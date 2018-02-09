@@ -1,0 +1,739 @@
+!Program Name: ubsqodet
+! loadsave -w -s -n 100,10 -o prog/dxport/ubsqodet.dl4 src/ubsqodet.src
+!                                                  
+!Last Updated:                                     
+!zyc 09/01/04 cct182085 modified path for include  
+!zyc 09/07/04 cct182085 rem "OD.L7[2]-OD.L7[4]-OD.L7[0]" logic
+!zyc 09/03/04 cct182085 add log file
+!zyc 09/24/04 cct182799 using smart mask
+!zyc 09/27/04 cct182799 rounding 
+!zyc 09/27/04 cct182799 Zline
+!rce 10/10/05  salesgroup
+!
+
+Declare External Sub QODet
+Declare Sub updatelog,errTrap
+Declare Function GetOtype$
+External Lib "getartermd.lib"
+
+Include "src/oovars.inc"
+Dim o1. as oInfo
+Dim ols.[25] as oItem
+Call QOdet(1,35,1,"files/6/dx.log","231750","5513",o1.,ols.[],ii,ss,600)
+Print i,s
+Stop
+
+External Sub QODet(intCo, intSalesMan, debug, dlog$, Order$, Cust$, o1. as oInfo, ols.[] as oItem, ii , ss, iLimit, cost_lev[], arrSales[])
+
+Try
+
+Declare Intrinsic Function FindChannel,Trim$
+Declare Intrinsic Sub FormatDate,DXSet
+Declare External Function FDate$,PDate$,BaseName$,XAmount,xunit$,OpenFile
+Declare External Function ReplaceChar$
+
+External Lib "ubsfunc.dl4","ubsprconv.dl4"
+
+! External Lib "getartermd.lib"
+Declare External Function GetArTermd$
+
+Include "src/ubsorder.inc"
+Include "src/ubscustomer.inc"
+Include "src/ubsprod.inc"
+Include "src/ubspo.inc"
+Include "src/ubswhse.inc"
+
+!DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01)
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)                       
+Def FNN(H) = Int(Abs(H) * 10 ^ Q0[1] + .5) * 10 ^ - Q0[1] * Sgn(H)       
+Def FNT(H) = Int(Abs(H) * 10 ^ Q0[1]) * 10 ^ - Q0[1] * Sgn(H)            
+Def FNV(H) = Int(Abs(H) * 10 ^ Q0[1] + .9999999) * 10 ^ - Q0[1] * Sgn(H) 
+Def FNU(H) = Int(Abs(H) + Sgn(Fra(Abs(H)))) * Sgn(H)                     
+
+Dim ODK$[12],OHK$[14],CUK$[12],SMK$[20],POK$[16],WHK$[20]
+
+Dim OH. As OrdH
+Dim OD. As OrdD
+Dim O2. As OrdS2
+Dim OT. As OrdT
+Dim CU. As Customer
+Dim PO. As PoDet
+Dim PR. As Prod
+Dim WH. As WHSE
+
+Dim 1%,debugDetail,Zline,NonStock
+! Variables for Channel#'s
+Dim 2%,OHC,ODC,OSC,OTC,CUC,CTLC,ENC,SMC,POC,PRC,CCC,WHC
+! Variables for Search Record#
+Dim 3%,OHR,ODR,OSR,OTR,CUR,CTLR,SMR,POR,PRC,WHR
+! Variables for Search Error
+Dim 2%,OHE,ODE,OSE,OTE,CUE,CTLE,SME,POE,PRE,WHE
+
+! Line Buffer for Output XML
+Dim Output$[1024]
+
+Dim Msg$[256],pgmName$[20]
+Dim EN$[10], ST$[80], Status$[10], Sales$[35], Temp$[100],Space$[100]
+Dim SLS$[3],CO$[2], ORD$[6], OrgL1$[16], CCD$[14], POSTR$[30],PODate$[30]
+Dim PUNIT1$[10],PUNIT2$[10],P9$[50],P60$[50],SPOInfo$[300],HLD$[100],U5$[50]
+Dim QMASK$[20],PMASK$[20],EMASK$[20],DEC$[5]
+Dim SHIPADDR1$[50],SHIPADDR3$[30],SHIPADDR4$[30]
+Dim SOLDADDR3$[30],SOLDADDR4$[30]
+Dim TERM$[16]
+
+Dim 1%, ii,pp,factor, counter
+Dim 2%, Q0[1]
+Dim 3%, Z1 , cnvta
+
+! cost_lev now passed from sfdash.dl4  5/3/05rce
+! Cost_Lev[0]=2
+! Cost_Lev[1]=2
+! Cost_Lev[2]=2
+! Cost_Lev[3]=2
+
+debugDetail=1
+pgmName$="ubsqodet"
+msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+ii=0 ! Item Counter
+
+Dim 1%,t9[11],2%, t2, N2[5], ErrStat, X1, X2, 3%,tDRM
+Dim 3%,LOWDD
+
+N2[2]=3 ! 1=Stock, 2=NonStock, 3=Both (order)
+N2[3]=3 ! UM Conv 1=stock, 2=selling, 3=as Entered
+Space$=" ",Space$
+ErrStat = 0
+SLS$=intSalesMan Using "###" ! Passed Salesman
+CO$=Str$(intCo) ! Company
+ORD$=Val(Order$) Using "######" ! Passed Order Number
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+
+ST$="OR ENOR PTOR RGOR ACIN ENIN PTIN RG-NOF-CM ENCM PTCM RG"
+
+OHC= OpenFile(-1280,intCo)  \ If OHC=-1 Error 42    ! Order Header
+ODC= OpenFile(-1344,intCo)  \ If ODC=-1 Error 42    ! Order detail Line
+OTC= OpenFile(-2656,intCo)  \ If OTC=-1 Error 42    ! Order Total
+OSC= OpenFile(-1392,intCo)  \ If OSC=-1 Error 42    ! Order Shipto
+CUC= OpenFile(-1808,intCo)  \ If CUC=-1 Error 42    ! Customer master
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42   ! Control
+ENC= OpenFile(-9995,intCo)  \ If ENC=-1 Error 42    ! Entered By
+SMC= OpenFile(-1824,intCo)  \ If SMC=-1 Error 42    ! SalesMan
+POC= OpenFile(-2432,intCo)  \ If POC=-1 Error 42    ! PO Line
+PRC= OpenFile(-1792,intCo)  \ If PRC=-1 Error 42    ! Product
+CCC= OpenFile(-1728,intCo)  \ If CCC=-1 Error 42    ! CCodes
+WHC=OpenFile(-1744,intCo)   \ If WHC=-1 Error 42    ! Product Whse
+
+
+Mat Read #CTLC,19,50;P9$;
+Mat Read #CTLC,60,50;P60$;
+Mat Read #CTLC,115,40;Q0; 
+
+
+If not(Q0[1]) let Q0[1]=2                                                       
+Let Dec$="#",Dec$;Qmask$="---,---,--#"                                         
+If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask      
+If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask        
+Let Emask$="-$$$,$$$,$$$,$$$.##"                         !ext. price mask    
+
+Cst=Val(Cust$)
+
+OHK$=Cst using " ######",Ord$  ! ," "
+FDir=2
+Temp$=OHK$
+
+
+OOTOP: !===============================================================
+	Search #OHC,2,FDir;OHK$,OHR,OHE
+	If OHK$<>Temp$ Let OHE=22
+	If OHE Goto OOEND:
+
+	If debugDetail
+		msg$="doing...Search #OHC: OHK$="+OHK$+" OHR="+OHR\Call updatelog(debug)
+		If OHE msg$="error...Search error "+OHE  \ Call updatelog(debug)
+	Endif
+
+	Read Record #OHC,OHR; OH.;
+
+	If IntSalesMan=999 goto SLSPassed:  ! all reps 
+
+	If arrSales  ! sales group in action
+		for counter = 0 to 999
+			If OH.H0[11]=arrSales[counter] GOTO SLSPassed  ! found it
+			if not(arrSales[counter]) let counter=999  ! skip to end
+		next counter
+	Endif
+	
+	If OH.H0[11]=IntSalesMan goto SLSPassed  ! non salesgroup check
+	
+	Let ErrStat=10000
+Goto OOEND: ! failed all tests so leave
+
+SLSPassed: ! Passed tests keep going
+
+! Determine Status
+t2 = OH.H0[0]
+Status$=""
+
+If t2<1 Let Status$="ERROR**"
+If t2=58 Let Status$="PS BP"
+If t2=59 Let Status$="PS OH"
+If t2=90 Let Status$="IN PS"
+If t2=91 Let Status$="IN ED"
+If t2>91 Let Status$="OTHER"
+If t2>=9 and t2<=11 Let factor=-1 else factor=1
+
+If Status$="" AND t2<=11 Let Status$=ST$[t2*5-4,t2*5]
+
+OTR = OH.H0[3] ! Record Number To Ord Total record.
+Read Record #OTC,OTR; OT.;
+! Get Order Hold Codes...
+
+HLD$="! Order Not Held !"
+REM UNPACK T2[21] TO T9[x]
+LET X2=OT.T2[21]
+FOR K=0 TO 11
+  LET T9[K]=SGN(FRA(X2/2))
+  LET X2=INT(X2/2)
+  IF T9[K] THEN
+    READ #CTLC,65,K*16;U5$;
+    IF U5$[1,1]<>" " THEN
+      IF HLD$[1,1]="!" THEN
+        HLD$=TRIM$(U5$[1,16])+" | "
+      ELSE
+        LET HLD$=HLD$+TRIM$(U5$[1,16])+" | "
+      END IF
+    END IF
+  END IF
+NEXT K
+
+IF HLD$[1,1]<>"!" Then
+  LET HLD$=HLD$[1,LEN(HLD$)-3]
+Else
+   HLD$=""
+End IF
+
+OSR = OH.H0[2] ! Record Number For Ship to
+Read Record #OSC,OSR; O2.;
+
+Let shipAddr1$=""
+Let shipAddr1$=O2.S1$[1,30]+"-"
+Let shipAddr1$=shipAddr1$+(O2.SRN[2]+(O2.SRN[1]/1000000)) using "######.######"
+Let shipAddr3$=""                                                 
+If len(O2.S1$[61,90])>1 and O2.S1$[61,65]<>"     " Then         
+	Let shipAddr3$=Trim$(O2.S1$[61,90])                          
+Endif                                                             
+Let shipAddr4$=""                                                 
+Let shipAddr4$=Trim$(O2.S1$[91,105])+", "+O2.S1$[106,107]+"  "  
+Let shipAddr4$=shipAddr4$+Trim$(O2.S1$[108,112])                 
+If len(O2.S1$[113,117])>1 and O2.S1$[113,117]<>"     " Then      
+   Let shipAddr4$=shipAddr4$+"-"+Trim$(O2.S1$[113,117])          
+Endif                                                             
+If shipAddr3$="" then let shipAddr3$=shipAddr4$;shipAddr4$=""     
+
+term$ = getartermd$(0,oh.h0[12],intco)
+
+!======================Get Customer Info
+CUK$=OH.H0[4] USING "######"
+Temp$=CUK$
+
+Search #CUC,2,1;CUK$,CUR,CUE
+If CUK$[1,6]<>Temp$ Let CUE=22
+
+IF CUE Then
+  ErrStat = 93 ! No Customer?
+  Goto OOEND:
+End If
+
+Read Record #CUC,CUR;CU.;
+
+Let soldAddr3$=""                                         
+If len(CU.A1$[91,120])>1 and CU.A1$[91,95]<>"     " Then 
+	Let soldAddr3$=Trim$(CU.A1$[91,120])                  
+Endif                                                     
+Let soldAddr4$=""                                               
+Let soldAddr4$=Trim$(CU.A1$[121,135])+", "+CU.A1$[136,137]+"  "
+Let soldAddr4$=soldAddr4$+Trim$(CU.A2$[1,10])               
+If soldAddr3$="" then let soldAddr3$=soldAddr4$;soldAddr4$=""   
+
+!==========================Get SalesMan
+SMK$=OH.H0[11] Using "### "
+Temp$=SMK$
+
+Search #SMC,2,1;SMK$,SMR,SME
+If SMK$[1,4] <> Temp$ Let SME=22
+
+If SME=0 Then
+	Mat Read #SMC,SMR;Sales$[1,30];
+Else
+	Sales$="-NF-"
+End If
+Temp$=Sales$
+Sales$=""
+For X1=1 to Len(Temp$)
+	If Temp$[X1,X1]="'" Then
+           Sales$=Sales$,"\\"
+        End If
+	Sales$=Sales$,Temp$[X1,X1]
+Next X1
+! Get Entered By
+Mat Read #ENC,OH.H5[0],0;EN$;
+
+If Trim$(EN$)="" Let EN$="-null-"
+
+Rem Build the returned header structure
+
+o1.CustNumber$=Str$(OH.H0[4])
+o1.CustName$=CU.A1$[31,60]
+o1.SoldAddr1$=CU.A1$[31,60]
+o1.SoldAddr2$=CU.A1$[61,90]
+o1.SoldAddr3$=soldaddr3$
+o1.SoldAddr4$=soldaddr4$
+o1.S2Addr1$=shipaddr1$
+o1.S2Addr2$=O2.S1$[31,60]
+o1.S2Addr3$=shipaddr3$
+o1.S2Addr4$=shipaddr4$
+o1.SLSNo$=str$(OH.H0[11])
+o1.SLSName$=Sales$
+o1.Order$=Str$(OH.H0[7])
+o1.EnteredBy$=EN$
+o1.CustPO$=OH.PO$
+o1.Term$=Term$
+o1.Hold$=Str$(OT.T2[21])
+o1.WHSE$=Str$(OH.H4[2])
+o1.Division$=Str$(OH.H5[8])
+o1.OrderDate$=PDate$(OH.H0[9])
+o1.ShipDate$=PDate$(OH.H0[10])
+o1.Stp$=Str$(OH.H4[1])
+o1.Zne$=O2.S2$[19,20]
+o1.Type$=str$(OH.H5[7])
+o1.TypeDesc$=GetOtype$(OH.H5[7])
+o1.SP$=Str$(OH.H0[11])
+o1.Status$=Status$
+
+! o1.TCost$=OH.H5[14]*factor Using Emask$
+! o1.TResale$=OH.H5[13]*factor Using Emask$
+! If OH.H5[13] Then
+  !  GPP=((ABS(OH.H5[13]-OH.H5[14])/OH.H5[13]))*100
+!  Else
+  !  GPP=0
+!  End IF
+!  o1.TGPP$=GPP*factor Using "----#.##%"
+!  o1.GTM$=(OH.H5[13]-OH.H5[14])*factor Using Emask$
+
+! o1.TCost$=OT.T2[17]*factor Using Emask$  ! shipped
+o1.TCost$ = (OT.T2[17] + OT.T2[20] + OT.tot[0]) * factor Using Emask$
+o1.TResale$=OT.T2[1]*factor Using Emask$	! shipped
+If OT.T2[1] Then                                                               
+  ! GPP=FNR(((ABS(OT.T2[1]-OT.T2[17])/OT.T2[1]))*100)
+  GPP=FNR(((Abs(OT.T2[1]-(OT.T2[17]+OT.T2[20]+OT.tot[0])) / OT.T2[1]))*100)
+Else                                                                            
+  GPP=0                                                                         
+End IF       
+o1.TGPP$=GPP*factor Using "----#.##%"                                           
+! o1.GTM$=(OT.T2[1]-OT.T2[17])*factor Using Emask$
+o1.GTM$=(OT.T2[1] - (OT.T2[17]+OT.T2[20]+OT.tot[0])) * factor Using Emask$
+
+o1.HoldReason$=HLD$
+o1.attn$=OH.H0$[1,20]
+o1.duedate$=Pdate$(OH.H5[1]) 
+If OH.H0[0] >=5 and OH.H0[0]<=7 and OH.H0[8] then
+   o1.invdate$=Pdate$(OH.H0[8])
+Else
+   o1.invdate$=""
+Endif
+o1.truck$=O2.S5 Using "######"
+o1.totweight$=OT.T2[16] Using QMask$
+o1.totcube$=OT.T2[15]   Using Qmask$
+o1.tax$=OT.T2[7]         Using Emask$
+o1.freight$=OT.T2[5]     Using Emask$
+o1.misc$=OT.T2[4]        Using Emask$
+If OT.T2[3] then o1.discount$=OT.T2[3]*-1 Using Emask$ else o1.discount$="0"
+o1.grandtotal$=OT.T2[0]*factor  Using Emask$
+
+
+Let ODK$=ORD$
+OODetLoop: Rem Start of Ord Det Loop
+Search #ODC,3,1;ODK$,ODR,ODE
+
+If ODK$[1,6]<>ORD$ LET ODE=22
+If ODE Goto OOEnd: ! All Done !!! Whew!
+
+If debugDetail
+   msg$="doing...Search #ODC: ODK$="+ODK$+" ODR="+ODR \ Call updatelog(debug)
+   If ODE msg$="error...Search error "+ODE  \ Call updatelog(debug)
+Endif
+Read Record #ODC,ODR,0;OD.;
+
+tDRM=OD.OLM[3]
+If (OH.H5[7]=21 or OH.H5[7]=22) And ODK$[7,9]="   " Let OD.S2[0]=3
+!If OD.S2[0]=3 Goto OODetLoop:
+If OD.L3[2]>900 Goto OODetLoop:
+! Validate UM Selections??
+If N2[2]=3 Goto OODetOK:
+If N2[2]=2 IF OD.L3[0] Goto OODetOK:
+If N2[2]=1 If NOT(OD.L3[0]) Goto OODetOK:
+
+Goto OODetLoop:
+
+OODetOK: Rem Ok to continue here
+
+If OD.L3[0] and OD.S2[0]=3 let Zline=1 else let Zline=0
+! If Zline Goto LoadMe:   ! this was causing the qtys to repeat from line above
+If OD.L3[0] let NonStock=1 else NonStock=0
+
+If OD.L3[0] Then
+  Clear PR.
+  rem The old Gosub L_30000:
+  REM ===== set units for conversions (stock/nonstock version)
+
+   LET PR.A[6]=OD.L6[4]
+   LET PR.A[5]=OD.UNF[5]
+   IF NOT(PR.A[5]) THEN
+     LET PR.A[5]=1
+     LET OD.UNF[5]=1
+   END IF
+
+   LET PR.PFU1[0]=OD.EUN[0]
+   LET PR.PFU1[1]=OD.UN[0]
+   LET PR.PFU1[2]=OD.UN[1]
+   LET PR.PFU1[3]=OD.UN[2]
+   LET PR.PFU1[4]=OD.EUN[1]
+   LET PR.PFU1[5]=0
+   LET PR.PFU1[6]=0
+   LET PR.PFU1[7]=0
+   LET PR.PFU1[8]=OD.UN[0]
+   LET PR.PFU1[9]=OD.UN[0]
+   LET PR.PFU1[10]=OD.EUN[1]
+   LET PR.PFU1[11]=OD.UN[2]
+   LET PR.PFU1[12]=OD.UN[1]
+   IF OD.L3[0]=0
+     LET PR.PFU1[13]=OD.UN[0]
+     LET PR.PFU1[16]=OD.EUN[0]
+     LET PR.PFU1[17]=OD.EUN[0]
+     LET PR.PFU1[15]=OD.CTWT
+     LET PR.PFU1[18]=OD.UN[0]
+     LET PR.PFU1[19]=OD.UN[0]
+   END IF
+
+   LET PR.PFU2[0]=OD.UNF[0]
+   LET PR.PFU2[1]=OD.UNF[1]
+   LET PR.PFU2[2]=OD.UNF[2]
+   LET PR.PFU2[3]=OD.UNF[3]
+   LET PR.PFU2[4]=0
+   LET PR.PFU2[5]=0
+   LET PR.PFU2[6]=0
+
+   FOR X1=1 TO 4
+     FOR X2=0 TO X1-1
+       IF PR.PFU1[X1]=PR.PFU1[X2] THEN
+         LET PR.PFU1[X1]=0
+         PR.PFU2[X1-1]=0
+       END IF
+     NEXT X2
+   NEXT X1
+
+  Let OrgL1$[1,16]=OD.L1$[1,16]
+  If OD.S3$[1,16]=Space$[1,16] Let OD.L1$[1,16]=OD.S3$[1,16]
+Else
+  Read Record #PRC,OD.L4[0];PR.;
+End If
+
+If OD.L5[3] Then                                     
+  Let GPP=FNR((ABS(OD.L5[3]-OD.S3[12])/OD.L5[3])*100)
+Else                                                 
+  Let GPP=0                                          
+End If                                               
+
+If OD.OLM[3] Then                                     
+  Let GPP=FNR((ABS(OD.OLM[3]-OD.L5[1])/OD.OLM[3])*100)
+End If                                               
+
+CVTFIG: REM "==== OLD L_3500: ======================== convert figures
+LET CNVTA=OD.L7[2]
+LET CNVTU[0]=0
+LET CNVTU[1]=OD.UN[0]
+IF OD.S2[1] LET CNVTA=CNVTA*OD.S2[1]
+IF N2[3]=1 LET CNVTU[1]=PR.PFU1[8]
+IF N2[3]=2 LET CNVTU[1]=PR.PFU1[9]
+IF N2[3]=3 LET CNVTU[1]=OD.UN[0]
+LET CNVTU[2]=1
+LET QORD=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+LET CNVTA=OD.L7[2]            !OD.L7[2]-OD.L7[4]-OD.L7[0]-OD.L7[3]
+IF OD.S2[1] LET CNVTA=CNVTA*OD.S2[1]
+LET QOPN=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+LET CNVTA=OD.L7[4]            !+ OD.L7[0] ! Was just shipped/
+IF OD.S2[1] LET CNVTA=CNVTA*OD.S2[1]
+LET QSHP=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+LET CNVTA=OD.L7[3]
+IF OD.S2[1] LET CNVTA=CNVTA*OD.S2[1]
+LET QBOR=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+LET CCD$[11,14]="BASE"
+
+IF N2[3]=1 THEN 
+  IF PR.PFU1[8]=-1 LET CCD$[11,14]="CWT "
+  IF PR.PFU1[8]=-2 LET CCD$[11,14]="LOT "
+  IF PR.PFU1[8]=-3 LET CCD$[11,14]="LB  "
+  IF PR.PFU1[8]>0 MAT  READ #ccc,PR.PFU1[8],0;CCD$;
+END IF 
+
+IF N2[3]=2 THEN 
+  IF PR.PFU1[9]=-1 LET CCD$[11,14]="CWT "
+  IF PR.PFU1[9]=-2 LET CCD$[11,14]="LOT "
+  IF PR.PFU1[9]=-3 LET CCD$[11,14]="LB  "
+  IF PR.PFU1[9]>0 MAT  READ #ccc,PR.PFU1[9],0;CCD$;
+END IF 
+
+IF N2[3]=3 THEN
+  IF OD.UN[0]>0 MAT  READ #ccc,OD.UN[0],0;CCD$;
+  IF OD.UN[0]=-1 LET CCD$[11,14]="CWT "
+  IF OD.UN[0]=-2 LET CCD$[11,14]="LOT "
+  IF OD.UN[0]=-3 LET CCD$[11,14]="LB  "
+END IF 
+
+! Get NONStock PO For this Order.
+Clear SPOInfo$
+PODate$="N/A"
+IF OD.L3[0] THEN
+  POK$=OD.L4[2] USING "######   "
+  Temp$=POK$
+  NSPOBEG: Search #POC,3,1;POK$,POR,POE
+  IF POK$[1,6]<>Temp$[1,6] Let POE=22
+  If POE Goto NSPOEND:
+  Read Record #POC,POR;PO.;
+  If PO.L1$[81,92]=ORGL1$[1,12] Goto POOK:
+  If PO.L1$[61,76]=OD.L1$[1,16] Goto POOK:
+  Goto NSPOBEG:
+  POOK: REM
+  IF PO.L1[0]>2 Then
+    PODate$="PO ",Str$(OD.L4[2])," DUE DATE: N/A"
+    Goto NSPOEND:
+  End If
+  IF PO.PL4[10]<>OD.L2[1] Goto NSPOBEG:
+  POStr$=PO.L2[2] Using "&&&&&&"
+  Call FormatDate(POStr$,POStr$,T2,4)
+  PODate$=Str$(OD.L4[2])," DUE: ",POStr$
+  If T2 Let PODate$="PO ",Str$(OD.L4[2])," DUE DATE: ERR"
+  NSPOEND: Rem
+ELSE
+  ! Should the <> be < ??? drm
+  IF OD.L7[3] OR (OH.H5[7]=4 AND OD.L7[2]<>OD.L7[0]) OR (OH.H5[7]=15 AND OD.L7[2]<>OD.L7[0]) THEN
+    POK$=OD.L4[0] USING "######"
+    Temp$=POK$
+    Search #POC,3,2;POK$,POR,POE
+    IF POK$[1,6]<>Temp$[1,6] Let POE=22
+    IF POE Then
+       PODate$="No STK PO"
+       Goto PODone:
+    End If
+    Read Record #POC,POR;PO.;
+    pp=0
+    If PO.L1[0] > 2 Then
+       LOWDD=0
+    Else
+       LOWDD=PO.L2[2]
+       SPOInfo$=Str$(Val(POK$[7,12]))+";"+Str$(PO.L3[2]-PO.L3[3])+";"+PDate$(PO.L2[2])+";"+Str$(PO.L3[0])+"~"
+       pp=1
+    End If
+    POLoop: Search #POC,3,2;POK$,POR,POE
+    If POK$[1,6]<>Temp$[1,6] Let POE=22
+    If POE Goto PODone:
+    Read Record #POC,POR;PO.;
+    IF PO.L1[0] < 3 Then
+      If PO.L2[2]<>0 IF PO.L2[2]<LOWDD LET LOWDD=PO.L2[2]
+      If LOWDD=0 LET LOWDD=PO.L2[2]
+      If pp < 11 Then
+        SPOInfo$=SPOInfo$+Str$(Val(POK$[7,12]))+";"+Str$(PO.L3[2]-PO.L3[3])+";"+PDate$(PO.L2[2])+";"+Str$(PO.L3[0])+"~"
+        pp=pp+1
+      End If
+      POStr$=LOWDD Using "&&&&&&"
+      Call FormatDate(POStr$,POStr$,T2,4)
+      !PODate$="STK PO: ",Str$(Val(POK$[7,12]))," DUE: ",POStr$
+      !If T2 Let PODate$="STK PO: ",Str$(Val(POK$[7,12]))," DUE: ERR"
+    End If
+    
+    Goto POLoop:
+
+  End IF
+End If
+
+PODone: !
+
+If Len(SPOInfo$)>3 Let SPOInfo$=SPOInfo$[1,Len(SPOInfo$)-1] ! Remove trailing ~
+
+Rem Get Whse rec for Product.
+Clear WH.
+If P9$[33,33]<>"N" Then
+  If Not(OD.L3[0]) Then
+    Temp$=OD.L1$[1,12]
+    Temp$=Temp$,OH.H4[2] Using "##"
+    WHK$=Temp$
+    Search #WHC,2,1;WHK$,WHR,WHE
+    If WHK$<>Temp$ Let WHE=22
+    If WHE=0 Then
+       Read Record #WHC,WHR;WH.;
+    End If
+  End If
+End If
+
+Rem  Now do some other UM Conversion for the unit cost/unit resale
+
+IF OD.UN[1]=-1 Then
+  Let PR.A[6]=OD.L6[4]
+  Let PR.A[5]=OD.UNF[5]
+End if
+Let CHBase=0
+If OD.S3[8]=-3 THEN
+  LET CHBase=(OD.S3[0]/OD.L7[2])
+Else
+  LET CHBase=OD.S3[0]
+End If
+If OD.UN[1]>0 AND OD.S2[1] Then
+  Let CNVTA=((OD.L5[2]-OD.L6[1])/OD.S2[1]) + (CHBase/OD.S2[1])
+Else
+  Let CNVTA=OD.L5[2]-OD.L6[1] + CHBase
+End If
+
+Let CNVTA=CNVTA-(CNVTA*(OD.L6[0]/100))
+Let CNVTA=CNVTA+(CNVTA*(OD.L7[8]/100))
+Let CNVTU[0]=0
+Let CNVTU[1]=OD.UN[1]
+Let CNVTU[2]=2
+LET OD.OLM[3]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+LET PUNIT1$=XUNIT$(OD.UN[1],CCC)
+
+IF Cost_Lev[1] Then
+  LET CNVTU[0]=0
+  LET CNVTU[1]=OD.UN[2]
+  LET CNVTU[2]=2
+  LET CNVTA=OD.L5[1]
+  LET OD.L5[1]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+  IF OD.S2[1]=0 OR OD.S3[1]=0 THEN
+    LET Temp$=""
+  ELSE
+    ChBase=0
+    IF OD.S2[1]=-3 AND OD.L7[2] THEN
+      CHBase=(OD.S3[1]/OD.L7[2])
+    ELSE
+      CHBase=OD.S3[1]
+    END IF
+    IF CHBASE AND OD.S2[1] THEN
+      LET CNVTA=CHBase/OD.S2[1]
+    ELSE
+      LET CNVTA=0
+    END IF
+    IF OD.S3[11]=-1 AND OD.UN[2]=-1 AND CHBase LET CNVTA=CHBase
+    IF CHBase AND OD.UN[2]<0 LET CNVTA=CHBase
+    LET CNVTU[0]=0
+    LET CNVTU[1]=OD.UN[2]
+    LET CNVTU[2]=2
+    LET OD.L5[1]=OD.L5[1] + XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+  END IF
+  LET PUNIT2$=XUNIT$(OD.UN[2],CCC)
+END IF
+
+
+LoadMe: !=============================================
+If ii < iLimit Then
+  Rem Now Put together the Line Item returned Structure
+  ols.[ii].Li$=Str$(OD.L3[2])
+  ols.[ii].Item$=ReplaceChar$(OD.L1$[1,16])
+  If NonStock then ols.[ii].Item$=OrgL1$[1,16]
+  ols.[ii].Desc1$=ReplaceChar$(OD.L6$[1,30]) 
+  ols.[ii].Desc2$=ReplaceChar$(OD.L6$[31,60])
+  ols.[ii].QtyOrd$=QORD Using Qmask$    !"###,###"
+  if zline ols.[ii].QtyOrd$ = " "		! 
+  ols.[ii].QtyOpn$=QOPN Using Qmask$    !"###,###"
+  if zline ols.[ii].QtyOpn$ = " "		! 
+  ols.[ii].QtyShp$=QSHP Using Qmask$    !"###,###"
+  if zline ols.[ii].QtyShp$ = " "		! 
+  ols.[ii].QtyBOrd$=QBOR Using Qmask$   !"###,###"
+  if zline ols.[ii].QtyBOrd$ = " "		! 
+  ols.[ii].QtyAvail$=(WH.W3[0]-WH.W3[2]) Using "---,--#"
+  if zline ols.[ii].QtyAvail$ = " "		! 
+  ols.[ii].UoM$=CCD$[11,14]
+  if zline ols.[ii].UoM$ = " "		! 
+  ols.[ii].PoDate$=PODate$
+  if zline ols.[ii].PODate$ = " "		! 
+  ols.[ii].SPO$=SPOInfo$
+  if zline ols.[ii].SPO$ = " "		! 
+  ols.[ii].UnitPrice$=OD.OLM[3] Using Pmask$   !"###,###.##"
+  if zline ols.[ii].UnitPrice$ = " "		! 
+  ols.[ii].UPUoM$=PUnit1$
+  if zline ols.[ii].UPUoM$ = " "		! 
+  ols.[ii].UnitCost$=OD.L5[1] Using Pmask$     !"###,###.##"
+  if zline ols.[ii].UnitCost$ = " "		! 
+  ols.[ii].extweight$=OD.S3[4] Using Qmask$
+  if zline ols.[ii].extweight$ = " "		! 
+  ols.[ii].UCUom$=Punit2$
+  if zline ols.[ii].UCUoM$ = " "		! 
+  ols.[ii].BOExt$=FNR(OD.L7[3]*tDRM)*factor Using Emask$  
+  if zline ols.[ii].BOExt$ = " "		! 
+  ols.[ii].Extended$=OD.L5[3]*factor Using Emask$     
+  if zline ols.[ii].Extended$ = " "		! 
+  ols.[ii].LGP$ = (OD.L5[3] - OD.S3[12]) Using Pmask$
+  if zline ols.[ii].LGP$ = " "
+  ols.[ii].GPP$=GPP*factor Using "-####.##%"
+  if zline ols.[ii].GPP$ = " "		! 
+  If Int(OD.S3[16])=1 Then
+     ols.[ii].Substitute$="Y"
+  Else
+     ols.[ii].Substitute$="N"
+  End If
+  ols.[ii].LineType$ = "ST"
+  If NonStock then ols.[ii].LineType$ = "NS"
+  If Zline then ols.[ii].LineType$ = "ZL"
+  
+  Let ii=ii+1
+  ss=22
+  CCD$=" ",CCD$
+  Goto OODetLoop:
+Endif
+
+OOEnd: Rem End it all !
+
+Close #OHC,#ODC,#OSC,#OTC,#CUC,#CTLC,#ENC,#SMC,#POC,#PRC,#CCC,#WHC
+msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+ss=ErrStat
+Exit Sub
+
+Else
+  ss=Spc(10)
+  Call errTrap(pgmName$)
+  Exit Sub
+End Try
+
+Function GetOtype$(otype)
+	dim otypedesc$[16]
+	dim 1%,j1,x,x1,x2
+	dim 3%
+	otypedesc$=" ",otypedesc$
+	Try
+		LET J1=otype;X=20;X1=62
+		LET X2=J1*X-X                                                       
+		IF X2<0 LET X2=0                                                    
+		READ #CTLC,X1,X2;otypedesc$;
+	else
+		otypedesc$ = " "
+	end try
+End Function otypedesc$
+
+Sub updatelog(debug)                                        
+	If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub     
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+
+ss=ErrStat
+
+End Sub
+

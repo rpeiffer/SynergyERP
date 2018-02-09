@@ -1,0 +1,2212 @@
+Rem ordertotal based on mx03ed total up lines and write totals
+Rem GEORGE DOSCHER  12/20/79
+Rem rev: roman 01/16/1992  clean up (eliminate T3)
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: JUN  1, 2004  16:34:46
+Rem /w/papermaster/r2002//usr/acct/zyc/work/r2002/misc/ordertotal.src (univ2) [zyc] {42781}
+!**** BROUGHT UP TO R2005 REVISION 26 as 02/28/08 on  07/16/08 - MTG ****
+! loadsave -w -n 100,10 -o prog/dxport/ordertotal src/ordertotal.src
+!
+! ERPScheduler Enabled
+!
+Rem  Copyright (c) 2004 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+!
+! loadsave -w -n 100,10 -o prog/dxport/ordertotal src/ordertotal.src
+!
+
+include "src/copyright.inc" ! dx
+! notes:
+! passinfo [0] - credit check inquiry mode (1=Y, 0=N)
+!			(set to N if creating new order, Y if updating exising order)
+! passinfo [1] - do credit check at all ?  (1=Y, 0=N)
+! passinfo [2] - do exception list check ? (1=Y, 0=N)
+! passinfo [3] - write total data out ?    (1=Y, 0=N)
+! passinfo [4] - recalc cust on order amnt (1=Y, 0=N) 
+!                ( if passinfo[0]=0 has to be set to 1 to total correctly)
+! passinfo [5] - clear manual fields ?     (1=Y, 0=N) T2[2] to T2[7]
+! passinfo [6] - clear cash flds (P.O.S)   (1=Y, 0=N) T2[10], T2[12]
+! passinfo [8]  -bypass calc of freight  (99=yes no freight calc, 0 - calc freight)
+! passinfo[9]=calc delivery charge flag 0=calc, 88=charge delete/editted, 99=bypass/no change
+!
+! * Note: Passinfo variable was originally dim to 9 - it has been expanded to 20 in the following erp programs
+!         205, 264ns, buildorder, buildquote, la512b, lacalccost, mx234a, mxautotran, poupsocost, poupsoq, serp229, serp288
+!         serpordh, serpqteh, sopolinecreate
+!         
+! passinfo[10] = calc ar term charge falg 0=calc, 88=charge delete/editted, 99=bypass/no change
+! some of these flags may seem strange but we tried to set up so we could use it! in other things maybe, maybe not
+! ch[] array of channel #'s (if not open will open # close)
+! WARNING: when adding channels, you MUST increase maxch variable!
+!
+! custom changes for htberry
+!jliu 12/07/07 cct220357 o/t 35 should work as same as o/t 1
+! cch calcs tax in serpordh call - STILL DO IT HERE for other non-serpordh progs!
+! custom General Paper - deliv chrg only on "OUR" jliu 202985
+! ------------------------------------------------------------------------------
+! 09/27/12 vst task18118 /mtg task# 21594 - master delivery cust# now suflag 109,109                                                                    
+! 05/14/09 rjs cct225460 - master delivery cust#                                
+! 02/21/11 rjs cct238572 - code related to master delivery cust#                
+! ------------------------------------------------------------------------------
+! 03/21/2013 - EVAP Billing/Shipping OT 36 & 37 are STANDARD
+! ---------------   notes for upgrade to rev10 for Jersey Paper -----------------
+! used xrev9 prog & added in custom code for:
+! 10/26/05 dek       - "gen_inv_deliv_chg" routine to check to see if an
+!        in mx208c           invoice should be generated for delivery chgs.
+! ------------------------------------------------------------------------------
+!
+Declare External Function GetParameter$
+External Lib "ubsfunc.dl4"
+Declare external sub utage5
+Declare Intrinsic Sub DateToJulian,InpBuf,JulianToDate,String
+Declare Intrinsic Sub dxget,programdump,Time, findf
+Declare Intrinsic Function findchannel
+! Option Default Dialect IRIS1
+
+Enter S9[],H1,PASSINFO[],CH[],T1[],T2[],MCODE[],MCHARGE[],TOT[],MCTXBL[],DCLVL,R5,V1,CFIN[]
+!!
+If Err 0 Gosub ERR_TRAP
+Dim co$[5]
+dim 1%,mcosttype,2%,mcostcode,3%,mcostamt,chrgamt
+DIM S$[1],S1$[25],A$[30],A1$[100],N$[30],Q$[40],R$[15],J7$[76],EX$[30],SUNIT$[4]
+Dim F$[20],I$[40],C$[30],K5$[50],U5$[50],B$[30],F1$[16],A2$[20],PN$[16]
+Dim P60$[50],V0$[12],S2$[20],S0$[118],X$[10],T2$[8],I1$[30],P9$[50],P61$[256]
+dim dlog$[256],prflg$[10],k1$[50],k2$[50],l1$[20],logfle$[100]
+Dim 1%,X1[10],L3[3],H4[2],T9[11],S2[1],S6[1],C2[2],CHNL,SZUM[4],OFLG
+dim 1%,cr_chnl[4],logflg,ch_log
+Dim 1%,EUN[2],L,I1,BADCT,PL[1],Z0,Z2[4],UN[2],COWT,2%,S5,D1,Z1[4],Z3$[12]
+Dim 1%,LOCKPORT,DFLAG[4],PASS,FTFLG,TAX[100],FTAX,LEVEL,MTAX
+Dim 1%,C11[2],MS2[2],INVOICE_BASED,CH_LTM,CH_LEV[2]
+dim 1%,ms1[2],TCB,CChan[10],BILLC[3]
+Dim 1%,PFU1[20],CNVTU[2],COST_LEV[3]
+dim 1%,codcust,chinvh  
+dim 2%,arterm2[1],L9[1],CUSTID
+Dim 2%,AGE[7],DT3[1],JDATE[5],rstk,C13,cuttime
+Dim 2%,L1,L6[5],T7,T8,CASH_CUST,CC1[12],C1[12],AXCESS,ARDATE
+Dim 2%,N0,H0[12],L4[3],X2,B[24],H6[8],H5[16],ODSC[5],TRMS[1],M3[2]
+Dim 2%,A2[4],A4[7],NSD[50],D0,A5[2],UPS[150],MCHG[2],COWT1,CMP
+Dim 2%,JDAT0,JDAT,JDAT1,LTM,CHAN[30],HA3[2],CL,LTAX2
+Dim 2%,DCOST[11],DCHRG[11],A0[3]
+dim 2%,taxrate,disccap,L9[1]
+Dim 2%,MAXWGT[11],DFLTCHG[11],DFLTCOST[11],MAXCOST[11],MINCOST[11]
+dim 3%,srn[4],oref[5],ROHRec,orgopentot,newopentot
+Dim 3%,PFU2[6],CNVTA,A[33],CFIN[8],UWORK[15],W3[24],LPRC1
+Dim 3%,C9,X3,L5[3],C4[6],S3[17],L7[10],A1[7],TOT_HOLD,R[99],AMOUNT
+Dim 3%,EX[21],A3[13],TWT,TDISC,FUNIT[1],UWT,HAZCHG,OLM[5],ESTMT,UNF[6]
+DIM 3%,TOT_SELL,CL1,CL2,LTAX1,MAXTAX,maxch,Tot_Ord
+dim 2%,nsfmcode,3%,nsfmcost,NSFRT1
+Dim 3%,MCHARGE[9,1],TOT[4],WGT,C10[5],PARM[10],CURTIM[9]
+dim 3%,SRNMD[1],DLVMST[1],mastdelvcust,invhrec
+dim 1%,mastlvl, keymast$[20],3%,mcust_rec,freightonce
+DIM SCRATCH$[80],rtype$[1],msg$[100],custom_customer$[30]
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+Dim DC_KEY$[20],SDate$[50]
+DIM invhkey$[100]
+Dim 2%,DC_REC,DLVC2,frtaddon
+Dim 3%,DLVC3[1],PARAM[9]
+Dim 1%,tx9[1],2%,lvlpct,3%,qtysell
+dim 1%,armflag
+! * arterms
+dim 1%,cday,ch_art
+dim 2%,trms[1],d3[2],smallord[23]
+dim d$[8],rstr$[200]
+!*freight tax
+dim taxdesc$[20]
+dim 2%,taxrate1
+dim 3%,frgttaxable,frgttaxrate
+Dim 3%
+
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+DEF FNV(X)=SGN(X)*(INT(ABS(X)*100+.9999999)*.01)
+If Err 0 Let F = Spc(8)
+N = Chf(1)
+If Err 0 Gosub ERR_TRAP
+co$ = GetParameter$("S_USER.AppID")
+COID = co$
+If F
+  ! X2 = Spc(5);F$ = Int((X2 - Int(X2 / 16384) * 16384) / 64) Using "CNTRL#"
+  F$ = "CNTRL"+Str$(COID)
+  Open #1,F$
+End If 
+IntCo=Coid ! as this is standard ERP name
+mat READ #1,19,50;P9$; \ MAT  READ #1,60,50;P60$;
+Mat Read #1,61,0;P61$;
+let nsfmcode=0
+let nsfmcost=0
+if p61$[132,132]="Y"
+	read #1,52,104;nsfmcode;
+	if nsfmcode<0 or nsfmcode>999
+		let nsfmcode=0
+	endif
+endif
+
+! call dxget("u_custom_customer", custom_customer$)
+mat read #1,115,60;custom_customer$;
+custom_customer$=UCase$(rtrim$(custom_customer$))
+logflg=0  ! set to 1 if doing some kind of logging
+if logflg 
+	gosub Build_logfle:
+	msg$="starting ordertotal" \ gosub write_logfle:
+endif
+rstr$="ordertotal"
+if custom_customer$="MIDATLANTIC" ! cash/cc at any point
+	let passinfo[6]=0 ! NEVER CLEAR CASH SALE FLAG!!
+endif
+CH[20]=-1 ! no channel for arterms
+MAXCH = 20
+INVOICE_BASED = 0
+If S9[4] = 223 Or S9[4] = 234 Or S9[4] = 221 Or (S9[4] = 205 And (P9$[45,45] = "Y" Or P9$[45,45] = "A")) Let INVOICE_BASED = 1
+If S9[4]=231 or S9[4]=251 let invoice_based=1 
+Credit=0 \ if S9[4]=241 OR S9[4]=243 LET CREDIT=1
+QUOTE=0 \ IF S9[4]=281 OR S9[4]=283 LET QUOTE=1
+! task#14035 added 231 as invoice_based - since 231 creates order/invoice need to check flag
+if s9[4]=231 and P61$[36,36] <> "Y" let invoice_based=0 ! need to create on order
+armflag=99
+if p61$[138,138]="Y"
+	if invoice_based<>0 or credit<>0
+		try
+			let armflag=passinfo[10]
+		else
+			let armflag=99
+		end try
+	endif
+endif
+Mat Read #1,0,108;ARDATE;
+READ #1,2,106;RSTK;
+OLD_SEL = SEL
+!Read #1,19,50;P9$; \ Mat Read #1,60,50;P60$;
+Read #1,2,50;CASH_CUST;
+
+If Not(PASSINFO[0]) Let PASSINFO[4] = 1
+Let BillC[3]=0;BillC[1]=0;BillC[2]=0 ! " part or complete, or all 1 shipment
+Gosub OPEN_FILES
+Gosub READ_ROH
+Gosub Get_cust ! need cust data now
+if p61$[109,109]="Y" ! custom_customer$="RUTHERFORD" 
+	if p61$[36,36]="Y" 
+		gosub chk_if_cod:
+		if codcust<>0
+			let p61$[36,36]="N"
+			if s9[4]=231 let invoice_based=0 ! need to create on order
+		endif
+	endif
+endif                                               
+! check if cch calc's tax
+If custom_customer$="HTBERRY" or P61$[140,140]="Y" ! was custom_customer$="PIEDMONT"
+	Read #ch_Taxcode,H4[0],412;TCB; ! flag - 0=PM, 1=CCH, 2=Avatax
+Else
+	tcb=0 ! make sure
+Endif
+! Gosub CHECK_AXCESS  -- NO NEED NOW
+If H5[9] = 97 Let AXCESS = H0[4]
+Gosub GET_DISCOUNT
+If P60$[14,14] <> "Y" goto L_240: ! AUTO Frtcalc
+!if P61$[36,36] = "Y" ! flag to calc at invoice time
+!		if INVOICE_BASED=0 Goto L_240: ! bypass not invoice but calc based on invoice
+!else
+!		if invoice_based<>0 goto L_240: ! bypass is an invoice but calc based on order
+!endif
+Gosub CHECK_ZONE \ Goto L_240
+If S0$[118,118] = "2" And (S6[1] > 1 And S6[1] < 90) And S6 = 1 And Z0 <> S6[1] Let Z0 = S6[1]
+Gosub CHECK_UPS
+L_240: T1 = H0[3] \ Gosub READ_ROT
+If tcb=0 ! normal - not 3rd party
+	LET T2[7]=0 \ TOT[3]=0 ! zero out taxable amt, & "OTHER" TAX $-CCT188031
+Endif
+IF H5[7]=8 or h5[7]=16 or (H5[7]=37 and not(CREDIT)) OR (CREDIT AND H5[7]=37 And H3[1]=16)
+	 LET T2[2]=0     ! tax %
+	 let t2[3]=0	! discount
+	 let t2[4]=0	! misc charge
+	 LET T2[5]=0     ! freight charges
+	 let t2[6]=0	! other charges
+	 LET T2[7]=0     ! tax amount
+	 let t2[19]=0	! prepaid freight
+	 LET T2[20]=0    ! freight cost
+	 for i=0 to 9	! misc charges table
+		mcode[i]=0
+		mcharge[i,0]=0 \ mcharge[i,1]=0
+	 next i
+ 	 If (H5[7]=37 AND NOT(CREDIT)) OR (CREDIT AND H5[7]=37 And H3[1]=16) ! "shipping - additional clear
+	   Let t2[1]=0;T2[4]=0;t2[6]=0;t2[10]=0;t2[19]=0
+	   Let t2[20]=0;t2[24]=0;Tot[3]=0
+	   For X=0 to 9 \ Let MCharge[x,0]=0 \ Next X
+	 Endif
+ENDIF
+IF (NOT(CREDIT) AND H5[7]=36) OR (CREDIT AND H5[7]=36 And H3[1]=16) ! "EVAP Bill - No Cost
+	LET T2[14]=0;T2[17]=0;T2[18]=0;H5[14]=0;passinfo[2]=0
+ENDIF 
+IF (NOT(CREDIT) AND H5[7]=36) OR (CREDIT AND H5[7]=37 And H3[1]=16) ! "EVAP Ship - No Price (And zero invoice)
+	LET T2[0]=0;T2[1]=0;T2[3]=0;T2[4]=0;T2[5]=0
+	LET T2[6]=0;T2[7]=0;T2[8]=0;T2[9]=0;T2[11]=0
+	LET T2[24]=0;H5[13]=0;passinfo[9]=99
+	let passinfo[2]=0;Passinfo[1]=0;passinfo[4]=0
+ENDIF
+Gosub UNPACK_HOLDS
+TOT_HOLD = T2[0];TWT = 0;TDISC = 0;OFLG = 0;HAZCHG = 0
+If P60$[40,40] = "O" And (T2[24] - TOT[4]) > 0
+  TOT_HOLD = (T2[0] - T2[1]) + T2[24] - TOT[4]
+Else 
+  TOT_HOLD = T2[0]
+End If 
+If H5[7] = 4 And H0[5] <> 0 Let TOT_HOLD = T2[0]
+If H5[7] = 15 And H0[5] <> 0 Let TOT_HOLD = 0
+If S9[4] = 286 Let TOT_HOLD = 0
+If QUOTE 
+	let tot_hold=0;passinfo[1]=0;passinfo[4]=0
+	if p61$[106,106]<>"Y" let passinfo[2]=0 ! sysflag controlled!
+Endif
+if CREDIT let passinfo[2]=0;Passinfo[1]=0;passinfo[4]=0 ! NO EXCEPT CHK ON CREDIT
+let orgopentot=tot_hold
+For K = 0 To 18 ! clear totals
+  If K >= 2 And K < 7
+    If Not(PASSINFO[5]) Goto L_257
+  End If 
+  If K = 10 And Not(PASSINFO[6]) Goto L_257
+  If K = 12 And Not(PASSINFO[6]) Goto L_257
+  if tcb=1 or tcb=2
+	if k=7 goto L_257 ! don't zero taxamt
+	if k=2 goto L_257 ! don't zero taxprct
+  Endif
+  T2[K] = 0
+L_257: Next K
+LET T2[24]=0;H6[6]=0;TOT_SELL=0;Tot_Ord=0
+if passinfo[2] LET T9[1]=0;T9[6]=0;T9[7]=0 ! 244892
+if QUOTE ! PER GROUP QUOTES ONLY GP HOLDS!
+	FOR K=0 TO 11
+		IF PASSINFO[2] LET T9[K]=0 ! recheck or clear
+		IF NOT(PASSINFO[2])
+			IF K<>1 AND K<>6 AND K<>7 LET T9[K]=0
+		ENDIF
+	NEXT K
+ENDIF
+If P60$[13,13] = "Y" And ODSC[5] Let T2[3] = 0
+Let BillC[3]=0;BillC[1]=0;BillC[2]=0 ! "Bill Complete calcs/flags
+A$[1,6] = H0[7] Using "######"
+LINE_LOOP: Rem
+Search #CH_ROL,3,1;A$,V1,E \ If E > 2 Gosub ERR_SEARCH
+N0 = A$[1,6]
+If Not(E) And N0 = H0[7]
+  Gosub PROCESS_LINE
+  If PASSINFO[2] Gosub EXCEPTION_LIST
+  Goto LINE_LOOP
+End If 
+Gosub GET_CUST
+Gosub MISC_READS
+IF P61$[53,53]="N" and oref[2]
+   !  it's a backorder and backorders don't get charged
+ELSE
+   if dclvl = 0 
+		if p61$[109,109]<>"Y"
+			if c11[0]<>0
+				let dclvl = c11[0] ! see if needed
+			endif
+		else
+			if p61$[36,36]="Y"
+				if invoice_based<>0
+					let dclvl=mastlvl
+				else
+					let dclvl=0
+				endif
+			else
+				if invoice_based=0 let dclvl=mastlvl
+			endif
+		endif
+		! check if an invoice edit and cash sales
+		If T2[10]<>0 let dclvl=0 ! INVOICE EDIT/CASH SALE
+		If s9[4]=251 and p61$[133,133]<> "Y" let dclvl=0 ! from cash sale
+	endif
+ENDIF
+if h5[7]=19 let dclvl=0   ! don't charge deliv chrg until ot19 filled entirely
+IF (NOT(CREDIT) AND H5[7]=37) OR (CREDIT AND H5[7]=37 AND H3[1]=16) LET DCLVL=0
+If CREDIT
+	IF H3[1]>2 OR (H5[7]=6 OR H5[7]=10) LET RSTK=0                 
+	IF T2[1]>0 AND RSTK LET T2[6]=FNR(T2[1]*RSTK/100);T2[6]=0-T2[6]
+Endif
+IF INVOICE_BASED ! and S9[4]<>251 exclude certain ones?
+  IF (P61$[36,36]<>"Y" AND H5[7]>0 AND H5[7]<3) OR (CUSTOM_CUSTOMER$="HTBERRY" AND H5[7]=35)
+	if passinfo[9]=88 ! had a delete or a manual change need to delete deliv charge key
+		gosub delcharge: !!!! delete the key -- system has already calculated the charges 
+	endif
+!	IF PASSINFO[9]=0 Gosub CHECK_4DELIV_CHG					!<<<<<<<<<<<doing delcharge here
+  Endif ! in 223c does check_4 on if 36,36=Y else above
+Endif
+If P61$[36,36] = "Y" !* delivery charge at invoice
+	if p61$[109,109]="Y" and codcust<>0 
+		if passinfo[9]=88 gosub delcharge:
+		goto bypass_for_mastdelv:
+	endif
+	IF invoice_based<>0
+		if passinfo[9]=88 
+			GOSUB DELCHARGE:
+		endif 
+	  if passinfo[9]=0 ! calculate delivery charge
+	    Gosub GEN_INV_DELIV_CHG                              !<<<<<<<<<<<<
+		If RETVAL Gosub CHECK_4DELIV_CHG
+	  endif
+  End If 
+  bypass_for_mastdelv: ! bypass_for_RUTHERFORD:
+Else 
+  If Not(INVOICE_BASED)
+   if s9[4]<>207 and s9[4]<>251 and s9[4]<>243 ! do on 201/221/231/241 208?
+     if custom_customer$ = "CHUDY" and s9[4] = 241
+		! chudy does not check
+	 else
+	   IF NOT(PASSINFO[9])! on sales order when misc charge is deleted - it leave key in 3/delvchrg file
+		if custom_customer$="JPAPER" ! does it in order entry 201/286
+			gosub gen_inv_deliv_chg
+		endif
+		Gosub CHECK_4DELIV_CHG
+	   ENDIF
+	 end if
+   Endif
+  Endif
+End If 
+If S9[4]<>207 and s9[4]<>208 and s9[4]<>223 and s9[4]<>243 ! no calc on edits!!
+  If Not(T2[5]) And Not(T2[20]) And Not(INVOICE_BASED) Gosub GET_FREIGHT_CHG
+End if
+
+Gosub PACK_HOLDS
+If P60$[13,13] = "Y" And ODSC[5] And TWT >= ODSC[5]
+  T2[3] = FNR(TDISC)
+End If 
+If P60$[14,14] = "Y"
+	!if p61$[36,36]="Y"
+	!	if (INVOICE_BASED)<>0
+			Gosub GET_SHIPVIA_WEIGHT
+	!	endif
+	!else
+	!	if invoice_based=0
+	!		gosub get_shipvia_weight
+	!	endif
+	!endif
+endif
+If p61$[132,132]="Y" Gosub Calc_NS_FrtCost:
+If Not(INVOICE_BASED) Gosub CALC_SHIP_DATE
+If (C13=19 OR H5[7]=19) Gosub Chk_BillComplete: ! "bill complete checks
+Gosub TAXANDTOTAL
+if p61$[138,138]="Y"  	
+	IF Invoice_Based<>0 or credit<>0  gosub calcartmcode:
+endif
+gosub CalcTerm:
+Gosub L_6800
+If PASSINFO[3] Gosub WRITE_ROT_AND_STUFF
+If TCB=1 or tcb=2
+ if (S9[4]=201 or s9[4]=205 or s9[4]=264 or s9[4]=266 or s9[4]=374 or s9[4]=221)! cch calcs the tax - DO IT NOW BEFORE CUSTONORD update
+  ! this is here for all the other programs that use this for totalling changed/new orders
+  ! so far 205, 266, 234a(221), poupsoq(374) (264 to be added?)
+  ! found also: buildorder(201), mx013f3(266), poupsocost(208), serp229(201) ! how to add?
+  IF NOT(PASSINFO[3]) GOSUB WRITE_ROT_AND_STUFF: ! ALWAYS WRITE TOTALS FIRST!
+  ROHRec=H1;CChan[1]=CH_Cust;CChan[2]=CH_ROH ! rec,cust,roh
+  CChan[3]=CH_ROS;CChan[4]=CH_ROT;CChan[5]=CH_ROL ! ros,rot,rol
+  CChan[6]=CH_TaxCode;CChan[7]=CH_CUSTTAX ! taxcode, ctaxtype
+  if tcb=1 Call "cch.calc.dsout.dl4",ROHRec,CChan[],Intco,rstr$
+  if tcb=2 call "ava.gettaxout.dl4",ROHRec,CChan[],Intco,rstr$
+  Gosub read_rot: ! reread rot for new totals
+  Unlock #CH_Rot ! incase locked
+ Endif ! certain programs calc (as serpordh does calc!)
+Endif
+If H5[7]=19 And BillC=0 And Invoice_Based ! "after these totals written
+	Gosub Get_BillComplete: ! "get all totals
+	rem If P9$[45,45]<>"N" Gosub Calc_Slscom: ! "commission needs calc
+    rem removing the check for bypass 221 to recalc commissions always 
+	rem re task 54330 Omaha paper
+	Gosub Calc_Slscom: ! "commission needs calc
+	! "no credit check needed and open order $ updated already
+	Goto Done:
+Endif
+Gosub CALC_SLSCOM
+If PASSINFO[4] Gosub OPEN_ORDER_AMNT
+If H5[7] <> 20 ! no cred chk on freight invoice
+  If PASSINFO[1] Gosub CHECK_CREDIT
+End If 
+Goto DONE
+PROCESS_LINE: Rem "====================================== process 1 line
+If (H5[7] = 21 Or H5[7] = 22) And A$[7,9] = "   " Goto L_1900
+L1 = V1 \ Gosub READ_ROL
+If (H5[7] = 21 Or H5[7] = 22) And A$[10,10] = "C" Let ESTMT = L5[3]
+If (H5[7] = 21 Or H5[7] = 22) And A$[7,9] = "   " Goto L_1900
+If S2[0] = 3 Goto L_1900
+If L3[2] > 900 Goto L_1900
+IF (NOT(CREDIT) AND H5[7]=36) OR (CREDIT AND H5[7]=36 AND H3[1]=16)  ! "EVAP Bill - No Cost
+	LET S3[12]=0
+ENDIF 
+IF (NOT(CREDIT) AND H5[7]=37) OR (CREDIT AND H5[7]=37 AND H3[1]=16) ! "EVAP Ship - No Price
+	LET L5[3]=0;L5[0]=0
+ENDIF 
+T2[1] = T2[1] + L5[3]
+T2[24] = T2[24] + L5[0]
+T2[14] = T2[14] + S3[13]
+If L7[4] <> 0 Let T2[16] = T2[16] + FNR(S3[4])
+If L7[4] <> 0 If A1[3] Let T2[15] = T2[15] + FNR(Abs(L7[4] * L6[2]) / A1[3])
+If L6[5] Let T2[8] = T2[8] + (L5[3] - OLM[1])
+If Not(L6[5]) Let T2[9] = T2[9] + (L5[3] - OLM[1])
+if p61$[132,132]="Y" and nsfmcode<>0 and L3[0]=1 and not(credit)! nonstock only
+	If S2[0] <> 3
+		Mat Read #CH_SPRODDESC,L4[0],190;NSFRT1;! 
+		let nsfmcost=nsfmcost+nsfrtcost+NSFRT1
+	ENDIF
+endif
+CNVTU[0] = 0;CNVTU[1] = UN[0];CNVTU[2] = 1;CNVTA = L7[4]
+If CNVTA <> 0 Gosub UOM_CONVERT \ TOT_SELL = TOT_SELL + AMOUNT
+LET CNVTU[0]=0;CNVTU[1]=UN[0];CNVTU[2]=1;CNVTA=L7[2]
+IF CNVTA<>0 GOSUB uom_convert: \ LET TOT_ORD=TOT_ORD+AMOUNT ! "tot sell units
+If P60$[42,42] = "Y" !* if sales tax per line
+  if tcb=1 or tcb=2 goto L_1044 ! 3rd party calcs it - not PM
+  If Not(L6[5]) Let LTAX1 = 0 \ LTAX2 = 0 \ Goto L_1044
+  IF (NOT(CREDIT) AND H5[7]=37) OR (CREDIT AND H5[7]=37 AND H3[1]=16)
+	Let LTAX1 = 0;LTAX2 = 0
+	GOTO L_1044
+  ENDIF ! evap ship - no tax
+  Mat Read #CH_TAXCODE,L6[5],20;T8; \ LTAX2 = T8
+  mat  read #ch_taxcode,L6[5],414;rtype$;
+  IF RTYPE$<>"N" AND RTYPE$<>"U" LET RTYPE$="N"
+  LTAX1 = FNR((L5[3] - OLM[1]) * (LTAX2 / 100))
+  IF RTYPE$="U" LET LTAX1=FNV((L5[3]-OLM[1])*(LTAX2/100)) 
+  Mat Read #CH_TAXCODE,L6[5],66;MAXTAX; \ If Not(MAXTAX) Goto L_1042
+  if maxtax<>0
+		LET CNVTU[0]=0;CNVTU[1]=UN[0];CNVTU[2]=1;CNVTA=L7[4]
+		GOSUB uom_convert:
+		qtysell=amount
+		mat read #ch_taxcode,L6[5],444;TX9;
+		let lvlpct=0
+		if tx9[1]>0 and tx9[1]<10
+			if tx9[1]=1 READ #ch_taxcode,L6[5],72;lvlpct;  
+			if tx9[1]=2 READ #ch_taxcode,L6[5],76;lvlpct;  
+			if tx9[1]=3 READ #ch_taxcode,L6[5],80;lvlpct;     
+			if tx9[1]=4 READ #ch_taxcode,L6[5],292;lvlpct; 
+			if tx9[1]=5 READ #ch_taxcode,L6[5],296;lvlpct; 
+			if tx9[1]=6 READ #ch_taxcode,L6[5],300;lvlpct; 
+			if tx9[1]=7 READ #ch_taxcode,L6[5],304;lvlpct; 
+			if tx9[1]=8 READ #ch_taxcode,L6[5],308;lvlpct; 
+			if tx9[1]=9 read #ch_taxcode,L6[5],312;lvlpct;! NEED BREAKTABLE LEVELS
+		endif
+		If not (tx9[0]) ! max tax based upon tax amount
+			IF LTAX1>FNR(MAXTAX*qtysell) ! tax amount greater per unit
+				if tx9[1]=0 ! based upon entire tax code
+					LET LTAX1=FNR(MAXTAX*qtysell)
+					if rtype$="U" LET LTAX1=FNV(MAXTAX*qtysell)
+				else ! based upon the level
+					if rtype$<>"U"
+						let ltax1=fnr(maxtax*qtysell)! need break table 
+						let ltax1=ltax1+fnr(l5[3]*((ltax2-lvlpct)/100))
+					else
+						let ltax1=fnv(maxtax*qtysell)! need break table 
+						let ltax1=ltax1+fnv(l5[3]*((ltax2-lvlpct)/100))
+					endif
+				endif
+			ENDIF
+		else ! TAXABLE MERCHANDISE AMOUNT
+			IF L5[3]>MAXTAX ! total shipped on the line > max tax
+				LET MAXTAX=MAXTAX*QTYSELL
+				IF L5[3]>MAXTAX
+					IF TX9[1]=0 ! FOR ENTIRE TAX CODE
+						LET LTAX1=FNR(MAXTAX*LTAX[2]/100)
+						if rtype$="U" LET LTAX1=FNV(MAXTAX*AMOUNT)
+					ELSE				
+						let ltax1=0
+						if rtype$<>"U"
+							LET LTAX1=FNR(MAXTAX*lvlpct/100)
+							let Ltax1=ltax1+fnr(l5[3]*((ltax2-lvlpct)/100))
+						else
+							let ltax1=FNV(MAXTAX*lvlpct/100)
+							let ltax1=ltax1+fnr(l5[3]*((ltax2-lvlpct)/100))
+						endif
+					ENDIF
+				ENDIF
+			ENDIF
+		endif
+	endif
+  !If LTAX1 > FNR(MAXTAX * AMOUNT) Let LTAX1 = FNR(MAXTAX * AMOUNT)
+  !IF RTYPE$="U" IF LTAX1>FNV(MAXTAX*AMOUNT) LET LTAX1=FNV(MAXTAX*AMOUNT)  
+L_1042: T2[7] = T2[7] + LTAX1
+L_1044: Mat Write #CH_ROL,L1,508;LTAX1 \ Mat Write #CH_ROL,L1,538;LTAX2;
+Else 
+  Unlock #CH_ROL
+End If 
+If Not(H6[5]) And S3[14] > 0 Let H6[5] = S3[14]
+T2[17] = T2[17] + S3[12]
+T2[18] = T2[18] + FNR(B[21] * L7[4])
+H6[6] = H6[6] + OLM[1]
+If L7[2] > 0 If A[5] Let TWT = TWT + ((L6[4] * L7[2]) / A[5])
+If P60$[11,11] = "Y" If PL[1] Let OFLG = 1
+If P60$[11,11] <> "Y" If L3[0] Let OFLG = 1
+If P60$[14,14] <> "Y" Or S2[0] = 3
+	IF P61$[36,36]="Y"
+		if not (INVOICE_BASED) Goto L_1100
+	else
+		if (invoice_based) goto L_1100
+	endif
+endif
+CMP = PFU1[9] \ If P60$[15,15] = "P" Let CMP = PFU1[18]
+If L7[4] <= 0 Let UWT = 0 \ Goto L_1094
+CNVTU[0] = 0;CNVTU[1] = PFU1[9];CNVTU[2] = 1;CNVTA = L7[4]
+If P60$[15,15] = "P" Let CNVTU[1] = PFU1[18]
+Gosub UOM_CONVERT \ If Fra(AMOUNT) Or Not(AMOUNT) Let AMOUNT = Int(AMOUNT + 1)
+FUNIT[0] = AMOUNT \ Gosub CHECK_CONTAINER_WT
+UWT = (S3[4] / FUNIT[0] + COWT1) \ If Fra(UWT) Let UWT = Int(UWT + 1)
+If UWT > 150 Let UWT = 150;BADCT = BADCT + 1
+L_1094: If UWT = 0 Goto L_1100
+FUNIT[1] = FUNIT[1] + (UPS[UWT] * FUNIT[0])
+If A5[0] = 1 Let HAZCHG = HAZCHG + (MCHG[1] * FUNIT[0])
+L_1100: Rem TOTAL ORDER DISCOUNT BY WEIGHT
+If CREDIT goto L_1900
+If P60$[13,13] <> "Y" Goto L_1900
+If Not(ODSC[5]) Or L3[0] <> 0 Goto L_1900
+For CT = 0 To 4
+  If SZUM[CT] And PFU1[19] = SZUM[CT] Goto L_1170
+Next CT
+Goto L_1900
+L_1170: If Not(ODSC[CT]) Goto L_1900
+TDISC = TDISC + (L5[3] * (ODSC[CT] / 100))
+!L_1900: Unlock #CH_ROL \ Return 
+L_1900: ! "line finished
+UNLOCK #ch_rol
+If (C13=19 or H5[7]=19) and S2[0]<>3  ! "BILL COMPLETE checks - except Msg Lines
+	Let BillC[2]=BillC[2]+1 ! "# lines
+	If L7[0] ! "not first time - had Prev Ships
+		If L7[0]=L7[2] Let BillC[3]=BillC[3]+1 ! "complete
+	Else ! "no ships yet
+		If L7[4]=L7[2] Let BillC[1]=BillC[1]+1 ! "all ship upon entry
+		if h0[5]=0 and l7[4]<>l7[2] and (l7[3]=0 and l7[4]=0) let billc[1]=billc[1]+1 ! first time and no ship/bo
+	Endif
+Endif
+RETURN 
+
+
+Calc_NS_FrtCost: ! 
+if not(nsfmcode) return
+! if not(nsfmcost) return
+if p61$[132,132]<>"Y" return
+if credit<>0 return
+FOR SCR=0 TO 9
+		if INT(MCODE[SCR])=NSFMCODE ! already exists
+			LET T2[4]=T2[4]-MCHARGE[SCR,0]
+			LET TOT[0]=TOT[0]-MCHARGE[SCR,1]
+			mat read #ch_miscchg,(int(mcode[scr])),0;ms1;
+			IF int(FRA(MCODE[SCR])*10) ! gross profit check
+				let tot[1]=tot[1]-mcharge[scr,0]
+				LET TOT[2]=TOT[2]-MCHARGE[SCR,1]
+			ENDIF 
+			let mcode[scr]=nsfmcode 
+			let mcharge[scr,0]=0 ! charge is alway 0
+			let mcharge[scr,1]=nsfmcost
+			if nsfmcost=0
+				let mcode[scr]=0
+				let mctxbl[scr]=0
+			else
+				if int(mcode[scr])
+					if ms1[1] ! flag for gp
+						let mcode[scr]=mcode[scr]+.1
+					endif
+					mat read #ch_miscchg,(int(mcode[scr])),0;ms1;
+					LET T2[4]=T2[4]+MCHARGE[SCR,0]
+					LET TOT[0]=TOT[0]+MCHARGE[SCR,1]
+					IF int(FRA(MCODE[SCR])*10) ! gross profit check
+						let tot[1]=tot[1]+mcharge[scr,0]
+						LET TOT[2]=TOT[2]+MCHARGE[SCR,1]
+					ENDIF 						
+				endif
+			endif
+			return
+		endif
+NEXT SCR
+if not(nsfmcost) return ! no cost 
+! check if misc charge is avail
+for scr=0 to 9
+	if int(mcode[scr])=0 goto calcnsfm:
+next scr	
+return ! all 10 misc charges are being used
+calcnsfm: ! calculate delivery charge 
+LET MCODE[SCR]=nsfmcode
+if int(mcode[scr])
+	mat read #ch_miscchg,(int(mcode[scr])),0;ms1;
+	if ms1[1] ! flag for gp
+		let mcode[scr]=mcode[scr]+.1
+	endif
+endif
+LET MCHARGE[SCR,0]=0 ! always 0 
+LET MCHARGE[SCR,1]=nsfmcost
+LET MCTXBL[SCR]=mtax
+if int(mcode[scr]) AND mtax<>0
+	mat read #ch_miscchg,(int(mcode[scr])),38;ms2;
+	let mctxbl[scr]=ms2[0]
+	if not (mtax) let mctxbl[scr]=mtax
+	if t2[1]<>0 and t2[8]=0 let mctxbl[scr]=0
+endif
+LET T2[4]=T2[4]+MCHARGE[SCR,0]
+LET TOT[0]=TOT[0]+MCHARGE[SCR,1]
+IF int(FRA(MCODE[SCR])*10) ! gross profit check
+	let tot[1]=tot[1]+mcharge[scr,0]
+	LET TOT[2]=TOT[2]+MCHARGE[SCR,1]
+ENDIF 
+return 
+
+GET_SHIPVIA_WEIGHT: Rem GET SHIP BY
+If S0$[118,118] = "2" Goto L_2180
+If S6[1] < 0 Goto L_2180
+If T2[16] = 0 Goto L_2180
+Gosub CHECK_ZONE \ Goto L_2180
+S6 = 0;S6[1] = 0
+NOWGT = 1
+For I = 4 To 0 Step -1
+  If NOWGT = 1 If Z1[I] If T2[16] > Z1[I] Let S6 = Z2[I]
+  If Z1[I] Let NOWGT = 0
+  If Z1[I] If T2[16] <= Z1[I] Let S6 = Z2[I]
+Next I
+If NOWGT Goto L_2180
+If S6 = 1 Let S6[1] = Z0
+If S6 <> 1 Let S6[1] = 0
+If S6 = 2 Let V0$ = Z3$
+If S6 = 1 If S6[1] = 0 Let S6 = 0
+If S6 <> 1 Goto L_2160
+If S6[1] < 10 Let V0$ = "UPS GROUND      "
+If S6[1] > 10 If S6[1] < 20 Let V0$ = "UPS 2DAY AIR      "
+If S6[1] > 20 Let V0$ = "UPS NDAY AIR    "
+L_2160: If S6 = 0 Let S5 = D1;V0$ = "OUR TRUCK     "
+L_2180: ! CALCULATE THE UPS FREIGHT
+If S6 = 1 
+		IF PASSINFO[8]=0
+			Let T2[5] = 0;T2[6] = 0
+			Gosub UPS_CHARGES
+		ENDIF
+ENDIF
+Return 
+
+CHECK_ZONE: Rem OPEN,READ ZONE
+If Err 0 Gosub ERR_TRAP
+Q$ = " ",Q$;Q$ = S2$[19,20]
+Search #CH_ZONE,2,1;Q$,R23,E
+If E Let P60$[14,14] = "N" \ Return 
+Read #CH_ZONE,R23,28;D0;
+Mat Read #CH_ZONE,R23,36;T2$;
+Mat Read #CH_ZONE,R23,76;Z3$;
+Mat Read #CH_ZONE,R23,88;Z0;
+Mat Read #CH_ZONE,R23,90;Z1;
+Mat Read #CH_ZONE,R23,110;Z2;
+Read #CH_ZONE,R23,32;D1;
+Return 1
+
+CHECK_UPS: Rem OPEN,READ UPS
+If Z0 = 0 Return 
+Try Close #CH_MISC Else Rem
+If Err 0 Gosub ERR_TRAP
+Read #1,88,2800;Q$[1,16];
+Ropen #CH_MISC,Q$
+Mat Read #CH_MISC,0,0;MCHG;
+Mat Read #CH_MISC,Z0,0;UPS;
+Close #CH_MISC
+Return 
+
+CHECK_CONTAINER_WT: Rem CHECK FOR CONTAINER WEIGHT
+if CREDIT return
+Try Close #CH_MISC Else Rem
+If Err 0 Gosub ERR_TRAP
+Read #1,88,2368;Q$[1,16];
+Ropen #CH_MISC,Q$
+For CT = 1 To Chf(CH_MISC) - 1
+  Read #CH_MISC,CT,0;COWT;
+  Read #CH_MISC,CT,2;COWT1;
+  If COWT = CMP Goto L_2485
+Next CT
+COWT1 = 0
+L_2485: Close #CH_MISC \ Return 
+CALC_SHIP_DATE: Rem SHIP DATE
+If P60$[16,16] <> "Y" Return 
+If H5[7] = 4 Or H5[7] = 15 or H5[7]=16 Return 
+If TWT = 0 Return 
+If S0$[118,118] = "2" Return 
+if CREDIT or s9[4]=251 return
+if QUOTE return ! manual entry on Quotes!
+If H0[10]=999999 return ! do not recalc per committee - 4771
+If H0[0] = 1 Or H0[0] = 90 Goto L_2520
+If S9[4] <> 201 And S9[4] <> 983 Return 
+L_2520: If S6[0] = 0 Gosub CHECK_ZONE \ Return 
+CHNL = findchannel() ! 99
+! Gosub GETCHAN
+CH_LTM = CHNL
+Read #1,88,2816;Q$[1,16];
+Open #CH_LTM,Q$
+If Err 0 Gosub ERR_TRAP
+Mat Read #CH_LTM,0,0;NSD;
+E = 1;LTM = 0;x1[1]=0
+For I = 4 To 0 Step -1
+  If E = 1 If NSD[I] If TWT > NSD[I] Let LTM = NSD[I + 5]
+  If NSD[I] Let E = 0
+  If NSD[I] If TWT <= NSD[I] Let LTM = NSD[I + 5]
+Next I
+If S6[0] = 0 If D0 > LTM Let LTM = D0
+If S6[0] = 1 If LTM <= NSD[10] Let LTM = NSD[10]
+If OFLG = 1 If LTM <= NSD[11] Let LTM = NSD[11]
+! check order cutoff time
+MAT  READ #1,182,84;CUTTIME;
+if cuttime<=0 let cuttime=24 ! always a day away -- from build order
+LET  sdate$="" 
+! Call Time(SDATE$) ! USE THE saved
+IF H5[16]<25 ! entered with HH.MM (standard)
+	LET X$=H5[16] USING "&&&&.&&" ! SOMe just HH.MM?
+	let sdate$=X$[3,4]+X$[6,7]+x$[1,2] ! 00 seconds!
+ELSE
+	sdate$=h5[16] USING "&&&&&&" ! entered as HHMMSS
+ENDIF
+LET CURTIM[0]=SDATE$[1,2] ! [15,16] ! HOUR                                      
+LET CURTIM[1]=SDATE$[3,4] ! [18,19]  ! MINUTER                                    
+LET CURTIM[2]=SDATE$[5,6] ! [21,22]  ! SECOND                                    
+LET CURTIM[3]=CURTIM[0]*10000+CURTIM[1]*100+CURTIM[2]  ! TIME CALC                 
+IF CURTIM[3]>CUTTIME 
+	LET LTM=LTM+1 ! a day away 
+Endif
+Gosub INCREASE_LEAD_TIME
+X$ = H0[9] Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Goto L_2680
+JDAT = X$;JDAT0 = JDAT;JDAT = JDAT + LTM
+If JDAT < 1000 Goto L_2680
+L_2620: X$ = JDAT Using "&&&&&"
+Call JulianToDate(1,X$,X$,E) \ If E Goto L_2680
+R0 = X$[1,2] \ If R0 >= 1 If R0 <= 12 If Not(Fra(R0)) Goto L_2650
+Goto L_2680
+L_2650: Mat Read #CH_LTM,R0,0;NSD; ! no ship by month
+For I = 0 To 50
+  If NSD[I] If JDAT = NSD[I] Goto L_2700
+Next I
+! also do validdate!
+LET VDATE=JDAT;STAT=0;WARN=0;PARAM[0]=H4[2];PARAM[1]=h5[8]
+CALL "validdate",vdate,STAT,WARN,PARAM[]
+if JDAT<>VDATE and x1[1]<20 ! OK - CHGD IT
+	let JDAT=vdate
+	x1[1]=x1[1]+1 ! prevent endless
+	GOTO L_2620 ! need x$ for check
+ENDIF
+If Len(X$) = 8 Goto L_2750
+Q$ = X$[1,6];Q$[7,8] = X$[8,9]
+X$ = Q$[1,8] \ Goto L_2750
+L_2680: Close #CH_LTM
+If Err 0 Gosub ERR_TRAP
+Return 
+L_2700: Rem DATE MATCH
+L_2710: JDAT = JDAT + 1
+If (JDAT - JDAT0) > 120 Goto L_2755 ! Bumped > 3 months? give up now
+Goto L_2620
+L_2750: Rem DATE, GET YYMMDD
+
+If S6[0] = 0 Gosub L_2800 \ Goto L_2710
+L_2755: Gosub L_7740 !  date to mm/dd/yy
+If X2 <= 0 Goto L_2790
+J1 = X2 \ R[8] = H1
+CH_LEV[0] = CH_PROD
+CH_LEV[1] = CH_PRWH
+CH_LEV[2] = CH_ROL
+Call "MX208LEV5",R[],H5[],J1,H0[],H4[],CH_LEV[]
+Unlock #CH_PROD
+
+H0[10] = X2
+X2 = H0[10] \ Gosub YMD2JUL \ X2 = 0
+JDATE[0] = X2
+X2 = H5[1] \ Gosub YMD2JUL \ X2 = 0
+JDATE[1] = X2
+If JDATE[0] > JDATE[1] Let H5[1] = H0[10]
+L_2790: Goto L_2680
+L_2800: Rem CHECK ZONE
+Gosub L_2900
+I = Z9 + 1
+If T2$[I,I] = "N" Return 
+Return 1
+L_2900: Rem GET DOW$ NEED X$ (MM/DD/YY)
+J1 = X$[7,8] \ J2 = X$[1,2] \ J3 = X$[4,5]
+If J1 < 85 Let J1 = J1 + 100
+Z4 = J2 + 1 \ Z5 = Int(1 / Z4 + .7) \ Z6 = J1 - Z5 \ Z7 = Z4 + 12 * Z5
+Z8 = Int(Z7 * 30.6001) + Int(Z6 * 365.25) + J3 \ Z9 = Z8 - 7 * (Int(Z8 / 7))
+Return 
+INCREASE_LEAD_TIME: Rem INCREASE LEAD TIME BY NON-SHIP
+X$ = H0[9] Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Goto L_3085
+JDAT = X$
+If JDAT < 1000 Goto L_3085
+JDAT1 = JDAT + LTM
+L_3030: For JDAT0 = JDAT To JDAT1
+  X$ = JDAT0 Using "&&&&&"
+  Call JulianToDate(1,X$,X$,E) \ If E Goto L_3080
+  R0 = X$[1,2] \ If R0 >= 1 If R0 <= 12 If Not(Fra(R0)) Goto L_3060
+  Goto L_3080
+L_3060: Mat Read #CH_LTM,R0,0;NSD;
+  For I = 0 To 50
+    If NSD[I] If JDAT0 = NSD[I] Goto L_3090
+  Next I
+L_3080: Next JDAT0
+L_3085: Return 
+L_3090: LTM = LTM + 1;JDAT1 = JDAT1 + 1
+If LTM > 100 Return 
+JDAT = JDAT0 + 1 \ Goto L_3030
+L_3100: Rem BILLTO
+Q$ = " ",Q$ \ Q$ = H0[1] Using "######"
+Search #CH_CUST,2,1;Q$,Q2,E \ If E > 1 Gosub ERR_SEARCH
+If Not(E) Return 
+If H0[1] = H0[4] Gosub ERR_SEARCH
+H0[1] = H0[4] \ Write #CH_ROH,H1,4;H0[1]
+Goto L_3100
+
+UPS_CHARGES: Rem APPLY UPS CHARGES
+IF PASSINFO[8]<>0 RETURN
+T2[5] = FUNIT[1]
+T2[6] = MCHG[0] + HAZCHG
+!Mat Read #1,26,(H0[12] - 1) * 8;TRMS;
+!CHAN[1]=FINDCHANNEL()
+!ROPEN #CHan[1],"2/ARTERMCODE"+STR$(COID)
+!MAT  READ #CHAN[1],H0[12],52;TRMS;
+!Close #CHAN[1]
+!If TRMS[1] = 99 Let T2[5] = T2[5] + MCHG[2]
+if p61$[109,109]="Y"
+	if codcust<>0 LET T2[5]=T2[5]+MCHG[2] ! "cod charge	
+else
+	mat read #ch_arterms,h0[12],52;trms; ! terms data
+	IF TRMS[1]=99 LET T2[5]=T2[5]+MCHG[2] ! "cod charge
+endif
+Return 
+CHECK_AXCESS: Rem "===================== check if direct connect (usually @ 4000)
+AXCESS = 0;E = 0
+If H5[9] = 97 Return 
+L_3570: Call "MXAXC5",AXCESS,E
+L_3580: Rem "======= error handling
+If Not(E) Return 
+!If E = 1 Print "error with usercntrl record #" \ Signal 3,20
+!If E = 2 Print "error with channel availability" \ Signal 3,20
+!If E = 3 Print 'RB RB RB';"security violation" \ Signal 3,20
+Goto DONE
+L_3640: Return 
+
+DELCharge: ! delete delivery charge
+if custom_customer$ = "AFP" ! All Florida Paper uses customer billto code as key
+		DC_KEY$=H0[1] USING "######",".000000",H0[10] USING "&&&&&&"
+else                                                    
+        if p61$[109,109]="Y" ! custom_customer$="RUTHERFORD"   
+			let srnmd[1]=0
+			DC_KEY$=SRNMD[0] USING "######",".",SRNMD[1] USING "&&&&&&",H0[10] USING "&&&&&&"                                       
+        else                                            
+			LET DC_KEY$=SRN[2] USING "######",".",SRN[1] USING "&&&&&&",H0[10] USING "&&&&&&" 
+		endif		
+end if
+SEARCH #ch_delvchrg,2,1;DC_KEY$,DC_REC,E \ IF E>1 GOSUB Err_Search:
+IF not(E)
+!*  we have a record we need to delete invoice delivery charge
+	SEARCH #ch_delvchrg,5,1;DC_KEY$,DC_REC,E\if e gosub err_search:
+	E=3 \ SEARCH #ch_delvchrg,1,0;DC_KEY$,DC_REC,E\if e gosub err_search:
+endif
+return ! manual edit/delete
+
+
+CHECK_CREDIT: Rem "=============================== check cust credit
+L_4310: Rem "??? used in L_8500:
+L_4370: Rem "??? used in L_8500:
+Try Close #CH_Misc Else Rem
+Gosub UNPACK_HOLDS
+If P60$[40,40] = "O" And (T2[24] - TOT[4]) > 0 !"check credit based on order amt
+  TOT_HOLD = (T2[0] - T2[1]) + T2[24] - TOT[4]
+Else !"check based on ordered amt
+  TOT_HOLD = T2[0]
+End If 
+If H5[7] = 4 And H0[5] <> 0 Let TOT_HOLD = T2[0]
+If H5[7] = 15 And H0[5] <> 0 Let TOT_HOLD = 0
+E = PASSINFO[4]
+!! Call "credck",H0[4],H0[1],TOT_HOLD,H0[7],E,scratch$  *** old call ***
+Let cr_CHNL[1]=1   !cntrl
+Let cr_CHNL[2]=ch_cust    !cust
+let cr_CHNL[3]=0  !saract
+Let cr_CHNL[4]=0  !credck
+Call "credck.dl4",cr_CHNL[],H0[4],H0[1],TOT_HOLD,H0[7],E,scratch$,debug,dlog$,ss
+Mat Read #1,66,0;F1$;
+If E And PASSINFO[0] = 0 And H6[1] = 0 And F1$[1,1] > " " Let T9[0] = 1
+IF QUOTE LET T9[0]=0 ! NOT ON QUOTES
+Gosub PACK_HOLDS
+Gosub WRITE_ROT
+Return 
+OPEN_ORDER_AMNT: Rem "======================billto & cust open order amount
+if CREDIT return ! not on credits!
+if QUOTE return ! not on quotes!
+newopentot = 0
+If P60$[40,40] = "O" And (T2[24] - TOT[4]) > 0
+  newopentot = (T2[0] - T2[1]) + T2[24] - TOT[4]
+Else 
+  newopentot = T2[0]
+End If 
+If H5[7] = 4 And H0[5] <> 0 Let newopentot = T2[0]
+If H5[7] = 15 And H0[5] <> 0 Let newopentot = 0
+if h5[7] = 20 let newopentot=0
+if tot_hold=newopentot return
+K5$ = H0[4] Using "######"
+Search #CH_CUST,2,1;K5$,CUST_REC,E \ If E Gosub ERR_SEARCH
+Read #CH_CUST,CUST_REC,412;C9
+C9 = C9 - TOT_HOLD
+if QUOTE
+	! write #CH_CUST,CUST_REC,412;C9
+endif
+
+If tot_hold<>newopentot Or H5[7] = 20 !if cred chck in inqy mode only need to add back
+  If H5[7] = 4 And H0[5] <> 0
+    C9 = C9 + T2[0]
+  Else 
+    If H5[7] = 15 And H0[5] <> 0
+      C9 = C9 + 0
+    Else 
+      If P60$[40,40] = "O" And (T2[24] - TOT[4]) > 0
+        C9 = C9 + (T2[0] - T2[1]) + T2[24] - TOT[4]
+      Else 
+        C9 = C9 + T2[0]
+      End If 
+    End If 
+  End If
+  if s9[4]<>281
+	Write #CH_CUST,CUST_REC,412;C9;
+  endif
+End If 
+Read #ch_cust,cust_rec,412;c9; ! unlock the record
+If H0[1] = H0[4] Goto L_5090
+K5$ = H0[1] Using "######"
+Search #CH_CUST,2,1;K5$,CUST_REC,E \ If E Return 
+Read #CH_CUST,CUST_REC,412;C9
+C9 = C9 - TOT_HOLD
+if QUOTE
+	Write #CH_CUST,CUST_REC,412;C9;
+	goto L_5090
+endif
+If tot_hold<>newopentot Or H5[7] = 20 !if cred chck in inqy mode only need to add back
+  If H5[7] = 4 And H0[5] <> 0
+    C9 = C9 + T2[0]
+  Else 
+    If H5[7] = 15 And H0[5] <> 0
+      C9 = C9 + 0
+    Else 
+      If P60$[40,40] = "O" And (T2[24] - TOT[4]) > 0
+        C9 = C9 + (T2[0] - T2[1] + T2[24] - TOT[4])
+      Else 
+        C9 = C9 + T2[0]
+      End If 
+    End If 
+  End If 
+  if NOT(QUOTE)
+	Write #CH_CUST,CUST_REC,412;C9;
+endif
+End If 
+Read #ch_cust,cust_rec,412;c9; ! unlock the record
+let tot_hold=newopentot ! back it out
+L_5090: Return 
+
+GET_CUST: Rem
+K5$ = H0[4] Using "######"
+Search #CH_CUST,2,1;K5$,CUST_REC,E \ If E Gosub ERR_SEARCH
+Mat Read #CH_CUST,CUST_REC,412;C9
+Mat Read #CH_CUST,CUST_REC,486;A0
+Mat Read #CH_CUST,CUST_REC,624;C10;
+Mat Read #CH_CUST,CUST_REC,660;C11;
+mat read #ch_cust,cust_rec,692;c13; ! deflt ord type
+mat read #ch_cust,cust_rec,778;mastdelvcust;
+MAT read #ch_cust,cust_rec,146;custid;
+IF not(mastdelvcust) and p61$[109,109]="Y"
+	let mastdelvcust=custid
+endif
+If p61$[109,109]="Y"
+	if mastdelvcust=custid
+		let mastlvl=c11
+	else
+		let keymast$=mastdelvcust using "######"
+		search #ch_cust,2,1;keymast$,mcust_rec,e
+		if not (e)
+			READ #CH_CUST,MCUST_REC,660;MASTLVL;
+			If not (mastlvl) let mastlvl=c11
+		else
+			let mastlvl=c11
+		endif
+	endif
+	let dclvl=mastlvl
+endif
+Return 
+UNPACK_HOLDS: Rem UNPACK T2[21] TO T9[x]
+X2 = T2[21] \ For K = 0 To 11
+  T9[K] = Sgn(Fra(X2 / 2)) \ X2 = Int(X2 / 2)
+Next K \ Return 
+PACK_HOLDS: Rem PACK CHAIN TYPE FROM T9[]
+if CREDIT let T2[21]=0 \ Return ! no hold on credits
+if p61$[106,106]<>"Y" and QUOTE let t2[21]=0 \ return ! no hold on quotes
+X2 = 0 \ For K = 0 To 11
+  If T9[K] Let X2 = X2 + 2 ^ K
+Next K \ T2[21] = X2 \ Return 
+CALC_SLSCOM: Rem GET SLSM/COMM
+S1$ = " ",S1$ \ S1$ = H0[11] Using "###"
+Search #CH_SLSM,2,1;S1$,V3,E \ If E > 1 Gosub ERR_SEARCH
+SCR = V1
+V1 = V3
+if QUOTE return ! NO COMMISSION ON QUOTES!
+If NOT(CREDIT) AND (H5[7]=36 Or H5[7]=37) Return ! EVAP NO COMMISSIONS
+IF CREDIT AND H3[1]=16 AND (H5[7]=36 Or H5[7]=37) Return ! EVAP NO COMMISSIONS
+! Call "MXSLSCOM5",R5,H1,V1,CFIN[],CH[]
+S9[1] = COID ! Val(co$)
+S9[2] = H0[11]
+clear chan[] ! need diff channels passed!
+Chan[1]=1;Chan[3]=CH_PROD;Chan[4]=CH_COMCDE ! cntrl,prod,commd
+Chan[5]=CH_Cust;Chan[6]=CH_PRWH;Chan[8]=CH_ROH ! Cust,prwh,roh
+Chan[9]=CH_ROT;Chan[10]=CH_ROL;Chan[13]=Ch_slsm ! rot,rol,slsm
+
+Call "MXSLSCOM5",S9[],CHan[],R5,H1,V1,CFIN[]
+V1 = SCR
+Return 
+EXCEPTION_LIST: Rem HOLD BY EXECPTIONS INVOICES ONLY
+if CREDIT return ! no hold on credits
+if p61$[106,106]<>"Y" and QUOTE return ! no hold on quotes
+! if s9[4]=223 return ! no check in inv edit!(done on entry)
+If H5[7]=36 Or H5[7]=37 Return ! EVAP NO
+If S2[0] = 3 Goto L_6190
+If L7[4] <= 0 Goto L_6190
+GP = L5[3] - S3[12]
+If H6[1] Return 
+! LET T9[1]=0 \ LET T9[6]=0 \ LET T9[7]=0 ! 244892 remove it
+If L3[0] Gosub CHECK_HOLDCODE9
+If EX[9] If L5[0] < EX[9] Let T9[6] = 1
+If EX[10] If L5[0] > EX[10] Let T9[6] = 1
+if s9[4]>=221 and s9[4]<241 ! invoice exceptions
+	If EX[13]<>0 and S3[13] < EX[13] Let T9[7] = 1
+	If EX[14]<>0 and S3[13] > EX[14] Let T9[7] = 1
+endif
+if custom_customer$="AMERICANOSMENT" and s9[4]=251
+	If EX[13]<>0 and S3[13] < EX[13] Let T9[7] = 1
+	If EX[14]<>0 and S3[13] > EX[14] Let T9[7] = 1
+endif
+If EX[3]<>0 and GP < EX[3] Let T9[1] = 1
+If EX[4]<>0 and GP > EX[4] Let T9[1] = 1
+If EX[17]<>0 and Not(L5[3]) Let T9[1] = 1
+If L5[3]<>0 and  EX[17]<>0 
+	IF (FNR((GP / L5[3]) * 100) < EX[17]) Let T9[1] = 1
+ENDIF
+If L5[3]<>0 and   EX[18]<>0 
+	if (FNR((GP / L5[3]) * 100) > EX[18]) Let T9[1] = 1
+ENDIF
+if t9[1]=0 and not(l3[0]) gosub LP1chk ! no hold yet and stk item
+Mat Read #1,66,16;F1$;
+If F1$[1,1] <= " " Let T9[1] = 0
+Mat Read #1,66,96;F1$;
+If F1$[1,1] <= " " Let T9[6] = 0
+Mat Read #1,66,112;F1$;
+If F1$[1,1] <= " " Let T9[7] = 0
+!cct156308
+if prflg$[2,2]="Y" LET T9[1]=0 \ LET T9[6]=0
+Gosub PACK_HOLDS
+L_6190: Return 
+CHECK_HOLDCODE9: Rem "==== check if ext.weight entered is valid for non stock
+RETURN ! NOT READY YET?
+If (EX[19] = 0) And (EX[20] = 0) And (EX[21] = 0) Return 
+If S3[12] > EX[19]
+  Mat Read #CH_CCODES,UN[0],10;SUNIT$;
+  If SUNIT$ = "LBS " Or SUNIT$ = "LB  "
+    If A[5] If (L6[4] * L7[4] / A[5]) = S3[4] Goto L7490
+  End If 
+  if s9[4]>=221 and s9[4]<241 ! invoice exceptions
+	If EX[20] If S3[4] < EX[20] Let T9[8] = 1
+	If EX[21] If S3[4] > EX[21] Let T9[8] = 1
+  endif
+End If 
+Return 
+lp1chk: ! see if over %
+if l3[0] return ! no lp1 on nonstks!
+Spcl=1
+if L9[0]<0 or L9[0]=1 OR L9[0]=4 OR L9[0]=5 OR L9[0]=9 LET SPCL=0
+IF L9[0]=10 OR L9[0]=14 LET SPCL=0
+IF spcl return ! special/contract price - no check!
+! got prod already - during process_line (need to recalc list 1? - hope not)
+k1$=" ",k1$;k1$=L1$[17,20]
+search #ch_comcde,2,1;k1$,r[80],E
+if e return ! no commcode - no percent!
+read #ch_comcde,r[80],58;disccap;
+if disccap<=0 or disccap>100 return ! no need to check further - no/invalid min %
+LPRc1=a[20] ! list 1
+if p9$[32,32]="Y" ! whse pricing
+	let k2$=" ",k2$;k2$[1,12]=L1$[1,12];k2$[13]=L4[3] using "##"
+	Search #ch_prwh,2,1;k2$,r[81],e
+	if not(e)
+		mat read #ch_prwh,r[81],78;w3;
+		if w3[19]>0 let LPRC1=w3[19] ! only if non-zero
+	Endif
+Endif
+! got list 1 - check percent lowest price allowed
+let DLP1=LPRC1-(LPRC1*(DISCCAP/100)) ! min price allowed (lp1-(lp1*disc))
+if OLM[3]<DLP1 let t9[1]=1 ! fail - put gp hold ! Net or unit? let's use NET
+Return
+
+READ_PROD: Rem "============================= read product
+Mat Read #CH_PROD,L4,156;B;
+Mat Read #CH_PROD,L4,256;A; \ If Not(A[5]) Let A[5] = 1
+Mat Read #CH_PROD,L4,460;A1; \ If Not(A1[3]) Let A1[3] = 1
+Mat Read #CH_PROD,L4,512;PFU1;
+Mat Read #CH_PROD,L4,554;PFU2;
+Mat Read #CH_PROD,L4,834;A5;
+MAT  READ #ch_prod,L4,1056;PRFLG$;
+Return 
+READ_ROH: Rem "====================================== read header
+Mat Read #CH_ROH,H1;H0
+Read #CH_ROH,H1,56;TOT_SELL
+Mat Read #CH_ROH,H1,66;V0$
+Mat Read #CH_ROH,H1,78;H4
+Mat Read #CH_ROH,H1,104;H5
+Mat Read #CH_ROH,H1,408;H6
+mat read #ch_roh,h1,512;oref
+Mat Read #CH_ROS,H0[2],8;S0$
+Mat Read #CH_ROS,H0[2],126;S2$
+Mat Read #CH_ROS,H0[2],146;S5
+Mat Read #CH_ROS,H0[2],150;S6
+Mat Read #CH_ROS,H0[2],154;SRN;
+if p61$[109,109]="Y"
+	mat  read #ch_ros,h0[2],196;srnmd;
+	if not (srnmd[0]) and srn[3]<>2
+		K5$ = H0[4] Using "######"
+		Search #CH_CUST,2,1;K5$,CUST_REC,E \ If E Gosub ERR_SEARCH
+		mat read #ch_cust,cust_rec,778;mastdelvcust;
+		IF not(mastdelvcust) 
+			MAT read#ch_cust,cust_rec,146;custid;
+			let mastdelvcust=custid
+		endif
+		let srnmd[0]=mastdelvcust  ! "was: srn[2]
+		let srnmd[1]=0
+	endif
+	if srn[3]=2 
+		if not (srnmd[1]) let srnmd[1]=srn[1]
+	end if
+	mat write #ch_ros,h0[2],196;srnmd;
+endif
+Gosub GET_EXCEPTIONS
+Return 
+READ_ROL: Rem "===================================== read line record
+Mat Read #CH_ROL,L1,8;L3
+Mat Read #CH_ROL,L1,16;L4
+Mat Read #CH_ROL,L1,32;L5
+Mat Read #CH_ROL,L1,56;L6
+Mat Read #CH_ROL,L1,140;L1$
+Mat Read #CH_ROL,L1,160;L9
+Mat Read #CH_ROL,L1,168;L7
+Mat Read #CH_ROL,L1,246;PL
+Mat Read #CH_ROL,L1,256;S2
+Mat Read #CH_ROL,L1,260;S3
+Mat Read #CH_ROL,L1,250;UN
+Mat Read #CH_ROL,L1,404;OLM
+Mat Read #CH_ROL,L1,446;EUN
+Mat Read #CH_ROL,L1,452;UNF
+Mat Read #CH_ROL,L1,508;LTAX1
+Mat Read #CH_ROL,L1,538;LTAX2
+let prflg$=" ",prflg$
+If L3[0] ! "non stock
+  If S2[0] <> 3 Mat Read #CH_SPRODDESC,L4[0],120;HA3;
+  Gosub L_30000
+  B[21] = L5[1]
+Else 
+  Gosub READ_PROD
+End If 
+Return 
+READ_ROT: Rem "================================ read totals
+Mat Read #CH_ROT,H0[3],8;T2;
+Mat Read #CH_ROT,H0[3],168;MCODE
+Mat Read #CH_ROT,H0[3],208;MCHARGE
+Mat Read #CH_ROT,H0[3],328;TOT
+Mat Read #CH_ROT,H0[3],358;MCTXBL
+Mat Read #CH_ROT,H0[3],378;DCLVL;
+Mat Read #ch_Rot,H0[3],380;Tot_Ord;
+IF not(t2[2]) 
+	Read #CH_TAXCODE,H4[0],20;TAXRATE;
+	If tcb=0 let t2[2]=TAXRATE ! if tcb - ALREADY GOTTEN!!
+endif
+Return 
+WRITE_ROT_AND_STUFF: Rem "============================= write total record
+If S9[4] = 221 Goto WRITE_ROT
+Read #CH_TAXCODE,H4[0],20;T8;
+if tcb=0 ! not third party 
+	IF H5[7]<>8 AND H5[7]<>16 LET T2[2] = T8
+Endif
+WRITE_ROT: Rem "now write totals and stuff
+READ #CH_TAXCODE,H4[0],414;RTYPE$;            
+IF RTYPE$<>"N" AND RTYPE$<>"U" LET RTYPE$="N" 
+FOR X1=0 TO 20         
+  IF X1<>2                       
+	IF X1=7 AND RTYPE$="U"       
+	   LET T2[X1]=FNV(T2[X1])     
+	ELSE                         
+	   LET T2[X1]=FNR(T2[X1])     
+	ENDIF                        
+  ENDIF                          
+NEXT X1 
+
+Mat Write #CH_ROH,H1,0;H0
+Write #CH_ROH,H1,56;TOT_SELL;
+Mat Write #CH_ROT,H0[3],8;T2;
+Mat Write #CH_ROT,H0[3],168;MCODE
+Mat Write #CH_ROT,H0[3],208;MCHARGE
+Mat Write #CH_ROT,H0[3],328;TOT
+Mat Write #CH_ROT,H0[3],358;MCTXBL
+Mat Write #CH_ROT,H0[3],378;DCLVL;
+Mat Write #ch_rot,H0[3],380;Tot_Ord;
+Mat Write #CH_ROH,H1,66;V0$
+Mat Write #CH_ROH,H1,104;H5
+Mat Write #CH_ROH,H1,408;H6;
+Mat Write #CH_ROS,H0[2],146;S5
+Mat Write #CH_ROS,H0[2],150;S6;
+Return 
+
+chk_if_cod:! ======================== set if cod customer- Rutherford custom
+codcust=0
+mat read #ch_arterms,h0[12],52;arterm2;
+if arterm2[1]=99 let codcust=1
+return
+
+L_6800: Rem "================================= gp component(s)
+H5[13] = T2[1] - H6[6] \ H5[14] = T2[17]
+If P9$[35,35] = "Y" Let H5[13] = H5[13] + T2[5] + H6[6]
+If P9$[36,36] = "Y" Let H5[13] = H5[13] - T2[3]
+If P9$[37,37] = "Y" Let H5[14] = H5[14] + T2[20]
+If P9$[38,38] = "Y" Let H5[13] = H5[13] + T2[6]
+H5[13] = H5[13] + TOT[1];H5[14] = H5[14] + TOT[2]
+Return 
+
+L_7740: Rem  *PACK DATE    X$ TO X2      V1.0  4/04/84  G.DOSCHER
+X2 = X$[4,5] \ X1 = X$[1,2] \ X2 = X2 + X1 * 10 ^ 2
+X1 = X$[7,8] \ X2 = X2 + X1 * 10 ^ 4
+Return 
+GET_EXCEPTIONS: Rem OPEN EXECPTION LIST
+
+Try Close #CH_MISC Else Rem
+if err 0 gosub err_trap:
+Mat Read #1,88,1760;F$;
+L_7820: If Err 0 Goto L_7900
+Open #CH_MISC,F$
+If Err 0 Gosub ERR_TRAP
+Mat Read #CH_MISC,H5[7],0;EX;
+Close #CH_MISC
+Return 
+L_7900: Rem
+If Spc(8) = 40 Let CHNL = CHNL - 1
+If Spc(8) = 40 If CHNL > 10 Goto L_7820
+If Err 0 Gosub ERR_TRAP
+Gosub ERR_TRAP
+L_8500: Rem "========================= over 45 days check
+
+Try Close #CH_MISC Else Rem
+If Err 0 Gosub ERR_TRAP
+Mat Read #1,88,1504;F$; \ Open #CH_MISC,F$
+If (C4[3] + C4[4] + C4[5] - C4[1]) <= 0 Goto L_4370
+X3 = C4[4] + C4[5] - C4[1]
+If X3 > 0 Goto L_4310
+X3 = 0;I3 = C4[1]
+Q$ = " ",Q$;Q$ = H0[1] Using "######"
+L_8555: Search #CH_MISC,3,2;Q$,V1,E \ If E > 2 Gosub ERR_SEARCH
+If E Goto L_8675
+X2 = Q$[1,6] \ If X2 <> H0[1] Goto L_8675
+X2=Q$[23] \ IF X2>4 GOTO L_8555 ! "hit cm statuses
+Mat Read #CH_MISC,V1,0;A2;
+Mat Read #CH_MISC,V1,24;A3;
+Mat Read #CH_MISC,V1,154;A4;
+X2 = A2[4] \ Gosub JUL2YMD
+X = DT3[0]
+If P9$[25,25] = "Y" If A4[3] Let X = A4[3]
+AGE[1] = 0;AGE[2] = ARDATE;AGE[3] = X;AGE[4] = 1;x1=1
+!Call "UTAGE5",P9$,AGE[]
+Call utage5(e$,P9$,AGE[],X1)
+L_8635: If AGE[0] = 1 Let E = 0 \ Gosub ERR_SEARCH
+If AGE[0] = 2 Goto L_8555
+If Int(AGE[1]) > 45 ! "found one over 45 days
+  I3 = I3 - (A3[0] - A3[1] - A3[2])
+  X3 = X3 + (A3[0] - A3[1] - A3[2])
+End If 
+Goto L_8555
+L_8675: Rem "eof. see if there is a balance
+If I3 < 0 Goto L_4310
+Goto L_4370
+GET_DISCOUNT: Rem GET CUSTOMER DISCOUNT INFORMATION
+if CREDIT return ! not on credits
+If (not(CREDIT) and H5[7]=37) OR (CREDIT AND H5[7]=37 AND H3[1]=16) RETURN ! evap ship
+L = 0;I1 = 0
+CHAN[0]=findchannel()
+L_10160: Rem GO ON
+I1$ = " ",I1$ \ Read #1,88,2848;I1$;
+Open #CHAN[0],I1$
+For CT = 0 To 5
+  ODSC[CT] = 0
+  If CT < 5 Let SZUM[CT] = 0
+Next CT
+I1$ = " ",I1$;I1$ = H0[4] Using "######"
+Search #CHAN[0],2,1;I1$,V1,E \ If E > 1 Gosub ERR_SEARCH
+If E Goto L_10300
+Mat Read #CHAN[0],V1,0;SZUM;
+Mat Read #CHAN[0],V1,10;ODSC;
+L_10300: Close #CHAN[0]
+Return 
+SET_EDIT_STATUS: Rem "=================================== 91 = EDIT
+If H0 >= 90 Return 
+Read #CH_ROH,H1,416;H6[2]
+Read #CH_ROH,H1,64;LOCKPORT
+H6[2] = H0
+LOCKPORT = Spc(6)
+A$ = " ",A$;A$[1,2] = H0 Using "##";A$[3] = H0[7] Using "######"
+Search #CH_ROH,2,1;A$,R1,E \ If E = 1 Goto L_17110
+If E Gosub ERR_SEARCH
+Search #CH_ROH,5,1;A$,R1,E
+If E Gosub ERR_SEARCH
+H0 = 91
+L_17110: A$[1,2] = H0 Using "##"
+E = 0;R1 = H1
+Search #CH_ROH,4,1;A$,R1,E
+If E > 1 Gosub ERR_SEARCH
+Write #CH_ROH,H1,0;H0
+Write #CH_ROH,H1,416;H6[2]
+Write #CH_ROH,H1,64;LOCKPORT;
+Return 
+CLEAR_EDIT_STATUS: Rem "=================================== RESET STATUS
+If H0 < 90 Return 
+Read #CH_ROH,H1,416;H6[2]
+Read #CH_ROH,H1,64;LOCKPORT
+If H6[2] <= 1 If P9$[45,45] = "Y" Let H6[2] = 2
+If H6[2] <= 0 Let H6[2] = 1
+If H6[2] > 11 Or Fra(H6[2]) Let H6[2] = 1
+A$ = " ",A$;A$[1,2] = H0 Using "##";A$[3] = H0[7] Using "######"
+Search #CH_ROH,2,1;A$,R1,E \ If E = 1 Goto L_17420
+If E Gosub ERR_SEARCH
+Search #CH_ROH,5,1;A$,R1,E
+If E Gosub ERR_SEARCH
+L_17420: A$[1,2] = H6[2] Using "##"
+E = 0;R1 = H1
+Search #CH_ROH,4,1;A$,R1,E
+If E > 1 Gosub ERR_SEARCH
+H0 = H6[2];H6[2] = 0
+LOCKPORT = 0
+Write #CH_ROH,H1,0;H0
+Write #CH_ROH,H1,416;H6[2]
+Write #CH_ROH,H1,64;LOCKPORT;
+Return 
+Chk_BillComplete: ! "see if complete and/or all 1 shipment
+!If H5[7]<>19 Return ! "not right OT
+If Not(Invoice_Based) Return ! "this is not for ORDERS (Just check 231/251 if ot19 needed)
+! if H0[5] and (s9[4]=221 or s9[4]=223) return ! can not change now(234 SENT AS 221!!)
+If H0[5]=0 AND C13=19 And H5[7]=1 Let h5[7]=19 ! "redochk if OT =1 and custdfltot=19
+If H5[7]<>19 Return ! "not right OT
+If BillC[2]=BillC[1] ! "# lines on order = #lines completed at entry
+	if not(dclvl)
+		If p61$[109,109]<>"Y"
+			let dclvl=c11[0]
+		else
+			IF P61$[36,36]="Y"
+				if invoiced_based<>0 let dclvl=mastlvl
+			else
+				if invoice_based=0 let dclvl=mastlvl
+			endif
+		endif
+	endif
+	If H0[5]=0 let h5[7]=1
+	if dclvl gosub gen_inv_deliv_chg:
+	if retval gosub check_4deliv_chg:
+	let billc=0
+	goto skip_billc_checks:
+Endif
+If H5[7]=19 and BillC[2]<>BillC[3] ! "not all lines completed and still OT19
+	Let BillC=1 ! "write as a partial
+Else ! "ALL lines show prevship=order qty / no longer ot19
+	Let BillC=0 ! "write as complete
+	if not(dclvl)
+		if p61$[109,109]<>"Y"
+			let dclvl=c11[0] 
+		else
+			if p61$[36,36]="Y"
+				if invoiced_based<>0 let dclvl=mastlvl
+			else
+				if invoice_based=0 let dclvl=mastlvl
+			endif
+		endif
+	endif
+	if p61$[36,36]="Y" and dclvl<>0                                     
+		gosub gen_inv_deliv_chg:  ! see if charge needed after h5[7]=1  
+		if retval gosub check_4deliv_chg:                               
+	endif
+Endif
+skip_billc_checks:!
+Write #ch_roh,h1,508;BillC  ! "record part/master flag
+Return
+
+Get_BillComplete: ! "it's complete - get all totals
+! "as normally this happens in 221 - DO IT NOW! (from 205/234)
+Let R[8]=H1
+Call "MXBCTTL.DL4",R[8],S9[],CH[],COID
+Gosub Read_rot: ! "reread with new totals
+Return
+
+calcterm: ! "================================== calculate terms date/amt
+if not(h0[8]) ! no invoice date
+	let t2[22]=0
+	let t2[23]=0
+	return
+endif
+let trms[0]=0;trms[1]=0;cday=0
+if h0[12]>0 and h0[12]<=99
+	CHNL = findchannel() ! gosub getchan:
+	let ch_art=chnl
+	let f$="2/ARTERMCODE"+STR$(COID)
+	open #ch_art,f$
+	!!! open the arterms files
+	mat read #ch_art,h0[12],52;trms; ! terms data
+	mat read #ch_art,h0[12],76;cday;
+	close #ch_art
+endif
+LET D$=H0[8] USING "&&&&&&" ! "invoice date
+LET D3[0]=D$[3,4];D3[1]=D$[5,6];D3[2]=D$[1,2] ! "mm/dd/yy
+! IF TRMS[1]<0 GOTO L_3560: ! "days into next month!
+! IF TRMS[1]=99 GOTO L_3600: ! " cod
+if trms[1]>=0 and trms[1]<=99
+	if trms[1]<>99
+		Call DateToJulian(1,D$,D$,E) 
+		! CALL 25,1,D$,D$,E !" get julian date (days from 01/01/1968)
+		IF E<>0
+			LET T2[22]=0;T2[23]=0 
+			return
+		endif
+		LET D2=D$;D2=D2+TRMS[1];D$=D2 USING "&&&&&&" ! "add terms days
+		!CALL 27,1,D$,D$,E ! "convert back to printable date
+		Call JulianToDate(1,D$,D$,E)
+		IF E<>0
+			LET E=0 \ GOSUB ERR_SEARCH: ! "ker mif guit?
+		endif
+		LET D3[0]=D$[1,2];D3[1]=D$[4,5];D3[2]=D$[7,8] ! "mm/dd/yy
+	endif
+else 
+	! "terms are days into next month trms[1]<0
+	LET D3[0]=D3[0]+1
+	IF D3[0]>12 LET D3[0]=1;D3[2]=D3[2]+1 ! "days / add 1 to month
+	IF CDAY IF D3[1]>CDAY LET D3[0]=D3[0]+1 
+	IF D3[0]>12 LET D3[0]=1;D3[2]=D3[2]+1
+	LET D3[1]=ABS(TRMS[1])
+	IF D3[0]>12 LET D3[0]=1;D3[2]=D3[2]+1 ! "month over 12
+	if d3[2]>99 let d3[2]=d3[2]-100 ! year 2000 or more 
+	loopday: ! loop day in case of end of month
+	LET D$=D3[2]*10^4+D3[0]*10^2+D3[1] USING "&&&&&&" ! "terms disc.date
+	Call DateToJulian(1,D$,D$,E)
+	if e<>0
+		LET D3[1]=D3[1]-1 ! "back the days down
+		IF D3[0]=2 ! febuary end of month
+			 IF D3[1]<28
+				 LET T2[22]=0;T2[23]=0
+				 return
+			 endif
+		else	
+			IF D3[1]<30 ! not feb end of month
+				 LET T2[22]=0;T2[23]=0  ! "<>feb
+				 return
+			endif
+		endif
+		goto loopday: ! try again
+	endif
+endif
+! "got due date, place into file variables
+LET T2[22]=FNR((T2[1]-T2[3]-H6[6]-t2[19])*TRMS[0]/100) ! "terms disc. amt.
+LET T2[23]=D3[2]*10^4+D3[0]*10^2+D3[1] ! "terms disc. date
+RETURN 
+
+UOM_CONVERT: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)
+If CNVTU[2] = 3 Goto L_20050
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[2] = 0 Goto L_20050
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+L_20050: Rem "from old ub 4 routine
+L_20120: Rem "====== unibasic 5+ logic
+Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+If CNVTU[2] = 0 Goto L_20160
+If FLAG Let E = FLAG \ Gosub ERR_SEARCH
+AMOUNT = CNVTA
+L_20160: Return 
+L_30000: Rem ===== set units for conversions (stock/nonstock version)
+If S2[0] = 3 Goto L_30099
+A[6] = L6[4];A[5] = UNF[5] \ If Not(A[5]) Let A[5] = 1;UNF[5] = 1
+B[23] = L6[2];A1[3] = UNF[4] \ If Not(A1[3]) Let A1[3] = 1;UNF[4] = 1
+PFU1[0] = EUN[0];PFU1[1] = UN[0]
+PFU1[2] = UN[1];PFU1[3] = UN[2]
+PFU1[4] = EUN[1]
+PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+PFU1[8] = UN[0];PFU1[9] = UN[0];PFU1[10] = EUN[1]
+PFU1[11] = UN[2];PFU1[12] = UN[1]
+If Not(L3[0]) Goto L_30060
+PFU1[13] = UN[0];PFU1[16] = EUN[0];PFU1[17] = EUN[0]
+PFU1[18] = UN[0];PFU1[19] = UN[0]
+L_30060: PFU2[0] = UNF[0];PFU2[1] = UNF[1]
+PFU2[2] = UNF[2];PFU2[3] = UNF[3]
+PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+For X1 = 1 To 4
+  For X2 = 0 To X1 - 1
+    If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+  Next X2
+Next X1
+L_30099: Return 
+OPEN_FILES: Rem
+scratch$ = STR$(coid)
+STRTCHNL = 99
+For COUNT = 1 To MAXCH
+  If CH[COUNT] > 0 And CH[COUNT] <= 99
+    CHNL = CH[COUNT]
+    Gosub CHNLFREE
+    If CHNLFREE Let CH[COUNT] = - CH[COUNT]
+  End If 
+  If CH[COUNT] <= 0 ! ignore passed info in favor of getchan
+    CHNL = STRTCHNL
+    Gosub GETCHAN
+    CH[COUNT] = - CHNL
+    STRTCHNL = CHNL - 1
+  End If 
+Next COUNT
+CH_MISC = Abs(CH[1])
+CH_ZONE = Abs(CH[2])
+CH_PROD = Abs(CH[3])
+CH_COMCDE = Abs(CH[4])
+CH_CUST = Abs(CH[5])
+L7490: CH_PRWH = Abs(CH[6])
+CH_ROS = Abs(CH[7])
+CH_ROH = Abs(CH[8])
+CH_ROT = Abs(CH[9])
+CH_ROL = Abs(CH[10])
+CH_SPRODDESC = Abs(CH[11])
+CH_CUSTTAX = Abs(CH[12])
+CH_SLSM = Abs(CH[13])
+CH_TAXCODE = Abs(CH[14])
+CH_SPRODLOT = Abs(CH[15])
+CH_SORDLOT = Abs(CH[16])
+CH_CCODES = Abs(CH[17])
+CH_DELVCHRG = Abs(CH[18])
+CH_MISCCHG = Abs(CH[19])
+CH_ARTERMS = ABS (CH[20])  ! will open in program
+For J = 2 To MAXCH
+  Read J1
+  If J1 <> -1
+    Read #1,88,J1;U5$;
+    CHWK = Abs(CH[J])
+    If CH[J] < 0 Open #CHWK,U5$
+  End If 
+Next J
+Data "1920","1792","2288","1808","1744","1856","1840","1872","1888","2128","928","1824"
+Data "2176","2528","2320","1728","-1","2032","-1"
+!If P61$[36,36] = "Y" !* delivery charge at invoice
+  U5$ = "3/DELVCHRG"+Str$(COID)
+  CHWK = Abs(CH[18])
+  If CH[18] < 0 Open #CHWK,U5$
+!End If 
+LET U5$="2/ARTERMCODE"+STR$(COID) ! let u5$="2/ARTERMS"+STR$(COID)
+!CHNL = findchannel() ! 99
+LET CH_ARTERMS=abs(CH[20]) ! CHNL
+ROPEN #CH_ARTERMS,U5$
+Return 
+GEN_INV_DELIV_CHG: Rem
+IF CUSTOM_CUSTOMER$="HTBERRY"                          
+	IF H5[7]=1 OR H5[7]=35 OR P61$[36,36]="Y"            
+		LET SCR=172                                        
+	ELSE                                                 
+		LET SCR=171                                        
+	ENDIF                                                
+ELSE                                                   
+	IF H5[7]=1 OR P61$[36,36]="Y"                        
+		LET SCR=172                                        
+	ELSE                                                 
+		LET SCR=171                                        
+	ENDIF                                                
+ENDIF    
+if p61$[133,133]="Y" and h5[7]=2 ! small order charge for direct
+	LET SCR=171  
+endif
+MAT  READ #1,SCR,48;DCHRG;                             
+MAT  READ #1,SCR,96;DCOST;                             
+MAT  READ #1,SCR,240;DFLAG;     
+Mat read #1,184,2;smallord;
+if P61$[133,133]="Y"  ! USE AS A SMALL ORDER CHARGE 
+	If DCLVL<>0
+		if h5[7]=2
+			smallordamt=smallord[DCLVL-1]
+		else 
+			smallordamt=smallord[DCLVL+11]
+		endif
+	endif
+endif
+if P61$[133,133]<>"Y" let smallordamt=0
+IF P61$[109,109]="Y"
+	if codcust<>0 
+		let retval=0
+		return     ! "already had delivery charge at order time
+	endif
+endif
+RETVAL = 0
+if custom_customer$="ACME" !
+	if source=221 or source=223 or source=231 or source=251
+		if p61$[53,53]="N" and ORef[2] let dclvl=0
+	Endif ! invoices only (in 223c)
+Endif
+If NOT(CREDIT) AND H5[7]=37 return ! EVAP 37 - NO CHARGES
+IF CREDIT AND H5[7]=37 AND H3[1]=16 RETURN ! EVAP 37 - NO CHARGES
+if custom_customer$="JPAPER"
+	iF P61$[36,36]<>"N" RETURN
+Else
+	If P61$[36,36] <> "Y" Return 
+Endif
+if passinfo[9]=88 ! had a delete or a manual change need to delete deliv charge key
+	gosub delcharge: !!!! delete the key -- system has already calculated the charges 
+endif
+If passinfo[9]<>0 return ! bypass calculating delivery charge on submit
+for scr=0 to 9 ! check if charge were already generated
+	if int(fra(mcode[scr]*10)*10)=9 !  sys calculated delivery charge
+		!!! delete the key -- system has already calculated the charges 
+		if custom_customer$ = "AFP" ! All Florida Paper uses customer billto code as key
+			DC_KEY$=H0[1] USING "######",".000000",H0[10] USING "&&&&&&"
+		else
+			if p61$[109,109]="Y" ! custom_customer$="RUTHERFORD"                                                                            
+				let DC_KEY$=SRNMD[0] USING "######",".",SRNMD[1] USING "&&&&&&",H0[10] USING "&&&&&&"                                       
+			else                                       
+				LET DC_KEY$=SRN[2] USING "######",".",SRN[1] USING "&&&&&&",H0[10] USING "&&&&&&"                                                                         
+			end if
+		endif
+		SEARCH #ch_delvchrg,2,1;DC_KEY$,DC_REC,E \ IF E>1 GOSUB Err_Search:
+		IF not(E)
+		!*  we have a record we need to delete invoice delivery charge
+			SEARCH #ch_delvchrg,5,1;DC_KEY$,DC_REC,E\if e gosub err_search:
+			E=3 \ SEARCH #ch_delvchrg,1,0;DC_KEY$,DC_REC,E\if e gosub err_search:
+		endif
+	endif
+next scr
+gosub delsyschrg: ! delete any system calculated delivery charge
+If Not(DCLVL) Return
+if custom_customer$<>"HTBERRY" ! normal
+	If H5[7] <> 1 AND H5[7]<> 2 And H5[7] <> 3 And H5[7] <> 4 And H5[7] <> 15 And H5[7]<>19 Return
+Else ! berry - include ot 35 (same as 1)
+	IF H5[7]<>1 AND H5[7]<> 2 AND H5[7]<>3 AND H5[7]<>4 AND H5[7]<>15 and H5[7]<>35 RETURN 
+Endif
+if p61$[133,133]<>"Y" ! small order charge - need to bypass for fuel delivery charges
+	if H5[7]=2 Return ! do not include Directs if fuel service charge only
+	If T2[5] > 0 Return ! already has 
+	!If T2[16] = 0 Return 
+	IF (T2[16]=0 and h5[7]<>19)  RETURN ! total weight is 0 and order type is not 19 purchase complete
+endif
+!* if there is no subtotal $, no delivery charge cct#208760
+if t2[1]=0 return ! cct#208760
+!* if the ship via is proceeded by a "+", no delivery charge
+If V0$[1,1] = "+" Return 
+if custom_customer$="GPG" ! jliu 202985
+	if UCase$(v0$[1,3])<>"OUR" RETURN
+Endif
+if custom_customer$="ACME"
+	!* if either type of backorder, none. (flag controlled)
+	if p61$[53,53]="N"
+	   if h0[5] or ORef[2] RETURN
+	endif
+	!* if the ship via isn't "OUR TRUCK", no deliv charge (CUSTOM ACME)
+	if UCase$(v0$[1,9])<>"OUR TRUCK" RETURN
+endif
+if QUOTE return ! no delivery chrg quotes
+
+if custom_customer$ = "AFP" ! All Florida Paper uses customer billto code as key
+	DC_KEY$=H0[1] USING "######",".000000",H0[10] USING "&&&&&&"
+else
+	if p61$[109,109]="Y" ! custom_customer$="RUTHERFORD"   
+	    let srnmd[1]=0
+		DC_KEY$=SRNMD[0] USING "######",".",SRNMD[1] USING "&&&&&&",H0[10] USING "&&&&&&"                                       
+    else  
+		DC_KEY$ = SRN[2] Using "######",".",SRN[1] Using "&&&&&&",H0[10] Using "&&&&&&"
+	end if
+endif
+If P61$[133,133] = "Y" and  H5[7] = 2
+	if T2[24]> smallordamt goto nosmallorder: 
+	Let RETVAL = 1 
+	return
+endif
+Search #CH_DELVCHRG,2,1;DC_KEY$,DC_REC,E \ If E > 1 Gosub ERR_SEARCH
+If E<>0
+	if p61$[133,133]="Y" ! using a small order charge 
+		If smallordamt= 0  goto nosmallorder:  
+		if T2[24]> smallordamt goto nosmallorder: 
+	endif
+	RETVAL = 1
+	if p61$[133,133]="Y" and H5[7]=2 return  ! if small order charge all directs are checked and charge applied if needed 
+! create delivery charge key 
+	E = 2 \ Search #CH_DELVCHRG,1,0;DC_KEY$,DC_REC,E
+	If E Gosub ERR_SEARCH
+	Search #CH_DELVCHRG,4,1;DC_KEY$,DC_REC,E
+	If E Gosub ERR_SEARCH
+	if custom_customer$ = "AFP" ! All Florida Paper uses customer billto code as key
+		LET DLVC3[0]=h0[1];DLVC3[1]=0;DLVC2=H0[10]
+	else
+		if p61$[109,109]="Y"
+			dlvmst[0]=srnmd[0];dlvmst[1]=srnmd[1]
+			MAT WRITE #ch_delvchrg,DC_REC,16;DLVMST;
+			DLVC3[0] = SRN[2];DLVC3[1] = SRN[1];DLVC2 = H0[10]
+		else
+			DLVC3[0] = SRN[2];DLVC3[1] = SRN[1];DLVC2 = H0[10]
+		end if
+	endif
+	Mat Write #CH_DELVCHRG,DC_REC,0;DLVC3
+	Write #CH_DELVCHRG,DC_REC,12;DLVC2;
+	nosmallorder: ! no charge 
+End If 
+Return 
+CHECK_4DELIV_CHG: Rem ---------------------------------------------
+IF P61$[109,109]="Y" ! if custom_customer$="RUTHERFORD"
+	gosub delsyschrg: ! delete previous calculated service charges
+	if p61$[53,53]="N"                   ! if don't do backorders
+	  IF oref[2]=0 or oref[2]=h0[7]	! original order
+		if oref[1]<>0 				! maybe invoiced
+			let chnl=findchannel()    
+			let chinvh=chnl               
+			invhkey$="4/sordflehhkey"+str$(coid)
+			open #chinvh,invhkey$        
+			invhkey$=" ",invhkey$
+			invhkey$=h0[4] using "######"
+			invhkey$[7]=h0[7] using "##########"
+			search #chinvh,3,5;invhkey$,invhrec,e \ if e>2 gosub err_search:
+			Try close #chinvh else rem
+			if not(e)
+				if val(invhkey$[1,6])=h0[4] and val(invhkey$[7,16])=h0[7] then return
+			endif
+		endif
+	 else
+	    if h0[5]<>0 return
+	 endif
+  endif
+else
+	IF P61$[53,53]="N" ! if don't do backorders 
+		IF H0[5]<>0 OR OREF[2]<>0 RETURN                
+	ENDIF 
+endif
+if CREDIT and oref[1]<>h0[7] return ! copied from inv - NO recalc
+If H5[7] = 16 OR H5[7]=37 Return  ! or h5[7]=36?
+if custom_customer$="GPG" ! jliu 202985
+	if UCase$(v0$[1,3])<>"OUR" RETURN
+Endif
+! IF s9[4]<220 and P61$[36,36]="Y" return ! deliv calc at invoice time
+if p61$[109,109]<>"Y" 
+	gosub delsyschrg: ! delete previous calculated service charges
+endif
+if v0$[1,1]="+" return
+If Not(DCLVL) Return 
+IF H5[7]=16 OR H5[7]=8 return ! NO Charge ever
+Dochrg=0
+!If P61$[36,36] = "Y" Or (P61$[36,36] <> "Y" And H5[7] > 0 And H5[7] < 3) let dochrg=1
+! valid order types if at order/invoice time:
+if p61$[36,36]<>"Y"
+	if h5[7]=1  let dochrg=1
+	if h5[7]=19 let dochrg=1
+	if h5[7]=2 let dochrg=1
+	if p61$[133,133]="Y"  ! small order charge
+	 if h5[7]=3 let dochrg=1
+	 Endif
+	! if h5[7]=24 let dochrg=1
+	! if h5[7]=37 let dochrg=1
+	! if h5[7]=38 let dochrg=1
+Endif
+! bypass delivery calc - if master delivery cust is on, cod is flagged and deliv by invoice 
+if P61$[109,109]="Y" and CODCUST<>0  and p61$[36,36]="Y" goto bypasscalcdelv:
+if p61$[36,36]="Y" let dochrg=1  ! at invoice time
+If custom_customer$="HTBERRY"
+	IF P61$[36,36]="Y" OR (P61$[36,36]<>"Y" AND H5[7]>0 AND H5[7]<3) or h5[7]=35 let dochrg=1
+Endif
+If DoChrg=1 ! was a long check above
+	Whsdel=0
+	if H5[7] = 1 Or P61$[36,36] = "Y" let whsdel=1
+	if custom_customer$="HTBERRY"
+		IF H5[7]=1 or h5[7]=35 OR P61$[36,36]="Y" let whsdel=1
+	Endif
+	If Whsdel=1 ! H5[7] = 1 Or P61$[36,36] = "Y"
+		SCR = 172
+	Else 
+		SCR = 171
+	End If 
+	IF P61$[133,133]="Y" and H5[7]=2
+		LET SCR=171
+	ENDIF
+	rem here
+	Mat Read #1,SCR,48;DCHRG;
+	Mat Read #1,SCR,96;DCOST;
+	Mat Read #1,SCR,240;DFLAG;
+	Mat read #1,184,2;smallord;
+	if P61$[133,133]="Y"  ! USE AS A SMALL ORDER CHARGE 
+		if h5[7]=2
+			smallordamt=smallord[DCLVL-1]
+		else 
+			smallordamt=smallord[DCLVL+11]
+		endif
+	endif
+if P61$[133,133]<>"Y" let smallordamt=0
+if p61$[133,133]="Y" ! using a small order charge 
+  If smallordamt= 0  goto bypasscalcdelv:  
+  if T2[24]> smallordamt goto bypasscalcdelv:
+  endif
+
+ 	! check if charge was entered manually
+	! check if charge was entered manually
+	FOR SCR=0 TO 9
+		if INT(MCODE[SCR])=DFLAG[1] return
+	NEXT SCR
+	! check if misc charge is avail
+	for scr=0 to 9
+		if int(mcode[scr])=0 goto calcdelv:
+	next scr
+	return ! all 10 misc charges are being used
+	calcdelv: ! calculate delivery charge 
+	LET MCODE[SCR]=DFLAG[1]+.09
+	!! check gross profit flag
+	if int(mcode[scr])
+		mat read #ch_miscchg,(int(mcode[scr])),0;ms1;
+		if ms1[1] ! flag for gp
+			let mcode[scr]=mcode[scr]+.1
+		endif
+	endif
+	IF DFLAG[0]=-3 ! flat rate
+		LET MCHARGE[SCR,0]=DCHRG[DCLVL-1]
+		LET MCHARGE[SCR,1]=DCOST[DCLVL-1]
+	ELSE  ! CWT
+		LET MCHARGE[SCR,0]=DCHRG[DCLVL-1]*(T2[16]/100)
+		LET MCHARGE[SCR,1]=DCOST[DCLVL-1]*(T2[16]/100)
+	ENDIF 
+	if mcharge[scr,0] = 0 and mcharge[scr,1] = 0
+		! no charge and no cost, clear delivery
+		! code and exit
+		let mcode[scr] = 0
+		goto bypasscalcdelv:
+	end if
+	LET MCTXBL[SCR]=mtax
+	if int(mcode[scr]) AND mtax
+		mat read #ch_miscchg,(int(mcode[scr])),38;ms2;
+		let mctxbl[scr]=ms2[0]
+		if not (mtax) let mctxbl[scr]=mtax
+		if t2[1]<>0 and t2[8]=0 let mctxbl[scr]=0
+	endif
+	LET T2[4]=T2[4]+MCHARGE[SCR,0]
+	LET TOT[0]=TOT[0]+MCHARGE[SCR,1]
+	IF int(FRA(MCODE[SCR])*10) ! gross profit check
+		let tot[1]=tot[1]+mcharge[scr,0]
+		LET TOT[2]=TOT[2]+MCHARGE[SCR,1]
+	ENDIF 
+ENDIF 
+bypasscalcdelv: ! bypass delivery calc
+RETURN 
+
+delsyschrg: ! remove any previously system calculated delivery charges
+for scr=0 to 9 ! remove calculated delivery charges
+	if int(fra(mcode[scr]*10)*10)=9 !  sys calculated delivery charge
+		let t2[4]=t2[4]-mcharge[scr,0] ! total misc charges
+		let tot[0]=tot[0]-mcharge[scr,1] ! total misc cost
+		if int(fra(mcode[scr])*10) ! flagged for gp  
+			let tot[1]=tot[1]-mcharge[scr,0] ! gp misc charge
+			let tot[2]=tot[2]-mcharge[scr,1] ! gp misc cost 
+		endif
+		let mcode[scr]=0;mcharge[scr,0]=0;mcharge[scr,1]=0
+	endif
+next scr
+return	
+
+
+calcartmcode: ! calc misc charge code based upon a/r terms code
+if p61$[138,138]<>"Y" return
+if armflag<>0 return
+gosub delartermcst:
+let chrgamt=t2[1]-t2[3]+t2[4]+t2[5]+t2[6]+t2[7]
+if h0[12]>0 and h0[12]<=99
+	CHNL = findchannel() ! gosub getchan:
+	let ch_art=chnl
+	let f$="2/ARTERMCODE"+STR$(COID)
+	open #ch_art,f$
+	mat read #ch_art,h0[12],50;MCOSTTYPE;
+	mat read #ch_art,h0[12],68;MCOSTCODE;
+	mat read #ch_art,h0[12],78;MCOSTAMT;
+	close #ch_art
+else
+	return
+endif
+If not(mcostcode) return ! no cost code for this ar term code
+if not(mcostamt) return ! no cost allocate for this ar term code
+FOR SCR=0 TO 9
+	if INT(MCODE[SCR])=mcostcode return ! manually entered
+NEXT SCR
+! check if misc charge is avail
+for scr=0 to 9
+	if int(mcode[scr])=0 goto calcarte:
+next scr
+return ! all 10 misc charges are being used
+calcarte: ! calculate ar term misc cost 
+LET MCODE[SCR]=mcostcode+.08
+!! check gross profit flag
+if int(mcode[scr])
+	mat read #ch_miscchg,(int(mcode[scr])),0;ms1;
+	if ms1[1] ! flag for gp
+		let mcode[scr]=mcode[scr]+.1
+	endif
+endif
+LET MCHARGE[SCR,0]=0
+if mcosttype<>0 ! calc %
+	let mcharge[scr,1]=fnr(chrgamt*(mcostamt/100))
+else
+	let mcharge[scr,1]=mcostamt
+endif
+if credit<>0
+	let mcharge[scr,1]=-(mcharge[scr,1])
+endif
+LET MCTXBL[SCR]=mtax
+if int(mcode[scr]) AND mtax
+	mat read #ch_miscchg,(int(mcode[scr])),38;ms2;
+	let mctxbl[scr]=ms2[0]
+	if not (mtax) let mctxbl[scr]=mtax
+	if t2[1]<>0 and t2[8]=0 let mctxbl[scr]=0
+endif
+LET T2[4]=T2[4]+MCHARGE[SCR,0]
+LET TOT[0]=TOT[0]+MCHARGE[SCR,1]
+IF int(FRA(MCODE[SCR])*10) ! gross profit check
+	let tot[1]=tot[1]+mcharge[scr,0]
+	LET TOT[2]=TOT[2]+MCHARGE[SCR,1]
+ENDIF 
+RETURN 
+
+
+
+
+delartermcst: ! remove any previously system calculated a/r term misc cost code
+if p61$[138,138]<>"Y" return
+if armflag=99 return
+for scr=0 to 9 ! remove calculated ar term misc cost code charges
+	if int(fra(mcode[scr]*10)*10)=8 !  sys calculated ar term misc code
+		let t2[4]=t2[4]-mcharge[scr,0] ! total misc charges
+		let tot[0]=tot[0]-mcharge[scr,1] ! total misc cost
+		if int(fra(mcode[scr])*10) ! flagged for gp  
+			let tot[1]=tot[1]-mcharge[scr,0] ! gp misc charge
+			let tot[2]=tot[2]-mcharge[scr,1] ! gp misc cost 
+		endif
+		let mcode[scr]=0;mcharge[scr,0]=0;mcharge[scr,1]=0
+	endif
+next scr
+return	
+	
+GET_FREIGHT_CHG: Rem -------------------------from level on freight table
+IF PASSINF0[8]<>0 RETURN ! BYPASS FREIGHT CALC ON SAVE AND EDIT
+if CREDIT return ! not on credits?
+If H5[7] = 16 Or H5[7] = 14 Return
+IF (CREDIT AND H5[7]=37 AND H3[1]=16) OR (NOT(CREDIT) AND H5[7]=37) RETURN
+If T2[16] = 0 Return 
+If H5[7] = 2
+  SCR = 174
+Else 
+  SCR = 173
+End If 
+Mat Read #1,SCR,0;MAXWGT;
+Mat Read #1,SCR,48;DFLTCOST;
+Mat Read #1,SCR,96;MINCOST;
+Mat Read #1,SCR,144;MAXCOST;
+Mat Read #1,SCR,192;DFLTCHG;
+Mat Read #1,SCR,240;FTFLG;
+WGT = T2[16]
+For LEVEL = 0 To 6
+  If WGT <= MAXWGT[LEVEL] Goto FOUND_LEVEL
+Next LEVEL
+If LEVEL > 6 Let LEVEL = 6
+FOUND_LEVEL: Rem
+If FTFLG = -1 ! cwt
+  T2[5] = DFLTCHG[LEVEL] * (WGT / 100)
+  T2[20] = DFLTCOST[LEVEL] * (WGT / 100)
+Else !flat
+  T2[5] = DFLTCHG[LEVEL]
+  T2[20] = DFLTCOST[LEVEL]
+End If 
+If MINCOST[LEVEL] And T2[20] < MINCOST[LEVEL] Let T2[20] = MINCOST[LEVEL]
+If MAXCOST[LEVEL] And T2[20] > MAXCOST[LEVEL] Let T2[20] = MAXCOST[LEVEL]
+MAT READ #1,182,150;FRTADDON;
+if frtaddon<0 or frtadd>500 let frtaddon=0
+if frtaddon<>0 and t2[5]<>0
+	if h5[7]<>2 and h5[7]<>6 and h5[7]<>8 and h5[7]<>16
+		let t2[5]=t2[5]+fnr((t2[5]*frtaddON)/100)
+	endif
+endif
+Return 
+CHECK_DETAIL_4TAX: Rem -------------------------------------------
+For SCR = 0 To 9
+  If MCTXBL[SCR]
+    TAXABLE = TAXABLE + MCHARGE[SCR,0]
+    TTAX = TTAX + MCHARGE[SCR,0]
+  End If 
+Next SCR
+Return 
+TAXANDTOTAL: Rem
+let frgttaxrate=0;frgtaxable=0
+if not(t2[3]) and not (h6[7])
+	IF C10[4]<>0 LET H6[7]=C10[4]    ! Customer Discount
+endif
+If tcb=1 or tcb=2 goto notaxhere ! It's gotten by third party - NOT IN HERE
+If NOT(CREDIT) AND H5[7]=37 goto notaxhere ! "no discount/tax/etc
+IF CREDIT AND H5[7]=37 AND H3[1]=16 GOTO NOTAXHERE
+TAXABLE = T2[8] \ TTAX = 0
+LINETAX = T2[7] - TOT[3]
+Gosub CHECK_DETAIL_4TAX
+IF H5[7]=6 OR H5[7]=10 LET DTAX=0;HTAX=0 ! USED TO CREDIT ALL BACK OUT!!
+If DTAX Let TAXABLE = TAXABLE - T2[3] \ TTAX = TTAX - T2[3]
+If HTAX Let TAXABLE = TAXABLE + T2[6] \ TTAX = TTAX + T2[6]
+IF FTAX<>0
+	mat READ #CH_TAXCODE,H4[0],0;taxdesc$;
+	if taxdesc$[1,1]="+"
+		let frgttaxable=t2[5]+h6[6]
+		mat read #ch_taxcode,H4[0],72;taxrate1;
+		let frgttaxrate=taxrate1	
+	else
+	  if custom_customer$<>"MORRISETTE" ! 
+		if t2[8]<>0
+			LET TAXABLE=TAXABLE+T2[5]+H6[6] \ LET TTAX=TTAX+T2[5]+H6[6]
+		endif
+	  Else ! morrisette custom
+		IF taxable   !  was: T2[7] tuning of cct155025 and ct193748
+			IF FTAX LET TAXABLE=TAXABLE+T2[5]+H6[6] \ LET TTAX=TTAX+T2[5]+H6[6]
+		ENDIF
+	  Endif ! custom
+	 endif ! taxdesc
+ENDIF
+If T2[1] > 0 If TAXABLE < 0 Let TAXABLE = 0
+T2[11] = TAXABLE
+If P60$[42,42] = "Y"
+	READ #CH_TAXCODE,H4[0],414;RTYPE$;            
+	IF RTYPE$<>"N" AND RTYPE$<>"U" LET RTYPE$="N"
+  TOT[3] = FNR(TTAX * (T2[2] / 100))
+  IF RTYPE$="U" LET TOT[3]=FNV(TTAX*(T2[2]/100)) 
+  T2[7] = LINETAX + TOT[3]
+Else 
+		READ #CH_TAXCODE,H4[0],414;RTYPE$;            
+		IF RTYPE$<>"N" AND RTYPE$<>"U" LET RTYPE$="N" 
+		T2[7] = FNR(TAXABLE * (T2[2] / 100))
+  	if rtype$="U" LET T2[7]=FNV(TAXABLE*(T2[2]/100))  
+	
+End If 
+if frgttaxrate<>0
+	IF RTYPE$<>"N" AND RTYPE$<>"U" LET RTYPE$="N" 
+	if rtype$="U"
+		LET T2[7]=t2[7]+FNV(frgtTAXABLE*(frgttaxrate/100))
+		if p60$[42,42]="Y"
+			LET Tot[3]=tot[3]+FNV(frgtTAXABLE*(frgttaxrate/100))
+		endif
+	else
+		LET T2[7]=t2[7]+FNR(frgtTAXABLE*(frgttaxrate/100))
+		if p60$[42,42]="Y"
+			LET Tot[3]=tot[3]+FNR(frgtTAXABLE*(frgttaxrate/100))
+		endif
+	endif
+endif
+Notaxhere: ! bypass
+If H5[7] = 10 Or H5[7] = 6 Let T2[6] = 0 - T2[7];H6[7]=100 !  T2[3] = T2[3] + T2[1]
+If H6[7]<>0 Let T2[3] = Abs(FNR(H6[7] * T2[1] / 100)) * Sgn(T2[1])
+T2[0] = T2[1] - T2[3] + T2[4] + T2[5] + T2[6] + T2[7]
+!If T2[3]<>0 and T2[1] If Not(H6[7]) Let H6[7] = Abs((T2[3] * 100) / T2[1]) * Sgn(T2[1])
+Return 
+MISC_READS: Rem
+Mat Read #1,88,928;F1$;
+Open #CH_MISC,F1$
+If SRN[4] = 0 Mat Read #CH_MISC,A0[3],36;TAX; Else Mat Read #CH_MISC,SRN[4],36;TAX; ! "used to read A0[3]
+FTAX = TAX[99]
+DTAX = TAX[100]
+HTAX = TAX[97]
+MTAX = TAX[98]
+Close #CH_MISC
+Return 
+Rem {begin src/inc/rtn.date.i}
+NUM2DATE: Rem *UNPACK DATE  X2 TO X$      V1.0  4/04/84  G.DOSCHER
+X$ = " ",X$ \ X$[10] = ""
+X$[1,3] = Int(X2 / 10 ^ 2 - Int(X2 / 10 ^ 4) * 10 ^ 2) + 10 ^ 2 Using "###"
+X$[4,6] = Fra(X2 / 10 ^ 2) * 10 ^ 2 + 10 ^ 2 Using "###"
+X$[7,9] = Int(X2 / 10 ^ 4) + 10 ^ 2 Using "###"
+X$[4,4] = "/" \ X$[7,7] = "/" \ X$ = X$[2]
+If Not(X2) Let X$ = "        "
+Return 
+DATE2NUM: Rem *PACK DATE    X$ TO X2      V1.0  4/04/84  G.DOSCHER
+X2 = X$[4,5] \ X1 = X$[1,2] \ X2 = X2 + X1 * 10 ^ 2
+X1 = X$[7,8] \ X2 = X2 + X1 * 10 ^ 4
+Return 
+JUL2DATE: Rem REM DATE JULIAN X2 TO X$
+DT3[0] = X2;FLAG = 1;X$ = " "
+If X2 <= 0 Let X$ = " ",X$ \ Return 
+Call "JULIANUTIL",DT3[],X$,FLAG
+Return 
+YMD2JUL: Rem  REM  CONVERT YYMMDD TO JULIAN (RETURN=NOGOOD, +1=OKAY)
+If X2 <= 0 Return 
+X$ = X2 Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Return 
+X2 = X$[1,5]
+Return 1
+JUL2YMD: Rem  REM CONVERT JULIAN TO YYMMDD
+DT3[0] = X2;DT3[1] = X2;FLAG = 0
+If X2 <= 0 Return 
+Call "JULIANUTIL",DT3[],X$,FLAG
+Return 
+YM2LONGYEAR: Rem Rem Convert YYMM to YYYYMM
+If X2 <= 0 Return 
+X$ = X2 Using "&&&&"
+DT3[0] = X$[1,2];DT3[1] = X$[3,4]
+If DT3[0] > 67 Let DT3[0] = 1900 + DT3[0]
+If DT3[0] < 68 Let DT3[0] = 2000 + DT3[0]
+X$[1,4] = DT3[0] Using "&&&&"
+X$[5,6] = DT3[1] Using "&&"
+X2 = X$[1,6]
+Return 
+Rem {end rtn.date.i}
+GETCHAN: Rem search for open channel (counts down from supplied chnl #)
+For SCR = CHNL To 1 Step -1
+  CHNL = SCR
+  Gosub CHNLFREE
+  If CHNLFREE
+    SCR = 1
+  Else 
+    CHNL = 0
+  End If 
+Next SCR
+Return 
+
+build_logfle: rem build log file
+if logflg
+!! log file will use port and yymmdd to avoid 2 session working the same file
+	logfle$="/tmp/ordertotal.log."+(spc(6) using "&&&&&&.")+(tim(8) using "&&")+(tim(9) using "&&")+(tim(10) using "&&")
+	e=0 \ call findf(logfle$,e)
+	if not(e) then system("touch "+logfle$)
+	ch_log=findchannel()
+	open #ch_log,logfle$
+	log_loop: read #ch_log;msg$ \ if msg$ goto log_loop:  ! get to end of file
+endif
+return
+
+write_logfle: rem write to the log file
+if logflg
+	print #ch_log;(tim(9) using "&&/");(tim(10) using "&&/");(tim(8) using "&&"),
+	print #ch_log;(tim(11) using "&&/");(tim(12) using "&&/");(tim(13) using "&&"),msg$
+endif
+return
+
+CHNLFREE: Rem check to see if a channel is being used
+If Err 0 Let CHNLFREE = Spc(8)
+CHNLFREE = 0
+CHNLSCR = Chf(CHNL)
+If Err 0 Gosub ERR_TRAP
+If CHNLFREE And CHNLFREE <> 49 Gosub ERR_TRAP
+END_CHNLFREE: Rem
+Return 
+DONE: Rem "======================================= exit
+OUTEND: Rem
+! If Err 0 Rem
+! call programdump("tmp/ottl!","")
+For SCR = 1 To MAXCH
+  If CH[SCR] < 0 Try Close #Abs(CH[SCR]) Else REM
+Next SCR
+! if ch_arterms<>0 Try Close #ch_arterms Else Rem
+if logflg and ch_log then close #ch_log
+End 
+ERR_TRAP: Rem
+If Spc(8) = 123
+  Escdis 
+  Escclr 
+  Return -1
+End If 
+Goto ERR_MAIN
+ERR_SEARCH: Rem
+ENUM = E + 1000;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+Msc$(4)
+Goto ERR_MAIN
+ERR_MAIN: Rem
+! If Err 0 Rem
+e$ = msg$
+!call programdump("/tmp/beordtot!","")
+Dim msc4$[100] \ msc4$ = Msc$(4)                                   
+If Pos(msc4$, = "/",-1) Let msc4$ = msc4$[Pos(msc4$, = "/",-1) + 1]
+Call env(2,"PROGNAME",msc4$)                                       
+Call programdump()                       
+If Spc(8) <> 10000 Call suberr(e$,Spc(8),Spc(10),Msc$(2))
+Call mainerr(e$,Spc(8),buttonlist$[],nextlist$[])
+End 
+Rem {end rtn.error.s}

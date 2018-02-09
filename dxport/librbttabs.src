@@ -1,0 +1,1837 @@
+! librbttabs.lib
+!
+! loadsave -w -n 100,10 -o prog/dxport/librbttabs.lib src/librbttabs.src
+!
+! Rebate Contract Tabs (PM program 87)
+! Product specific data based on tab selected:
+! RCOPN		S	Related Contracts Open - Open contracts (expire in days select)
+! RCCLS		S	Related Contracts Expired - closed (days select)
+! CNCTR		S	Non Contract - Custs not on contracts
+! COCTR		S	Customer Other - Custs on other contracts
+!
+! 1.0 07/14/2008
+!
+
+! THE WEB USES REBATE LINE TYPE 3 for ALL PRODUCTS
+! PM REBATE TYPES= 1:Product, 2:Commodity ONLY
+! So - check & convert needed to make type 3 = type 1 w/"#  " prod code
+!
+include "src/copyright.inc"
+! internal files needed
+Include "src/inc/filea80vm.inc" ! Vendor
+Include "src/inc/fileccodes.inc" ! u/m file
+Include "src/inc/filecommhead.inc" ! commodity
+Include "src/inc/filecust.inc" ! customer
+Include "src/inc/filecustcat.inc" ! customer ctgy
+Include "src/inc/filecustcontz.inc" ! customer / contract (fix for rbt/contr)
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+Include "src/inc/fileprtypefle.inc" ! Price type file
+Include "src/inc/filercontracthz.inc" ! Rebate Contract Header (MANUAL DIR 2/3)
+Include "src/inc/filerebatedtlz.inc" ! Rebate Lines (fixed for diff prodtypes)
+Include "src/inc/filevendtag.inc" ! vendtag file
+Include "src/inc/filecustsls.inc" ! cust sales
+Include "src/inc/fileslscurr.inc" ! cust/prod sales
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$,buildsort
+Declare External Function ChkAltItem$,formatdate2$
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus,GetDelimiters
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,UMDList
+Declare External Function getpravail,getumrec,ChkPrdUM
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+
+
+! internal subs/functions 
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian,JulianToDate
+
+Declare Sub Updatelog,OpenFiles,GetVend,GetCust,GetProd
+Declare Sub GetCCust,GetRProd,GetCOProd
+Declare Function NStkUMT$,NStkTUM,GetRTDesc$,GetCTDesc$,GetCBDesc$
+
+
+External Sub RCOPN(e$,IntCo,List$[],maxcnt,chans[],UserId$)
+! related contracts open
+Try
+	Declare Sub Updatelog,OpenFiles,GetVend,GetProd,GetRProd
+	Declare Intrinsic Sub DateToJulian
+
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200],X$[20]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],RKey$[60],Cust$[6]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim List2$[maxcnt,1000] ! for drill
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2]
+	dim 1%,X1[9],ArMth
+	Dim 2%,ContrNo,x2[9],Q0[1]
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/rbt.log" ! fields for DEBUG
+
+	Dim Vend. as a80vm ! Vendor
+	Dim umc. as ccodes ! u/m file
+	Dim comd. as commhead ! commodity
+	Dim cust. as cust ! customer
+	Dim ccat. as custcat ! customer ctgy
+	Dim ccnt. as custcont ! customer / contract
+	Dim PR. as prod ! product file
+	Dim PW. as prodwhse ! prodwhse file
+	Dim PT.	as prtypefle ! Price type file
+	Dim RCH. as rcontracth ! Rebate Contract Header (MANUAL DIR 2/3)
+	Dim RD. as rebatedtl ! Rebate Lines
+	Dim VTag. as vendtag ! Vendor tag file
+	Dim CPR. as prod ! a copy of product
+	
+	! call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$)
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="librbttabs"
+		! dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+	
+	Call OpenFiles(e$,IntCo,Chans[],debugdetail,debug,dblog$,dmsg$,Userid$) ! open any/all files
+	CTLC=Chans[0];CCC=Chans[1];CMC=Chans[2];CUC=Chans[3]
+	PRC=Chans[4];PWC=Chans[5];PTC=Chans[6];RHC=Chans[7]
+	RDC=Chans[8];VNC=Chans[9];CSC=Chans[10];VTC=Chans[11];SRT=chans[12]
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	Mat read #ctlc,0,120;ARMth; ! ar/sls month
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	JTODay=TIM(6) ! today (julian)
+
+	! start
+	ReturnStatus=1
+	Message$="OK"
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto GRH1Done
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto GRH1Done
+	Endif
+	Call DXGet("RTYPE",tmp$)
+	X2=tmp$
+	if x2=1 or x2=2 or x2=3 ! only types 1=prod,2=commod,3=ALL
+		Rtype=x2
+	Else
+		ReturnStatus=0
+		Message$="TYPE NOT VALID"
+		goto GRH1Done
+	Endif
+	Call DXGet("PRODID",tmp$)
+	let prod$=tmp$+Blank$
+	if Prod$[1,3]="#  " let Rtype=3 ! incase passed as 1
+	If Rtype=3 ! all prod (web option)
+		Prod$="#"+Blank$	
+	Endif
+	Call DXGet("EXPDAYS",tmp$) ! list contracts that expired in <= # Days  0=ALL
+	ExpDays=tmp$ ! s/b 0,30,60,90
+	If ExpDays<0 or ExpDays>100 let expdays=0
+	ExpDays=Int(ExpDays) ! no fractions
+	if debugdetail
+		dmsg$="Get Contracts Open "+Str$(ContrNo)+" T="+Str$(RType)+" "+prod$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+	Clear List$[]
+	Clear List2$[]
+	tmpcnt=maxcnt
+	tmpcnt2=maxcnt
+	List$[0]=bsdel$,"RELPRODOPEN",fdel$
+	WebStr$="CONTRID",fdel$,"LNTYPE",fdel$,"RBTCOST",fdel$
+	WebStr$=WebStr$,"SLSPCOST",fdel$,"STDATE",fdel$,"ENDDATE",fdel$
+	WebStr$=WebStr$,"DESC",fdel$,"WHSE",fdel$
+	List$[1]=WebStr$
+	row=2
+	List2$[0]=bsdel$,"CUSTINFO",fdel$
+	WebStr$="CONTRID",fdel$,"CUSTID",fdel$,"CUSTNAME",fdel$
+	WebStr$=WebStr$,"SLSTD",fdel$,"SLSLMTH",fdel$
+	List2$[1]=WebStr$
+	Row2=2
+	! get data for vendor on contract
+	Vend=rch.VendNum
+	Call GetVend(e$,VNC,VTC,Vend,vend.,Vtag.,debugdetail,debug,dblog$,dmsg$,Userid$) ! or get for every contract found?
+	RBCBASE=vtag.RebateCost ! vendor's base for rebates
+	If RType=1 ! need 3 loops (1:prod,2:commod,3:all)
+		ProdKey$=" ",ProdKey$
+		ProdKey$=Prod$
+		PRR=filegetprod(e$,PRC,"=",1,prodkey$,pr.)
+		If PRR<=0
+			ReturnStatus=0
+			Message$="PRODUCT NOT FOUND"
+			goto GRH1Done
+		Endif
+		! 1st for the product alone	
+		Do
+			RDR=filegetrebatedtlz(e$,RDC,">",2,ProdKey$,rd.)
+			If RDR<=0 Exit Do
+			If ProdKey$[1,12]<>Prod$[1,12] Exit Do
+			! if rd.Contract<>ContrNO ! only if diff contract
+				tmp1$=" ",tmp1$
+				If rd.CancelDate<>0
+					X$=rd.CancelDate Using "&&&&&&"
+					Call DateToJulian(1,X$,tmp1$,F) \ if f let tmp1$=" ",tmp1$
+				Endif
+				JRDate=tmp1$
+				If JRDate=0 let JRDate=999999
+				If JToDay<JRDate and (ExpDays=0 or (JToDay+ExpDays)>JRDate) ! expires + Days! not expired yet (OPEN)
+				  ! okay process this one
+				  Whse=rd.Whse
+				  Call GetProd(e$,IntCo,Prod$,PRC,PWC,Whse,P9$,CPR.,debugdetail,debug,dblog$,dmsg$,Userid$) ! main prod
+				  If CPR.CostLoad2>0 Let pr.CostLoad2=cpr.CostLoad2
+				  if cpr.CostAvg>0 let pr.CostAvg=cpr.CostAvg
+				  if cpr.CostPo>0 let pr.CostPO=cpr.CostPo
+				  if cpr.CostLoad>0 let pr.CostLoad=cpr.CostLoad
+				  if cpr.CostBase>0 let pr.CostBase=cpr.CostBase
+				  if cpr.CostNetPO>0 let pr.CostNetPO=cpr.CostNetPO
+				  Call GETRProd(e$,CCC,ctlc,RHC,RBCBASE,PMask$,List$[],row,tmpcnt,rd.,pr.,rch.,debugdetail,debug,dblog$,dmsg$,Userid$)
+				  ! done added to List$
+				  GCOntrNo=rd.Contract;Whse=rd.Whse
+				  Call GetCCust(E$,GCONTRNO,RHC,CUC,SRT,CSC,ARMth,Whse,Prod$,List2$[],tmpcnt2,row2,debugdetail,debug,dblog$,dmsg$,Userid$)
+				  ! add custs to list2$
+				Endif ! of not expired & diff contract
+			! Endif
+		Loop
+		! now by commodity
+		ProdKey$=" ",ProdKey$
+		ProdKey$="*"+Pr.ComdtyCode$+Blank$
+		Do
+			RDR=filegetrebatedtlz(e$,RDC,">",2,ProdKey$,rd.)
+			If RDR<=0 Exit Do
+			If ProdKey$[2,5]<>Pr.ComdtyCode$ Exit Do
+			! if rd.Contract<>ContrNO ! only if diff contract
+				tmp1$=" ",tmp1$
+				If rd.CancelDate<>0
+					X$=rd.CancelDate Using "&&&&&&"
+					Call DateToJulian(1,X$,tmp1$,F) \ if f let tmp1$=" ",tmp1$
+				Endif
+				JRDate=tmp1$
+				If JRDate=0 let JRDate=999999
+				If JToDay<JRDate and (ExpDays=0 or (JToDay+ExpDays)>JRDate) ! not expired yet (OPEN) or will expire in
+				  ! okay process this one
+				  Whse=rd.Whse
+				  Call GetProd(e$,IntCo,Prod$,PRC,PWC,Whse,P9$,CPR.,debugdetail,debug,dblog$,dmsg$,Userid$) ! main prod
+				  If CPR.CostLoad2>0 Let pr.CostLoad2=cpr.CostLoad2
+				  if cpr.CostAvg>0 let pr.CostAvg=cpr.CostAvg
+				  if cpr.CostPo>0 let pr.CostPO=cpr.CostPo
+				  if cpr.CostLoad>0 let pr.CostLoad=cpr.CostLoad
+				  if cpr.CostBase>0 let pr.CostBase=cpr.CostBase
+				  if cpr.CostNetPO>0 let pr.CostNetPO=cpr.CostNetPO
+				  Call GETRProd(e$,CCC,ctlc,RHC,RBCBASE,PMask$,List$[],row,tmpcnt,rd.,pr.,rch.,debugdetail,debug,dblog$,dmsg$,Userid$)
+				  ! done added to List$
+				  GCOntrNo=rd.Contract;Whse=rd.Whse
+				  Call GetCCust(E$,GCONTRNO,RHC,CUC,SRT,CSC,ARMth,Whse,Prod$,List2$[],tmpcnt2,row2,debugdetail,debug,dblog$,dmsg$,Userid$)
+				  ! add custs to list2$
+				Endif
+			! Endif
+		Loop
+		! finally ALL
+		ProdKey$=" ",ProdKey$
+		ProdKey$="#"+Blank$
+		Do
+			RDR=filegetrebatedtlz(e$,RDC,">",2,ProdKey$,rd.)
+			If RDR<=0 Exit Do
+			If ProdKey$[1,3]<>"#  " Exit Do
+			! if rd.Contract<>ContrNO ! only if diff contract
+				tmp1$=" ",tmp1$
+				If rd.CancelDate<>0
+					X$=rd.CancelDate Using "&&&&&&"
+					Call DateToJulian(1,X$,tmp1$,F) \ if f let tmp1$=" ",tmp1$
+				Endif
+				JRDate=tmp1$
+				If JRDate=0 let JRDate=999999
+				If JToDay<JRDate and (ExpDays=0 or (JToDay+ExpDays)>JRDate) ! not expired yet (OPEN) or will expire in
+				  ! okay process this one
+				  Whse=rd.Whse
+				  Call GetProd(e$,IntCo,Prod$,PRC,PWC,Whse,P9$,CPR.,debugdetail,debug,dblog$,dmsg$,Userid$) ! main prod
+				  If CPR.CostLoad2>0 Let pr.CostLoad2=cpr.CostLoad2
+				  if cpr.CostAvg>0 let pr.CostAvg=cpr.CostAvg
+				  if cpr.CostPo>0 let pr.CostPO=cpr.CostPo
+				  if cpr.CostLoad>0 let pr.CostLoad=cpr.CostLoad
+				  if cpr.CostBase>0 let pr.CostBase=cpr.CostBase
+				  if cpr.CostNetPO>0 let pr.CostNetPO=cpr.CostNetPO
+				  Call GETRProd(e$,CCC,ctlc,RHC,RBCBASE,PMask$,List$[],row,tmpcnt,rd.,pr.,rch.,debugdetail,debug,dblog$,dmsg$,Userid$)
+				  ! done added to List$
+				  GCOntrNo=rd.Contract;Whse=rd.Whse
+				  Call GetCCust(E$,GCONTRNO,RHC,CUC,SRT,CSC,ARMth,Whse,Prod$,List2$[],tmpcnt2,row2,debugdetail,debug,dblog$,dmsg$,Userid$)
+				  ! add custs to list2$
+				Endif
+			! Endif
+		Loop
+	Endif ! of type=Product
+	If RType=2 ! by commodity? (thru all prods by commod?) (how do we do an all?)
+		! ANSWER: WE DO NOT ALLOW COMMODITIES AS MAIN FOCUS
+	Endif
+	If RType=3 ! ALL PRODS? (show all lines on all contracts?)
+		! ANSWER: WE DO NOT ALLOW ALL PRODUCTS AS MAIN FOCUS
+	Endif
+	List$[row]=esdel$ ! end of prod section
+	List2$[row2]=esdel$ ! end of cust section
+	call AddToStr(e$,rstr$,List$[]) ! data
+	call AddToStr(e$,rstr$,List2$[]) ! cust data
+	GRH1Done: ! finished
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Related Contracts Open complete "+message$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+  if debugdetail
+		dmsg$="End of Program Librbttabs" \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+  Endif
+else
+ include "src/callsuberr.inc"
+end try
+end Sub ! end of RCOPN
+!
+!--------------------------------------------------------------------
+External Sub RCCLS(e$,IntCo,List$[],maxcnt,chans[],UserId$)
+! related contracts expired
+Try
+	Declare Sub Updatelog,OpenFiles,GetVend,GetProd,GetRProd
+	Declare Intrinsic Sub DateToJulian
+
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200],X$[20]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],RKey$[60],Cust$[6]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim List2$[maxcnt,1000] ! for drill
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2]
+	dim 1%,X1[9],ArMth
+	Dim 2%,ContrNo,x2[9],Q0[1]
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/rbt.log" ! fields for DEBUG
+
+	Dim Vend. as a80vm ! Vendor
+	Dim umc. as ccodes ! u/m file
+	Dim comd. as commhead ! commodity
+	Dim cust. as cust ! customer
+	Dim ccat. as custcat ! customer ctgy
+	Dim ccnt. as custcont ! customer / contract
+	Dim PR. as prod ! product file
+	Dim PW. as prodwhse ! prodwhse file
+	Dim PT.	as prtypefle ! Price type file
+	Dim RCH. as rcontracth ! Rebate Contract Header (MANUAL DIR 2/3)
+	Dim RD. as rebatedtl ! Rebate Lines
+	Dim VTag. as vendtag ! Vendor tag file
+	Dim CPR. as prod ! a copy of product
+	
+	! call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$)
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="librbttabs"
+		! dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+	
+	Call OpenFiles(e$,IntCo,Chans[],debugdetail,debug,dblog$,dmsg$,Userid$) ! open any/all files
+	CTLC=Chans[0];CCC=Chans[1];CMC=Chans[2];CUC=Chans[3]
+	PRC=Chans[4];PWC=Chans[5];PTC=Chans[6];RHC=Chans[7]
+	RDC=Chans[8];VNC=Chans[9];CSC=Chans[10];VTC=Chans[11];SRT=chans[12]
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	Mat read #ctlc,0,120;ARMth; ! ar/sls month
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	JTODay=TIM(6) ! today (julian)
+
+	! start
+	ReturnStatus=1
+	Message$="OK"
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto GRH2Done
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto GRH2Done
+	Endif
+	Call DXGet("RTYPE",tmp$)
+	X2=tmp$
+	if x2=1 or x2=2 or x2=3 ! only types 1=prod,2=commod,3=ALL
+		Rtype=x2
+	Else
+		ReturnStatus=0
+		Message$="TYPE NOT VALID"
+		goto GRH2Done
+	Endif
+	Call DXGet("EXPDAYS",tmp$) ! list contracts that expired in <= # Days  0=ALL
+	ExpDays=tmp$ ! s/b 0,30,60,90
+	If ExpDays<0 or ExpDays>100 let expdays=0
+	ExpDays=Int(ExpDays) ! no fractions
+	Call DXGet("PRODID",tmp$)
+	let prod$=tmp$+Blank$
+	if Prod$[1,3]="#  " let Rtype=3 ! incase passed as 1
+	If Rtype=3 ! all prod (web option)
+		Prod$="#"+Blank$	
+	Endif
+	if debugdetail
+		dmsg$="Get Contracts Expired "+Str$(ContrNo)+" T="+Str$(RType)+" "+prod$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+	Clear List$[]
+	Clear List2$[]
+	tmpcnt=maxcnt
+	tmpcnt2=maxcnt
+	List$[0]=bsdel$,"RELPRODEXPD",fdel$
+	WebStr$="CONTRID",fdel$,"LNTYPE",fdel$,"RBTCOST",fdel$
+	WebStr$=WebStr$,"SLSPCOST",fdel$,"STDATE",fdel$,"ENDDATE",fdel$
+	WebStr$=WebStr$,"DESC",fdel$,"WHSE",fdel$
+	List$[1]=WebStr$
+	row=2
+	List2$[0]=bsdel$,"CUSTINFO",fdel$
+	WebStr$="CONTRID",fdel$,"CUSTID",fdel$,"CUSTNAME",fdel$
+	WebStr$=WebStr$,"SLSTD",fdel$,"SLSLMTH",fdel$
+	List2$[1]=WebStr$
+	Row2=2
+	! get data for vendor on contract
+	Vend=rch.VendNum
+	Call GetVend(e$,VNC,VTC,Vend,vend.,Vtag.,debugdetail,debug,dblog$,dmsg$,Userid$) ! or get for every contract found?
+	RBCBASE=vtag.RebateCost ! vendor's base for rebates
+	If RType=1 ! need 3 loops (1:prod,2:commod,3:all)
+		ProdKey$=" ",ProdKey$
+		ProdKey$=Prod$
+		PRR=filegetprod(e$,PRC,"=",1,prodkey$,pr.)
+		If PRR<=0
+			ReturnStatus=0
+			Message$="PRODUCT NOT FOUND"
+			goto GRH2Done
+		Endif
+		! 1st for the product alone	
+		Do
+			RDR=filegetrebatedtlz(e$,RDC,">",2,ProdKey$,rd.)
+			If RDR<=0 Exit Do
+			If ProdKey$[1,12]<>Prod$[1,12] Exit Do
+			! if rd.Contract<>ContrNO ! only if diff contract
+				tmp1$=" ",tmp1$
+				If rd.CancelDate<>0
+					X$=rd.CancelDate Using "&&&&&&"
+					Call DateToJulian(1,X$,tmp1$,F) \ if f let tmp1$=" ",tmp1$
+				Endif
+				JRDate=tmp1$
+				If JRDate=0 let JRDate=99999
+				! needs to get jrdate+ExpDays check (07/15/08<06/30/08+30?) (14808<14793+30) (14808<14823) ok
+				! 07/15/08=14808  03/31/08=14702  14808>14702 and 14702+30>14808
+				If JToDay>JRDate and (ExpDays=0 or (JRDate+ExpDays)>JToDay) ! expired + Days
+				  ! okay process this one
+				  Whse=rd.Whse
+				  Call GetProd(e$,IntCo,Prod$,PRC,PWC,Whse,P9$,CPR.,debugdetail,debug,dblog$,dmsg$,Userid$) ! main prod
+				  If CPR.CostLoad2>0 Let pr.CostLoad2=cpr.CostLoad2
+				  if cpr.CostAvg>0 let pr.CostAvg=cpr.CostAvg
+				  if cpr.CostPo>0 let pr.CostPO=cpr.CostPo
+				  if cpr.CostLoad>0 let pr.CostLoad=cpr.CostLoad
+				  if cpr.CostBase>0 let pr.CostBase=cpr.CostBase
+				  if cpr.CostNetPO>0 let pr.CostNetPO=cpr.CostNetPO
+				  Call GETRProd(e$,CCC,ctlc,RHC,RBCBASE,PMask$,List$[],row,tmpcnt,rd.,pr.,rch.,debugdetail,debug,dblog$,dmsg$,Userid$)
+				  ! done added to List$
+				  GCOntrNo=rd.Contract;Whse=rd.Whse
+				  Call GetCCust(E$,GCONTRNO,RHC,CUC,SRT,CSC,ARMth,Whse,Prod$,List2$[],tmpcnt2,row2,debugdetail,debug,dblog$,dmsg$,Userid$)
+				  ! add custs to list2$
+				Endif ! of not expired & diff contract
+			! Endif
+		Loop
+		! now by commodity
+		ProdKey$=" ",ProdKey$
+		ProdKey$="*"+Pr.ComdtyCode$+Blank$
+		Do
+			RDR=filegetrebatedtlz(e$,RDC,">",2,ProdKey$,rd.)
+			If RDR<=0 Exit Do
+			If ProdKey$[2,5]<>Pr.ComdtyCode$ Exit Do
+			! if rd.Contract<>ContrNO ! only if diff contract
+				tmp1$=" ",tmp1$
+				If rd.CancelDate<>0
+					X$=rd.CancelDate Using "&&&&&&"
+					Call DateToJulian(1,X$,tmp1$,F) \ if f let tmp1$=" ",tmp1$
+				Endif
+				JRDate=tmp1$
+				If JRDate=0 let JRDate=999999
+				If JToDay>JRDate and (ExpDays=0 or (JRDate+ExpDays)>JToDay) ! expired + Days
+				  ! okay process this one
+				  Whse=rd.Whse
+				  Call GetProd(e$,IntCo,Prod$,PRC,PWC,Whse,P9$,CPR.,debugdetail,debug,dblog$,dmsg$,Userid$) ! main prod
+				  If CPR.CostLoad2>0 Let pr.CostLoad2=cpr.CostLoad2
+				  if cpr.CostAvg>0 let pr.CostAvg=cpr.CostAvg
+				  if cpr.CostPo>0 let pr.CostPO=cpr.CostPo
+				  if cpr.CostLoad>0 let pr.CostLoad=cpr.CostLoad
+				  if cpr.CostBase>0 let pr.CostBase=cpr.CostBase
+				  if cpr.CostNetPO>0 let pr.CostNetPO=cpr.CostNetPO
+				  Call GETRProd(e$,CCC,ctlc,RHC,RBCBASE,PMask$,List$[],row,tmpcnt,rd.,pr.,rch.,debugdetail,debug,dblog$,dmsg$,Userid$)
+				  ! done added to List$
+				  GCOntrNo=rd.Contract;Whse=rd.Whse
+				  Call GetCCust(E$,GCONTRNO,RHC,CUC,SRT,CSC,ARMth,Whse,Prod$,List2$[],tmpcnt2,row2,debugdetail,debug,dblog$,dmsg$,Userid$)
+				  ! add custs to list2$
+				Endif
+			! Endif
+		Loop
+		! finally ALL
+		ProdKey$=" ",ProdKey$
+		ProdKey$="#"+Blank$
+		Do
+			RDR=filegetrebatedtlz(e$,RDC,">",2,ProdKey$,rd.)
+			If RDR<=0 Exit Do
+			If ProdKey$[1,3]<>"#  " Exit Do
+			! if rd.Contract<>ContrNO ! only if diff contract
+				tmp1$=" ",tmp1$
+				If rd.CancelDate<>0
+					X$=rd.CancelDate Using "&&&&&&"
+					Call DateToJulian(1,X$,tmp1$,F) \ if f let tmp1$=" ",tmp1$
+				Endif
+				JRDate=tmp1$
+				If JRDate=0 let JRDate=999999
+				If JToDay>JRDate and (ExpDays=0 or (JRDate+ExpDays)>JToDay) ! expired + Days
+				  ! okay process this one
+				  Whse=rd.Whse
+				  Call GetProd(e$,IntCo,Prod$,PRC,PWC,Whse,P9$,CPR.,debugdetail,debug,dblog$,dmsg$,Userid$) ! main prod
+				  If CPR.CostLoad2>0 Let pr.CostLoad2=cpr.CostLoad2
+				  if cpr.CostAvg>0 let pr.CostAvg=cpr.CostAvg
+				  if cpr.CostPo>0 let pr.CostPO=cpr.CostPo
+				  if cpr.CostLoad>0 let pr.CostLoad=cpr.CostLoad
+				  if cpr.CostBase>0 let pr.CostBase=cpr.CostBase
+				  if cpr.CostNetPO>0 let pr.CostNetPO=cpr.CostNetPO
+				  Call GETRProd(e$,CCC,ctlc,RHC,RBCBASE,PMask$,List$[],row,tmpcnt,rd.,pr.,rch.,debugdetail,debug,dblog$,dmsg$,Userid$)
+				  ! done added to List$
+				  GCOntrNo=rd.Contract;Whse=rd.Whse
+				  Call GetCCust(E$,GCONTRNO,RHC,CUC,SRT,CSC,ARMth,Whse,Prod$,List2$[],tmpcnt2,row2,debugdetail,debug,dblog$,dmsg$,Userid$)
+				  ! add custs to list2$
+				Endif
+			! Endif
+		Loop
+	Endif ! of type=Product
+	If RType=2 ! by commodity? (thru all prods by commod?) (how do we do an all?)
+		! ANSWER: WE DO NOT ALLOW COMMODITIES AS MAIN FOCUS
+	Endif
+	If RType=3 ! ALL PRODS? (show all lines on all contracts?)
+		! ANSWER: WE DO NOT ALLOW ALL PRODUCTS AS MAIN FOCUS
+	Endif
+	List$[row]=esdel$ ! end of prod section
+	List2$[row2]=esdel$ ! end of cust section
+	call AddToStr(e$,rstr$,List$[]) ! data
+	call AddToStr(e$,rstr$,List2$[]) ! cust data
+	GRH2Done: ! finished
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Related Contracts Expired complete "+message$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+  if debugdetail
+		dmsg$="End of Program Librbttabs" \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+  Endif
+else
+ include "src/callsuberr.inc"
+end try
+end Sub ! end of RCCLS
+!
+!--------------------------------------------------------------------
+External Sub CNCTR(e$,IntCo,List$[],maxcnt,chans[],UserId$)
+! Customers not on any contract
+Try
+	Declare Sub Updatelog,OpenFiles,GetVend,GetProd,GetRProd
+	Declare Intrinsic Sub DateToJulian
+
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200],X$[20]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],RKey$[60],Cust$[6]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim List2$[maxcnt,1000] ! for drill
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2]
+	dim 1%,X1[9],ArMth
+	Dim 2%,ContrNo,x2[9],Q0[1]
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99],S1[12],S2[12]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/rbt.log" ! fields for DEBUG
+
+	Dim Vend. as a80vm ! Vendor
+	Dim umc. as ccodes ! u/m file
+	Dim comd. as commhead ! commodity
+	Dim cust. as cust ! customer
+	Dim ccat. as custcat ! customer ctgy
+	Dim ccnt. as custcont ! customer / contract
+	Dim PR. as prod ! product file
+	Dim PW. as prodwhse ! prodwhse file
+	Dim PT.	as prtypefle ! Price type file
+	Dim RCH. as rcontracth ! Rebate Contract Header (MANUAL DIR 2/3)
+	Dim RD. as rebatedtl ! Rebate Lines
+	Dim VTag. as vendtag ! Vendor tag file
+	Dim CPR. as prod ! a copy of product
+	Dim CSls. as slscurr
+	
+	! call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$)
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="librbttabs"
+		! dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+	
+	Call OpenFiles(e$,IntCo,Chans[],debugdetail,debug,dblog$,dmsg$,Userid$) ! open any/all files
+	CTLC=Chans[0];CCC=Chans[1];CMC=Chans[2];CUC=Chans[3]
+	PRC=Chans[4];PWC=Chans[5];PTC=Chans[6];RHC=Chans[7]
+	RDC=Chans[8];VNC=Chans[9];CSC=Chans[10];VTC=Chans[11];SRT=chans[12]
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	Mat read #ctlc,0,120;ARMth; ! ar/sls month
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	
+	! start
+	ReturnStatus=1
+	Message$="OK"
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto GRH3Done
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto GRH3Done
+	Endif
+	Call DXGet("RTYPE",tmp$)
+	X2=tmp$
+	if x2=1 or x2=2 or x2=3 ! only types 1=prod,2=commod,3=ALL
+		Rtype=x2
+	Else
+		ReturnStatus=0
+		Message$="TYPE NOT VALID"
+		goto GRH3Done
+	Endif
+	Call DXGet("PRODID",tmp$)
+	let prod$=tmp$+Blank$
+	if Prod$[1,3]="#  " let Rtype=3 ! incase passed as 1
+	If Rtype=3 ! all prod (web option)
+		Prod$="#"+Blank$	
+	Endif
+	if debugdetail
+		dmsg$="Get Customers not on Contracts "+Str$(ContrNo)+" T="+Str$(RType)+" "+prod$
+		Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+	PRR=filegetprod(e$,PRC,"=",1,Prod$,PR.) ! get prod data
+	If PRR<=0
+		ReturnStatus=0
+		Message$="PRODUCT NOT VALID"
+		goto GRH3Done
+	Endif
+
+	Clear List$[]
+	Clear List2$[]
+	tmpcnt=maxcnt
+	tmpcnt2=maxcnt
+	List$[0]=bsdel$,"CUSTNOCONTR",fdel$
+	WebStr$="CUSTID",fdel$,"CUSTNAME",fdel$,"UNTSMTH",fdel$
+	WebStr$=WebStr$,"UNTS12M",fdel$,"SLSMTH",fdel$,"SLS12M",fdel$
+	List$[1]=WebStr$
+	row=2
+	! i guess go through salescurr by prod/cust then see if cust/prctype is on any contract
+	Key1$=" ",Key1$
+	Key1$=Prod$
+	Do ! thru slscurr dir 2 (prod/cust/whse)
+		CSR=filegetslscurr(e$,CSC,">",2,Key1$,CSls.)
+		If CSR<=0 Exit do
+		If Key1$[1,12]<>Prod$[1,12] Exit Do
+		tmp$=Key1$[13,18] ! cust
+		If Cust$="" let cust$=tmp$[1,6]
+		If Cust$<>tmp$[1,6] and not(fndone) ! diff cust did not find prev one
+			! send data from not found - ONLY IF SLS?
+		 If x3[1]<>0 OR X3[2]<>0 OR X3[3]<>0 OR X3[4]<>0 ! only if <>0
+			WebStr$=Cust$,fdel$,RTrim$(Cust.Name$),fdel$ ! cust # & Name
+			Cnvtu[0]=0;cnvtu[1]=pr.UMSellDefault;cnvtu[2]=1
+			Cnvta=X3[2]
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			X$=XUNIT$(pr.UMSellDefault,ccc) ! get um text
+			WebStr$=WebStr$,LTrim$(Amount Using QMask$),"/",x$,fdel$ ! mtd units / sell um
+			CNVTA=X3[4]
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			WebStr$=WebStr$,LTrim$(Amount Using QMask$),"/",x$,fdel$ ! 12M units / sell um
+			WebStr$=WebStr$,LTrim$(X3[1] Using QMask$),fdel$ ! mtd $
+			WebStr$=WebStr$,LTrim$(X3[3] Using QMask$),fdel$ ! 12M $
+			List$[row]=WebStr$
+			row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		  Endif ! of only send custs with sales?
+			
+		Endif
+		if cust$<>tmp$[1,6] ! cust change
+			For X=0 to 9 \ let X3[x]=0 \ Next X ! clear ttls for prod/cust
+		Endif
+		S1[0]=csls.YtdDol;s1[1]=csls.JanDol;s1[2]=csls.FebDol
+		S1[3]=csls.MarDol;s1[4]=csls.AprDol;s1[5]=csls.MayDol
+		S1[6]=csls.JunDol;s1[7]=csls.JulDol;s1[8]=csls.AugDol
+		s1[9]=csls.SepDol;s1[10]=csls.OctDol;s1[11]=csls.NovDol
+		s1[12]=csls.DecDol
+		S2[0]=csls.YtdUnits;s2[1]=csls.JanUnits;s2[2]=csls.FebUnits
+		S2[3]=csls.MarUnits;s2[4]=csls.AprUnits;s2[5]=csls.MayUnits
+		S2[6]=csls.JunUnits;s2[7]=csls.JulUnits;s2[8]=csls.AugUnits
+		s2[9]=csls.SepUnits;s2[10]=csls.OctUnits;s2[11]=csls.NovUnits
+		s2[12]=csls.DecUnits
+		Let X3[1]=X3[1]+s1[ArMth];X3[2]=X3[2]+S2[ARMth] ! mtd $ / #
+		For X=1 to 12
+			X3[3]=X3[3]+S1[x] ! 12 mo $
+			X3[4]=X3[4]+s2[x] ! 12 mo #
+		Next X
+		Cust$=Key1$[13,18] ! set to new cust
+		Call GetCust(e$,CUC,PTC,CUR,Cust$,Cust.,debugdetail,debug,dblog$,dmsg$,Userid$)
+		If CUR<=0 goto CPSDone ! not valid cust
+		! now see if cust is on any contract
+		RKey$=" ",RKey$
+		RKey$=Cust$
+		Do ! contracth dir 2
+			let Fndone=0
+			RHR=filegetrcontracthz(e$,RHC,">",2,RKey$,rch.)
+			If RHR<=0 Or RKey$[1,6]<>Cust$ Exit Do
+			If rch.RebtContr<>ContrNo ! only if NOT same as curr one
+				! ok, on a contract <> this one - is prod on it?
+				ProdKey$=" ",ProdKey$
+				ProdKey$=Prod$,RKey$[7,12]
+				RDR=filegetrebatedtlz(e$,RDC,"=",2,ProdKey$,rd.)
+				If RDR<=0 ! no prod, try commod
+					ProdKey$=" ",ProdKey$
+					ProdKey$="*"+Pr.ComdtyCode$+Blank$
+					ProdKey$[13]=RKey$[7,12]
+					RDR=filegetrebatedtlz(e$,RDC,"=",2,ProdKey$,rd.)
+					If RDR<=0 ! no commod, all
+						ProdKey$=" ",ProdKey$
+						ProdKey$="#"+Blank$
+						ProdKey$[13]=RKey$[7,12]
+						RDR=filegetrebatedtlz(e$,RDC,"=",2,ProdKey$,rd.)
+					Endif ! all
+				Endif ! commod
+				If RDR>0 let fndone=1
+			Else
+				fndone=1 ! this contract counts as a FIND
+			Endif ! diff Contr
+			If Fndone Exit Do ! found any contract for cust ignore rest for cust
+		Loop ! loop for Cust #/contract
+		If not(Fndone) ! did not find cust - try Price type
+			tmp$="PT"+Cust.PriceType Using "###"+Blank$
+			tmp$[7]="" ! cut at six
+			RKey$=" ",RKey$
+			RKey$=tmp$
+			Do ! contracth dir 2
+				let Fndone=0
+				RHR=filegetrcontracthz(e$,RHC,">",2,RKey$,rch.)
+				If RHR<=0 Or RKey$[1,6]<>tmp$[1,6] Exit Do
+				If rch.RebtContr<>ContrNo ! only if NOT same as curr one
+				! ok, on a contract <> this one - is prod on it?
+					ProdKey$=" ",ProdKey$
+					ProdKey$=Prod$,RKey$[7,12]
+					RDR=filegetrebatedtlz(e$,RDC,"=",2,ProdKey$,rd.)
+					If RDR<=0 ! no prod, try commod
+						ProdKey$=" ",ProdKey$
+						ProdKey$="*"+Pr.ComdtyCode$+Blank$
+						ProdKey$[13]=RKey$[7,12]
+						RDR=filegetrebatedtlz(e$,RDC,"=",2,ProdKey$,rd.)
+						If RDR<=0 ! no commod, all
+							ProdKey$=" ",ProdKey$
+							ProdKey$="#"+Blank$
+							ProdKey$[13]=RKey$[7,12]
+							RDR=filegetrebatedtlz(e$,RDC,"=",2,ProdKey$,rd.)
+						Endif ! all
+					Endif ! commod
+					If RDR>0 let fndone=1
+				Else
+					fndone=1 ! this contract counts as a FIND
+				Endif ! diff Contr head
+				If Fndone Exit Do ! found a contract for cust ignore rest for cust
+			Loop ! cust dir of contracth for price type
+		Endif ! of try Price type
+		
+	CPSDone: ! finished
+	Loop ! of sls curr prod/cust
+	If CUR>0 and not(fndone) ! last cust did not have contract
+			! send data from not found
+			WebStr$=Cust$,fdel$,RTrim$(Cust.Name$),fdel$ ! cust # & Name
+			Cnvtu[0]=0;cnvtu[1]=pr.UMSellDefault;cnvtu[2]=1
+			Cnvta=X3[2]
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			X$=XUNIT$(pr.UMSellDefault,ccc) ! get um text
+			WebStr$=WebStr$,LTrim$(Amount Using QMask$),"/",x$,fdel$ ! mtd units / sell um
+			CNVTA=X3[4]
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			WebStr$=WebStr$,LTrim$(Amount Using QMask$),"/",x$,fdel$ ! 12M units / sell um
+			WebStr$=WebStr$,LTrim$(X3[1] Using QMask$),fdel$ ! mtd $
+			WebStr$=WebStr$,LTrim$(X3[3] Using QMask$),fdel$ ! 12M $
+			List$[row]=WebStr$
+			row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			For X=0 to 9 \ let X3[x]=0 \ Next X ! clear ttls for prod/cust
+	Endif
+	List$[row]=esdel$ ! end of data section
+	! List2$[row2]=esdel$ ! end of cust section
+	call AddToStr(e$,rstr$,List$[]) ! data
+	! call AddToStr(e$,rstr$,List2$[]) ! cust data
+	GRH3Done: ! finished
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Customers not on Contracts complete "+message$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+  if debugdetail
+		dmsg$="End of Program Librbttabs" \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+  Endif
+else
+ include "src/callsuberr.inc"
+end try
+end Sub ! end of CNCTR
+!
+!--------------------------------------------------------------------
+External Sub COCTR(e$,IntCo,List$[],maxcnt,chans[],UserId$)
+! Customers on other contracts
+Try
+	Declare Sub Updatelog,OpenFiles,GetVend,GetProd,GetRProd
+	Declare Intrinsic Sub DateToJulian
+
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],SKey$[60],SKey2$[60]
+	dim Message$[200],WebStr$[2000],SessionID$[200],X$[20]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],RKey$[60],Cust$[6]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim List2$[maxcnt,1000] ! for drill
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2]
+	dim 1%,X1[9],ArMth
+	Dim 2%,ContrNo,x2[9],Q0[1]
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99],s1[12],s2[12]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/rbt.log" ! fields for DEBUG
+
+	Dim Vend. as a80vm ! Vendor
+	Dim umc. as ccodes ! u/m file
+	Dim comd. as commhead ! commodity
+	Dim cust. as cust ! customer
+	Dim ccat. as custcat ! customer ctgy
+	Dim ccnt. as custcont ! customer / contract
+	Dim PR. as prod ! product file
+	Dim PW. as prodwhse ! prodwhse file
+	Dim PT.	as prtypefle ! Price type file
+	Dim RCH. as rcontracth ! Rebate Contract Header (MANUAL DIR 2/3)
+	Dim RD. as rebatedtl ! Rebate Lines
+	Dim VTag. as vendtag ! Vendor tag file
+	Dim CPR. as prod ! a copy of product
+	Dim CSls. as slscurr
+	
+	! call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$)
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="librbttabs"
+		! dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+	
+	Call OpenFiles(e$,IntCo,Chans[],debugdetail,debug,dblog$,dmsg$,Userid$) ! open any/all files
+	CTLC=Chans[0];CCC=Chans[1];CMC=Chans[2];CUC=Chans[3]
+	PRC=Chans[4];PWC=Chans[5];PTC=Chans[6];RHC=Chans[7]
+	RDC=Chans[8];VNC=Chans[9];CSC=Chans[10];VTC=Chans[11];SRT=chans[12]
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	Mat read #ctlc,0,120;ARMth; ! ar/sls month
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	JTODay=TIM(6) ! today (julian)
+	! start
+	ReturnStatus=1
+	Message$="OK"
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto GRH4Done
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto GRH4Done
+	Endif
+	Call DXGet("RTYPE",tmp$)
+	X2=tmp$
+	if x2=1 or x2=2 or x2=3 ! only types 1=prod,2=commod,3=ALL
+		Rtype=x2
+	Else
+		ReturnStatus=0
+		Message$="TYPE NOT VALID"
+		goto GRH4Done
+	Endif
+	Call DXGet("PRODID",tmp$)
+	let prod$=tmp$+Blank$
+	if Prod$[1,3]="#  " let Rtype=3 ! incase passed as 1
+	If Rtype=3 ! all prod (web option)
+		Prod$="#"+Blank$	
+	Endif
+	if debugdetail
+		dmsg$="Get Customers on other Contracts "+Str$(ContrNo)+" T="+Str$(RType)+" "+prod$
+		Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+	Clear List$[]
+	Clear List2$[]
+	tmpcnt=maxcnt
+	tmpcnt2=maxcnt
+	List$[0]=bsdel$,"CUSTOOCONTR",fdel$
+	WebStr$="CUSTID",fdel$,"CUSTNAME",fdel$,"CONTRID",fdel$
+	WebStr$=WebStr$,"STDATE",fdel$,"ENDDATE",fdel$,"DESC",fdel$
+	WebStr$=WebStr$,"RBTCOST",fdel$
+	WebStr$=WebStr$,"SLSPCOST",fdel$,"UNTSMTH",fdel$
+	WebStr$=WebStr$,"UNTS12M",fdel$,"SLSMTH",fdel$,"SLS12M",fdel$
+	List$[1]=WebStr$
+	row=2
+	ProdKey$=" ",ProdKey$
+	ProdKey$=Prod$
+	PRR=filegetprod(e$,PRC,"=",1,prodkey$,pr.)
+	If PRR<=0
+		ReturnStatus=0
+		Message$="PRODUCT NOT FOUND"
+		goto GRH4Done
+	Endif
+	! get data for vendor on contract
+	Vend=rch.VendNum
+	Call GetVend(e$,VNC,VTC,Vend,vend.,Vtag.,debugdetail,debug,dblog$,dmsg$,Userid$) ! or get for every contract found?
+	RBCBASE=vtag.RebateCost ! vendor's base for rebates
+	! i guess go through salescurr by prod/cust then see if cust/prctype is on any contract
+	Key1$=" ",Key1$
+	Key1$=Prod$
+	Do ! thru slscurr dir 2 (prod/cust/whse)
+		CSR=filegetslscurr(e$,CSC,">",2,Key1$,CSls.)
+		If CSR<=0 Exit do
+		If Key1$[1,12]<>Prod$[1,12] Exit Do
+		Let tmp$=Key1$[13,18]
+		if cust$=tmp$[1,6] goto CPS2Done ! once per customer in slscurr!(multiwhse)
+		Cust$=Key1$[13,18] ! set to new cust
+		Call GetCust(e$,CUC,PTC,CUR,Cust$,Cust.,debugdetail,debug,dblog$,dmsg$,Userid$)
+		If CUR<=0 goto CPS2Done ! not valid cust
+		! now see if cust is on any contract
+		RKey$=" ",RKey$
+		RKey$=Cust$
+		Do ! contracth dir 2
+			let RDR=0
+			RHR=filegetrcontracthz(e$,RHC,">",2,RKey$,rch.)
+			If RHR<=0 Or RKey$[1,6]<>Cust$ Exit Do
+			! If rch.RebtContr<>ContrNo ! only if NOT same as curr one
+				! ok, on a contract <> this one - is prod on it?
+				ProdKey$=" ",ProdKey$
+				ProdKey$=Prod$,RKey$[7,12]
+				RDR=filegetrebatedtlz(e$,RDC,"=",2,ProdKey$,rd.)
+				If RDR<=0 ! no prod, try commod
+					ProdKey$=" ",ProdKey$
+					ProdKey$="*"+Pr.ComdtyCode$+Blank$
+					ProdKey$[13]=RKey$[7,12]
+					RDR=filegetrebatedtlz(e$,RDC,"=",2,ProdKey$,rd.)
+					If RDR<=0 ! no commod, all
+						ProdKey$=" ",ProdKey$
+						ProdKey$="#"+Blank$
+						ProdKey$[13]=RKey$[7,12]
+						RDR=filegetrebatedtlz(e$,RDC,"=",2,ProdKey$,rd.)
+					Endif ! all
+				Endif ! commod
+				If RDR>0 ! found on contract - add to list
+					tmp1$=" ",tmp1$
+					If rd.CancelDate<>0
+						X$=rd.CancelDate Using "&&&&&&"
+						Call DateToJulian(1,X$,tmp1$,F) \ if f let tmp1$=" ",tmp1$
+					Endif
+					JRDate=tmp1$
+					If JRDate=0 let JRDate=999999
+					If JToDay>JRDate goto FndRcntlDone ! expired (exclude it!)
+					Skey$=" ",SKey$
+					Skey$=Cust$,RKey$[7,12] ! cust contr
+					Search #SRT,4,1;SKey$,R,E
+					If E=0 ! first time on list
+						For X=0 to 9 \ let X3[x]=0 \ Next X ! clear ttls for prod/cust
+						SKey2$=" ",SKey2$
+						SKey2$=Prod$,Cust$
+						tmp$=SKey2$
+						Do
+							CSR=filegetslscurr(e$,CSC,">",2,SKey2$,CSls.)
+							If CSR<=0 Exit do
+							If SKey2$[1,18]<>tmp$[1,18] Exit Do
+							S1[0]=csls.YtdDol;s1[1]=csls.JanDol;s1[2]=csls.FebDol
+							S1[3]=csls.MarDol;s1[4]=csls.AprDol;s1[5]=csls.MayDol
+							S1[6]=csls.JunDol;s1[7]=csls.JulDol;s1[8]=csls.AugDol
+							s1[9]=csls.SepDol;s1[10]=csls.OctDol;s1[11]=csls.NovDol
+							s1[12]=csls.DecDol
+							S2[0]=csls.YtdUnits;s2[1]=csls.JanUnits;s2[2]=csls.FebUnits
+							S2[3]=csls.MarUnits;s2[4]=csls.AprUnits;s2[5]=csls.MayUnits
+							S2[6]=csls.JunUnits;s2[7]=csls.JulUnits;s2[8]=csls.AugUnits
+							s2[9]=csls.SepUnits;s2[10]=csls.OctUnits;s2[11]=csls.NovUnits
+							s2[12]=csls.DecUnits
+							Let X3[1]=X3[1]+s1[ArMth];X3[2]=X3[2]+S2[ARMth] ! mtd $ / #
+							For X=1 to 12
+								X3[3]=X3[3]+S1[x] ! 12 mo $
+								X3[4]=X3[4]+s2[x] ! 12 mo #
+							Next X
+						Loop ! get sls for all whse for prod/cust
+						! okay process this one
+						Whse=rd.Whse
+						Call GetProd(e$,IntCo,Prod$,PRC,PWC,Whse,P9$,CPR.,debugdetail,debug,dblog$,dmsg$,Userid$) ! main prod
+					  If CPR.CostLoad2>0 Let pr.CostLoad2=cpr.CostLoad2
+					  if cpr.CostAvg>0 let pr.CostAvg=cpr.CostAvg
+					  if cpr.CostPo>0 let pr.CostPO=cpr.CostPo
+					  if cpr.CostLoad>0 let pr.CostLoad=cpr.CostLoad
+					  if cpr.CostBase>0 let pr.CostBase=cpr.CostBase
+					  if cpr.CostNetPO>0 let pr.CostNetPO=cpr.CostNetPO
+					  WebStr$=Cust$,fdel$,RTrim$(Cust.Name$),fdel$ ! cust # & Name
+					  WebStr$=WebStr$,RKey$[7,12],fdel$ ! contr #
+					  tmp$=PDate$(rd.StartDate)
+					  if rd.StartDate=0 let tmp$="NONE"
+					  WebStr$=WebStr$,tmp$,fdel$ ! start date
+					  tmp$=PDate$(rd.CancelDate)
+					  if rd.CancelDate=0 let tmp$="NONE"
+					  WebStr$=WebStr$,tmp$,fdel$ ! end/cancel date
+					  WebStr$=WebStr$,RTrim$(rch.ContrDesc$),fdel$ ! contr desc
+					  Call GetCOProd(e$,CCC,ctlc,RHC,RBCBASE,PMask$,WebStr$,rd.,pr.,rch.,debugdetail,debug,dblog$,dmsg$,Userid$)
+					  ! adds rebate & slsprsn cost to WebStr$
+					  Cnvtu[0]=0;cnvtu[1]=pr.UMSellDefault;cnvtu[2]=1
+						Cnvta=X3[2]
+						Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+						X$=XUNIT$(pr.UMSellDefault,ccc) ! get um text
+						WebStr$=WebStr$,LTrim$(Amount Using QMask$),"/",x$,fdel$ ! mtd units / sell um
+						CNVTA=X3[4]
+						Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+						WebStr$=WebStr$,LTrim$(Amount Using QMask$),"/",x$,fdel$ ! 12M units / sell um
+						WebStr$=WebStr$,LTrim$(X3[1] Using QMask$),fdel$ ! mtd $
+						WebStr$=WebStr$,LTrim$(X3[3] Using QMask$),fdel$ ! 12M $
+					  List$[row]=WebStr$
+					  row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+					Endif ! of cust/contr not on list already
+				FndRcntlDone: ! 
+				Endif ! of found contr
+			! Endif ! diff Contr
+			
+		Loop ! loop for Cust #/contract
+		! If not(Fndone) ! did not find cust - try Price type ALWAYS
+			tmp$="PT"+Cust.PriceType Using "###"+Blank$
+			tmp$[7]="" ! cut at six
+			RKey$=" ",RKey$
+			RKey$=tmp$
+			Do ! contracth dir 2
+				let RDR=0
+				RHR=filegetrcontracthz(e$,RHC,">",2,RKey$,rch.)
+				If RHR<=0 Or RKey$[1,6]<>tmp$[1,6] Exit Do
+				! If rch.RebtContr<>ContrNo ! only if NOT same as curr one
+				! ok, on a contract <> this one - is prod on it?
+					ProdKey$=" ",ProdKey$
+					ProdKey$=Prod$,RKey$[7,12]
+					RDR=filegetrebatedtlz(e$,RDC,"=",2,ProdKey$,rd.)
+					If RDR<=0 ! no prod, try commod
+						ProdKey$=" ",ProdKey$
+						ProdKey$="*"+Pr.ComdtyCode$+Blank$
+						ProdKey$[13]=RKey$[7,12]
+						RDR=filegetrebatedtlz(e$,RDC,"=",2,ProdKey$,rd.)
+						If RDR<=0 ! no commod, all
+							ProdKey$=" ",ProdKey$
+							ProdKey$="#"+Blank$
+							ProdKey$[13]=RKey$[7,12]
+							RDR=filegetrebatedtlz(e$,RDC,"=",2,ProdKey$,rd.)
+						Endif ! all
+					Endif ! commod
+					If RDR>0 ! found on contract - add to list
+						tmp1$=" ",tmp1$
+						If rd.CancelDate<>0
+							X$=rd.CancelDate Using "&&&&&&"
+							Call DateToJulian(1,X$,tmp1$,F) \ if f let tmp1$=" ",tmp1$
+						Endif
+						JRDate=tmp1$
+						If JRDate=0 let JRDate=999999
+						If JToDay>JRDate goto FndRcnt2Done ! expired (exclude it!)
+					  Skey$=" ",SKey$
+					  Skey$=Cust$,RKey$[7,12] ! cust contr
+					  Search #SRT,4,1;SKey$,R,E
+					  If E=0 ! new to list
+						For X=0 to 9 \ let X3[x]=0 \ Next X ! clear ttls for prod/cust(NO SALES BY PRCTYPE
+						! okay process this one
+						Whse=rd.Whse
+						Call GetProd(e$,IntCo,Prod$,PRC,PWC,Whse,P9$,CPR.,debugdetail,debug,dblog$,dmsg$,Userid$) ! main prod
+						If CPR.CostLoad2>0 Let pr.CostLoad2=cpr.CostLoad2
+						if cpr.CostAvg>0 let pr.CostAvg=cpr.CostAvg
+						if cpr.CostPo>0 let pr.CostPO=cpr.CostPo
+						if cpr.CostLoad>0 let pr.CostLoad=cpr.CostLoad
+						if cpr.CostBase>0 let pr.CostBase=cpr.CostBase
+						if cpr.CostNetPO>0 let pr.CostNetPO=cpr.CostNetPO
+						WebStr$=Cust$,fdel$,RTrim$(Cust.Name$),fdel$ ! cust # & Name
+						WebStr$=WebStr$,RKey$[7,12],fdel$ ! contr #
+						tmp$=PDate$(rd.StartDate)
+						if rd.StartDate=0 let tmp$="NONE"
+						WebStr$=WebStr$,tmp$,fdel$ ! start date
+						tmp$=PDate$(rd.CancelDate)
+						if rd.CancelDate=0 let tmp$="NONE"
+						WebStr$=WebStr$,tmp$,fdel$ ! end/cancel date
+						WebStr$=WebStr$,RTrim$(rch.ContrDesc$),fdel$ ! contr desc
+						Call GetCOProd(e$,CCC,ctlc,RHC,RBCBASE,PMask$,WebStr$,rd.,pr.,rch.,debugdetail,debug,dblog$,dmsg$,Userid$)
+						! adds rebate & slsprsn cost to WebStr$
+						Cnvtu[0]=0;cnvtu[1]=pr.UMSellDefault;cnvtu[2]=1
+						Cnvta=X3[2]
+						Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+						X$=XUNIT$(pr.UMSellDefault,ccc) ! get um text
+						WebStr$=WebStr$,LTrim$(Amount Using QMask$),"/",x$,fdel$ ! mtd units / sell um
+						CNVTA=X3[4]
+						Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+						WebStr$=WebStr$,LTrim$(Amount Using QMask$),"/",x$,fdel$ ! 12M units / sell um
+						WebStr$=WebStr$,LTrim$(X3[1] Using QMask$),fdel$ ! mtd $
+						WebStr$=WebStr$,LTrim$(X3[3] Using QMask$),fdel$ ! 12M $
+						List$[row]=WebStr$
+						row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+					  Endif ! of cust/contr not on list already
+					FndRcnt2Done: ! expired - bypass
+					Endif
+				! Endif ! diff Contr head
+				
+			Loop ! cust dir of contracth for price type
+		! Endif ! of try Price type (ALWAYS DO)
+		
+	CPS2Done: ! finished
+	Loop ! of sls curr prod/cust
+	! as each cust is checked - all up to diff prod checked
+	List$[row]=esdel$ ! end of data section
+	! List2$[row2]=esdel$ ! end of cust section
+	call AddToStr(e$,rstr$,List$[]) ! data
+	! call AddToStr(e$,rstr$,List2$[]) ! cust data
+	GRH4Done: ! finished
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Customers on other Contracts complete "+message$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+  if debugdetail
+		dmsg$="End of Program Librbttabs" \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+  Endif
+else
+ include "src/callsuberr.inc"
+end try
+end Sub ! end of COCTR
+!
+!--------------------------------------------------------------------
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles(e$,IntCo,Chans[],debugdetail,debug,dblog$,dmsg$,Userid$)
+
+ Try
+	CTLC=Chans[0];CCC=Chans[1];CMC=Chans[2];CUC=Chans[3]
+	PRC=Chans[4];PWC=Chans[5];PTC=Chans[6];RHC=Chans[7]
+	RDC=Chans[8];VNC=Chans[9]
+    !
+	If CTLC<=0 Let CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	If VNC<=0 Let VNC=OpenFile(-2400,IntCo) \ If VNC=-1 Error 42 ! Vendor
+	If CCC<=0 let CCC=OpenFile(-1728,IntCo) \ IF CCC=-1 Error 42 ! u/m file
+	If CMC<=0 Let CMC=OpenFile(-2288,IntCo) \ if CMC=-1 Error 42 ! commodity
+	IF CUC<=0 Let CUC=OpenFile(-1808,IntCo) \ If CUC=-1 Error 42 ! customer
+	CSC=OpenFile(-2016,IntCo) \ if CSC=-1 Error 42 ! curr sales
+	If PRC<=0 Let PRC=OpenFile(-1792,IntCo) \ if prc=-1 Error 42 ! product file
+	If PWC<=0 Let PWC=OpenFile(-1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	If PTC<=0 Let PTC=OpenFile(-752,IntCo) \ If PTC=-1 Error 42 ! Price type file
+	If RHC<=0 Let RHC=OpenFile(304,IntCo) \ If RHC=-1 Error 42 ! Rebate Contract Header (MANUAL DIR 2/3)
+	If RDC<=0 Let RDC=OpenFile(320,IntCo) \ If RDC=-1 Error 42 ! Rebate Lines
+	VTC=OpenFile(-1120,IntCo) \ if VTC=-1 Error 42 ! Vendtag file
+	SRT=buildsort(e$,20,0) \ if srt<=0 Error 42 ! sort file keylen=20w
+ 	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+    Endif
+	Chans[0]=CTLC;Chans[1]=CCC;Chans[2]=CMC;Chans[3]=CUC
+	Chans[4]=PRC;Chans[5]=PWC;Chans[6]=PTC;Chans[7]=RHC
+	Chans[8]=RDC;Chans[9]=VNC
+	Chans[10]=CSC;Chans[11]=vtc;chans[12]=srt
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug,dblog$,dmsg$,Userid$)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+Userid$+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+
+Sub GetVend(e$,VNC,VTC,Vend,vend. as a80vm,Vtag. as vendtag,debugdetail,debug,dblog$,dmsg$,Userid$)
+! get Vendor data
+  Try
+	Dim Vkey$[60],Blank$[100]
+	Dim 3%,VNR,VTR
+	Blank$=" ",Blank$
+	Vkey$=" ",VKey$
+	VKey$=Vend Using "######"
+	VNR=filegeta80vm(e$,VNC,"=",1,VKey$,vend.)
+	If VNR<0 
+		clear vend.
+		Vend.Name$="VENDOR NOT FOUND"+Blank$
+		clear vtag.
+		vtag.RebateCost=4
+	Else
+		VTR=filegetvendtag(e$,VTC,"=",1,VKey$,vtag.)
+		If VTR<=0
+			clear vtag.
+			vtag.RebateCost=4
+		Endif
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetVend
+! 
+!--------------------------------------------------------------------
+Sub GetCust(e$,CUC,PTC,CUR,Cust$,Cust. as Cust,debugdetail,debug,dblog$,dmsg$,Userid$)
+! get Customer data - 
+! PASS IN CUST$ - as it may hold "PT###"
+  Try
+	Dim Ckey$[60],Blank$[100]
+	Dim 2%,PRTYPE
+	Dim 3%,CUR
+	Dim PT.	as prtypefle ! Price type file
+	Blank$=" ",Blank$
+	ckey$=" ",cKey$
+	cKey$=Cust$
+	if Cust$[1,2]="PT" ! it's a pricetype field
+		CUR=0
+		Clear cust.
+		PRType=Cust$[3,6]
+		Read record #PTC,PRType,0;PT.;
+		iF Trim$(PT.DESC$)="" let pt.desc$="NOT ON FILE"
+		cust.Name$=pt.Desc$+Blank$
+	Else
+		CUR=filegetcust(e$,CUC,"=",1,CKey$,cust.)
+		If CUR<0
+			clear cust.
+			cust.Name$="CUSTOMER NOT FOUND"+Blank$
+		Endif
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetCust
+! 
+!--------------------------------------------------------------------
+Sub GetProd(e$,IntCo,Prod$,PRC,PWC,Whse,P9$,CPR. as prod,debugdetail,debug,dblog$,dmsg$,Userid$)
+! get Prod data - 
+! PASS IN Prod$ already checked for type=2 or "#  " (commod or allprod)
+  Try
+	Dim tmp$[80],tmp1$[80],prodkey$[60]
+	Dim 3%,PWR
+	Dim PW. as prodwhse
+	tmp$=Prod$
+	
+	ProdKey$=Prod$
+	PRR=filegetprod(e$,PRC,"=",1,ProdKey$,Cpr.)
+	If PRR<0
+		clear Cpr.
+		cpr.Desc1$="PRODUCT NOT FOUND"
+	Else
+		If P9$[32,32]="Y" ! get whse
+			If Whse>0 ! has whse
+				ProdKey$[13]=Whse Using "##"
+				PWR=filegetprodwhse(e$,PWC,"=",1,ProdKey$,pw.)
+				If PWR<=0 Clear pw.
+				If pw.CostLoad2>0 Let cpr.CostLoad2=pw.CostLoad2
+				if pw.CostAvg>0 let cpr.CostAvg=pw.CostAvg
+				if pw.CostLastPo>0 let cpr.CostPO=pw.CostLastPo
+				if pw.CostLoad>0 let cpr.CostLoad=pw.CostLoad
+				if pw.CostBase>0 let cpr.CostBase=pw.CostBase
+				if pw.CostNetPO>0 let cpr.CostNetPO=pw.CostNetPO
+			Endif
+		Endif
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Getprod
+! 
+!--------------------------------------------------------------------
+
+Sub GetCCust(E$,GCONTRNO,RHC,CUC,SRT,CSC,ARMth,Whse,Prod$,List2$[],tmpcnt2,row2,debugdetail,debug,dblog$,dmsg$,Userid$)
+! get customers on the contract for list
+  Try
+	Dim KCust$[30],SCKey$[60],RKey$[60]
+	Dim SMask$[20],Message$[200],Cust$[6]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10]
+	Dim 2%
+	Dim 3%,S1[12],STM,SLM
+	
+	Dim CRCH. as rcontracth
+	Dim Cust. as cust
+	Dim CSls. as slscurr
+
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	ReturnStatus=1
+	Message$="OK"
+	SMask$="----,---,--#.##"
+	RKey$=" ",RKey$
+	RKey$=GContrNo Using "######"
+	Search #SRT,2,1;RKey$,R,E
+	If E=0 goto CCHDone: ! already got custs for Contract
+	Search #SRT,4,1;RKey$,R,E
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,CRCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto CCHDone
+	Endif
+	if debugdetail
+		dmsg$="Get Customers on Contract "+Str$(GContrNo)+" "+message$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+	
+	tmpcnt=tmpcnt2
+	STM=0;SLM=0
+	Row=row2
+	KCust$=" ",KCust$
+	KCust$=GContrNo Using "######"
+	Do
+		RHR=filegetrcontracthz(e$,RHC,">",3,KCust$,CRCH.) ! dir3=contr & cust
+		if RHR<0 Exit Do
+		X2=kcust$[1,6] \ if x2<>GContrNo Exit do
+		Cust$=KCust$[7,12]
+		STM=0;SLM=0
+		call getcust(e$,CUC,PTC,CUR,Cust$,Cust.,debugdetail,debug,dblog$,dmsg$,Userid$) ! get cust & name
+		If CUR>0 ! Found customer - get sales
+			! Read Record #CSC,CUR,0;csls.; ! was custsls - now slscurr!
+			If Whse ! get for the specified whse?
+				SCKey$=" ",SCKey$
+				SCKey$=Cust$,Prod$,Whse Using "##"
+				CSR=filegetslscurr(e$,CSC,"=",1,SCKey$,csls.)
+				If CSR<=0 Clear csls.
+				S1[0]=csls.YtdDol;s1[1]=csls.JanDol;s1[2]=csls.FebDol
+				S1[3]=csls.MarDol;s1[4]=csls.AprDol;s1[5]=csls.MayDol
+				S1[6]=csls.JunDol;s1[7]=csls.JulDol;s1[8]=csls.AugDol
+				s1[9]=csls.SepDol;s1[10]=csls.OctDol;s1[11]=csls.NovDol
+				s1[12]=csls.DecDol
+				Let X3=s1[ArMth]
+				STM=STM+X3
+				X1=ARMth-1 \ if x1<1 let X1=12
+				Let X3=S1[X1]
+				SLM=SLM+X3
+			Else ! all whses - get all for cust/prod
+				SCKey$=" ",SCKey$
+				SCKey$=Cust$,Prod$,Whse Using "##"
+				Do
+					CSR=filegetslscurr(e$,CSC,">",1,SCKey$,csls.)
+					If CSR<=0 Exit do
+					If SCKey$[1,6]<>Cust$ exit do
+					If SCKey$[7,18]<>Prod$ Exit do
+					S1[0]=csls.YtdDol;s1[1]=csls.JanDol;s1[2]=csls.FebDol
+					S1[3]=csls.MarDol;s1[4]=csls.AprDol;s1[5]=csls.MayDol
+					S1[6]=csls.JunDol;s1[7]=csls.JulDol;s1[8]=csls.AugDol
+					s1[9]=csls.SepDol;s1[10]=csls.OctDol;s1[11]=csls.NovDol
+					s1[12]=csls.DecDol
+					Let X3=s1[ArMth]
+					STM=STM+X3
+					X1=ARMth-1 \ if x1<1 let X1=12
+					Let X3=S1[X1]
+					SLM=SLM+X3
+				Loop
+			Endif ! whse or not
+		Else ! no cust - no sales
+			Clear Csls.
+			STM=0;SLM=0
+		Endif
+		Webstr$=STR$(GCONTRNO),fdel$,Cust$,fdel$,RTrim$(cust.Name$),fdel$ ! cust or PT & name/desc
+		! need $ mtd / last month
+		
+		WebStr$=WebStr$,LTrim$(STM Using SMask$),fdel$ ! sls this month
+		
+		WebStr$=WebStr$,LTrim$(SLM Using SMask$),fdel$ ! sls last month
+		List2$[row2]=WebStr$
+		row2=row2+1 \ if row2>tmpcnt2 let tmpcnt2=expandarray(e$,List2$[])
+	Loop
+
+	
+	if debugdetail
+		dmsg$="Get Contract Customers complete "+message$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+	CCHDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetCCust
+! 
+!--------------------------------------------------------------------
+
+Sub GetRProd(e$,CCC,ctlc,RHC,RBCBASE,PMask$,List$[],row,tmpcnt,rd. as rebatedtl,pr. as prod,rch. as rcontracth,debugdetail,debug,dblog$,dmsg$,Userid$)
+! based on prod detail send - get costs
+! add this single line to List$
+  Try
+	Dim LKey$[60],CMKey$[60],Prdf$[12]
+	Dim RBUM$[4],SCUm$[4],WebStr$[1000]
+	Dim tmp$[500],Message$[200],RKey$[60]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10]
+	Dim 1%,Type,PFU1[20],Cnvtu[2]
+	Dim 3%,RBCostBase,BSCostBase
+	Dim 3%,RBCost,SLCost,Amount,Cnvta
+	
+	Dim Crch. as rcontracth
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	ReturnStatus=1
+	Message$="OK"
+	
+	RKey$=" ",RKey$
+	RKey$=rd.Contract using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,crch.)
+	If RHR<0 Clear crch.
+	! RBCBASE = Vendtag rebate cost
+	Type=rd.LineType ! (1=prod, 2=Commod)
+	NonStk=0
+	if type=2 or rd.ProdCode$[1,3]="#  " let NonStk=1
+	! existing list boxes (web hardcode?)
+	! REBATE TYPES: 1=%DISC(-=%MARKUP), 2=$DISC(-=MARKUP), 3=Flat
+	! SLSM COST: 1=%MARKUP(-=DISC), 2=$MARKUP(-=DISC), 3=FLAT, 3=STD
+	! COST BASE: 1=BASE, 2=LOAD, 3=LAST, 4=REBATE, 5=LOAD2(REDI)
+	If NonStk ! commodity - needs PFU1 loaded
+		pfu1[8]=pr.UMStkDefault
+		pfu1[9]=pr.UMSellDefault
+		pfu1[10]=pr.UMPurchDefault
+		pfu1[11]=pr.UMCostDefault
+		pfu1[12]=UMPriceDefault
+		Let x1=rd.UMRebate
+		if x1=0 let x1=11
+		if x1<8 let x1=x1+7 ! in case 1-5
+		rd.UMRebate=pfu1[x1] ! switch to prod u/m
+		x1=rd.UMCost
+		if x1=0 let x1=11
+		if x1<8 let x1=x1+7 ! in case 1-5
+		rd.UMCost=Pfu1[x1] ! to actual prod u/m
+	Endif
+	! 
+	! load detail string
+	If RBCBASE=1 let RBCostBase=pr.CostLoad
+	If RBCBASE=2 let RBCostBase=pr.CostLoad2
+	if RBCBASE=3 let RBCostBase=pr.CostAvg
+	If RBCBase=4 let RBCostBase=pr.CostPO
+	If RBCBase=5 let RBCostBase=pr.CostBase
+	if rbcbase=6 let rbcostbase=pr.CostNetPO
+	If RBCostBase<=0 ! no cost - set
+		let RBCostBase=pr.CostPO
+		let rbcbase=4
+	Endif
+	! calc rabte
+	If rd.RebateType = 1 ! rebate type #1 % discount
+		RBCOST = (RBCostBase * ((100 - rd.RbFactor) / 100))
+	End If 
+	If rd.RebateType = 2 ! rebate type #2 $ discount
+		CNVTU[0] = 0;CNVTU[1] = rd.UMRebate;CNVTU[2] = 2;CNVTA = RBCostBase
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		CNVTA = (AMOUNT - rd.RbFactor);CNVTU[0] = rd.UMRebate;CNVTU[1] = 0
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		RBCOST = AMOUNT
+	End If 
+	If rd.RebateType = 3 ! rebate type #3 flat cost
+		RBCOST = rd.RbFactor
+		If Type = 2 !  commodity code
+			CNVTU[0] = rd.UMRebate;CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = RBCOST
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			RBCOST = AMOUNT
+		End If 
+	End If 
+	If (rd.CostType = 1 Or rd.CostType = 2) ! done after rbcost calc
+  		If rd.CostBase = 1 Let BSCost = pr.CostBase
+		If rd.CostBase = 2 Let BSCost = pr.CostLoad
+		If rd.CostBase = 3 Let BSCost = pr.CostPO
+		If rd.CostBase = 4 Let BSCost = RBCOST
+		If rd.CostBase = 5 Let BSCost = pr.CostLoad2
+	End If 
+	If rd.CostType = 1 ! % mark up/down
+		RBSLCOST = (BSCost * ((100 + rd.CostFactor) / 100))
+	End If 
+	If rd.CostType = 2 ! $ mark up/down
+		CNVTU[0] = 0;CNVTU[1] = rd.UMCost;CNVTU[2] = 2;CNVTA = BSCost
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		CNVTU[0] = rd.UMCost;CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = (AMOUNT + rd.CostFactor)
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		RBSLCOST = AMOUNT
+	End If 
+	If rd.CostType = 3 ! flat cost
+		RBSLCOST = rd.CostFactor
+		If Type = 2 !  commodity code
+			CNVTU[0] = rd.UMCost;CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = RBSLCOST
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			RBSLCOST = AMOUNT
+		End If 
+	End If 
+	If rd.CostType = 4 ! standard cost (use regular default cost)
+		RBSLCOST = 0
+	End If
+	RBUM$=XUnit$(rd.UMRebate,ccc)
+	SCUM$=XUnit$(rd.UMCost,ccc)
+	WebStr$=Str$(rd.Contract),fdel$ ! Contract #
+	tmp$="PROD" \ if type=2 let tmp$="COMMD"
+	If rd.ProdCode$[1,3]="#  " let tmp$="ALL"
+	WebStr$=WebStr$,tmp$,fdel$ ! type
+	CNVTU[0] = 0;CNVTU[1] = rd.UMRebate;CNVTU[2] = 2;CNVTA = RBCost
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	WebStr$=WebStr$,LTrim$(Amount using PMask$),"/",rbum$,fdel$ ! rbcost / um$
+	If rd.CostType<>4
+		CNVTU[0] = 0;CNVTU[1] = rd.UMCost;CNVTU[2] = 2;CNVTA = RBSLCost
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(Amount using PMask$),"/",scum$,fdel$ ! rbslcost / um$
+	Else ! std
+		WebStr$=WebStr$,"STD COST",fdel$ ! evidently doesn't have it
+	Endif
+	X2=RD.StartDate
+	let tmp$=PDate$(X2) \ if x2=0 let tmp$="NONE"
+	WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! start
+	X2=rd.CancelDate
+	let tmp$=PDate$(X2) \ if x2=0 let tmp$="NONE"
+	WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! End
+	If RHR>0 ! this lines contract
+		WebStr$=WebStr$,RTrim$(crch.ContrDesc$),fdel$ ! contract desc
+	Else ! use main
+		WebStr$=WebStr$,RTrim$(rch.ContrDesc$),fdel$ ! contract desc
+	Endif
+	WebStr$=WebStr$,Str$(rd.Whse),fdel$ ! whse
+	! got Data
+	List$[row]=WebStr$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	
+	if debugdetail
+		dmsg$="Get Contract "+Str$(rd.Contract)+" Line complete "+message$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetRProd
+! 
+!--------------------------------------------------------------------
+Sub GetCOProd(e$,CCC,ctlc,RHC,RBCBASE,PMask$,WebStr$,rd. as rebatedtl,pr. as prod,rch. as rcontracth,debugdetail,debug,dblog$,dmsg$,Userid$)
+! based on prod detail send - get costs
+! add this single line to WebStr$ sent
+  Try
+	Dim LKey$[60],CMKey$[60],Prdf$[12]
+	Dim RBUM$[4],SCUm$[4]
+	Dim tmp$[500],Message$[200],RKey$[60]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10]
+	Dim 1%,Type,PFU1[20],Cnvtu[2]
+	Dim 3%,RBCostBase,BSCostBase
+	Dim 3%,RBCost,SLCost,Amount,Cnvta
+	
+	Dim Crch. as rcontracth
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	ReturnStatus=1
+	Message$="OK"
+	
+	RKey$=" ",RKey$
+	RKey$=rd.Contract using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,crch.)
+	If RHR<0 Clear crch.
+	! RBCBASE = Vendtag rebate cost
+	Type=rd.LineType ! (1=prod, 2=Commod)
+	NonStk=0
+	if type=2 or rd.ProdCode$[1,3]="#  " let NonStk=1
+	! existing list boxes (web hardcode?)
+	! REBATE TYPES: 1=%DISC(-=%MARKUP), 2=$DISC(-=MARKUP), 3=Flat
+	! SLSM COST: 1=%MARKUP(-=DISC), 2=$MARKUP(-=DISC), 3=FLAT, 3=STD
+	! COST BASE: 1=BASE, 2=LOAD, 3=LAST, 4=REBATE, 5=LOAD2(REDI)
+	If NonStk ! commodity - needs PFU1 loaded
+		pfu1[8]=pr.UMStkDefault
+		pfu1[9]=pr.UMSellDefault
+		pfu1[10]=pr.UMPurchDefault
+		pfu1[11]=pr.UMCostDefault
+		pfu1[12]=UMPriceDefault
+		Let x1=rd.UMRebate
+		if x1=0 let x1=11
+		if x1<8 let x1=x1+7 ! in case 1-5
+		rd.UMRebate=pfu1[x1] ! switch to prod u/m
+		x1=rd.UMCost
+		if x1=0 let x1=11
+		if x1<8 let x1=x1+7 ! in case 1-5
+		rd.UMCost=Pfu1[x1] ! to actual prod u/m
+	Endif
+	! 
+	! load detail string
+	If RBCBASE=1 let RBCostBase=pr.CostLoad
+	If RBCBASE=2 let RBCostBase=pr.CostLoad2
+	if RBCBASE=3 let RBCostBase=pr.CostAvg
+	If RBCBase=4 let RBCostBase=pr.CostPO
+	If RBCBase=5 let RBCostBase=pr.CostBase
+	if RBCBase=6 let RBCostBase=pr.CostNetPO
+	If RBCostBase<=0 ! no cost - set
+		let RBCostBase=pr.CostPO
+		let rbcbase=4
+	Endif
+	! calc rabte
+	If rd.RebateType = 1 ! rebate type #1 % discount
+		RBCOST = (RBCostBase * ((100 - rd.RbFactor) / 100))
+	End If 
+	If rd.RebateType = 2 ! rebate type #2 $ discount
+		CNVTU[0] = 0;CNVTU[1] = rd.UMRebate;CNVTU[2] = 2;CNVTA = RBCostBase
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		CNVTA = (AMOUNT - rd.RbFactor);CNVTU[0] = rd.UMRebate;CNVTU[1] = 0
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		RBCOST = AMOUNT
+	End If 
+	If rd.RebateType = 3 ! rebate type #3 flat cost
+		RBCOST = rd.RbFactor
+		If Type = 2 !  commodity code
+			CNVTU[0] = rd.UMRebate;CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = RBCOST
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			RBCOST = AMOUNT
+		End If 
+	End If 
+	If (rd.CostType = 1 Or rd.CostType = 2) ! done after rbcost calc
+  		If rd.CostBase = 1 Let BSCost = pr.CostBase
+		If rd.CostBase = 2 Let BSCost = pr.CostLoad
+		If rd.CostBase = 3 Let BSCost = pr.CostPO
+		If rd.CostBase = 4 Let BSCost = RBCOST
+		If rd.CostBase = 5 Let BSCost = pr.CostLoad2
+	End If 
+	If rd.CostType = 1 ! % mark up/down
+		RBSLCOST = (BSCost * ((100 + rd.CostFactor) / 100))
+	End If 
+	If rd.CostType = 2 ! $ mark up/down
+		CNVTU[0] = 0;CNVTU[1] = rd.UMCost;CNVTU[2] = 2;CNVTA = BSCost
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		CNVTU[0] = rd.UMCost;CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = (AMOUNT + rd.CostFactor)
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		RBSLCOST = AMOUNT
+	End If 
+	If rd.CostType = 3 ! flat cost
+		RBSLCOST = rd.CostFactor
+		If Type = 2 !  commodity code
+			CNVTU[0] = rd.UMCost;CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = RBSLCOST
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			RBSLCOST = AMOUNT
+		End If 
+	End If 
+	If rd.CostType = 4 ! standard cost (use regular default cost)
+		RBSLCOST = 0
+	End If
+	RBUM$=XUnit$(rd.UMRebate,ccc)
+	SCUM$=XUnit$(rd.UMCost,ccc)
+	!WebStr$=Str$(rd.Contract),fdel$ ! Contract #
+	!tmp$="PROD" \ if type=2 let tmp$="COMMD"
+	!If rd.ProdCode$[1,3]="#  " let tmp$="ALL"
+	!WebStr$=WebStr$,tmp$,fdel$ ! type
+	CNVTU[0] = 0;CNVTU[1] = rd.UMRebate;CNVTU[2] = 2;CNVTA = RBCost
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	WebStr$=WebStr$,LTrim$(Amount using PMask$),"/",rbum$,fdel$ ! rbcost / um$
+	If rd.CostType<>4
+		CNVTU[0] = 0;CNVTU[1] = rd.UMCost;CNVTU[2] = 2;CNVTA = RBSLCost
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(Amount using PMask$),"/",scum$,fdel$ ! rbslcost / um$
+	Else ! std
+		WebStr$=WebStr$,"STD COST",fdel$ ! evidently doesn't have it
+	Endif
+	! X2=RD.StartDate
+	! let tmp$=PDate$(X2) \ if x2=0 let tmp$="NONE"
+	! WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! start
+	! X2=rd.CancelDate
+	! let tmp$=PDate$(X2) \ if x2=0 let tmp$="NONE"
+	! WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! End
+	! If RHR>0 ! this lines contract
+	!	WebStr$=WebStr$,RTrim$(crch.ContrDesc$),fdel$ ! contract desc
+	! Else ! use main
+	!	WebStr$=WebStr$,RTrim$(rch.ContrDesc$),fdel$ ! contract desc
+	! Endif
+	! WebStr$=WebStr$,Str$(rd.Whse),fdel$ ! whse
+	! got Data
+	! List$[row]=WebStr$
+	! row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	
+	if debugdetail
+		dmsg$="Get Contract "+Str$(rd.Contract)+" Line complete "+message$ \ Call updatelog(debug,dblog$,dmsg$,Userid$)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetCOProd
+! 
+!--------------------------------------------------------------------
+Function NStkUMT$(e$,X1)
+! translater NonStk UM to text (limit 4 chars)
+! stored in file as 8-12
+ Try
+	tmp$="ERR"
+	If x1=1 or x1=8 let tmp$="STKG"
+	If x1=2 or x1=9 let tmp$="SELL"
+	if x1=3 or x1=10 let tmp$="PURC"
+	if x1=4 or x1=11 let tmp$="COST"
+	if x1=5 or x1=12 let tmp$="PRCE"
+
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function tmp$ ! NStkUMT$
+! 
+!--------------------------------------------------------------------
+
+Function NStkTUM(e$,tmp$)
+! translater NonStk UM text to UM (limit 4 chars)
+! stored in file as 8-12
+ Try
+	X1=8 ! default
+	If tmp$="STKG" let x1=8
+	If tmp$="SELL" let x1=9
+	if tmp$="PURC" let x1=10
+	if tmp$="COST" let x1=11
+	if tmp$="PRCE" let x1=12
+
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function X1 ! NStkTUM
+! 
+!--------------------------------------------------------------------
+Function GetRTDesc$(e$,x1,rd. as rebatedtl)
+! translater - get desc for rebate type
+! REBATE TYPES: 1=%DISC(-=%MARKUP), 2=$DISC(-=MARKUP), 3=Flat
+
+ Try
+	tmp$=""
+	If x1=1 and rd.RbFactor>=0 let tmp$="% DISCOUNT"
+	if x1=1 and rd.RbFactor<0 let tmp$="% MARKUP"
+	If x1=2 and rd.RbFactor>=0 let tmp$="$ DISCOUNT"
+	if x1=2 and rd.RbFactor<0 let tmp$="$ MARKUP"
+	IF X1=3 Let tmp$="FLAT COST"
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function tmp$ ! GetRTDesc$
+! 
+!--------------------------------------------------------------------
+Function GetCTDesc$(e$,x1,rd. as rebatedtl)
+! translater - get desc for cost type
+! SLSM COST: 1=%MARKUP(-=DISC), 2=$MARKUP(-=DISC), 3=FLAT, 4=STD
+	
+ Try
+	tmp$=""
+	If x1=1 and rd.CostFactor<0 let tmp$="% DISCOUNT"
+	if x1=1 and rd.CostFactor>=0 let tmp$="% MARKUP"
+	If x1=2 and rd.CostFactor<0 let tmp$="$ DISCOUNT"
+	if x1=2 and rd.CostFactor>=0 let tmp$="$ MARKUP"
+	IF X1=3 Let tmp$="FLAT COST"
+	if x1=4 let tmp$="STANDARD"
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function tmp$ ! GetCTDesc$
+! 
+!--------------------------------------------------------------------
+Function GetCBDesc$(e$,x1)
+! translater - get desc for slsm cost base
+! COST BASE: 1=BASE, 2=LOAD, 3=LAST, 4=REBATE, 5=LOAD2(REDI)
+ Try
+	tmp$=""
+	If x1=1 let tmp$="BASE COST"
+	if x1=2 let tmp$="LOAD COST"
+	If x1=3 let tmp$="LAST COST"
+	if x1=4 let tmp$="REBATE COST"
+	IF X1=5 Let tmp$="REDI COST"
+	
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function tmp$ ! GetCBDesc$
+! 
+!--------------------------------------------------------------------

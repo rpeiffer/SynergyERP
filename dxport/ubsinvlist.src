@@ -1,0 +1,354 @@
+!Program Name: ubsinvlist
+! loadsave -w -n 100,10 -o prog/dxport/ubsinvlist.dl4 src/ubsinvlist.src
+!                                                  
+!Last Updated:                                     
+!zyc 09/01/04 cct182085 modified path for include  
+!zyc 09/03/04 cct182085 add log file
+!zyc 09/16/04 cct182085 modified logic
+!rce 10/10/05  salesgroup
+!rce 02/22/07 R9 changes
+!
+
+!Declare External Function INXML$
+Declare Sub updatelog, errTrap
+
+Include "src/invars.inc"
+!Dim x$[128],s$[128],bi.[100] as inInfo
+
+!x$=INXML$(1,999,bi.[],ii,s$)
+!If X$<>"" Then
+!	Print "Good!"
+!Else
+!	Print "Booo!"
+!End If
+!END
+!Chain ""
+
+
+External Sub INVList(intCo, intSalesMan, debug, dlog$, tot. as totInfo, iv.[] as inInfo, ii, ss,iLimit, cost_lev[], arrSales[], ...)
+Try 
+	Enter custid
+	Dim custid$[6]
+	custid$ = custid using "######"
+else
+	Dim custid$[6]
+	rem
+end try
+
+Try
+
+Declare Intrinsic Sub dxsave,DXOpen,DXGet,DXSet,DXClose
+Declare Intrinsic Function FindChannel,Trim$
+Declare Intrinsic Sub JulianToDate,DateToJulian
+Declare External Function PDate$,OpenFile, CheckSlsm
+
+External Lib "ubsfunc.dl4"
+
+Include "src/ubsinvoice.inc"
+Include "src/ubsorder.inc"
+Include "src/ubscustomer.inc"
+
+Dim OHK$[12],IDK$[12],IHK$[12],CUK$[12],SMK$[20],P9$[50],P60$[50],P61$[256]
+Dim HKK$[40]
+
+Dim OH. As ORDH
+Dim IH. As INVH
+Dim ID. As INVD
+Dim IT. As INVT
+Dim I2. As INVS2
+Dim CU. As Customer
+
+Dim 1%,debugDetail
+! Variables for Channel#'s
+Dim 2%,IHC,IDC,ITC,ISC,CUC,CTLC,SMC,HKC,ETC
+! Variables for Search Record#
+Dim 3%,IHR,IDR,ITR,ISR,CUR,CTLR,SMR,ETR
+! Variables for Search Error
+Dim 2%,IHE,IDE,ITE,ISE,CUE,CTLE,SME,ETE,E
+
+Dim Sales$[35], Temp$[100], DT1$[10],DT2$[10]
+Dim SLS$[3],CO$[2]
+Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5]
+Dim Msg$[256],pgmName$[20],EnteredBy$[10]
+
+Dim 1%,factor
+Dim 2%,JToday[1], d1[1]
+Dim 2%,t2,LastInvDate, X1,X2
+Dim 2%,Q0[1]
+Dim 3%,TOTCOST,TOTRESALE,totGP,CommAmt,GP
+Dim 3%,tot[10]
+
+debugDetail=0
+pgmName$="ubsinvlist"
+msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+ii=0
+SLS$=intSalesMan Using "###" ! Passed Salesman
+CO$=Str$(intCo) ! Company
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+
+IHC= OpenFile(-1136,intCo)  \ If IHC=-1  Error 42    
+IDC= OpenFile(-1184,intCo)  \ If IDC=-1  Error 42    
+ITC= OpenFile(-1168,intCo)  \ If ITC=-1  Error 42    
+ISC= OpenFile(-1152,intCo)  \ If ISC=-1  Error 42    
+CUC= OpenFile(-1808,intCo)  \ If CUC=-1  Error 42    
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42    
+SMC= OpenFile(-1824,intCo)  \ If SMC=-1  Error 42    
+HKC= OpenFile(-9994,intCo)  \ If HKC=-1  Error 42    !invhkey
+ETC= OpenFile(-1664,intCo)  \ If ETC=-1  Error 42    !entdby
+
+
+Mat Read #CTLC,19,50;P9$;
+Mat Read #CTLC,60,50;P60$;
+Mat Read #CTLC,115,40;Q0; 
+
+
+If not(Q0[1]) let Q0[1]=2                                                       
+Let Dec$="#",Dec$;Qmask$="---,---,--#"                                         
+If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask      
+If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask        
+Let Emask$="-$$$,$$$,$$$,$$$.##"                         !ext. price mask       
+
+
+! For xx=0 to 10
+	! tot[xx]=0
+! Next xx
+Clear tot[] \ TOT[0]=0
+
+If SLS$="999" AND NOT(CUSTID) 
+	Call DXGet("U_FOCUS",custid$) \ custid=custid$
+	if not(custid) goto INEND
+End If
+
+Let LastInvDate=Tim(6)
+If SLS$="999" Let DT2$="ALL"
+Let IHK$=" ",IHK$;IHK$=SLS$+"999999"
+! Let JToday=13122    
+Let JToday=Tim(6)
+! now set JToday[1] for "yesterday"                  
+	Select Case Tim(7)  ! day of the week            
+		Case 0  ! sunday                             
+			JToday[1] = JToday[0] - 2            
+		Case 1  ! Monday                             
+			JToday[1] = JToday[0] - 3            
+		Case 2 To 6  ! Tuesday - Sat.                
+			JToday[1] = JToday[0] - 1            
+End Select                                   
+
+
+mat read #ctlc,0,108;d1;  ! system date
+temp$ = d1[1] using "&&&&&&"
+call datetojulian(1,temp$,temp$,e)
+if not(e) let JToday = temp$
+
+Let HKK$="z",HKK$
+INTOP: Rem================================================invhkey dir 2
+Search #HKC,6,2;HKK$,IHR,E
+If E goto INEND:
+If Val(HKK$[1,6])<JToday and Val(HKK$[1,6])<JToday-1 goto INEND:
+
+If debugDetail
+   msg$="doing...INTop: HKK$="+HKK$+" IHR="+IHR \ Call updatelog(debug)
+   If E msg$="error...Search error "+E  \ Call updatelog(debug) 
+Endif
+Read Record #IHC,IHR; IH.;
+
+if custid and IH.H0[4] <> custid goto INTOP ! cust specific
+
+! Checking salesman
+t2 = IH.H0[11]
+
+If CheckSlsm(arrSales[],intSalesMan, t2) goto SLSPassed  
+! returns 0=failure, 1=success
+
+! old code for checking slsm
+! If intSalesMan=999 goto SLSPassed ! all reps      
+! If arrSales                                       
+	!for counter=0 to 999                          
+		!if arrSales[counter]=t2 goto SLSPassed:
+		!if not(arrSales[counter]) counter=999 ! skip to end 
+	!next counter
+! Endif                                             
+! If intSalesMan=t2 goto SLSPassed:          
+
+goto INTOP  !Security.                               
+
+SLSPassed: !
+! Determine Status
+t2 = IH.H0[0]
+
+If IH.H0[0]=30 then let factor=1
+If IH.H0[0]=31 then let factor=-1
+
+ITR = IH.ORef[5] ! Record Number To Ord Total record.
+
+Read Record #ITC,ITR; IT.;
+
+ISR = IH.ORef[4] ! Record Number For Ship to
+
+Read Record #ISC,ISR; I2.;
+
+
+!=====================Get Customer Info.
+CUK$=IH.H0[4] USING "######"
+Temp$=CUK$
+
+Search #CUC,2,1;CUK$,CUR,CUE
+If CUK$[1,6]<>Temp$ Let CUE=22
+
+!IF CUE Goto INTOP:   ! No Customer On File ??
+If CUE=0 Then
+   Read Record #CUC,CUR;CU.;
+Else
+   Clear CU.
+   CU.A1$[31,60]="-NOF-"
+End If
+
+
+!=====================entered by
+ETR=IH.H5[0];EnteredBy$=" ",EnteredBy$
+
+If ETR=0 Then
+   EnteredBy$="-NOF-"
+Else
+   Mat Read #ETC,ETR,0;EnteredBy$;  
+End If                        
+If Trim$(EnteredBy$) = "" Let EnteredBy$ = "-null-"
+
+!=====================Get SalesMan
+SMK$=IH.H0[11] Using "### "
+Temp$=SMK$
+
+Search #SMC,2,1;SMK$,SMR,SME
+If SMK$[1,4] <> Temp$ Let SME=22
+
+If SME=0 Then
+	Mat Read #SMC,SMR;Sales$[1,30];
+Else
+	Sales$="-NOF-"
+End If
+
+
+!===================Calc Commission dollars?
+CommAmt=0
+! For X1=0 to 4
+  ! If intSalesMan=999 Then
+     ! CommAmt=CommAmt + IH.SCOM[X1]
+  ! Else
+	! If intSalesMan=IH.SLSM[X1] Then
+     	! CommAmt=CommAmt + IH.SCOM[X1]
+	! end if
+  ! End If
+! Next X1
+
+For X1=0 to 4
+  If CheckSlsm(arrSales[],intSalesMan,IH.SLSM[X1]) CommAmt=CommAmt+IH.SCOM[X1]
+Next X1
+
+TOTCOST=TOTCOST+(IT.T2[17]+IT.T2[20]+IT.tot[0])*factor
+TOTRESALE=TOTRESALE+(IT.T2[1]*factor)
+
+! If IT.T2[1] Then
+  ! GP=100*((IT.T2[1]-(IT.T2[17]+IT.T2[20]+IT.tot[0]))/IT.T2[1])
+
+If IH.H5[13] Then
+  GP = ((ih.h5[13] - ih.h5[14]) / ih.h5[13]) * 100
+Else
+  GP=0
+End If
+
+
+if ii < iLimit Then
+  iv.[ii].SalesMan$=Str$(IH.H0[11])+" "+Sales$
+  iv.[ii].CustID$=Str$(IH.H0[4])
+  iv.[ii].CustName$=CU.A1$[31,60]
+  IF IHE Then
+    iv.[ii].OrderNo$="NOF"+Str$(IH.H0[7]) ! Order not on File, no clicky clicky
+  Else
+    iv.[ii].OrderNo$=Str$(IH.H0[7])
+  End If
+  iv.[ii].InvoiceNo$=Str$(IH.ORef[1])
+  iv.[ii].InvDate$=PDate$(IH.H0[8])
+  iv.[ii].Amount$=IT.T2[1]*factor Using "-,---,---.##"
+  iv.[ii].Tax$=IT.T2[7]*factor Using "-,---,---.##"
+  iv.[ii].Freight$=IT.T2[5]*factor Using "-,---,---.##"
+  iv.[ii].TInvoice$=IT.T2[0]*factor Using Emask$   !"-,---,---.##"
+  iv.[ii].Misc$=IT.T2[4]*factor Using "-,---,---.##"
+  if cost_lev[1]
+  	iv.[ii].Cost$=(IT.T2[17]+IT.T2[20]+IT.tot[0])*factor Using "-,---,---.##"
+  	iv.[ii].Profit$=(IT.T2[1]-(IT.T2[17]+IT.T2[20]+IT.tot[0]))*factor Using "-,---,---.##"
+  	iv.[ii].TGPP$=GP*factor Using "----#.##%"
+  else
+  	iv.[ii].Cost$=" "
+  	iv.[ii].Profit$=" "
+  	iv.[ii].TGPP$=" "
+  endif
+  iv.[ii].Commission$=CommAmt*factor Using "-,---,---.##"
+  iv.[ii].RPTDate$=DT2$
+  iv.[ii].EnteredBy$=EnteredBy$
+  iv.[ii].CustPO$=IH.po$
+  ii=ii+1
+Else
+  Goto INEnd:
+End If
+
+!accumulate total       
+tot[0] = tot[0]+IT.T2[1]*factor              !amount
+tot[1] = tot[1]+IT.T2[7]*factor              !tax 
+tot[2] = tot[2]+IT.T2[5]*factor              !freight           
+tot[3] = tot[3]+IT.T2[4]*factor              !misc
+tot[4] = tot[4]+IT.T2[0]*factor              !total
+! tot[5] = tot[5]+(IT.T2[17]+IT.T2[20]+IT.tot[0])*factor             !cost
+! tot[6] = tot[6]+(IT.T2[1]-(IT.T2[17]+IT.T2[20]+IT.tot[0]))*factor  !profit
+! If IT.T2[1] totgp=((IT.T2[1]-(IT.T2[17]+IT.T2[20]+IT.tot[0]))*factor*100)/IT.T2[1] else totgp=0 
+
+tot[5] = tot[5]+ih.h5[14]
+tot[6] = tot[6]+(ih.h5[13] - ih.h5[14])
+If IH.H5[13] TOTGP = ((ih.h5[13] - ih.h5[14]) / ih.h5[13]) * 100 Else TOTGP=0
+tot[7] = tot[7]+totgp                        !gp 
+tot[8] = tot[8]+CommAmt*factor               !comm
+!
+tot.totamount$  = tot[0] Using Emask$             
+tot.tottax$     = tot[1] Using Emask$                
+tot.totfreight$ = tot[2] Using Emask$          
+tot.totmisc$    = tot[3] Using Emask$               
+tot.tottotal$   = tot[4] Using Emask$ 
+if cost_lev[1]
+	tot.totcost$    = tot[5] Using Emask$              
+	tot.totprofit$  = tot[6] Using Emask$ 
+	tot.totgp$      = tot[7] Using "----#.##"                        
+else
+	tot.totcost$    = " "
+	tot.totprofit$  = " "
+	tot.totgp$      = " "
+endif
+tot.totcomm$    = tot[8] Using Emask$          
+
+Goto INTop:
+
+
+INEnd: !==============================================
+Close #IHC,#IDC,#ITC,#ISC,#CUC,#CTLC,#SMC,#ETC
+msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+ss=0
+Exit Sub
+Else
+  Temp$=""
+  Call errTrap(pgmName$)
+End Try
+
+Sub updatelog(debug)                                        
+  If not(debug) Exit Sub                                    
+  System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub       
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+
+ss=0
+!ss=spc(10)
+End Sub
+

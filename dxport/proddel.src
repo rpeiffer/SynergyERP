@@ -1,0 +1,1376 @@
+! >>> Program proddel
+!
+! description Check if product is used (& delete) 
+!
+! loadsave -w -n 100,10 -o prog/dxport/proddel.dl4 src/proddel.src
+!
+! 1.0 mm/dd/yyyy change??
+!
+include "src/copyright.inc" ! dx
+include "src/inc/sql_prod.inc" ! SQL defintions
+!
+Rem MX671E1 - Product Activity Check (CHECK ONLY IF J0=-1)
+Rem Date: 05/11/95 - Most of Files Check - Called Program
+Rem from mxproddel/mx671e1  - ALSO USED FOR BASE UM CHANGE CHECK
+! CUSTOM CHANGES FOR W.E. NELSON - new files/dirs
+! J0=mode  -1=chk if Base um (exit on 1st one found)
+!		  -11=Product Delete (prod maint)
+!		   -9=Audit Only (as in 921-does all range checks there!)
+!			0=Range Delete
+! prod$ = product code, k1=Prod Rec (neg=delete nonvital) (MUST HAVE!)
+! tmp$ = string that holds where used files
+! ch[] = 0=Coid #, 1=Cntrl fle, 
+! E$, rstr$ = web variables
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: OCT 26, 2000  12:19:21
+Rem /usr/acct/r97//usr/acct/zyc/work/devl/mx/mx671e1.src (univ2) [zyc] {24204}
+Rem  Copyright (c) 2000 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+Declare Intrinsic Sub InpBuf,Logic,String,getglobals,env,programdump
+Declare Intrinsic Sub dxopen,dxget,dxset,dxclose,dxsave,DatetoJulian
+Declare Intrinsic Sub FindF
+Declare Intrinsic function findchannel
+External Lib "libgeneral.lib" !general routines
+  Declare External Sub suberr,mainerr,getsession,setoutput,addtostr,CreateNetStatus
+  Declare External Function getmsg$,expandarray
+External Lib "ubsfunc.dl4"
+	Declare External Function OpenMySQLMirror
+! Option Default Dialect IRIS1
+
+If Err 0 Gosub ERR_TRAP
+Enter J0,PROD$,K1,Tmp$,CH[],e$,rstr$
+let delnv=0
+If K1<0 let delnv=1;k1=Abs(k1) ! if <0 wants nonvital deleted
+If K1 <= 0 Let J0 = 9 \ Goto OUTEND
+If J0 = -1 Let Edit_Flag = 1 ! as a check only (FOR Base Chg)
+If J0=-11 let ProdMnt=1
+If J0=-9 let AuditO=1
+let coid=ch[0]
+
+J0 = 1
+Dim nextblockid$[8],Message$[400],WebStr$[600],msg$[100]
+Dim buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp1$[2000],custom_customer$[30],BLANK$[100]
+Dim KEY0$[80],KEY1$[80],KEY2$[80],KEY3$[80],KEY4$[80],WORK$[60]
+Dim FILE$[16],A$[156],P9$[50],P60$[50],D$[8],D1$[8],K18$[80]
+DIM K32$[14],K33$[16],K34$[32],CNAME$[30],PICK$[1],PMASK$[12]         
+DIM J$[40],J0$[15],J1$[75],J4$[75],J5$[75],F4$[50],K6$[50],OLDK6$[50] 
+DIM K1$[14],K2$[80],K3$[80],K31$[80],K4$[34],K5$[20],R$[5],P1$[12]    
+DIM T9$[25],W1$[32],X$[20],Z$[50],ANS$[10],F$[80],J7$[80]             
+DIM DESC1$[30],DESC2$[30],DESC$[31],P61$[256],PKYW$[450],lp$[12]
+dim prodid$[35],REFK1$[50],REFK2$[50],REFK3$[50],REFK4$[50]
+DIM FSKEY$[30],SN$[224],REASON$[40],PRODKEY$[12],KEY5$[80],l1$[20]
+Dim WK$[40],WK1$[40],WRDKEY$[50],SPACE$[40],WORD$[20]
+Dim 1%,FLE[60],FOUND,FOUND1,CH_PROD,CH_SALE,CH_CNTRL,WORK1
+Dim 1%,X,L3[3],CH_WORK,REC5,WHSE,W1[2],Z3[190]
+Dim 2%,POS0,DIR,B[24],WORK2,E,X2[99],FndFile[60],RB1[5],w2[9]
+Dim 3%,WREC,REC_PROD,A[33],WORK3,S1[12,2],R[99],P3[4],LPType,LPC4[3]
+
+dim sql_prod. as sql_prod
+BLANK$=" ",BLANK$
+! If K1 Print @0,22;'CL';"Checking for Activity, Please Wait. ." \ Signal 3,0
+!If Err 0 Rem
+For X = 2 to 50 ! 31 To 50
+  Try Close #X Else Rem
+Next X
+If Err 0 Gosub ERR_TRAP
+let e$=""
+CH_CNTRL = CH[1];CH_PROD = CH[2];CH_SALE = ch[3]
+LET COID=CH[0];IntCo=Ch[0]
+Mat Read #CH_CNTRL,19,50;P9$;
+Mat Read #CH_CNTRL,60,60;P60$;
+Mat Read #CH_CNTRL,61,0;P61$;
+mat read #CH_CNTRL,115,60;custom_customer$;
+custom_customer$=UCASE$(Trim$(custom_customer$))
+! If Not(Edit_Flag) ! need additional files opened
+	 LET CH_IHIST=12
+	 LET WHCHAN=11
+	 LET CH_PWSLS=13
+	 LET ALTVEND=14
+	 LET ALTITEM=15
+	 LET CH_PWRDK=20
+	 FOR X=2 TO 12
+	   READ J \ IF J=-1 GOTO READ_NEXT:
+	   READ #Ch_cntrl,88,J;J$[1,16];
+	   OPEN #X,J$
+	 READ_NEXT: NEXT X
+	 Data "1792","1104","-1","-1","-1","-1","-1","2080","1696","1744","2304"
+
+	 LET F$="4/PWSALES"+STR$(COID) \ OPEN #CH_PWSLS,F$
+	 READ #1,88,1568;F$[1,16]; \ OPEN #ALTVEND,F$
+	 READ #1,88,2352;F$[1,16]; \ OPEN #ALTITEM,F$
+	 ch_prod=2;ch_sale=9
+! Endif
+Goto FLEDONE
+FLEGRP1: Rem "First Group of 10 Files to Check
+Read #CH_CNTRL,88,208;FILE$; \ Ropen #31,FILE$ \ FLE[1] = 31
+Read #CH_CNTRL,88,320;FILE$; \ Ropen #32,FILE$ \ FLE[2] = 32
+Read #CH_CNTRL,88,416;FILE$; \ Ropen #33,FILE$ \ FLE[3] = 33
+Read #CH_CNTRL,88,512;FILE$; \ Ropen #34,FILE$ \ FLE[4] = 34
+Read #CH_CNTRL,88,528;FILE$; \ Ropen #35,FILE$ \ FLE[5] = 35
+Read #CH_CNTRL,88,544;FILE$; \ Ropen #36,FILE$ \ FLE[6] = 36
+Read #CH_CNTRL,88,576;FILE$; \ Ropen #37,FILE$ \ FLE[7] = 37
+Read #CH_CNTRL,88,592;FILE$; \ Ropen #38,FILE$ \ FLE[8] = 38
+Read #CH_CNTRL,88,640;FILE$; \ Ropen #39,FILE$ \ FLE[9] = 39
+Read #CH_CNTRL,88,656;FILE$; \ Ropen #40,FILE$ \ FLE[10] = 40
+Return 
+FLEGRP2: Rem "Second group of 10 Files
+Read #CH_CNTRL,88,704;FILE$; \ Ropen #31,FILE$ \ FLE[11] = 31
+Read #CH_CNTRL,88,1184;FILE$; \ Ropen #32,FILE$ \ FLE[12] = 32
+if custom_customer$="ZEPHYR" let FLE[12]=0 ! do not check invh L		! "cct168610
+Read #CH_CNTRL,88,1344;FILE$; \ Ropen #33,FILE$ \ FLE[13] = 33
+Read #CH_CNTRL,88,1360;FILE$; \ Ropen #34,FILE$ \ FLE[14] = 34
+Read #CH_CNTRL,88,1376;FILE$; \ ROpen #35,File$ \ FLE[15]=35
+Read #CH_CNTRL,88,1568;FILE$; \ Ropen #36,FILE$ \ FLE[16] = 36
+Read #CH_CNTRL,88,1648;FILE$; \ Ropen #37,FILE$ \ FLE[17] = 37
+Read #CH_CNTRL,88,1888;FILE$; \ Ropen #38,FILE$ \ FLE[18] = 38
+Read #CH_CNTRL,88,1904;FILE$; \ Ropen #39,FILE$ \ FLE[19] = 39
+Read #CH_CNTRL,88,1936;FILE$; \ Ropen #40,FILE$ \ FLE[20] = 40
+Return 
+FLEGRP3: Rem "Third group of 10 files
+Read #CH_CNTRL,88,2016;FILE$; \ Ropen #31,FILE$ \ FLE[21] = 31
+Read #CH_CNTRL,88,2320;FILE$; \ Ropen #32,FILE$ \ FLE[22] = 32
+Read #CH_CNTRL,88,2336;FILE$; \ Ropen #33,FILE$ \ FLE[23] = 33
+Read #CH_CNTRL,88,2352;FILE$; \ Ropen #34,FILE$ \ FLE[24] = 34
+Read #CH_CNTRL,88,2432;FILE$; \ Ropen #35,FILE$ \ FLE[25] = 35
+Read #CH_CNTRL,88,2512;FILE$; \ Ropen #36,FILE$ \ FLE[26] = 36
+Read #CH_CNTRL,88,2528;FILE$; \ Ropen #37,FILE$ \ FLE[27] = 37
+Read #CH_CNTRL,88,2576;FILE$; \ Ropen #38,FILE$ \ FLE[28] = 38
+Read #CH_CNTRL,88,2912;FILE$; \ Ropen #39,FILE$ \ FLE[29] = 39
+If P60$[9,9] <> "N"
+  Read #CH_CNTRL,88,3008;FILE$; \ Ropen #40,FILE$ \ FLE[30] = 40
+Else 
+  FLE[30] = 0
+End If 
+Return 
+FLEGRP4: Rem "Open Fourth Group of 10 Files
+LET FILE$="4/SPOFLELH"+Str$(coid) \ LET R[31]=0 
+CALL Findf(FILE$,R[31])
+IF R[31]
+  ROPEN #41,FILE$ \ LET FLE[31]=41
+ENDIF
+IF P61$[60,60]="Y"
+  LET FILE$="4/FIFOSPC"+Str$(COID) \ LET R[32]=0
+  CALL Findf(FILE$,R[32])
+  IF R[32]
+    OPEN #42,FILE$ \ LET FLE[32]=42
+  ELSE
+    LET FLE[32]=0;R[32]=0
+  ENDIF
+ELSE
+  LET FLE[32]=0;R[32]=0
+ENDIF
+
+Return 
+FLEGRP5: Rem "Open fifth Group of 10 Files
+Return
+FLEDONE: Rem "DONE opening files (Hopefully All Opened)
+!
+sqlChan = OpenMySQLMirror(e$)
+!
+If Err 0 Gosub ERR_TRAP
+Reason$="" ! start at null - add as we go!
+PRODREAD: Rem "Read SOME of the Product File
+REC_PROD = K1;FOUND = 0;FOUND1 = 0
+Mat Read #CH_PROD,REC_PROD,0;A$;
+Mat Read #CH_PROD,REC_PROD,156;B;
+Mat Read #CH_PROD,REC_PROD,256;A;
+!if custom_customer$="WENELSON" ! per ERR - everyone if file is built
+	READ #CH_Prod,Rec_prod,1436;PRODID$;
+	prodid$=prodid$+BLANK$ ! FILL TO 35
+!Endif
+! NOTE - no condition check like native (sold & entry dates)
+If PROD$[1,1] = "" Or PROD$[1,5] = "     " Let PROD$ = A$[140,151]
+REASON$ = "PROD MASTER SALES";DISP_NUM=1792
+For X = 7 To 17
+  If A[X] Let FOUND1 = 9 \ Goto PRODDONE
+Next X
+For X = 30 To 33
+  If A[X] Let FOUND1 = 9 \ Goto PRODDONE
+Next X
+PRODDONE: Rem "Done With Master File Check
+If FOUND1
+  Gosub PRNT_EXCPT
+  FOUND = FOUND + 1
+  if EDIT_FLAG Goto CHKDONE
+End If 
+If REC_PROD < Chf(CH_SALE) ! "evidently to avoid err 51
+  FOUND1 = 0
+  Mat Read #CH_SALE,REC_PROD,16;S1;
+  REASON$ = "PRODUCT SALES";DISP_NUM=2080
+  For X = 0 To 12
+    If S1[X,0] Or S1[X,1] Or S1[X,2] Let FOUND1 = 9
+  Next X
+  Mat Read #CH_SALE,REC_PROD,256;S1;
+  For X = 0 To 12
+    If S1[X,0] Or S1[X,1] Or S1[X,2] Let FOUND1 = 9
+  Next X
+  If FOUND1
+    Gosub PRNT_EXCPT
+    FOUND = FOUND + 1
+    if Edit_Flag Goto CHKDONE
+  End If 
+End If 
+For X = 31 To 50
+!  If Err 0 Rem
+  Try Close #X Else Rem
+Next X
+If Err 0 Gosub ERR_TRAP
+Gosub FLEGRP1
+If FLE[1] > 0 If Edit_Flag = 0 ! "only check if deleting
+  REASON$ = "PRODUCT LOCATIONS"
+  CH_WORK = FLE[1];FOUND1 = 0;DISP_NUM=208
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[2] > 0
+  REASON$ = "REBATE LINES"
+  CH_WORK = FLE[2];FOUND1 = 0;DISP_NUM=320
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[3] > 0
+  REASON$ = "SERIAL NUMBERS"
+  CH_WORK = FLE[3];FOUND1 = 0;DISP_NUM=416
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[4] > 0
+  REASON$ = "WORK ORDER FILE"
+  CH_WORK = FLE[4];FOUND1 = 0;DISP_NUM=512
+  DIR = 3 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[5] > 0
+  REASON$ = "WORK ORDER LINE"
+  CH_WORK = FLE[5];FOUND1 = 0;DISP_NUM=528
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[6] > 0
+  REASON$ = "WORK ORDER HISTORY"
+  CH_WORK = FLE[6];FOUND1 = 0;DISP_NUM=544
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[7] > 0
+  REASON$ = "TESTING B.O.M."
+  CH_WORK = FLE[7];FOUND1 = 0;DISP_NUM=576
+  DIR = 1;REC5 = 1 \ Gosub CHKDIRREC
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+  DIR = 2;REC5 = 1 \ Gosub CHKDIRREC
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+  REC5 = 0
+End If 
+If FLE[8] > 0
+  REASON$ = "MACHINE SCHEDULE"
+  CH_WORK = FLE[8];FOUND1 = 0;DISP_NUM=592
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[9] > 0
+  REASON$ = "SCHEDULE MASTER"
+  CH_WORK = FLE[9];FOUND1 = 0;DISP_NUM=640
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[10] > 0
+  REASON$ = "BILL OF MATERIAL"
+  CH_WORK = FLE[10];FOUND1 = 0;DISP_NUM=656
+  DIR = 1;REC5 = 1 \ Gosub CHKDIRREC
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+  DIR = 2;REC5 = 1 \ Gosub CHKDIRREC
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+  REC5 = 0
+End If 
+For X = 31 To 50
+  !If Err 0 Rem
+  Try Close #X Else REM
+Next X
+If Err 0 Gosub ERR_TRAP
+Gosub FLEGRP2
+If FLE[11] > 0
+  REASON$ = "PHYSICAL TAG FILE"
+  CH_WORK = FLE[11];FOUND1 = 0;DISP_NUM=704
+  DIR = 2;REC5 = 1 \ Gosub CHKDIRWHSE
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+  REC5 = 0
+End If 
+If FLE[12] > 0  ! Zephyr has custom FLE[12]=0 ! no check dd 168610
+  REASON$ = "INVOICE LINE HISTORY"
+  CH_WORK = FLE[12];FOUND1 = 0;DISP_NUM=1184
+  DIR = 2 \ Gosub CHKDIRREC
+  If FOUND1
+    Mat Read #CH_WORK,WREC,8;L3;
+    mat read #ch_work,wrec,140;l1$;
+	if l3[0]=0 and l1$[1,12]=prod$[1,12] goto gotil:
+    rem If L3[0]
+NXTIL: Rem "Next Invoice Line
+      Search #CH_WORK,3,DIR;KEY0$,WREC,E \ If E = 2 Goto ILDONE
+      If E Gosub ERR_SEARCH
+      X2 = KEY0$[1,6] \ If X2 <> REC_PROD Goto ILDONE
+      Mat Read #CH_WORK,WREC,8;L3;
+	  mat read #ch_work,wrec,140;l1$;
+	  if l3[0]=0 and l1$[1,12]=prod$[1,12] goto gotil:
+      Goto NXTIL
+     rem Goto GOTIL
+ILDONE: Rem "Done Must ALL Be NonStock
+      FOUND1 = 0;FOUND = FOUND - 1
+    End If 
+GOTIL: Rem "Done Let Found1 Fall where it may
+  rem End If 
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[13] > 0
+  REASON$ = "QUOTE LINES"
+  CH_WORK = FLE[13];FOUND1 = 0;DISP_NUM=1344
+  DIR = 2 \ Gosub CHKDIRREC
+  If FOUND1
+    Mat Read #CH_WORK,WREC,8;L3;
+    If L3[0]
+NXTQL: Rem "Next Quote Line
+      Search #CH_WORK,3,DIR;KEY0$,WREC,E \ If E = 2 Goto QLDONE
+      If E Gosub ERR_SEARCH
+      X2 = KEY0$[1,6] \ If X2 <> REC_PROD Goto QLDONE
+      Mat Read #CH_WORK,WREC,8;L3;
+      If L3[0] Goto NXTQL
+      Goto GOTQL
+QLDONE: Rem "Done Must ALL Be NonStock
+      FOUND1 = 0;FOUND = FOUND - 1
+    End If 
+GOTQL: Rem "Done Let Found1 Fall where it may
+  End If 
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[14] > 0
+  REASON$ = "TRANSFER LINES"
+  CH_WORK = FLE[14];FOUND1 = 0;DISP_NUM=1360
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[15] > 0 ! "If ANYONE can Figure a Quick way of Checking - INSERT HERE
+  REASON$ = "LAST PRICE"
+  CH_WORK = FLE[15];FOUND1 = 0;DISP_NUM=1376
+  Search #CH_WORK,1,5;KEY0$,LPDIR5,E
+  If Not(E) Let LPDIR5 = 1
+  If E Let LPDIR5 = 0
+  
+  If LPDIR5
+    DIR = 5 \ Gosub ChkDirlastp ! CHKDIR
+	If Found1 
+		Gosub Prnt_Excpt
+		let found=found+1
+	endif
+  End If 
+  If FOUND1 and edit_Flag goto CHKDONE ! Gosub PRNT_EXCPT
+End If 
+If FLE[16] > 0
+  REASON$ = "ALTERNATE VENDOR"
+  CH_WORK = FLE[16];FOUND1 = 0;DISP_NUM=1568
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[17] > 0
+  REASON$ = "DEPT SALES"
+  CH_WORK = FLE[17];FOUND1 = 0;DISP_NUM=1648
+  DIR = 6 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[18] > 0
+  REASON$ = "ORDER LINES"
+  CH_WORK = FLE[18];FOUND1 = 0;DISP_NUM=1888
+  DIR = 2 \ Gosub CHKDIRREC
+  If FOUND1
+    Mat Read #CH_WORK,WREC,8;L3;
+    If L3[0]
+NXTOL: Rem "Next Order Line
+      Search #CH_WORK,3,DIR;KEY0$,WREC,E \ If E = 2 Goto OLDONE
+      If E Gosub ERR_SEARCH
+      X2 = KEY0$[1,6] \ If X2 <> REC_PROD Goto OLDONE
+      Mat Read #CH_WORK,WREC,8;L3;
+      If L3[0] Goto NXTOL
+      Goto GOTOL
+OLDONE: Rem "Done Must ALL Be NonStock
+      FOUND1 = 0;FOUND = FOUND - 1
+    End If 
+GOTOL: Rem "Done Let Found1 Fall where it may
+  End If 
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[19] > 0
+  REASON$ = "LOST SALES FILE"
+  CH_WORK = FLE[19];FOUND1 = 0;DISP_NUM=1904
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[20] > 0
+  REASON$ = "SPECIAL/CONTRACT PRICE"
+  CH_WORK = FLE[20];FOUND1 = 0;DISP_NUM=1936
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+For X = 31 To 50
+  !If Err 0 Rem
+  Try Close #X Else REM
+Next X
+If Err 0 Gosub ERR_TRAP
+Gosub FLEGRP3
+If FLE[21] > 0
+  REASON$ = "PROD/CUST/WHSE SALES"
+  CH_WORK = FLE[21];FOUND1 = 0;DISP_NUM=2016
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if Edit_Flag Goto CHKDONE
+End If 
+If FLE[22] > 0
+  REASON$ = "LOT ALLOCATION"
+  CH_WORK = FLE[22];FOUND1 = 0;DISP_NUM=2320
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if EDIT_FLAG Goto CHKDONE
+End If 
+If FLE[23] > 0
+  REASON$ = "PROD/VEND PURCHASES"
+  CH_WORK = FLE[23];FOUND1 = 0;DISP_NUM=2336
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if EDIT_FLAG Goto CHKDONE
+End If 
+If FLE[24] > 0 If EDIT_FLAG = 0 ! "only check if deleting
+  REASON$ = "ALTERNATE ITEM CODES"
+  CH_WORK = FLE[24];FOUND1 = 0;DISP_NUM=2352
+  If FOUND1 Gosub PRNT_EXCPT \ if EDIT_FLAG Goto CHKDONE
+End If 
+If FLE[25] > 0
+  REASON$ = "P.O. LINES"
+  CH_WORK = FLE[25];FOUND1 = 0;DISP_NUM2=2432
+  DIR = 2 \ Gosub CHKDIRREC
+  If FOUND1
+    Mat Read #CH_WORK,WREC,0;L3;
+    Call Logic(1,2 ^ 0,L3[3],NONSTOCK)
+    If NONSTOCK
+NXTPL: Rem "Next Purchase Line
+      Search #CH_WORK,3,DIR;KEY0$,WREC,E \ If E = 2 Goto PLDONE
+      If E Gosub ERR_SEARCH
+      X2 = KEY0$[1,6] \ If X2 <> REC_PROD Goto PLDONE
+      Mat Read #CH_WORK,WREC,0;L3;
+      Call Logic(1,2 ^ 0,L3[3],NONSTOCK)
+      If NONSTOCK Goto NXTPL
+      Goto GOTPL
+PLDONE: Rem "Done Must ALL Be NonStock
+      FOUND1 = 0;FOUND = FOUND - 1
+    End If 
+GOTPL: Rem "Done Let Found1 Fall where it may
+  End If 
+  If FOUND1 Gosub PRNT_EXCPT \ if EDIT_FLAG Goto CHKDONE
+End If 
+If FLE[26] > 0
+  REASON$ = "INVENTORY TRANSACTIONS"
+  CH_WORK = FLE[26];FOUND1 = 0;DISP_NUM=2512
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if EDIT_FLAG Goto CHKDONE
+End If 
+If FLE[27] > 0
+  REASON$ = "PRODUCT INVENTORY LOT"
+  CH_WORK = FLE[27];FOUND1 = 0;DISP_NUM=2528
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if EDIT_FLAG Goto CHKDONE
+End If 
+If FLE[28] > 0
+  REASON$ = "BACK ORDER WORK"
+  CH_WORK = FLE[28];FOUND1 = 0;DISP_NUM=2576
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if EDIT_FLAG Goto CHKDONE
+End If 
+If FLE[29] > 0
+  REASON$ = "SUBSTITUTE HISTORY"
+  CH_WORK = FLE[29];FOUND1 = 0;DISP_NUM=2912
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if EDIT_FLAG Goto CHKDONE
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT \ if EDIT_FLAG Goto CHKDONE
+End If 
+If FLE[30] > 0
+  REASON$ = "FIFO/LIFO FILES"
+  CH_WORK = FLE[30];FOUND1 = 0;DISP_NUM=3008
+  DIR = 1 \ Gosub CHKDIR 
+  If FOUND1 Gosub PRNT_EXCPT \ if EDIT_FLAG Goto CHKDONE
+End If 
+For X = 31 To 50
+  ! If Err 0 Rem
+  Try Close #X Else REM
+Next X
+If Err 0 Gosub ERR_TRAP
+Gosub FLEGRP4
+IF FLE[31]>0
+  LET REASON$="PO/DM HISTORY LINES"
+  LET REC8=1
+  LET CH_WORK=FLE[31];FOUND1=0;DISP_NUM=-2432
+  LET DIR=2 \ GOSUB CHKDIRREC:
+  IF FOUND1
+    MAT  READ #CH_WORK,WREC,0;L3;
+    Call Logic(1,2 ^ 0,L3[3],NONSTOCK)
+    IF NONSTOCK
+NXTPLH: REM "Next Purchase Line history
+      SEARCH #CH_WORK,3,DIR;KEY0$,WREC,E \ IF E=2 GOTO PLHDONE:
+      IF E GOSUB ERR_SEARCH:
+      LET X3=KEY0$[1,8] \ IF X3<>REC_PROD GOTO PLHDONE:
+      MAT  READ #CH_WORK,WREC,0;L3;
+      Call Logic(1,2 ^ 0,L3[3],NONSTOCK)
+      IF NONSTOCK GOTO NXTPLH:
+      GOTO GOTPLH:
+PLHDONE: REM "Done Must ALL Be NonStock
+      LET FOUND1=0;FOUND=FOUND-1
+      !LET FNDFILE[FOUND+1]=0
+    ENDIF
+	GOTPLH: REM "Done Let Found1 Fall where it may
+  ENDIF
+  If FOUND1 Let REASON$ = "PO/DM ->HISTORY<- LINES. PO # ",KEY0$[9,14]
+  If FOUND1 Gosub PRNT_EXCPT \ if EDIT_FLAG Goto CHKDONE
+ENDIF
+If FLE[40] > 0
+  REASON$ = "Because"
+  CH_WORK = FLE[31];FOUND1 = 0
+  If FOUND1 Gosub PRNT_EXCPT \ if EDIT_FLAG Goto CHKDONE
+End If 
+FOR X=31 TO 50
+  Try CLOSE #X Else Rem
+NEXT X        
+GOSUB FLEGRP5:
+Goto CHKDONE
+CHKDIR: Rem "Check The PROD CODE IN THE SPECIFIED DIRECTORY (1ST CHARS)
+KEY0$ = " ",KEY0$;E = 0;FOUND1 = 0;KEY0$ = PROD$
+Search #CH_WORK,2,DIR;KEY0$,WREC,E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Return 
+SHOFOUND: Rem "Set Found1 & Increment Found
+FOUND1 = 9;FOUND = FOUND + 1
+FNDFILE[FOUND]=DISP_NUM
+Return 
+CHKDIRREC: Rem "Check Product Record in the Specified Directory (1st Chars)
+KEY0$ = " ",KEY0$;E = 0;FOUND1 = 0;KEY0$ = REC_PROD Using "######"
+If REC5 Let KEY0$ = " ",KEY0$;KEY0$ = REC_PROD Using "#####"
+IF REC8 LET KEY0$=" ",KEY0$;KEY0$=REC_PROD USING "########"
+Search #CH_WORK,2,DIR;KEY0$,WREC,E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Return 
+Goto SHOFOUND
+CHKDIRWHSE: Rem "Check PRod Code After Whse in First 2 Chars
+For WHSE = 1 To 99
+  KEY0$ = " ",KEY0$;E = 0;FOUND1 = 0;KEY0$[1,2] = WHSE Using "##"
+  If Not(REC5) Let KEY0$[3] = PROD$
+  If REC5 Let KEY0$[3] = REC_PROD Using "######"
+  Search #CH_WORK,2,DIR;KEY0$,WREC,E \ If E > 1 Gosub ERR_SEARCH
+  If E = 0 Goto SHOFOUND
+Next WHSE
+Return 
+ChkDirlastp: ! "Check The PROD CODE IN THE SPECIFIED DIRECTORY (1ST CHARS)
+!! IF KEY MATCHES, CK DATA TO DETER IF NON-STOCK & VEN ITEM # OR ACT PROD
+LET KEY0$=" ",KEY0$;E=0;Found1=0;Key0$=Prod$
+Search #CH_Work,2,Dir;Key0$,WRec,E \ IF E>1 Gosub Err_Search:
+If E=1 Return
+Mat Read #CH_Work,Wrec,140;LPC4;
+mat read #ch_work,wrec,0;LP$;
+!! WE WANT IT TO NOT ALLOW A DELETE IF EITHER CONDITION EXISTS
+if LPC4[3]=0 OR LP$[1,12]=prod$[1,12] goto SHOFOUND:
+! not first - check all for prod?
+LPLOOP: REM "Loop Thru  Lines for Product
+Search #CH_Work,3,Dir;Key0$,WRec,E 
+IF E=2 RETURN  !PRODUCT NOT FOUND
+IF E GOSUB ERR_SEARCH:
+IF KEY0$[1,12]<>PROD$[1,12] RETURN  !PRODUCT NOT FOUND
+Mat Read #CH_Work,Wrec,140;LPC4;
+mat read #ch_work,wrec,0;LP$;
+!! WE WANT IT TO NOT ALLOW A DELETE IF EITHER CONDITION EXISTS
+if LPC4[3]=0 OR LP$[1,12]=prod$[1,12] goto SHOFOUND:
+GOTO LPLOOP:
+CHKVITAL: REM "Check if the Found files can be safely deleted    
+LET VITALFLE=0                                                   
+FOR WORK1=0 TO 50                                                
+  IF FNDFILE[WORK1] LET VITALFLE=1                               
+  IF FNDFILE[WORK1]=208 LET VITALFLE=0                           
+  IF FNDFILE[WORK1]=320 LET VITALFLE=0                           
+  IF FNDFILE[WORK1]=416 LET VITALFLE=0                           
+  IF FNDFILE[WORK1]=1648 LET VITALFLE=0                          
+  IF FNDFILE[WORK1]=1904 LET VITALFLE=0                          
+  IF FNDFILE[WORK1]=1936 LET VITALFLE=0                          
+  IF FNDFILE[WORK1]=2016 LET VITALFLE=0                          
+  IF FNDFILE[WORK1]=2336 LET VITALFLE=0                          
+  IF FNDFILE[WORK1]=2512 LET VITALFLE=0                          
+  IF FNDFILE[WORK1]=2528 !"must have zero balance                
+    LET VITALFLE=0                                               
+    READ #CH_CNTRL,88,2528;FILE$; \ ROPEN #31,FILE$              
+    LET KEY0$=" ",KEY0$ \ LET KEY0$=PROD$                           
+CHK_ZERO: SEARCH #31,3,2;KEY0$,WREC,E \ IF E=2 GOTO PROD_LOT_DONE:
+    IF E GOSUB ERR_SEARCH:                                       
+    IF KEY0$[1,12]<>PROD$[1,12] GOTO PROD_LOT_DONE:               
+	MAT  READ #31,WREC,82;P3;                      
+    LET BALANCE=P3[0]-P3[1]                        
+    IF BALANCE LET VITALFLE=1 \ GOTO PROD_LOT_DONE:
+    GOTO CHK_ZERO:                                 
+PROD_LOT_DONE: REM"                                
+  ENDIF                                            
+  IF FNDFILE[WORK1]=2912 LET VITALFLE=0            
+  IF VITALFLE RETURN                               
+NEXT WORK1                                         
+If Edit_flag Return  ! ?? ON WEB??       
+IF NOT(AUDITO) IF NOT(VITALFLE) GOSUB DELOFLE:       
+IF AUDITO IF NOT(VITALFLE) LET FOUND=0
+Return
+PRNT_EXCPT: Rem "Print The Name of the Module Used In
+!If FOUND <= 1 Print @0,22;'CL';"\7\ITEM IS IN USE: ";
+!Print "MODULE: ";REASON$
+tmp$=tmp$+"  "+Str$(Found)+" "+Reason$ ! add to sendback string
+Return
+DELOFLE: Rem "Delete the Non Vital Files - then Allow Delete
+if audito or edit_flag return
+For X = 31 To 50
+  Try Close #X  Else REM
+Next X
+DELOTHR = 9
+ProdKey$=Prod$
+For WORK1 = 0 To 50 ! 30 nonvitals? let's do 50
+  If FNDFILE[WORK1]
+    If FNDFILE[WORK1] = 208 ! "product location
+      E = 0
+      Key0$ = " ",Key0$;Key0$ = PRODKEY$
+      Read #CH_CNTRL,88,208;FILE$ \ Open #31,FILE$
+PLLOOP: Rem "loop thru all for prod in prodloc
+      Search #31,3,1;Key0$,WREC,E \ If E = 2 Goto PROD_LOCDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,12] <> PRODKEY$[1,12] Goto PROD_LOCDONE
+      Search #31,5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+	  key1$=" ",key1$
+	  key1$=key0$[13,20]+key0$[1,12]
+	  search #31,5,2;key1$,wrec,e \ if e gosub err_search:
+      E = 3
+      Search #31,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Goto PLLOOP
+PROD_LOCDONE: Rem"done with this product location
+      REASON$ = "PRODUCT LOCATION - DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If !"product location
+    If FNDFILE[WORK1] = 320 ! "rebate lines
+      E = 0
+      Key0$ = " ",Key0$;Key0$ = PRODKEY$
+      Read #CH_CNTRL,88,320;FILE$ \ Open #32,FILE$
+REBLOOP: Rem "loop thru all for prod in rebate lines
+      Search #32,3,2;Key0$,WREC,E \ If E = 2 Goto REBDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,12] <> PRODKEY$[1,12] Goto REBDONE
+      Mat Read #32,WREC,12;RB1;
+      KEY1$ = " ",KEY1$ \ KEY1$[1,6] = Key0$[13,18]
+      KEY1$[7,18] = Key0$[1,12]
+      KEY3$ = " ",KEY3$ \ KEY3$[1,6] = RB1[1] Using "######"
+      KEY3$[7,24] = KEY1$[1,18]
+      Search #32,5,2;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #32,5,1;KEY1$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #32,5,3;KEY3$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3
+      Search #32,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Goto REBLOOP
+REBDONE: Rem"done with this rebate lines
+      REASON$ = "REBATE LINES - DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If !"rebate lines
+    If FNDFILE[WORK1] = 416 ! "serial numbers
+      E = 0
+      Key0$ = " ",Key0$;Key0$ = PRODKEY$
+      Read #CH_CNTRL,88,416;FILE$ \ Open #33,FILE$
+SNLOOP: Rem "loop thru all for prod in serial numbers
+      Search #33,3,2;Key0$,WREC,E \ If E = 2 Goto SNDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,12] <> PRODKEY$[1,12] Goto SNDONE
+      Mat Read #33,WREC,0;SN$;
+      KEY1$ = " ",KEY1$ \ KEY1$[1,30] = SN$[35,64]
+      KEY1$[31,40] = SN$[25,34]
+      Search #33,5,2;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #33,5,1;KEY1$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3
+      Search #33,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Goto SNLOOP
+SNDONE: Rem"done with this serial numbers
+      REASON$ = "SERIAL NUMBERS - DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If !"serial numbers
+    If FNDFILE[WORK1] = 1648 ! "dept sales
+      E = 0
+      Key0$ = " ",Key0$;Key0$ = PRODKEY$
+      Read #CH_CNTRL,88,1648;FILE$ \ Open #34,FILE$
+DSLOOP: Rem "loop thru all for prod in dept sales
+      Search #34,3,6;Key0$,WREC,E \ If E = 2 Goto DSDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,12] <> PRODKEY$[1,12] Goto DSDONE
+      KEY1$ = " ",KEY1$ \ KEY1$[1,6] = Key0$[17,22]
+      KEY1$[7,10] = Key0$[23,26]
+      KEY1$[11,22] = Key0$[1,12]
+      KEY1$[23,24] = Key0$[27,28]
+      KEY1$[25,26] = Key0$[13,14]
+      KEY1$[27,28] = Key0$[15,16]
+      KEY1$[29,30] = Key0$[29,30]
+      KEY1$[31,32] = Key0$[31,32]
+      KEY1$[33,36] = Key0$[33,36]
+      KEY2$ = " ",KEY2$
+      KEY2$[1,8] = KEY1$[29,36]
+      KEY2$[9,20] = KEY1$[11,22]
+      KEY2$[21,24] = KEY1$[25,28]
+      KEY2$[25,26] = KEY1$[23,24]
+      KEY2$[27,36] = KEY1$[1,10]
+      KEY3$ = " ",KEY3$
+      KEY3$[1,4] = KEY2$[21,24]
+      KEY3$[5,14] = KEY2$[27,36]
+      KEY3$[15,34] = KEY2$[1,20]
+      KEY3$[35,36] = KEY2$[25,26]
+      KEY4$ = " ",KEY4$
+      KEY4$[1,4] = KEY3$[1,4]
+      KEY4$[5,24] = KEY3$[15,34]
+      KEY4$[25,34] = KEY3$[5,14]
+      KEY4$[35,36] = KEY3$[35,36]
+      KEY5$ = " ",KEY5$
+      KEY5$[1,4] = KEY3$[1,4]
+      KEY5$[5,6] = KEY3$[35,36]
+      KEY5$[7,36] = KEY3$[5,34]
+      Search #34,5,6;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #34,5,1;KEY1$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #34,5,2;KEY2$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #34,5,3;KEY3$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #34,5,4;KEY4$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #34,5,5;KEY5$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3
+      Search #34,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Goto DSLOOP
+DSDONE: Rem"done with this dept sales
+      REASON$ = "DEPT SALES - DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If !"dept sales
+    If FNDFILE[WORK1] = 1904 ! "lost sales
+      E = 0
+      Key0$ = " ",Key0$;Key0$ = PRODKEY$
+      Read #CH_CNTRL,88,1904;FILE$ \ Open #35,FILE$
+LSLOOP: Rem "loop thru all for prod in lost sales
+      Search #35,3,1;Key0$,WREC,E \ If E = 2 Goto LSDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,12] <> PRODKEY$[1,12] Goto LSDONE
+      KEY2$ = " ",KEY2$ \ KEY2$[1,6] = Key0$[13,18]
+      KEY2$[7,18] = Key0$[1,12] \ KEY2$[19,24] = Key0$[19,24]
+      Search #35,5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #35,5,2;KEY2$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3
+      Search #35,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Goto LSLOOP
+LSDONE: Rem"done with this lost sales
+      REASON$ = "LOST SALES - DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If !"lost sales
+    If FNDFILE[WORK1] = 1936 ! "special prices
+      E = 0
+      Key0$ = " ",Key0$;Key0$ = PRODKEY$
+      Read #CH_CNTRL,88,1936;FILE$ \ Open #36,FILE$
+SPLOOP: Rem "loop thru all for prod in special prices
+      Search #36,3,2;Key0$,WREC,E \ If E = 2 Goto SPDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,12] <> PRODKEY$[1,12] Goto SPDONE
+      KEY1$ = " ",KEY1$ \ KEY1$[1,6] = Key0$[13,18]
+      KEY1$[7,18] = Key0$[1,12]
+      Search #36,5,2;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #36,5,1;KEY1$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3
+      Search #36,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Goto SPLOOP
+SPDONE: Rem"done with this special prices
+      Key0$ = " ",Key0$
+SPLOOP1: Search #36,3,1;Key0$,WREC,E
+      If E = 2 Goto SPDONE1
+      If E Gosub ERR_SEARCH
+      If Key0$[1,1] = "C" Goto SPDONE1
+      If Key0$[7,18] = PRODKEY$[1,12]
+        E = 0
+        Search #36,5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+        E = 3
+        Search #36,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      End If 
+      Goto SPLOOP1
+SPDONE1: Rem"done with spcprice directory 1
+      REASON$ = "SPECIAL PRICE - DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If !"special prices
+    If FNDFILE[WORK1] = 2016 ! "sales current - cust/prod/whse sales
+      E = 0
+      Key0$ = " ",Key0$;Key0$ = PRODKEY$
+      Read #CH_CNTRL,88,2016;FILE$ \ Open #37,FILE$
+SCLOOP: Rem "loop thru all for prod in sales current
+      Search #37,3,2;Key0$,WREC,E \ If E = 2 Goto SCDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,12] <> PRODKEY$[1,12] Goto SCDONE
+      KEY1$ = " ",KEY1$ \ KEY1$[1,6] = Key0$[13,18]
+      KEY1$[7,18] = Key0$[1,12] \ KEY1$[19,20] = Key0$[19,20]
+      Search #37,5,2;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #37,5,1;KEY1$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3
+      Search #37,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Goto SCLOOP
+SCDONE: Rem"done with this special prices
+      REASON$ = "CUST/PROD/WHSE SALES - DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If !"sales current
+    If FNDFILE[WORK1] = 2336 ! "prod/vend purchase
+      E = 0
+      Key0$ = " ",Key0$;Key0$ = PRODKEY$
+      Read #CH_CNTRL,88,2336;FILE$ \ Open #38,FILE$
+VDPRLOOP: Rem "loop thru all for prod in vdprhist
+      Search #38,3,2;Key0$,WREC,E \ If E = 2 Goto VDPRDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,12] <> PRODKEY$[1,12] Goto VDPRDONE
+      KEY1$ = " ",KEY1$ \ KEY1$[1,6] = Key0$[13,18]
+      KEY1$[7,18] = Key0$[1,12] \ KEY1$[19,20] = Key0$[19,20]
+      Search #38,5,2;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #38,5,1;KEY1$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3
+      Search #38,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Goto VDPRLOOP
+VDPRDONE: Rem"done with this vdprhist
+      REASON$ = "PROD/VEND PURCHASE - DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If !"prod/vend purchase
+    If FNDFILE[WORK1] = 2512 ! "inventory transactions
+      E = 0
+      Key0$ = " ",Key0$;Key0$ = PRODKEY$
+      Read #CH_CNTRL,88,2512;FILE$ \ Open #39,FILE$
+ITLOOP: Rem "loop thru all for prod in inventory transaction
+      Search #39,3,2;Key0$,WREC,E \ If E = 2 Goto ITDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,12] <> PRODKEY$[1,12] Goto ITDONE
+      KEY1$ = " ",KEY1$ \ KEY1$[1,14] = Key0$[13,26]
+      Search #39,5,2;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #39,5,1;KEY1$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3
+      Search #39,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Goto ITLOOP
+ITDONE: Rem"done with this inventory transactions
+      REASON$ = "INVENTORY TRANSACTIONS - DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If !"inventory transactions
+    If FNDFILE[WORK1] = 2528 ! "product inventory lot - sprodlot file
+      E = 0
+      Key0$ = " ",Key0$;Key0$ = PRODKEY$
+      Read #CH_CNTRL,88,2528;FILE$ \ Open #40,FILE$
+SPRODLOTLOOP: Rem "loop thru all for the product in sprodlot file
+      Search #40,3,2;Key0$,WREC,E \ If E = 2 Goto SPRODLOTDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,12] <> PRODKEY$[1,12] Goto SPRODLOTDONE
+      KEY1$ = " ",KEY1$ \ KEY1$[1,22] = Key0$[21,42]
+      KEY1$[23,30] = Key0$[13,20]
+      KEY1$[31,42] = Key0$[1,12]
+      KEY3$ = " ",KEY3$
+      KEY3$[1,20] = KEY1$[23,42]
+      KEY3$[21,42] = KEY1$[1,22]
+      KEY4$ = " ",KEY4$
+      KEY4$[1,14] = Key0$[1,14]
+      KEY4$[15,36] = Key0$[21,42]
+      KEY4$[37,42] = Key0$[15,20]
+      Search #40,5,2;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #40,5,1;KEY1$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #40,5,3;KEY3$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #40,5,4;KEY4$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3
+      Search #40,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Goto SPRODLOTLOOP
+SPRODLOTDONE: Rem"done with this sprodlot file
+      REASON$ = "INVENTORY TRANSACTIONS - DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If !"product inventory lot - sprodlot fil
+    If FNDFILE[WORK1] = 2912 ! "substitute history
+      E = 0
+      Key0$ = " ",Key0$;Key0$ = PRODKEY$
+      Read #CH_CNTRL,88,2912;FILE$ \ Open #41,FILE$
+SUBSTLOOP: Rem "loop thru all for prod in substhist
+      Search #41,3,1;Key0$,WREC,E \ If E = 2 Goto SUBSTDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,12] <> PRODKEY$[1,12] Goto SUBSTDONE
+      KEY2$ = " ",KEY2$ \ KEY2$[1,12] = Key0$[13,24]
+      KEY2$[13,24] = Key0$[1,12]
+      KEY2$[25,26] = Key0$[25,26]
+      Search #41,5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #41,5,2;KEY2$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3
+      Search #41,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Goto SUBSTLOOP
+SUBSTDONE: Rem"done with this substitute hist
+      REASON$ = "SUBSTITUTES HISTORY - DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If !" substhist
+  End If !"fndfile[work1]
+Next WORK1
+DELOTHR = 0;NONVITAL = 1
+If FOUND < 0 Let FOUND = 0
+Return 
+DO_DELETION: Rem========================================================
+NUM_CANBE_PURGE = NUM_CANBE_PURGE + 1
+If AUDITO Goto END_DO_DELETION
+If Edit_flag goto END_DO_DELETION
+K2$ = " ",K2$;K2$ = PROD$
+PSLOOP: Rem "Loop Thru ALL Lines for Product Support Notes
+Search #10,3,1;K2$,REC,E \ If E = 2 Goto PSDONE
+If E Gosub ERR_SEARCH
+If K2$[1,12] <> PROD$[1,12] Goto PSDONE
+Search #10,5,1;K2$,REC,E \ If E Gosub ERR_SEARCH
+E = 3
+Search #10,1,0;K2$,REC,E \ If E Gosub ERR_SEARCH
+Goto PSLOOP
+PSDONE: Rem "NOTES ARE DONE - DO NEXT FILE (ITEMHISTORY)
+K2$ = " ",K2$;K2$ = PROD$
+Search #CH_IHIST,5,1;K2$,REC,E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Goto IHDONE
+E = 3
+Search #CH_IHIST,1,0;K2$,REC,E \ If E Gosub ERR_SEARCH
+IHDONE: Rem "Just the one Key - Gofor Next (PRODWHSE)
+Gosub L_6500 ! prodwhse
+Gosub L_6800 ! altvends
+Gosub ALTITEMS
+Gosub DELWORDS
+Gosub DELKEYWRDS
+If P61$[60,60] = "Y" Gosub DELFIFOSPC
+Gosub DELPUDA
+Gosub DELPRCBOOK
+Gosub DelUPCX
+!if custom_customer$="WENELSON" ! per ERR - everyone if file is built
+	gosub delprodrefs: ! and produrl
+!Endif
+K31$ = " ",K31$
+K31$ = UCASE$(A$[9,38]),A$[140,151]
+Search #3,5,1;K31$,R[3],E \ If E > 1 Gosub ERR_SEARCH
+K2$ = PROD$
+Search #Ch_prod,5,1;K2$,R[2],E \ If E Gosub ERR_SEARCH
+K2$ = " ",K2$;K2$[2] = A$[139,139];K2$[3] = PROD$
+Search #Ch_prod,5,2;K2$,R[2],E \ If E Gosub ERR_SEARCH
+K2$ = " ",K2$;K2$ = A$[152,155];K2$[5] = PROD$
+Search #Ch_prod,5,3;K2$,R[2],E \ If E Gosub ERR_SEARCH
+K2$ = " ",K2$;K2$ = A$[93,112];K2$[21] = PROD$
+Search #Ch_prod,5,4;K2$,R[2],E \ If E Gosub ERR_SEARCH
+Mat Write #Ch_prod,R[2],0;Z3;
+E = 3 \ Search #Ch_prod,1,0;K2$,R[2],E \ If E Gosub ERR_SEARCH
+! sql delete
+! -------------------------------------------------------------------
+!
+! if the standard libs are NOT used (ex. fileupdateprod(...) vs.
+! mat write #chn,...
+!
+! For this scenario you will need the primary key for DIR 1, 
+! (and optionally the channel for the ISAM file, but not
+! required)
+if sqlChan >= 0 ! MySQL enabled and channel opened
+	! for deletes
+	clear sql_prod.
+	! load primary key values
+	sql_prod.ProdCode$ = prod$
+	e = prod_SQLDelete(e$,sqlChan,sql_prod.)
+	if e <> 1 ! returns the number of records add/updated/deleted
+		error 11000 ! do bad update stuff
+	end if
+end if
+!
+R[9]=R[2]
+Mat Write #CH_sale,R[9],0;Z3;
+Mat Write #CH_sale,R[9],16;S1; \ Mat Write #CH_sale,R[9],256;S1;
+NUM_PURGE = NUM_PURGE + 1
+END_DO_DELETION: Rem ============================= print audit log
+Return
+L_6500: Rem "============================= DELETE WAREHOUSE RECORDS
+K18$ = " ",K18$;K18$[1,12] = PROD$[1,12]
+L_6530: Search #WHCHAN,3,1;K18$,R[WHCHAN],E \ If E = 2 Goto L_6700
+If E Gosub ERR_SEARCH
+If K18$[1,12] <> PROD$[1,12] Goto L_6700
+Mat Read #WHCHAN,R[WHCHAN];W1$
+Mat Read #WHCHAN,R[WHCHAN],32;W1
+Mat Read #WHCHAN,R[WHCHAN],38;W2;
+Search #WHCHAN,5,1;K18$,R[WHCHAN],E \ If E Gosub ERR_SEARCH
+K2$ = " ",K2$;K2$[1,2] = K18$[13,14];K2$[3,5] = W1[2] Using "###"
+K2$[6,17] = K18$[1,12]
+Search #WHCHAN,5,2;K2$,R[WHCHAN],E \ If E Gosub ERR_SEARCH
+K2$ = " ",K2$;K2$[1,2] = K18$[13,14];K2$[3,8] = W2[3] Using "######"
+K2$[9,20] = K18$[1,12]
+Search #WHCHAN,5,3;K2$,R[WHCHAN],E \ If E Gosub ERR_SEARCH
+K2$ = " ",K2$;K2$[1,2] = K18$[13,14];K2$[3,22] = W1$[13,32]
+K2$[23,34] = K18$[1,12]
+Search #WHCHAN,5,4;K2$,R[WHCHAN],E \ If E Gosub ERR_SEARCH
+E = 3 \ Search #WHCHAN,1,0;K18$,R[WHCHAN],E \ If E Gosub ERR_SEARCH
+Goto L_6530
+L_6700: Rem "============================= DELETE PROD/WHSE SALES RECS
+K18$ = " ",K18$;K18$[1,12] = PROD$[1,12]
+L_6710: Search #CH_PWSLS,3,1;K18$,R[CH_PWSLS],E \ If E = 2 Return 
+If E Gosub ERR_SEARCH
+If K18$[1,12] <> PROD$[1,12] Return 
+Search #CH_PWSLS,5,1;K18$,R[CH_PWSLS],E \ If E Gosub ERR_SEARCH
+E = 3
+Search #CH_PWSLS,1,0;K18$,R[CH_PWSLS],E \ If E Gosub ERR_SEARCH
+Goto L_6710
+L_6800: Rem ===================== delete altvend records
+K2$ = " ",K2$;K2$ = PROD$
+Search #ALTVEND,3,1;K2$,REC,E \ If E > 2 Gosub ERR_SEARCH
+If E = 2 Goto AV_DONE
+If K2$[1,12] <> PROD$ Goto AV_DONE
+Search #ALTVEND,5,1;K2$,REC,E \ If E Gosub ERR_SEARCH
+E = 3
+Search #ALTVEND,1,0;K2$,REC,E \ If E Gosub ERR_SEARCH
+Goto L_6800
+AV_DONE: Return 
+ALTITEMS: Rem ======================= delete stagitem records
+K2$ = " ",K2$;K2$ = PROD$
+Search #ALTITEM,3,2;K2$,REC,E \ If E > 2 Gosub ERR_SEARCH
+If E = 2 Goto AI_DONE
+If K2$[1,12] <> PROD$ Goto AI_DONE
+Search #ALTITEM,5,2;K2$,REC,E \ If E Gosub ERR_SEARCH
+WORK$ = " ",WORK$
+WORK$[1,24] = K2$[13,36];WORK$[25,36] = K2$[1,12]
+Search #ALTITEM,5,1;WORK$,REC,E \ If E Gosub ERR_SEARCH
+E = 3
+Search #ALTITEM,1,0;K2$,REC,E \ If E Gosub ERR_SEARCH
+Goto ALTITEMS
+AI_DONE: Return 
+DELWORDS: Rem "need Word Index Deleted
+If P61$[35,35] <> "Y" Return 
+SPACE$ = "7/PRDWORDIDX" + Str$(COID)
+Call FindF(SPACE$,H)
+If Not(H) Return 
+!If Err 0 Rem
+Try Close #20 Else REM
+! If Err 0 Gosub ERR_TRAP
+CH_PWRDK = 20
+Open #CH_PWRDK,"7/PRDWORDIDX" + Str$(COID)
+! check for dir 2
+search #CH_PWRDK,1,2;key2$,twdir2,e! look for the exsistance dir 2
+if not(e) let twdir2=1
+if e let twdir2=0
+SPACE$ = " ",SPACE$
+DESC2$ = A$[63,92]
+DESC1$ = A$[9,38]
+GET_WORDS: Rem " All Words
+Gosub GET_WORDS1
+Gosub GET_WORDS2
+Close #20
+Return 
+DOWORDINDEX: Rem "Word file Index Insert/Delete (Always allow E=1)
+WRDKEY$ = " ",WRDKEY$
+WORD$ = WORD$ + SPACE$[1,20]
+If WORD$ = SPACE$ Or WORD$[1,1] = "" Return 
+WRDKEY$[1,20] = UCASE$(WORD$[1,20]) ! KEY=UPPERCASE, FILE=AS IS
+WRDKEY$[21,32] = PROD$[1,12]
+REC_PWRDK = K1
+If DELKEY ! "need to delete old words
+  Search #CH_PWRDK,5,1;WRDKEY$,REC_PWRDK,E \ If E > 1 Gosub ERR_SEARCH
+  if twdir2
+	KEY2$=" ",KEY2$
+	LET KEY2$[1,12]=WRDKEY$[21,32]
+	LET KEY2$[13,32]=WRDKEY$[1,20]
+	SEARCH #CH_PWRDK,5,2;KEY2$,REC_PWRDK,E \ IF E > 1 GOSUB ERR_SEARCH
+  Endif
+End If 
+WORD$ = " ",WORD$
+Return 
+FNDWORD: Rem "find next space
+WK1$ = " ",WK1$;WK1$ = DESC$[POS_]
+Search WK1$," ",POS1
+WK$ = " ",WK$
+If POS1 = 1 Goto BMPPOS
+WK$[1,POS1 - 1] = WK1$[1,POS1 - 1]
+BMPPOS: POS_ = POS_ + POS1
+If POS_ > 30 Return 
+If WK$[1,1] = " " Goto FNDWORD
+Return 
+GET_WORDS1: Rem "description 1 words
+DESC$ = DESC1$
+DELKEY = 1
+STARTIT1: Rem "Start Desc 1 Ins/Del Here
+Gosub STARTWFIND
+Return 
+STARTWFIND: Rem " Standard Routine
+STRTWRD = 1;DESC$[31] = " "
+TRMSTRT: Rem "in case blanks at beginning
+If STRTWRD >= 30 Goto DESCFDONE
+If DESC$[STRTWRD,STRTWRD] = " " Let STRTWRD = STRTWRD + 1 \ Goto TRMSTRT
+If DESC$[STRTWRD,STRTWRD] = "" Goto DESCFDONE
+POS_ = STRTWRD
+DESCFLOOP: Rem "loop until end
+Gosub FNDWORD
+WORD$ = WK$
+If WORD$[1,1] <> " " Gosub DOWORDINDEX
+If POS_ > 30 Goto DESCFDONE
+Goto DESCFLOOP
+DESCFDONE: Rem "done
+Return 
+GET_WORDS2: Rem "description 2 words
+DESC$ = DESC2$
+DELKEY = 1
+Gosub STARTWFIND
+Return 
+DELKEYWRDS: Rem "key word file delete
+SPACE$ = "2/PKEYWORD" + Str$(COID)
+Call FindF(SPACE$,H)
+If Not(H) Return 
+!If Err 0 Rem
+Try Close #20 Else Rem
+Try Close #21 Else Rem
+! If Err 0 Gosub ERR_TRAP
+SPACE$ = "2/PKEYWIDX" + Str$(COID)
+Call FindF(SPACE$,H)
+If Not(H) ! "no file built?
+  DELKEY = 0
+Else 
+  DELKEY = 1
+End If 
+Open #20,"2/PKEYWORD" + Str$(COID)
+If DELKEY ! Open #21,"2/PKEYWIDX" + Str$(COID)
+	Open #21,"2/PKEYWIDX"+Str$(COID)
+	! check for the 2nd dir
+	search #21,1,2;key2$,kwdir2,e! look for the exsistance dir 2
+	if not(e) let kwdir2=1
+	if e let kwdir2=0
+Endif
+K31$ = PROD$
+Search #20,2,1;K31$,R[20],E \ If E = 1 Goto KWDONE
+If E Gosub ERR_SEARCH
+SPACE$ = " ",SPACE$
+If DELKEY ! "delete index
+  Mat Read #20,R[20],12;PKYW$;
+  For X = 1 To 30
+    X1 = (X - 1) * 15 + 1
+    WORD$ = PKYW$[X1,X1 + 14]
+    If WORD$[1,1] = "" Or WORD$ = SPACE$[1,15] Goto NXTWRD
+    K2$ = " ",K2$
+    K2$[1,15] = UCase$(WORD$);K2$[16] = PROD$ ! KEY=UPPERCASE, FILE=AS IS
+    Search #21,5,1;K2$,R[21],E \ If E > 1 Gosub ERR_SEARCH
+	if kwdir2
+		LET KEY2$=" ",KEY2$                                                  
+		LET KEY2$[1,12]=K2$[16,27]                                           
+		LET KEY2$[13,27]=K2$[1,15]                                           
+		Search #21,5,2;KEY2$,R[21],E \ if e>1 Gosub err_search:  
+	Endif
+NXTWRD: Rem "
+  Next X
+End If 
+Search #20,5,1;K31$,R[20],E \ If E Gosub ERR_SEARCH
+E = 3
+Search #20,1,0;K31$,R[20],E \ If E Gosub ERR_SEARCH
+KWDONE: Rem "done with this
+Close #20
+If DELKEY Close #21
+Return 
+DELFIFOSPC: Rem delete fifo special cost
+If P61$[60,60] <> "Y" Return 
+!If Err 0 Rem
+Try Close #42 Else Rem
+!If Err 0 Gosub ERR_SEARCH
+FILE$ = "4/FIFOSPC"+Str$(COID)
+Call FindF(FILE$,R[32])
+If Not(R[32]) Return 
+Open #42,FILE$
+FSKEY$ = " ",FSKEY$;FSKEY$[1,12] = PROD$[1,12]
+SRCHFS: Rem search for fifo special cost
+Search #42,3,1;FSKEY$,R[32],E \ If E = 2 Return 
+If E Gosub ERR_SEARCH
+If FSKEY$[1,12] <> PROD$[1,12] Return 
+Search #42,5,1;FSKEY$,R[32],E \ If E Gosub ERR_SEARCH
+E = 3 \ Search #42,1,0;FSKEY$,R[32],E \ If E Gosub ERR_SEARCH
+Goto SRCHFS
+DELPUDA: Rem "product uda screen
+Try Close #21 Else Rem
+File$="2/SPRODUDA"+Str$(COID)
+Try
+	Open #21,File$
+Else
+	Return
+End try
+K2$ = " ",K2$;K2$ = PROD$
+Search #21,2,1;K2$,R[21],E
+if not(E)
+	Search #21,5,1;k2$,R,e
+	If E>1 gosub err_search
+	If Not(E)
+		let E=3;R=R[21]
+		Search #21,1,0;k2$,R,E
+		if e gosub err_search
+	Endif
+Endif
+Return 
+DELPRCBOOK: Rem "Price book(grade) screen
+Try Close #21  Else Rem
+! File$="2/PRODPRBK"+Str$(COID)
+File$="2/SYNGPRBK"+Str$(COID) ! use only synergy prc book
+Try
+	Open #21,File$
+Else
+	Return
+End try
+K2$ = " ",K2$;K2$ = PROD$
+Search #21,2,1;K2$,R[21],E
+if not(E)
+	Search #21,5,1;k2$,R,e
+	If E>1 gosub err_search
+	If Not(E)
+		let E=3;R=R[21]
+		Search #21,1,0;k2$,R,E
+		if e gosub err_search
+	Endif
+Endif
+Return
+DelUPCX: ! delete the upc xref
+try close #21 Else Rem
+File$="2/UPCXREF"+STR$(coid)
+try
+	Open #21,File$
+Else
+	return ! no file no delete
+End try
+Let ch_upcx=21
+UPCXLoop: ! "
+LET K2$=" ",K2$;K2$=PROD$
+SEARCH #CH_UPCX,3,1;K2$,REC,E \ IF E>2 GOSUB ERR_SEARCH:
+IF E=2 GOTO UPCX_DONE:
+IF K2$[1,12]<>PROD$ GOTO UPCX_DONE:
+
+LET WORK$=" ",WORK$
+LET WORK$[1,25]=K2$[13,37]
+WORK$[26,37]=K2$[1,12]
+WORK$[38,49]=K2$[38,49]
+SEARCH #CH_UPCX,5,2;WORK$,REC,E \ IF E GOSUB ERR_SEARCH:
+LET WORK$=" ",WORK$
+WORK$[1,6]=K2$[44,49]
+WORK$[7,18]=K2$[1,12]
+WORK$[19,24]=K2$[38,43]
+LET WORK$[25,49]=K2$[13,37]
+SEARCH #CH_UPCX,5,3;WORK$,REC,E \ IF E GOSUB ERR_SEARCH:
+SEARCH #CH_UPCX,5,1;K2$,REC,E \ IF E GOSUB ERR_SEARCH:
+LET E=3
+SEARCH #CH_UPCX,1,0;K2$,REC,E \ IF E GOSUB ERR_SEARCH:
+GOTO UPCXLoop:
+UPCX_DONE: RETURN
+
+delprodrefs: ! w.e. nelson ref files ! per ERR - everyone if file is built
+ch_prodref=0;ch_prodrefs=0
+k2$=" ",k2$
+k2$="2/prodref"+Str$(COID)
+Call Findf(k2$,found)
+if found
+LET CHNL=Findchannel() ! 99              
+! GOSUB GETCHAN:           
+LET CH_prodref=CHNL   
+Open #ch_prodref,"2/prodref"+Str$(COID)   
+Endif
+k2$=" ",k2$
+k2$="2/prodrefs"
+Call Findf(k2$,found)
+if found
+LET CHNL=Findchannel() ! 99              
+! GOSUB GETCHAN:           
+LET CH_prodrefs=CHNL     
+Open #ch_prodrefs,"2/prodrefs"
+Endif
+if ch_prodref=0 goto del_refs ! no file - bypass
+LET refk1$=" ",refk1$                                
+LET refk1$[1,35]=prodid$[1,35]                          
+LET refk1$[36,47]=A$[140,151]                       
+SEARCH #ch_prodref,5,1;refk1$,R[99],E                         
+IF E=1 GOTO DEL_KEY2:         
+IF E GOSUB ERR_SEARCH:        
+DEL_KEY2: REM                 
+LET refk2$=" ",refk2$                              
+LET refk2$[1,12]=A$[140,151]                             
+LET refk2$[13,47]=prodid$[1,35]                        
+SEARCH #ch_prodref,5,2;refk2$,R[99],E
+if e=1 goto del_refs:
+IF E GOSUB ERR_SEARCH:  
+!"delete the prodrefs
+del_refs: !
+if ch_prodrefs=0 goto del_ref_done ! no file - bypass
+LET refk1$=" ",refk1$
+LET refk1$[1,2]=COID USING "##"          
+LET refk1$[3,37]=prodid$[1,35]                
+LET refk1$[38,49]=A$[140,151] 
+SEARCH #ch_prodrefs,5,1;refk1$,R[99],E              
+if e=1 goto del_key22:
+IF E GOSUB ERR_SEARCH:                 
+del_key22:!
+LET refk2$=" ",refk2$                    
+LET refk2$[1,2]=COID USING "##"         
+LET refk2$[3,14]=A$[140,151]              
+LET refk2$[15,49]=prodid$[1,35]              
+SEARCH #ch_prodrefs,5,2;refk2$,R[99],E             
+if e=1 goto del_key3:
+IF E GOSUB ERR_SEARCH:  
+del_key3: !
+LET refk3$=" ",refk3$                    
+LET refk3$[1,35]=prodid$[1,35]               
+LET refk3$[36,47]=A$[140,151]            
+LET refk3$[48,49]=COID USING "##"       
+SEARCH #ch_prodrefs,5,3;refk3$,R[99],E             
+if e=1 goto del_key4:
+IF E GOSUB ERR_SEARCH:                 
+del_key4: !
+LET refk4$=" ",refk4$               
+LET refk4$[1,12]=A$[140,151]         
+LET refk4$[13,47]=prodid$[1,35]         
+LET refk4$[48,49]=COID USING "##"  
+SEARCH #ch_prodrefs,5,4;refk4$,R[99],E        
+if e=1 goto del_ref_done:
+IF E GOSUB ERR_SEARCH:   
+del_ref_done:!
+if ch_prodref Close #CH_PRODREF
+if ch_prodrefs Close #CH_PRODREFS
+! now the url file
+k2$=" ",k2$
+LET K2$="2/produrl"+STR$(COID)
+Call FINDF(k2$,Found)
+if found
+	LET CHNL=FINDCHANNEL() ! 99              
+	! GOSUB GETCHAN:           
+	LET CH_produrl=CHNL     
+	Open #ch_produrl,"2/produrl"+Str$(COID)
+Else
+	Return ! not found - ignore rest
+Endif
+REFK1$=" ",REFK1$
+refk1$=a$[140,151]
+SEARCH #ch_produrl,2,1;RefK1$,R[99],E \ IF E>1 GOSUB ERR_SEARCH:                 
+If not(e) ! found it - delete & return
+	SEARCH #ch_produrl,5,1;RefK1$,R32,E \ IF E>1 GOSUB ERR_SEARCH:
+	LET E=3 \ SEARCH #ch_produrl,1,0;K1$,R[99],E \ IF E GOSUB ERR_SEARCH:   
+Endif
+CLOSE #CH_PRODURL
+return
+
+CHKDONE: Rem "Done With Check Set J0 With Result
+LET DELOTHR=0;NONVITAL=0          
+IF FOUND LET J0=2                 
+IF J0=1 LET J0=0
+if Edit_Flag Goto OutEnd
+IF FOUND AND DELNV GOSUB CHKVITAL:
+IF NOT(FOUND) GOSUB DO_DELETION:   
+! all types exit
+Goto OUTEND
+ERR_SEARCH: Rem
+ENUM = E ;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+Msc$(4)
+e$=msg$;j0=3
+Call programdump("tmp/proddelse!","")
+goto OutEnd ! err_msg ! Error 10000
+Return ! End
+ERR_MSG: ! send message
+ReturnStatus=1 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)
+Message$=E$
+	  call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  call SetOutPut(e$,rstr$)
+End
+OUTEND: Rem "End of Check - Close Files & End Call
+!If Err 0 Rem
+For X = 31 To 50
+  Try Close #X Else REM
+Next X
+if sqlChan >= 0 ! MySQL enabled and channel opened
+	Try Close #sqlChan Else REM
+End If
+If Err 0 Gosub ERR_TRAP
+End 
+Rem {begin rtn.error.s}
+Err_Trap: ! pm 
+!
+include "src/callmainerrnet.inc"
+End
+!
+Rem {end rtn.error.s}

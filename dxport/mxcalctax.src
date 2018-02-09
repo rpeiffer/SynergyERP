@@ -1,0 +1,462 @@
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: FEB 21, 2008  14:16:29
+Rem /w2/papermaster/r2005//usr/acct/jliu/work/r2005/mx2/mxcalctax.src (univ2) [jliu] {59161}
+Rem  Copyright (c) 2008 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem 
+! loadsave -w -n 100,10 -o prog/dxport/mxcalctax src/mxcalctax.src
+!
+include "src/copyright.inc"
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Function getmsg$,expandarray
+Declare External Function AddToMYReports
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,FormatDate2$,getuidinfo$,JDate$
+Declare External Function chkDteFrmt$
+
+Declare Intrinsic Sub DateToJulian,InpBuf,String,programdump
+! Option Default Dialect IRIS1
+
+Rem! mxcalctax -- recalculate taxes on line items
+Enter CH[],H1,intco
+Rem ch[]
+ ! 1 = Control #     9999
+!  2 = Product       1792
+!  3 = Customer      1808
+!  4 = order shipto  1856
+!  5 = order header  1840
+!  6 = order total   1872
+!  7 = order lines   1888
+!  8 = product desc  2128
+!  9 = customer tax   928
+! 10 = tax code      2176
+! 11 = ccodes        1728
+!
+!* additional parameter notes:
+!* h1 = (input) set to the header record for the order to be totaled
+If Err 0 Gosub ERR_TRAP
+Dim S$[1],S1$[25],A$[30],A1$[100],N$[30],Q$[20],R$[15],J7$[76],EX$[30],SUNIT$[4]
+Dim F$[20],I$[40],C$[30],K5$[50],U5$[50],B$[30],F1$[16],A2$[20],PN$[16]
+Dim P60$[50],V0$[12],S2$[20],S0$[118],X$[10],T2$[8],I1$[30],P9$[50],P61$[256]
+Dim 1%,X1[10],L3[3],H4[2],T9[11],S2[1],S6[1],C2[2],CHNL,SZUM[4],OFLG
+Dim 1%,EUN[2],L,I1,BADCT,PL[1],Z0,Z2[4],UN[2],COWT,2%,S5,D1,Z1[4],Z3$[12]
+Dim 1%,LOCKPORT,DFLAG[4],PASS,FTFLG,TAX[100],FTAX,LEVEL,MTAX
+Dim 1%,C11[2],MS2[2],INVOICE_BASED,CH_LTM,CH_LEV[2]
+Dim 1%,PFU1[20],CNVTU[2],COST_LEV[3],BILLC[3]
+Dim 2%,AGE[7],DT3[1],JDATE[5]
+Dim 2%,L1,L6[5],T7,T8,CASH_CUST,CC1[12],C1[12],AXCESS,ARDATE
+Dim 2%,N0,H0[12],L4[3],X2,B[24],H6[8],H5[16],ODSC[5],TRMS[1],M3[2]
+Dim 2%,A2[4],A4[7],NSD[50],D0,A5[2],UPS[150],MCHG[2],COWT1,CMP
+Dim 2%,JDAT0,JDAT,JDAT1,LTM,CHANNEL_[10],HA3[2],CL,LTAX2
+Dim 2%,DCOST[11],DCHRG[11],A0[3]
+Dim 2%,MAXWGT[11],DFLTCHG[11],DFLTCOST[11],MAXCOST[11],MINCOST[11]
+Dim 2%,L9[1],L1$[12]
+Dim 3%,SRN[5]
+Dim 3%,PFU2[6],CNVTA,A[33],CFIN[8],UWORK[15]
+Dim 3%,C9,X3,L5[3],C4[6],S3[17],L7[10],A1[7],TOT_HOLD,R[10],AMOUNT
+Dim 3%,EX[21],A3[13],TWT,TDISC,FUNIT[1],UWT,HAZCHG,OLM[5],ESTMT,UNF[6]
+Dim 3%,TOT_SELL,CL1,CL2,LTAX1,MAXTAX,MAXCH
+Dim 1%,tx9[1],2%,lvlpct,3%,qtysell
+Dim 3%,TAXCODE,CUSTTAXTYPE
+Dim 3%,MCHARGE[9,1],TOT[4],WGT,C10[5],PARM[10]
+Dim SCRATCH$[80],RTYPE$[1]
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+dim tmp$[800],tmp1$[800],tmp2$[800],Message$[600],msg$[100],rstr$[2000],webstr$[2000]
+
+Dim 3%
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+Def FNV(X) = Sgn(X) * (Int(Abs(X) * 100 + .9999999) * .01)
+
+If not (ch[1])
+	ctlc= OpenFile(9999,intco) \ If ctlc= -1 Error 42 !control file
+endif
+
+Read #ch[1],19,50;P9$; \ Mat Read #ch[1],60,50;P60$;
+Mat Read #ch[1],61,0;P61$;
+Gosub OPEN_FILES
+Gosub READ_ROH
+A$[1,6] = H0[7] Using "######"
+LINE_LOOP: Rem
+Search #CH_ROL,3,1;A$,V1,E \ If E > 2 Gosub ERR_SEARCH
+N0 = A$[1,6]
+If Not(E) And N0 = H0[7]
+  Gosub PROCESS_LINE
+  Goto LINE_LOOP
+End If 
+Goto OUTEND
+
+PROCESS_LINE: Rem "====================================== process 1 line
+If (H5[7] = 21 Or H5[7] = 22) And A$[7,9] = "   " Goto L_1900
+L1 = V1 \ Gosub READ_ROL
+If (H5[7] = 21 Or H5[7] = 22) And A$[10,10] = "C" Let ESTMT = L5[3]
+If (H5[7] = 21 Or H5[7] = 22) And A$[7,9] = "   " Goto L_1900
+If S2[0] = 3 Goto L_1900
+If L3[2] > 900 Goto L_1900
+CUSTTAXTYPE = SRN[4]
+If Not(CUSTTAXTYPE) Let CUSTTAXTYPE = A0[3]
+Mat Read #CH_CUSTTAX,CUSTTAXTYPE,36;TAX;
+If L3[0] ! nonstock item ! save default for nonstock as entered
+  A1[7] = 0
+  If L6[5] Let TAX[0] = 1 Else Let TAX[0] = 0
+End If 
+If P60$[42,42] <> "Y" Let L6[5] = TAX[A1[7]]
+If P60$[42,42] = "Y"
+  If TAX[A1[7]] Let L6[5] = H4 Else Let L6[5] = 0
+End If 
+If P60$[42,42] = "Y" Or P60$[42,42] = "T"
+  TAXCODE = L6[5]
+  Call "LSTPRTAX",H0[4],SRN[],L9[1],L1$[1,12],TAXCODE,IntCo
+  If TAXCODE >= 0
+    L6[5] = TAXCODE
+    If P60$[42,42] = "T" And TAXCODE <> 0
+      L6[5] = 1
+    End If 
+  End If 
+End If 
+If P60$[42,42] = "Y" !* if sales tax per line
+	If Not(L6[5]) Let LTAX1 = 0 \ LTAX2 = 0 \ Goto L_1044
+	Mat Read #CH_TAXCODE,L6[5],20;T8; \ LTAX2 = T8
+	Mat Read #CH_TAXCODE,L6[5],414;RTYPE$;
+	If RTYPE$ <> "N" And RTYPE$ <> "U" Let RTYPE$ = "N"
+	LTAX1 = FNR((L5[3] - OLM[1]) * (LTAX2 / 100))
+	If RTYPE$ = "U" Let LTAX1 = FNV((L5[3] - OLM[1]) * (LTAX2 / 100))
+	Mat Read #CH_TAXCODE,L6[5],66;MAXTAX;
+  !If MAXTAX
+  !  If LTAX1 > FNR(MAXTAX * AMOUNT) Let LTAX1 = FNR(MAXTAX * AMOUNT)
+  !  If RTYPE$ = "U" If LTAX1 > FNV(MAXTAX * AMOUNT) Let LTAX1 = FNV(MAXTAX * AMOUNT)
+  !End If 
+  
+	if maxtax<>0
+		LET CNVTU[0]=0;CNVTU[1]=UN[0];CNVTU[2]=1;CNVTA=L7[4]
+		GOSUB uom_convert:
+		qtysell=amount
+		mat read #ch_taxcode,L6[5],444;TX9;
+		let lvlpct=0
+		if tx9[1]>0 and tx9[1]<10
+			if tx9[1]=1 READ #ch_taxcode,l6[5],72;lvlpct;  
+			if tx9[1]=2 READ #ch_taxcode,l6[5],76;lvlpct;  
+			if tx9[1]=3 READ #ch_taxcode,l6[5],80;lvlpct;     
+			if tx9[1]=4 READ #ch_taxcode,l6[5],292;lvlpct; 
+			if tx9[1]=5 READ #ch_taxcode,l6[5],296;lvlpct; 
+			if tx9[1]=6 READ #ch_taxcode,l6[5],300;lvlpct; 
+			if tx9[1]=7 READ #ch_taxcode,l6[5],304;lvlpct; 
+			if tx9[1]=8 READ #ch_taxcode,l6[5],308;lvlpct; 
+			if tx9[1]=9 read #ch_taxcode,l6[5],312;lvlpct;! NEED BREAKTABLE LEVELS
+		endif
+		If not (tx9[0]) ! max tax based upon tax amount
+			IF LTAX1>FNR(MAXTAX*qtysell) ! tax amount greater per unit
+				if tx9[1]=0 ! based upon entire tax code
+					LET LTAX1=FNR(MAXTAX*qtysell)
+					if rtype$="U" LET LTAX1=FNV(MAXTAX*qtysell)
+				else ! based upon the level
+					if rtype$<>"U"
+						let ltax1=fnr(maxtax*qtysell)! need break table 
+						let ltax1=ltax1+fnr(l5[3]*((ltax2-lvlpct)/100))
+					else
+						let ltax1=fnv(maxtax*qtysell)! need break table 
+						let ltax1=ltax1+fnv(l5[3]*((ltax2-lvlpct)/100))
+					endif
+				endif
+			ENDIF
+		else ! TAXABLE MERCHANDISE AMOUNT
+			IF L5[3]>MAXTAX ! total shipped on the line > max tax #1
+				LET MAXTAX=MAXTAX*QTYSELL
+				IF L5[3]>MAXTAX ! recalcu #2
+					IF TX9[1]=0 ! FOR ENTIRE TAX CODE
+						LET LTAX1=FNR(MAXTAX*LTAX[2]/100)
+						if rtype$="U" LET LTAX1=FNV(MAXTAX*AMOUNT)
+					ELSE		
+						let ltax1=0
+						if rtype$<>"U"
+							LET LTAX1=FNR(MAXTAX*lvlpct/100)
+							let ltax1=ltax1+fnr(l5[3]*((ltax2-lvlpct)/100))
+						else
+							let ltax1=FNV(MAXTAX*lvlpct/100)
+							let ltax1=ltax1+fnr(l5[3]*((ltax2-lvlpct)/100))
+						endif	! if rtype$<>"U"				
+					ENDIF ! if tx9[1]=0
+				ENDIF ! if l5[3]>Maxtax  #2
+			ENDIF ! if l5[3]>maxtax #1
+		endif ! if tx9[0]
+	endif ! if max tax
+	L_1044: Mat Write #CH_ROL,L1,508;LTAX1 \ Mat Write #CH_ROL,L1,538;LTAX2;
+End If  ! p60$[42,42]="Y"
+Mat Write #CH_ROL,L1,56;L6;
+L_1900: Rem "line finished
+Unlock #CH_ROL
+Return 
+GET_CUST: Rem
+K5$ = H0[4] Using "######"
+Search #CH_CUST,2,1;K5$,CUST_REC,E \ If E Gosub ERR_SEARCH
+Mat Read #CH_CUST,CUST_REC,412;C9
+Mat Read #CH_CUST,CUST_REC,486;A0
+Mat Read #CH_CUST,CUST_REC,624;C10;
+Mat Read #CH_CUST,CUST_REC,660;C11;
+Return 
+UNPACK_HOLDS: Rem UNPACK T2[21] TO T9[x]
+X2 = T2[21] \ For K = 0 To 11
+  T9[K] = Sgn(Fra(X2 / 2)) \ X2 = Int(X2 / 2)
+Next K \ Return 
+PACK_HOLDS: Rem PACK CHAIN TYPE FROM T9[]
+X2 = 0 \ For K = 0 To 11
+  If T9[K] Let X2 = X2 + 2 ^ K
+Next K \ T2[21] = X2 \ Return 
+READ_PROD: Rem "============================= read product
+Mat Read #CH_PROD,L4,156;B;
+Mat Read #CH_PROD,L4,256;A; \ If Not(A[5]) Let A[5] = 1
+Mat Read #CH_PROD,L4,460;A1; \ If Not(A1[3]) Let A1[3] = 1
+Mat Read #CH_PROD,L4,512;PFU1;
+Mat Read #CH_PROD,L4,554;PFU2;
+Mat Read #CH_PROD,L4,834;A5;
+Return 
+READ_ROH: Rem "====================================== read header
+Mat Read #CH_ROH,H1;H0
+Read #CH_ROH,H1,56;TOT_SELL
+Mat Read #CH_ROH,H1,66;V0$
+Mat Read #CH_ROH,H1,78;H4
+Mat Read #CH_ROH,H1,104;H5
+Mat Read #CH_ROH,H1,408;H6
+Mat Read #CH_ROS,H0[2],8;S0$
+Mat Read #CH_ROS,H0[2],126;S2$
+Mat Read #CH_ROS,H0[2],146;S5
+Mat Read #CH_ROS,H0[2],150;S6
+Mat Read #CH_ROS,H0[2],154;SRN;
+Return 
+READ_ROL: Rem "===================================== read line record
+Mat Read #CH_ROL,L1,8;L3
+Mat Read #CH_ROL,L1,16;L4
+Mat Read #CH_ROL,L1,32;L5
+Mat Read #CH_ROL,L1,56;L6
+Mat Read #CH_ROL,L1,140;L1$
+Mat Read #CH_ROL,L1,160;L9
+Mat Read #CH_ROL,L1,168;L7
+Mat Read #CH_ROL,L1,246;PL
+Mat Read #CH_ROL,L1,256;S2
+Mat Read #CH_ROL,L1,260;S3
+Mat Read #CH_ROL,L1,250;UN
+Mat Read #CH_ROL,L1,404;OLM
+Mat Read #CH_ROL,L1,446;EUN
+Mat Read #CH_ROL,L1,452;UNF
+Mat Read #CH_ROL,L1,508;LTAX1
+Mat Read #CH_ROL,L1,538;LTAX2
+If L3[0] ! "non stock
+  If S2[0] <> 3 Mat Read #CH_SPRODDESC,L4[0],120;HA3;
+  Gosub L_30000
+  B[21] = L5[1]
+Else 
+  Gosub READ_PROD
+End If 
+Return 
+READ_ROT: Rem "================================ read totals
+Mat Read #CH_ROT,H0[3],8;T2;
+Mat Read #CH_ROT,H0[3],168;MCODE
+Mat Read #CH_ROT,H0[3],208;MCHARGE
+Mat Read #CH_ROT,H0[3],328;TOT
+Mat Read #CH_ROT,H0[3],358;MCTXBL
+Mat Read #CH_ROT,H0[3],378;DCLVL;
+Return 
+L_7600: Print @0,22;'CR BR BD'; Tab (37 - Len(J7$) / 2);'ED';"  ";
+Print J7$;"  ";'BD'; Tab 77;'ER ED RB'; \ Signal 3,(Len(J7$)) * .75
+Print @0,23;'CL'; \ Return 
+X$ = " ",X$ \ X$[10] = ""
+X$[1,3] = Int(X2 / 10 ^ 2 - Int(X2 / 10 ^ 4) * 10 ^ 2) + 10 ^ 2 Using "###"
+X$[4,6] = Fra(X2 / 10 ^ 2) * 10 ^ 2 + 10 ^ 2 Using "###"
+X$[7,9] = Int(X2 / 10 ^ 4) + 10 ^ 2 Using "###"
+X$[4,4] = "/" \ X$[7,7] = "/" \ X$ = X$[2]
+If Not(X2) Let X$ = "        "
+Return 
+L_7740: Rem  *PACK DATE    X$ TO X2      V1.0  4/04/84  G.DOSCHER
+X2 = X$[4,5] \ X1 = X$[1,2] \ X2 = X2 + X1 * 10 ^ 2
+X1 = X$[7,8] \ X2 = X2 + X1 * 10 ^ 4
+Return 
+UOM_CONVERT: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)
+If CNVTU[2] = 3 Goto L_20050
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[2] = 0 Goto L_20050
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+L_20050: Rem "from old ub 4 routine
+L_20120: Rem "====== unibasic 5+ logic
+Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+If CNVTU[2] = 0 Goto L_20160
+If FLAG Let E = FLAG \ Gosub ERR_SEARCH
+AMOUNT = CNVTA
+L_20160: Return 
+L_30000: Rem ===== set units for conversions (stock/nonstock version)
+If S2[0] = 3 Goto L_30099
+A[6] = L6[4];A[5] = UNF[5] \ If Not(A[5]) Let A[5] = 1;UNF[5] = 1
+B[23] = L6[2];A1[3] = UNF[4] \ If Not(A1[3]) Let A1[3] = 1;UNF[4] = 1
+PFU1[0] = EUN[0];PFU1[1] = UN[0]
+PFU1[2] = UN[1];PFU1[3] = UN[2]
+PFU1[4] = EUN[1]
+PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+PFU1[8] = UN[0];PFU1[9] = UN[0];PFU1[10] = EUN[1]
+PFU1[11] = UN[2];PFU1[12] = UN[1]
+If Not(L3[0]) Goto L_30060
+PFU1[13] = UN[0];PFU1[16] = EUN[0];PFU1[17] = EUN[0]
+PFU1[18] = UN[0];PFU1[19] = UN[0]
+L_30060: PFU2[0] = UNF[0];PFU2[1] = UNF[1]
+PFU2[2] = UNF[2];PFU2[3] = UNF[3]
+PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+For X1 = 1 To 4
+  For X2 = 0 To X1 - 1
+    If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+  Next X2
+Next X1
+L_30099: Return 
+OPEN_FILES: Rem
+
+
+CH_PROD = Abs(CH[2])
+CH_CUST = Abs(CH[3])
+CH_ROS = Abs(CH[4])
+CH_ROH = Abs(CH[5])
+CH_ROT = Abs(CH[6])
+CH_ROL = Abs(CH[7])
+CH_SPRODDESC = Abs(CH[8])
+CH_CUSTTAX = Abs(CH[9])
+CH_TAXCODE = Abs(CH[10])
+CH_CCODES = Abs(CH[11])
+IF not(ch[2])
+	Ch_Prod = OpenFile(1792,intco) \ If Ch_Prod = -1 Error 42 !product file
+endif
+if not (ch[3])
+	Ch_Cust = OpenFile(1808,intco) \ If Ch_Cust = -1 Error 42 
+endif
+IF not(ch[4])
+	Ch_ros = OpenFile(1856,intco) \ If Ch_Ros = -1 Error 42 
+endif
+if not (ch[5])
+	Ch_roh = OpenFile(1840,intco) \ If Ch_Roh = -1 Error 42 
+endif
+IF not(ch[6])
+	Ch_rot = OpenFile(1872,intco) \ If Ch_rot = -1 Error 42 
+endif
+if not (ch[7])
+	Ch_rol = OpenFile(1888,intco) \ If Ch_rol = -1 Error 42 
+endif
+IF not(ch[8])
+	Ch_sproddesc = OpenFile(2128,intco) \ If Ch_sproddesc = -1 Error 42 
+endif
+if not (ch[9])
+	Ch_custtax = OpenFile(928,intco) \ If Ch_custtax = -1 Error 42 
+endif
+IF not(ch[10])
+	Ch_taxcode = OpenFile(2176,intco) \ If Ch_taxcode = -1 Error 42 
+endif
+if not (ch[11])
+	Ch_ccodes = OpenFile(1728,intco) \ If Ch_ccodes = -1 Error 42 
+endif
+
+Return 
+Rem {begin src/inc/rtn.date.i}
+NUM2DATE: Rem *UNPACK DATE  X2 TO X$      V1.0  4/04/84  G.DOSCHER
+X$ = " ",X$ \ X$[10] = ""
+X$[1,3] = Int(X2 / 10 ^ 2 - Int(X2 / 10 ^ 4) * 10 ^ 2) + 10 ^ 2 Using "###"
+X$[4,6] = Fra(X2 / 10 ^ 2) * 10 ^ 2 + 10 ^ 2 Using "###"
+X$[7,9] = Int(X2 / 10 ^ 4) + 10 ^ 2 Using "###"
+X$[4,4] = "/" \ X$[7,7] = "/" \ X$ = X$[2]
+If Not(X2) Let X$ = "        "
+Return 
+DATE2NUM: Rem *PACK DATE    X$ TO X2      V1.0  4/04/84  G.DOSCHER
+X2 = X$[4,5] \ X1 = X$[1,2] \ X2 = X2 + X1 * 10 ^ 2
+X1 = X$[7,8] \ X2 = X2 + X1 * 10 ^ 4
+Return 
+JUL2DATE: Rem REM DATE JULIAN X2 TO X$
+DT3[0] = X2;FLAG = 1;X$ = " "
+If X2 <= 0 Let X$ = " ",X$ \ Return 
+Call "JULIANUTIL",DT3[],X$,FLAG
+Return 
+YMD2JUL: Rem  REM  CONVERT YYMMDD TO JULIAN (RETURN=NOGOOD, +1=OKAY)
+If X2 <= 0 Return 
+X$ = X2 Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Return 
+X2 = X$[1,5]
+Return 1
+JUL2YMD: Rem  REM CONVERT JULIAN TO YYMMDD
+DT3[0] = X2;DT3[1] = X2;FLAG = 0
+If X2 <= 0 Return 
+Call "JULIANUTIL",DT3[],X$,FLAG
+Return 
+YM2LONGYEAR: Rem Rem Convert YYMM to YYYYMM
+If X2 <= 0 Return 
+X$ = X2 Using "&&&&"
+DT3[0] = X$[1,2];DT3[1] = X$[3,4]
+If DT3[0] > 67 Let DT3[0] = 1900 + DT3[0]
+If DT3[0] < 68 Let DT3[0] = 2000 + DT3[0]
+X$[1,4] = DT3[0] Using "&&&&"
+X$[5,6] = DT3[1] Using "&&"
+X2 = X$[1,6]
+Return 
+Rem {end rtn.date.i}
+
+
+DONE: Rem "======================================= exit
+OUTEND: Rem
+If Err 0 Rem
+If not (ch[1])
+	close #ctlc
+endif
+IF not(ch[2])
+	Ch_Prod = OpenFile(1792,intco) \ If Ch_Prod = -1 Error 42 !product file
+endif
+if not (ch[3])
+	Ch_Cust = OpenFile(1808,intco) \ If Ch_Prod = -1 Error 42 
+endif
+CH_PROD = Abs(CH[2])
+CH_CUST = Abs(CH[3])
+CH_ROS = Abs(CH[4])
+CH_ROH = Abs(CH[5])
+CH_ROT = Abs(CH[6])
+CH_ROL = Abs(CH[7])
+CH_SPRODDESC = Abs(CH[8])
+CH_CUSTTAX = Abs(CH[9])
+CH_TAXCODE = Abs(CH[10])
+CH_CCODES = Abs(CH[11])
+IF not(ch[2])
+	close #Ch_Prod
+endif
+if not (ch[3])
+	close #Ch_Cust
+endif
+IF not(ch[4])
+	close #Ch_ros
+endif
+if not (ch[5])
+	close #Ch_roh
+endif
+IF not(ch[6])
+	close #Ch_rot
+endif
+if not (ch[7])
+	close #Ch_rol 
+endif
+IF not(ch[8])
+	close #Ch_sproddesc
+endif
+if not (ch[9])
+	close #Ch_custtax
+endif
+IF not(ch[10])
+	close #Ch_taxcode 
+endif
+if not (ch[11])
+	close #Ch_ccodes 
+endif
+
+End 
+ERR_SEARCH: Rem                                            
+ENUM = E;ELINE = Spc(16);CTERR = 0                         
+If E = 5 Let CTERR = Err(8)                                
+e$ = "RETURN STATUS",(E + (CTERR * .001))                  
+e$ = e$,"/ STATEMENT",ELINE," IN PROGRAM " + Msc$(4)       
+Call programdump("tmp/mxcalctaxse!","") 
+End
+!Goto ERR_MSG ! Error 10000                                 
+!Return ! End
+Rem {begin rtn.error.s}
+ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+!
+include "src/callmainerrnet.inc"
+End

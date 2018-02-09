@@ -1,0 +1,200 @@
+!! check if l7[12] QTY ON BO REL  is going down in bo processing
+!! it should be accumulating all the 261/264 spin off amounts for the line
+
+! loadsave -w -n 100,10 -o prog/dxport/task65578.dl4 src/task65578.src
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile
+
+External Lib "libgeneral.lib"
+Declare Intrinsic Sub programdump,findf 
+Declare Intrinsic Function findchannel
+Declare External Sub GetSession
+Declare External Sub suberr,mainerr,searcherr
+
+Declare Intrinsic Function Trim$,findchannel 
+Declare Intrinsic Sub dxopen,dxget,dxset,dxclose,dxsave,programdump,env,findf,logic
+
+TRY
+
+	!IF ERR 0 GOSUB Err_Trap:
+
+	ENTER REC_ROL
+
+	Dim 1%,IntCo,ctlc
+	DIM 3%
+	DIM F$[16],P60$[50],tmp$[1000]
+	dim email_from$[50],email_to$[50],sys$[1000],comment1$[100],subject$[50]
+	dim cc1$[50],cc2$[50],nam$[30],userid$[8],DRIVERDIR$[70]
+	Dim action$[20],action1$[20],options$[20],Action2$[20],e$[500],blockid$[8]
+	Dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[3000]
+	
+	!Call dxopen()  
+	Call dxget("S_USER.AppID",tmp$) !company #               
+	Try Let IntCo = Val(tmp$) Else Let IntCo = 1 !company #  
+	!call dxclose()  
+	ctlc = 1
+	try 
+		ropen #ctlc,(IntCo Using "files/cntrl/cntrl#")
+		cntrlflag=1
+	else
+		cntrlflag=0
+	end try
+
+	mat read #CTLC,3,0;nam$
+	MAT  READ #CTLC,60,50;P60$;
+	Call dxget("blockid",blockid$)
+
+	ch_ROL = OpenFile(-1888,IntCo) \ If ch_ROH = -1 Error 42 !ROH
+	
+	DIM K_ROL$[100],k_log$[100],l1$[20],tdy$[6],BLANKS$[100]
+	DIM 1%,L3[3]
+	DIM 2%,L2[1]
+	DIM 3%,l7[12],log_l7[12]
+	
+	BLANKS$=" ",BLANKS$
+	tdy$=(tim(8) using "&&")+(tim(9) using "&&")+(tim(10) using "&&")
+	k_log$=" ",k_log$
+	CH_LOG = findchannel() 
+	GOSUB clean_file
+
+	IF rec_rol<0 or rec>chf(ch_rol) goto outend:  ! rec number looks bad
+	mat read #ch_rol,rec_rol,0;L2;
+	mat read #ch_rol,rec_rol,8;l3;
+	mat read #ch_rol,rec_rol,140;l1$;
+	mat read #ch_rol,rec_rol,168;l7;
+
+	K_log$=" ",k_Log$
+	k_log$[1,6]=L2[1] USING "######"
+	K_LOG$[7,10]=L3[2] USING "### "
+	k_LOG$[11,22]=L1$[1,12]
+	SEARCH #CH_LOG,2,1;K_LOG$,REC_LOG,E
+	IF NOT(E)
+		mat read #ch_log,rec_log,30;log_l7;
+		if l7[12]<log_l7[12]  ! rem don't think this is possible without a delete?
+			gosub mailresults:
+		endif
+	ELSE
+		e=2
+		search #ch_log,1,0;k_log$,rec_log,e
+		if not(e)
+			mat write #ch_log,rec_log,0;k_log$
+			mat write #ch_log,rec_log,30;l7;
+			search #ch_log,4,1;k_log$,rec_log,e
+		endif
+	ENDIF
+	
+outend: if cntrlflag and ctlc then close #ctlc
+if ch_ROL then close #ch_ROL
+try 
+	close #ch_log
+else 
+end try
+if ch_prt then close #ch_prt
+end
+
+else
+	include "src/callsuberr.inc"
+end try
+
+STOP 
+
+
+clean_file: rem remove from checker file records no longer needed
+!! if in log and not in rol, remove it from the log
+!! do check once a day only
+clean_flag=1
+TMP$="6/tsk65578"
+Call FindF(tmp$,found)
+if not(found)
+	BUILD #ch_log,"<755> [1:150] "+TMP$
+	rec_log=12
+	search #ch_log,0,1;k_log$,rec_log,e \ if e GOTO OUTEND
+	search #ch_log,0,0;k_log$,rec_log,e \ if e goto outend
+	close #ch_log
+	clean_flag=0
+endif
+open #ch_log,tmp$
+K_log$="cleaned "
+clean_file_loop: search #ch_log,3,1;k_log$,rec_log,e
+	if not(e)
+		if k_log$[1,7]="cleaned" 
+		if k_log$[9,14]=tdy$
+			clean_flag=0
+		else
+			search #ch_log,5,1;k_log$,rec_log,e
+		endif
+		goto clean_file_loop:
+	endif
+endif
+if clean_flag
+	k_log$=" ",k_log$
+clean_file_loop1: search #ch_log,3,1;k_log$,rec_log,e
+	if not(e)
+		k_rol$=" ",k_rol$
+		k_rol$[1,10]=k_log$[1,10]
+		search #ch_rol,2,1;k_rol$,rec_rol1,e
+		if e
+			search #ch_log,5,1;k_log$,rec_log,e
+		endif
+		goto clean_file_loop1:
+	endif
+	k_log$="cleaned "+tdy$+BLANKS$
+	search #ch_log,4,1;k_log$,rec_log,e
+endif
+return
+
+
+
+MAILRESULTS: REM mail prioblems to ubs 
+try
+if ch_prt=0
+		DriverDir$ = "DRIVERDIR" \ System 28,DriverDir$
+        email_from$="txc@ubssys.com"
+        email_to$="txc@ubsys.com"
+        subject$="L7[12] not right : Company "+nam$
+        !cc1$="dave@ubsys.com"
+		!cc2$="steve.mote@americanosment.com"
+		!if len(driverdir$) 
+		!	sys$=driverdir$
+		!else
+		!	sys$="$"
+		!endif
+        LET SYS$=sys$+"$/usr/ub/sys/email.report -f ''",EMAIL_FROM$,"''"," -t ''",EMAIL_TO$,"''"," -s ''",SUBJECT$,"''"       
+        IF CC1$<>"" LET SYS$=SYS$," -C ''",CC1$,"''"                            
+ 
+        IF CC2$<>"" LET SYS$=SYS$," -C ''",CC2$,"''"                            
+ 
+        IF COMMENT1$<>"" LET SYS$=SYS$," -c ''",COMMENT1$,"''"     
+        ch_prt=findchannel()
+                                       
+        OPEN #ch_prt,SYS$                                                       
+      
+        print #ch_prt;"Company Name : "+nam$
+        print #ch_prt;"  "
+		
+		print #ch_prt;"company # ";IntCo
+		
+endif
+print #ch_prt;"Sales Order Number ";k_log$[1,6]
+print #ch_prt;"Line               ";k_log$[7,10]
+print #ch_prt;"Product            ";k_log$[11]
+print #ch_prt;"Ordered Old        ";log_l7[2]
+print #ch_prt;"Ordered New        ";l7[2]
+print #ch_prt;"Shipped Old        ";log_l7[4]
+print #ch_prt;"Shipped New        ";l7[4]
+print #ch_prt;"Backorder Old      ";log_l7[3]
+print #ch_prt;"Backorder New      ";l7[3]
+print #ch_prt;"Accum BO Old       ";log_l7[12]
+print #ch_prt;"Accum BO New       ";l7[12]
+print #ch_prt;"date ";tim(4)
+print #ch_prt;"time ";tim(11);":";tim(12);":";tim(13)
+!PRINT #CH_PRT;"port ";SPC(6)
+print #ch_prt;"  "
+return
+
+else
+    include "src/callsuberr.inc"
+end try
+
+ 

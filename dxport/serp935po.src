@@ -1,0 +1,784 @@
+! serp935po.dl4
+!
+! G/L - PO&AP Control File Maintenance (PM program UT935PO)
+! Inquiry & Edit
+!
+! 1.0 03/02/2009
+!
+!
+!loadsave -w -n 100,10 -o prog/dxport/serp935po.dl4 src/serp935po.src
+!
+!
+include "src/copyright.inc"
+! internal files needed
+Include "src/inc/fileglpocntrl.inc" ! glpocntrl
+Include "src/inc/filewhinfoz.inc" ! wh info file (rec 0 fix)
+Include "src/inc/filesprodcatgy.inc" ! product category
+Include "src/inc/fileglglmz.inc" ! glmaster
+include "src/inc/fileglacfz.inc" ! application control file
+
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+Declare External Function formatdate2$,getuidrec
+Declare External Sub UserCntrl
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+
+
+
+! internal subs/functions 
+
+Declare Intrinsic sub programdump,env,Logic,FindF
+Declare Intrinsic Sub DateToJulian,JulianToDate
+Declare Intrinsic Function findchannel
+
+Declare Sub Updatelog,OpenFiles,STARTGLPOCNTRL,GETGLPOCNTRL,SUBMITGLPOCNTRL
+
+
+OPTION GOSUB NESTING 12  ! Default is 8 (called programs may add several nests)
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30],Fields$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim P9$[50],P60$[50],P61$[256],P8$[7],TUID$[10]
+	Dim QMask$[20],PMask$[20],Key1$[60],HKey$[60]
+	Dim Key2$[64],Msgdesc$[150],UCA2$[50],keyglpo$[50]
+	dim keyacf$[30],3%,rec_acf
+	Dim keyglm$[50],3%,glmrec
+	dim Blank$[100] \ Blank$=" ",Blank$
+	dim 1%,c0[7],spo,poglflag,filename$[100]
+	dim 1%,cost_lev[4],Q0[1],Whse,debug,Cnvtu[2],UCA5[10]
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	Dim RList$[100,100] ! for fixed droplists (libdroplist.lib)
+	dim 1%,X1[9],Chans[20],OT19
+	Dim 2%,x2[9],sysdate
+	Dim 3%,CNVTA,Amount,X3[9],R[99]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/mgl.log" ! fields for DEBUG
+
+	Dim glpo. as glpocntrl ! glpocntrl
+	Dim psc. as  sprodcatgy
+	Dim WH. as whinfo ! wh info file
+	Dim glm. As glglm ! gl master file
+	dim acf. as glacf ! application control file
+
+	
+	! call dxopen() ! already done in menu
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp935po"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action2$=UCase$(Action2$)
+	ACtion2$=RTrim$(Action2$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	GAct=0 ! action not found
+	if debugdetail
+		dmsg$="SERP935po ACTION1 "+action1$
+		If Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	
+
+	MAT  READ #CTLC,3,172;SysDate;
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #ctlc,52,60;P8$;
+	mat read #1,51,18;c0; !c0[4] = a/p - po interface
+	mat read #1,51,76;spo;!po control #
+	mat read #1,51,88;poglflag; ! po gl interface flags
+
+	Call OpenFiles() ! open any/all files (after reading flags!)
+	Mat Read #CTLC,115,40;Q0;
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	tmp$=" ",tmp$
+	read #ctlc,62,360;tmp$[1,20];
+	ot19=0 \ if trim$(tmp$[1,20])<>"" let OT19=1
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	TUID$=UserID$+Blank$
+	If Len(TUID$)>10 let TUID$[11]=""
+	Call UserCntrl(TUID$,UCA2$,UCA5[],status,intCo)
+	Let COST_LEV[0]=UCA5[0]
+	Let COST_LEV[1]=UCA5[1]
+	Let COST_LEV[2]=UCA5[2]
+	Let COST_LEV[3]=UCA5[3]
+	Let COMM_LEV=UCA5[4]
+	let rec_uac=GetUIDRec(e$,IntCo,Userid$)
+	
+	ReturnStatus=0
+	Message$="ACTION1 NOT FOUND!"
+	select case action1$
+		
+
+	case "STARTGLPOCNTRL" ! send over droplists and flags
+		let returnstatus=1
+		let message$="OK"
+		call StartGlPOcntrl()
+		if debugdetail
+			dmsg$="StartGlPOcntrl Done "+Message$ \ Call updatelog(debug)
+		Endif
+	case "GETGLPOCNTRL" ! get new or default key
+		let returnstatus=1
+		let message$="OK"
+		call Getglpocntrl()
+		if debugdetail
+			dmsg$="StartGlPOcntrl Done "+Message$ \ Call updatelog(debug)
+		Endif
+
+	case "SUBMITGLPOCNTRL" ! submit it							
+		ReturnStatus=1
+		Message$="OK"
+		call Submitglpocntrl()
+		if debugdetail
+			dmsg$="SubmitGlPOcntrl Done "+Message$ \ Call updatelog(debug)
+		Endif
+	
+
+  end select
+ 
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+
+  if debugdetail
+		dmsg$="End of Program serp935" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main processing
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	Ch_WH = OpenFile(-2768,IntCo) \ if ch_wh = -1 Error 42 ! wh info file (rec 0 fix)
+	ch_psc = OpenFile(-1984,IntCo) \ If ch_psc = -1 Error 42 ! prod sales category
+	! ch_glpo = OpenFile(464,IntCo) \ if ch_glpo= -1 Error 42  ! glpo controls
+	let filename$="6/GLPOCNTRL"+STR$(INTCO)
+	Call FindF(filename$,fileflag)  
+	If not(fileflag)
+			let ch_glpo=-1
+	else 
+		ch_glpo = FindChannel() ! need to get a channel #  
+		Open #ch_glpo,filename$ 
+	endif
+		
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+Userid$+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+!========================================================================================
+Sub StartGLPOcntrl()
+! droplists sent here 
+ Try	
+	Dim desc$[12]
+	dim keyglm$[50],3%,glmrec
+	Dim keypoh$[50],3%,pohrec
+	if p9$[17,17]="Y" or p9$[17,17]="M"
+		ch_glm = OpenFile(-176,intCo) \ If ch_glm = -1 Error 42 !
+	endif
+	ReturnStatus=1
+	Message$=""
+	! check is gl interface is needed
+	let tmp$="N"
+	if p9$[17,17]="Y" let tmp$="Y"
+	if p9$[17,17]="M" let tmp$="Y"
+	if not (c0[4]) let tmp$="N" ! ap/po interface is not turned on
+	if not (spo) let tmp$="N" ! control numbers are not turned on
+	if ch_glpo<0 let tmp$="N" ! file not found
+	if tmp$="N"
+		let returnstatus=0
+		let message$=message$+"General Ledger Interface Is Not Available"
+		goto endstartglpo: 
+	endif
+	! need to check if invoices are registered
+	if returnstatus<>0 and poglflag<>0
+		ch_poh = Openfile(-2416,IntCo) \ If ch_poh = -1 Error 42 !"order head
+		let keypoh$=" ",keypoh$
+		let keypoh$[1,2]=" 6"
+		search #ch_poh,3,1;keypoh$,pohrec,e
+		if not(e)
+			if keypoh$[1,2]=" 6"
+				let returnstatus=0
+				let message$=message$+"Purchase Orders need to be accepted. "
+			endif
+		endif
+		let keypoh$=" ",keypoh$
+		let keypoh$[1,2]="13"
+		search #ch_poh,3,1;keypoh$,pohrec,e
+		if not(e)
+			if keypoh$[1,2]="13"
+				let returnstatus=0
+				let message$=message$+"Debit Memos need to be accepted. "
+			endif
+		endif
+	endif
+	endstartglpo: ! 
+	! need to check if credit memos are registered
+	let tmpcnt=maxcnt 
+	Clear List$[]
+	List$[0]=bsdel$,"General Ledger Account",fdel$
+	WebStr$="GLACCTID",fdel$,"GLDESC",fdel$
+    List$[1]=WebStr$
+	If p9$[17,17]="Y" or p9$[17,17]="M"
+		if returnstatus<>0 
+			let row=2	
+			let keyglm$=" ",keyglm$
+			do
+				search #ch_glm,3,1;keyglm$,glmrec,e
+				if e>0 exit do
+				read record #ch_glm,glmrec;glm.;
+				if glm.rectype$[1,1]="0" ! normal posting account
+					let webstr$=Rtrim$(keyglm$),fdel$
+					let webstr$=webstr$,rtrim$(glm.Desc$),fdel$
+					let list$[row]=webstr$
+					let row=row+1
+					If row > tmpcnt Let tmpcnt = expandarray(e$,List$[]) 
+				endif
+			loop ! for the do
+			let webstr$="0",fdel$
+			let webstr$=webstr$,"None Assigned",fdel$
+			let list$[row]=webstr$
+			let row=row+1
+		endif
+	endif
+    call AddToStr(e$,rstr$,List$[])          
+	Call AddToStr(e$,rstr$,esdel$) ! end of section  ! gl
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"WHSELIST",fdel$
+	List$[1]="ID",fdel$,"WhName",fdel$
+	row=2
+	if returnstatus<>0
+		
+		List$[row]="0",fdel$,"DEFAULT",FDEL$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		maxwhse=CHF(ch_wh)-1 \ if maxwhse>98 let maxwhse=98
+		For I=0 to maxwhse ! CHF(WHC)-1 (99 is the ALLWHSE record)
+			read record #ch_wh,I,0;wh.;
+			if rtrim$(wh.WhName$)<>"" !indicates active record in non-indexed file
+				WebStr$=Str$(I+1),fdel$,rtrim$(wh.WhName$),fdel$
+				List$[row]=webstr$
+				row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			Endif
+		Next I
+	endif
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+    ! start purchase order types
+	Clear list$[]
+ 	tmpcnt=maxcnt
+	List$[0]=bsdel$,"droplistpotype",fdel$ ! beginning section!
+	List$[1]="ID",fdel$,"Description",fdel$
+	List$[2]="0",fdel$,"Default Order Type",fdel$
+	List$[3]="W ",fdel$,"Warehouse",fdel$ 
+	List$[4]="D ",fdel$,"Direct",fdel$ 
+	List$[5]="I ",fdel$,"Indirect",fdel$ 
+	row=6
+	if p60$[46,46]="Y" 
+			List$[row]="IW",fdel$,"Import Warehouse",fdel$ 
+			let row=row+1
+			List$[row]="ID",fdel$,"Import Direct",fdel$ 
+			let row=row+1
+			List$[row]="II",fdel$,"Import Indirect",fdel$ 
+			let row=row+1
+	endif
+	List$[row]=esdel$ ! end section delimiter
+	call AddToStr(e$,rstr$,List$[])
+	CLEAR LIST$[]
+	clear fields$[]
+	 Call filedroplistsprodcatgy(e$,List$[],100,ch_psc,"",fields$[],"0")     
+    Call AddToStr(e$,rstr$,List$[])   
+	Clear list$[]
+	List$[0]=bsdel$,"ControlFlags",fdel$
+	webstr$="GLFLAG",fdel$,"POTYPEFLAG",fdel$,"PRODCATFLAG",fdel$,"MULTICURRENCY",fdel$
+	List$[1]=webstr$
+	row=2
+	if returnstatus<>0
+		webstr$=""
+		let tmp$="N"
+		if p9$[17,17]="Y" let tmp$="Y"
+		if p9$[17,17]="M" let tmp$="Y"
+		webstr$=tmp$,fdel$! glflag
+		let tmp$="N"
+		if p8$[2,2]="Y" let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$ ! order type flag
+		let tmp$="N"
+		if p8$[3,3]="Y" let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$ ! prod cat flag
+		let tmp$="N"
+		if p61$[136,136]="Y" let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$ ! multi-currency
+		list$[2]=webstr$
+		row=row+1
+	endif
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+!!! need status section	
+	
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub !  
+! -------------------------------------------------------------------------------------
+Sub GetglpoCntrl()
+! droplists sent here 
+ Try
+	dim 3%,glporec
+	                       
+	ReturnStatus=1
+	Message$="OK" 
+	Call Dxget("WAREHOUSE",tmp$)
+	let whrec=tmp$
+	if whrec<0 or whrec>99
+		let returnstatus=0
+		let message$="Invalid Warehouse Entered "
+		goto endgetglpo:
+	endif
+	if whrec=0 ! default info
+		let keyglpo$=" ",keyglpo$
+		let keyglpo$[1,6]="DFAULT"
+		If p8$[2,2] = "Y"
+			Call Dxget("ORDERTYPE",tmp$)
+			ordertype = tmp$
+			If tmp$<>"0" and tmp$<>"" 
+				returnstatus = 0
+				message$ = "Default Record Must be entered for All Order Types "
+				Goto endgetglpo
+			End If
+		End If                                                                
+		let ordertype=0
+		goto getglporec:
+	endif
+	read record #ch_wh,(whrec-1);wh.;
+	If RTrim$(wh.whname$) = ""
+		let returnstatus=0
+		let message$="Warehouse "+str$(whrec)+ " Not On File "
+		goto endgetglpo:
+	endif
+	! check default record is setup first
+	keyglpo$ = " ",keyglpo$
+	keyglpo$[1,6] = "DFAULT"
+	Search #CH_glpo,2,1;keyglpo$,glporec,e
+	If e <> 0
+		returnstatus = 0
+		message$ = "Default Warehouse Record Needs to be first set-up "
+		If p9$[2,2] = "Y"
+			message$ = message$ + "For All Order Types "
+		End If
+		Goto endgetglpo
+	End If
+	keyglpo$ = " ",keyglpo$
+	keyglpo$[1,2] = whrec Using "##"
+	Search #CH_glpo,2,1;keyglpo$,glporec,e
+	
+	If e <> 0
+		let ordertype=0;prodcat=0
+		if p8$[2,2]="Y"
+			ordertype=-1
+			Call Dxget("POTYPE",tmp$)
+			let tmp$=RTRIM$(TMP$)
+			if tmp$="" or tmp$="0" let ordertype=0
+		endif
+		prodcat=0
+		if p8$[3,3]="Y"
+				let prodcat=-1
+				Call Dxget("PRODCAT",tmp$)
+				If rtrim$(tmp$)="" or rtrim$(tmp$)="0" let prodcat=0
+		endif 
+		if ordertype=0 and prodcat=0
+			goto getglporec:
+		endif
+		returnstatus = 0
+		message$ = "Warehouse Record " + Str$(whrec) 
+		If p8$[2,2] = "Y"
+			message$ = message$ + " For All Order Types "
+		End If
+		If p8$[3,3] ="Y"
+			message$ = message$+ "For All Prod Categories "
+		endif
+		message$ = message$ + " Need to be added first. "
+		Goto endgetglpo
+	End If
+	read record #ch_glpo,glporec;glpo.;
+	let ordertype=0
+	let prodcat=0
+	if p8$[2,2]="Y"
+		let ordertype=-1
+		Call Dxget("POTYPE",tmp$)
+		let tmp$=RTRIM$(TMP$)
+		if tmp$="W" let ordertype=1
+		if tmp$="D" let ordertype=2 
+		if tmp$="I" let ordertype=3
+		if p60$[46,46]="Y"
+			if tmp$="IW" let ordertype=4
+			if tmp$="ID" let ordertype=5
+			if tmp$="II" let ordertype=6
+		endif
+		if tmp$="" let ordertype=0
+		if tmp$="0" let ordertype=0
+		if ordertype<0 or ordertype>6 
+			let returnstatus=0
+			let message$="Invalid Order Type Entered "
+			goto endgetglpo:
+		endif
+		if not (ordertype)
+			if p8$[3,3]="Y"
+				let prodcat=0
+				Call Dxget("PRODCAT",tmp$)
+				let prodcat=tmp$
+				If prodcat<>0
+					returnstatus = 0
+					message$ = "Order Type Needs to be Selected "
+					Goto endgetglpo	
+				endif
+			endif
+			let keyglpo$=" ",keyglpo$
+			let keyglpo$[1,2]=whrec using "##"
+			goto getglporec:
+		endif
+		If whrec = 0
+			returnstatus = 0
+			message$ = "Warehouse Needs to be Selected "
+			Goto endgetglpo
+		End If                                          	
+	endif
+	if p8$[3,3]="Y"
+		let prodcat=0
+		Call Dxget("PRODCAT",tmp$)
+		let prodcat=tmp$
+		if tmp$="" let tmp$="0"
+		if tmp$="0" 
+			let keyglpo$=" ",keyglpo$
+			let keyglpo$[1,2]=whrec using "##"
+			if ordertype<>0 let keyglpo$[5,6]=ordertype using "##"	
+			goto getglporec: ! for all product categories
+		endif
+		if prodcat<1 or prodcat>20 
+			let returnstatus=0
+			let message$="Invalid Product Sales Category Entered "
+			goto endgetglpo:
+		endif
+		If whrec = 0
+			returnstatus = 0
+			message$ = "Warehouse Needs to be Selected "
+			Goto endgetglpo
+		End If  
+		If p8$[2,2]="Y" and ordertype=0 and prodcat<>0
+			returnstatus = 0
+			message$ = "Order Type Needs to be Selected "
+			Goto endgetglpo
+		endif
+		if p8$[2,2]="Y" and ordertype<>0
+			let keyglpo$=" ",keyglpo$
+			let keyglpo$[1,2]=whrec using "##"
+			if ordertype<>0 let keyglpo$[5,6]=ordertype using "##"	
+			search #ch_glpo,2,1;keyglpo$,glporec,e
+			if E<>0
+				let returnstatus=0
+				Message$="Purchase Order Type Record Must be added first "
+				goto endgetglpo:
+			endif
+		endif
+	endif
+	let keyglpo$=" ",keyglpo$
+	let keyglpo$[1,2]=whrec using "##"
+	if ordertype<>0 let keyglpo$[5,6]=ordertype using "##"
+	if prodcat<>0 let keyglpo$[7,8]=prodcat using "##"
+	getglporec: !  GET glpoCNTRL RECORD
+	let recordexist=0
+	glporec=-1
+	search #ch_glpo,2,1;keyglpo$,glporec,e
+	if not(e)
+		recordexist=1
+		read record #ch_glpo,glporec;glpo.;
+		goto endgetglpo:
+	endif
+	if not(whrec) ! entering default -- will be new
+		clear glpo.
+		goto endgetglpo:
+	endif
+	if p8$[3,3]="Y" and ordertype<>0 and prodcat<>0
+		let keyglpo$=" ",keyglpo$
+		let keyglpo$[1,2]=whrec using "##"
+		if ordertype<>0 let keyglpo$[5,6]=ordertype using "##"
+		search #ch_glpo,2,1;keyglpo$,glporec,e
+		if not(e)
+			recordexist=1
+			read record #ch_glpo,glporec;glpo.;
+			goto endgetglpo:
+		endif	
+	endif
+	if ordertype<>0
+		let keyglpo$=" ",keyglpo$
+		let keyglpo$[1,2]=whrec using "##"
+		search #ch_glpo,2,1;keyglpo$,glporec,e
+		if not(e)
+			read record #ch_glpo,glporec;glpo.;
+			goto endgetglpo:
+		else
+			let returnstatus=2
+			let message$="Warehouse "+str$(whrec)
+			let message$=" Needs to be setup first"
+			goto endgetglpo:
+		endif
+	endif
+	let ordertype=0
+	let prodcat=0
+	let keyglpo$=" ",keyglpo$
+	let keyglpo$[1,6]="DFAULT"
+	search #ch_glpo,2,1;keyglpo$,glporec,e
+	if not(e)
+		read record #ch_glpo,glporec;glpo.;
+		goto endgetglpo:
+	endif
+	clear glpo.
+	let returnstatus=2
+	let message$="Default Record needs to be setup first."
+	endgetglpo: ! 
+	clear list$[]
+	List$[0]=bsdel$,"GETGLPOCNTRL",fdel$
+	webstr$="WAREHOUSE",fdel$                       
+	webstr$=webstr$,"POTYPE",fdel$   
+	webstr$=webstr$,"PRODCAT",FDEL$
+	webstr$=webstr$,"Inventory",fdel$     
+	webstr$=webstr$,"Freight",fdel$                          
+	webstr$=webstr$,"MiscCharges",fdel$ 
+	webstr$=webstr$,"NewRecord",fdel$
+	webstr$=webstr$,"CURRENCY EXCHANGE",Fdel$
+	LIST$[1]=webstr$
+	let row=2
+	if returnstatus<>0
+		webstr$=""
+		Webstr$=str$(whrec),fdel$     ! warehouse   
+		let tmp$="0"
+		if ORDERTYPE=1 let tmp$="W"
+		if ORDERTYPE=2 let tmp$="D"
+		if ORDERTYPE=3 let tmp$="I"
+		if p60$[46,46]="Y"
+			if ORDERTYPE=4 let tmp$="IW"
+			if ORDERTYPE=5 let tmp$="ID"
+			if ORDERTYPE=6 let tmp$="II"
+		endif
+		Webstr$=Webstr$,tmp$,fdel$   ! ordertype
+		webstr$=webstr$,str$(prodcat),fdel$ ! pr
+		Webstr$=Webstr$,(glpo.Inventory using "########"),fdel$                           
+		Webstr$=Webstr$,(glpo.Freight using "########"),fdel$                                               
+		Webstr$=Webstr$,(glpo.MiscChrg using "########"),fdel$                     	
+		Tmp$="N"
+		if not(recordExist) let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$
+		if p61$[136,136]="Y"
+			if glpo.currExcVar<0 or glpo.currexcvar>99999999
+				let glpo.currexcvar=0
+			endif
+			Webstr$=webstr$,(glpo.CurrExcVar using "########"),fdel$
+		else
+			webstr$ = webstr$,"",fdel$
+		endif
+		list$[row]=webstr$
+		row=row+1
+	endif
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	webstr$=""
+else
+	include "src/callsuberr.inc"
+end try
+  !
+end sub ! GETglpoCNTRL
+
+! -------------------------------------------------------------------------------------
+Sub SubmitglpoCntrl()
+
+ Try
+	dim 3%,glporec                         
+ ReturnStatus=1
+ Message$="OK" 
+Call Dxget("WAREHOUSE",tmp$)
+let whrec=tmp$
+if whrec<0 or whrec>99
+	let returnstatus=0
+	let message$="Invalid Warehouse Entered "
+	goto endsubmitglpocntrl:
+endif
+if whrec=0
+	let keyglpo$=" ",keyglpo$
+	let keyglpo$[1,6]="DFAULT"
+	let div=0
+	let ordertype=0
+	goto getglporec1:
+endif
+read record #ch_wh,(whrec-1);wh.;
+If RTrim$(wh.whname$) = ""
+	let returnstatus=0
+	let message$="Warehouse "+str$(whrec)+ " Not On File "
+	goto endsubmitglpocntrl:
+endif
+let ordertype=0
+if p8$[2,2]="Y"
+	let ordertype=-1
+	Call Dxget("POTYPE",tmp$)
+	let tmp$=RTRIM$(TMP$)
+	if tmp$="W" let ordertype=1
+	if tmp$="D" let ordertype=2 
+	if tmp$="I" let ordertype=3
+	if p60$[46,46]="Y"
+		if tmp$="IW" let ordertype=4
+		if tmp$="ID" let ordertype=5
+		if tmp$="II" let ordertype=6
+	endif
+	if tmp$="0" let ordertype=0
+	if tmp$="" let ordertype=0
+	if ordertype<0 or ordertype>6 
+		let returnstatus=0
+		let message$="Invalid Order Type Entered "
+		goto endsubmitglpocntrl:
+	endif
+	if not (ordertype)
+		let keyglpo$=" ",keyglpo$
+		let keyglpo$[1,2]=whrec using "##"
+		goto getglporec1:
+	else
+		let keyglpo$=" ",keyglpo$
+		let keyglpo$[1,2]=whrec using "##"
+		if ordertype<>0 let keyglpo$[5,6]=ordertype using "##"
+	endif
+	If whrec = 0
+		returnstatus = 0
+		message$ = "Warehouse Needs to be Selected "
+		Goto endsubmitglpocntrl:
+	End If                                          	
+endif
+if p8$[3,3]="Y"
+	let prodcat=0
+	Call Dxget("PRODCAT",tmp$)
+	let prodcat=tmp$
+	if tmp$="0" goto getglporec1:! for all product categories
+	if prodcat<1 or prodcat>20 
+		let returnstatus=0
+		let message$="Invalid Product Sales Category Entered "
+		goto endsubmitglpocntrl:
+	endif
+	If whrec = 0
+		returnstatus = 0
+		message$ = "Warehouse Needs to be Selected "
+		Goto endsubmitglpocntrl:
+	End If  
+	if p8$[2,2]="Y" and ordertype<>0
+		let keyglpo$=" ",keyglpo$
+		let keyglpo$[1,2]=whrec using "##"
+		if ordertype<>0 let keyglpo$[5,6]=ordertype using "##"	
+		search #ch_glpo,2,1;keyglpo$,glporec,e
+		if E<>0
+			let returnstatus=0
+			Message$="Order Type Record Must be added first "
+			goto endsubmitglpocntrl:
+		endif
+	endif
+endif
+let keyglpo$=" ",keyglpo$
+let keyglpo$[1,2]=whrec using "##"
+if ordertype<>0 let keyglpo$[5,6]=ordertype using "##"
+if prodcat<>0 let keyglpo$[7,8]=prodcat using "##"
+getglporec1: !  GET glpoCNTRL RECORD
+let recordexist=0
+glporec=-1
+search #ch_glpo,2,1;keyglpo$,glporec,e
+if not(e)
+	Call Dxget("UPDATETYPE",tmp$)
+	If ucase$(rtrim$(tmp$))	="D"
+		search #ch_glpo,5,1;keyglpo$,glporec,e
+		if e<>0 Error (10000+e)
+		let e=3\search #ch_glpo,1,0;keyglpo$,glporec,e
+		if e<>0 Error (10000+e)
+		let message$="Deleted"
+		goto endsubmitglpocntrl:
+	endif
+	read record #ch_glpo,glporec;glpo.;
+else
+	Call Dxget("UPDATETYPE",tmp$)
+	If ucase$(rtrim$(tmp$))	="D"
+		let message$="Not on File. Deleted"
+		goto endsubmitglpocntrl:
+	endif
+	let glporec=-1
+	clear glpo.
+	let glpo.keyspare$=" ",glpo.keyspare$
+	let glpo.spare$=" ",glpo.spare$
+	let glpo.spare99$=" ",glpo.spare99$
+	let glpo.spare99$[32]="" ! put null in to prevent writing past end of file
+endif
+glpo.whse=whrec
+glpo.potype=ordertype
+glpo.Prodcat=prodcat
+Call Dxget("INVENTORY",tmp$) 
+glpo.Inventory=tmp$
+Call Dxget("FREIGHT",tmp$)
+glpo.FREIGHT=tmp$
+!Call Dxget("MISCCHARGES",tmp$)
+!glpo.MISCCHRG=tmp$
+glpo.miscchrg=0 ! not used
+If p61$[136,136] = "Y"
+	Call Dxget("CURRENCY EXCHANGE",tmp$)
+	glpo.CurrExcVar = tmp$
+End If
+
+if glporec<0 ! add new record
+	let e=2\search #ch_glpo,1,0;keyglpo$,glporec,e
+	IF e<>0 Error (10000+e)
+	search #ch_glpo,4,1;keyglpo$,glporec,e
+	if e<>0 Error (10000+e)
+endif
+write record #ch_glpo,glporec;glpo.;
+
+EndSubmitglpoCntrl: !  end of submit 
+
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GETglpoCNTRL
+

@@ -1,0 +1,471 @@
+! --- libprodwh
+! description product warehouse Misc programs 
+!
+! loadsave -w -n 100,10 -o prog/dxport/libprodwh.lib src/libprodwh.src
+!
+! 1.0  03/24/08 new
+! 1.5  05/07/2008 - revised prodwhse struct
+!
+!  SUB/Func		Name			Reason
+!	S			mxwhcreate		Create New prodwhse whse
+!	F			getWhAvail		Get the avail for whse
+!	S			chkrprod		Check if product is restricted
+!   F			getmillflg		Get a YN flag for Mill Item
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+!include structure,filehandler libs & default structure dims
+!
+include "src/inc/fileprodwhse.inc" ! product warehouse
+include "src/inc/sql_prodwhse.inc" ! product warehouse
+include "src/inc/fileprod.inc" ! product
+include "src/inc/filea80vm.inc" ! vendor
+include "src/inc/filematcode.inc" ! material code
+include "src/inc/filesprodcatgy.inc" ! product category 
+include "src/inc/filewhinfo.inc" ! whinfo file
+!
+! *declare additional dl4 intrinsic subs & functions
+Declare Intrinsic Function FindChannel
+Declare Intrinsic Sub Logic,FormatDate,programdump
+!
+! *declare additional external libs & subs & functions
+!
+External Lib "ubsfunc.dl4"
+Declare External Function FormatDate$,OpenFile
+Declare External Sub UserCntrl
+Declare External Function OpenMySQLMirror
+!
+External Lib "ubsprconv.dl4"
+Declare External Function XAmount, Xunit$
+!
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,CreateNetStatus
+!
+
+!
+!
+!--------------------------------------------------------------------
+External Sub mxwhcreate(e$,IntCo,WHPROD$,WHBLD[])
+! e$=error messages
+! intco=Company ID #
+! WHPROD$[1,12]=ITEM CODE
+! WHBLD[0]=WHSE CHANNEL, WHBLD[1]=WHSE #, WHBLD[2]=RECNO TO SEND BACK
+! ALSO: seems whbld[1] can have a fractional # - the default whse to copy
+! ENTER DIMS:  WHPROD$[12],3%,WHBLD[2]
+  Try
+	Dim 1%,Chan,DefWhnum,dir,CH_WHI,CH_PROD
+	Dim 2%,Vend,NSFlag
+	Dim 3%,Rec,E,DRec,Rec_whi
+	Dim k2$[60],Spaces$[120],KEYPROD$[12]
+	Dim dwhk$[60],mode$[2],tmp$[50],custom_customer$[30]
+
+	Dim pwh. as prodwhse
+	dim sql_prodwhse. as sql_prodwhse
+	Dim cpwh. as prodwhse ! copy for default whse
+	Dim whi. as whinfo
+	Dim prod. as prod
+	Let Spaces$=" ",Spaces$
+
+	LET CHAN=WHBLD[0]
+	LET VEND=WHBLD[2]  
+	Try LET NSFLAG=WHBLD[3] Else Let NSFlag=0
+	Try
+	   Mat read #1,115,60;custom_customer$;
+	Else
+		call dxget("u_custom_customer", custom_customer$)
+	End try
+	Custom_customer$=UCase$(Trim$(custom_customer$))
+	Clear pwh.
+	! space fill strings
+	pwh.VendPN$=Spaces$
+	pwh.ComdtyCode$=spaces$
+	pwh.SupercedeCode$=Spaces$
+	pwh.UseAdjReasons$=Spaces$
+	pwh.VendDiscOverrides$=spaces$
+	pwh.ChkBrknQty$=spaces$
+	pwh.Opne$=spaces$
+	pwh.VpMupType$=spaces$
+	pwh.Spare$=spaces$
+	!pwh.Reserved$=Spaces$ ! leave null!
+	CH_Prod=Openfile(-1792,IntCo) \ if ch_prod=-1 error 42
+	KeyProd$=WHPROD$+Spaces$
+    rec_prod=filegetprod(e$,ch_prod,"=",1,KeyProd$,Prod.) ! product mode=2 dir=1
+	if rec_prod<=0
+		prod.VendItem$=spaces$  ! should never happen that no such product
+	endif
+	close #ch_prod
+	! default vars
+	LET pwh.ProdCode$=WHPROD$+Spaces$
+	Let pwh.Whse=Int(WHBLD[1])
+	tmp$=RTrim$(pwh.ProdCode$)
+	if tmp$="" or (pwh.whse<=0 or pwh.Whse>99)
+		rec=-1 ! do not add blank prod or bad whse!!
+		goto FndExstg
+	Endif
+	LET pwh.Vend=VEND                               
+	IF NSFLAG LET pwh.DNReordFlg=2 
+	! evidently a check is needed for existing!!? as being called to create existing
+	LET DWHK$=" ",DWHK$ \ LET DWHK$[1,12]=pwh.ProdCode$
+	LET DWHK$[13]=pwh.Whse USING "##" 
+	mode$="=";dir=1;e=0 ! DO NOT USE pwh. as it MAY change previous data
+	Rec=filegetprodwhse(e$,chan,mode$,dir,dwhk$,cpwh.,e)
+	If Rec>0 goto FndExstg
+	if custom_customer$="MAYFIELD"
+		If pwh.whse>1 and not(fra(whbld[1])) ! ALWAYS DEFAULT FROM WHSE 1
+			let whbld[1]=Int(whbld[1])+.01 ! default from whse 1
+		Endif
+	Endif
+	IF FRA(WHBLD[1]) AND INT(WHBLD[1])<>FRA(WHBLD[1])*100 ! read default whse
+		LET DWHK$=" ",DWHK$ \ LET DWHK$[1,12]=pwh.ProdCode$
+		LET DEFWHNUM=(WHBLD[1]-INT(WHBLD[1]))*100      
+		IF FRA(DEFWHNUM) LET DEFWHNUM=INT(DEFWHNUM)    
+		LET DWHK$[13]=DEFWHNUM USING "##"           
+		mode$="=";dir=1;e=0 ! DO NOT USE pwh. as it MAY change previous data
+		DRec=filegetprodwhse(e$,chan,mode$,dir,dwhk$,cpwh.,e)
+		If DRec>0 ! found it - so read it and clear items not defaulted
+		   Read record #Chan,Drec,0;pwh.;
+		   ! now reset & clear
+		   LET pwh.ProdCode$=WHPROD$+Spaces$
+			Let pwh.Whse=Int(WHBLD[1]) ! drop fraction!
+			!LET pwh.Vend=VEND                               
+			!IF NSFLAG LET pwh.DNReordFlg=2 
+			pwh.LastSoldDate=0;pwh.LastUsedDate=0;pwh.LastPhysDate=0
+			pwh.LastUsedCust=0;pwh.QtyOnHand=0;pwh.QtyOnPO=0
+			pwh.QtyOnOrd=0;pwh.Demand=0;pwh.UsgRate=0;pwh.EoqNoRnding=0
+			pwh.EOQOrdQty=0;pwh.PendBaseDate=0;pwh.PrevBaseCost=0
+			pwh.Lvl1Qty=0;pwh.Lvl2Qty=0
+			pwh.UnitSlsCurYear1=0;pwh.UnitSlsCurYear2=0;pwh.UnitSlsCurYear3=0
+			pwh.UnitSlsCurYear4=0;pwh.UnitSlsCurYear5=0;pwh.UnitSlsCurYear6=0
+			pwh.UnitSlsCurYear7=0;pwh.UnitSlsCurYear8=0;pwh.UnitSlsCurYear9=0
+			pwh.UnitSlsCurYear10=0;pwh.UnitSlsCurYear11=0;pwh.UnitSlsCurYear12=0
+			pwh.UnitSlsCurYear13=0
+			pwh.UnitSlsLstYear1=0;pwh.UnitSlsLstYear2=0;pwh.UnitSlsLstYear3=0
+			pwh.UnitSlsLstYear4=0;pwh.UnitSlsLstYear5=0;pwh.UnitSlsLstYear6=0
+			pwh.UnitSlsLstYear7=0;pwh.UnitSlsLstYear8=0;pwh.UnitSlsLstYear9=0
+			pwh.UnitSlsLstYear10=0;pwh.UnitSlsLstYear11=0;pwh.UnitSlsLstYear12=0
+			pwh.UnitSlsLstYear13=0
+			pwh.AdjUnitSlsCurYr1=0;pwh.AdjUnitSlsCurYr2=0;pwh.AdjUnitSlsCurYr3=0
+			pwh.AdjUnitSlsCurYr4=0;pwh.AdjUnitSlsCurYr5=0;pwh.AdjUnitSlsCurYr6=0
+			pwh.AdjUnitSlsCurYr7=0;pwh.AdjUnitSlsCurYr8=0;pwh.AdjUnitSlsCurYr9=0
+			pwh.AdjUnitSlsCurYr10=0;pwh.AdjUnitSlsCurYr11=0;pwh.AdjUnitSlsCurYr12=0
+			pwh.AdjUnitSlsCurYr13=0
+			pwh.AdjUnitSlsLstYr1=0;pwh.AdjUnitSlsLstYr2=0;pwh.AdjUnitSlsLstYr3=0
+			pwh.AdjUnitSlsLstYr4=0;pwh.AdjUnitSlsLstYr5=0;pwh.AdjUnitSlsLstYr6=0
+			pwh.AdjUnitSlsLstYr7=0;pwh.AdjUnitSlsLstYr8=0;pwh.AdjUnitSlsLstYr9=0
+			pwh.AdjUnitSlsLstYr10=0;pwh.AdjUnitSlsLstYr11=0;pwh.AdjUnitSlsLstYr12=0
+			pwh.AdjUnitSlsLstYr13=0
+			pwh.UseAdjReasons$=spaces$;pwh.LbsOnHand=0;pwh.LbsOnOrder=0
+			pwh.AvgInvtVal=0;pwh.InvtTurns=0;pwh.RtnOnInvest=0
+			pwh.AdjMarg=0;pwh.AvgInvtQty=0;pwh.GrossMarg=0
+			pwh.sOpen=0
+			pwh.Spare$=spaces$
+			PWH.MinStkLvl=0;PWH.MaxStkLvl=0
+		Endif ! of read default and clear
+	Endif ! of use default whse
+	! get whinfo defaults
+		CH_WHI=OpenFile(-2768,IntCo) \ if CH_WHI=-1 Error 42
+		Rec_WHI=pwh.Whse-1
+		Read Record #CH_WHI,Rec_WHI,0;WHI.;
+		Close #CH_WHI
+		if whi.BuyingSrc>0 let pwh.CalcSrc=whi.BuyingSrc
+		if whi.ForecastWgt>0 let pwh.FrcstWgtTbl=whi.ForecastWgt
+		IF NOT(NSFLAG) LET pwh.DNReordFlg=whi.DoNotReord
+		If Custom_customer$="MAYFIELD" ! make sure not 0 or EOQ
+			If pwh.calcsrc<>6 let pwh.calcsrc=6 ! Min/Max?
+		Endif
+		if custom_customer$ = "PIEDMONT"
+			pwh.Load1MupTbl = 1
+			pwh.LifoPoolCost = 1 ! not really lifopoolcost
+		end if
+		pwh.ProdGrp=1 ! per group - default to group 1
+		pwh.VendPN$ = prod.VendItem$  
+	mode$="a";dir=1;e=0
+	Rec=fileupdateprodwhse(e$,chan,mode$,e,pwh.)
+	If Rec<0 ! - Error on add - What Now?
+		! Let X2=ABS(Rec)
+		E=abs(rec)
+		Error 11000
+	else ! mysql stuff
+		sqlChan = OpenMySQLMirror(e$)
+		if sqlChan>=0
+			call prodwhse_DL4SQLConvert(e$,"FROMDL4",pwh.,sql_prodwhse.)
+			e = prodwhse_SQLAddUpdate(e$,sqlChan,sql_prodwhse.)
+			close #sqlChan
+		end if
+	Endif
+	FndExstg: ! 
+	LET WHBLD[2]=REC ! "send back new recno
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! mxwhcreate
+! 
+!--------------------------------------------------------------------
+external function getwhavail(e$,intco,chan,product$,warehouse) 
+!get the available qty from product warehouse file
+!intco = company #
+!chan - product warehouse file
+Try                                                                         
+  Dim k$[80],hold$[80],P9$[50]
+  Dim Mode$[2],blank$[20]
+  Dim 1%,dir,Ctlc
+  Dim wh. As prodwhse     
+  Dim 3%,whavail,e,Rec
+
+  Blank$=" ",blank$
+  Ctlc=OpenFile(-9999,intco) \ if ctlc=-1 Error 42
+  Mat read #ctlc,19,50;p9$; ! sys flags
+  whavail=0 
+  if RTrim$(Product$)="" or warehouse=0 goto WHADone
+  k$=" ",k$
+  K$[1,12] = product$ + Blank$                   
+  K$[13] = warehouse Using "##"       
+  hold$ = k$[1,14] ! cut to limit 
+  Mode$="=";dir=1;e=0
+  Rec=filegetprodwhse(e$,chan,mode$,dir,hold$,wh.,e)   
+  If Rec<=0                   
+     Clear wh.
+  Else
+     whavail=wh.QtyOnHand-wh.QtyOnOrd
+	 if p9$[28,28]="Y" let whavail=whavail+wh.QtyOnPO ! include onpo in avail
+  End If 
+  WHADone: ! finished
+Else
+   include "src/callsuberr.inc"
+End Try                                                                     
+End Function whavail   !'"get whse avail 
+! 
+!--------------------------------------------------------------------
+external sub chkrprod(e$,intco,CH[],RCRD[],PARM[],Msg$) 
+!check restricted from product warehouse file
+! if prodwhse is flagged restricted and there is no entry for the
+! customer/grp & product - IT IS RESTRICTED
+! so the rpmaint is for entering combos that are allowed!?
+!intco = company #
+!ch[1]=product, [2]=customer, [3]=rprod
+!ch[4] - product warehouse file
+!RCRD[1]=prodrec, [2]=custrec
+!PARM[0]=stat (returned <0=problem, 1=ok,0=restricted), [1]=reopen prwh?
+!parm[2]=whse (-1=all)  [3]=program called from
+! msg$ = any message to return
+Try 
+	Dim 1%,MAXCH,STAT
+	Dim 1%,CH_PROD,CH_CUST,CH_RPROD,CH_PRWH,CH_CNTRL
+	Dim 2%,SCAN[10],WH,MAXWH,CF_CUSTGRP
+	Dim 3%,COUNT,REC_RPROD[15],REC_PROD,REC_CUST,REC_PRWH,SUBITEM_REC,LN[2]
+	Dim SCRATCH$[80],SORTBY$[1],RPKEY$[40],CHKPROD$[12],CHKCUST
+	Dim PARAM1$[50],CHAR$[1],ADDPROD$[12],ADDCUST$[6],HLDKEY$[40],CGKEY$[20]
+	Dim WORKKEY$[12],BLANK$[30]
+	Dim A$[156]
+	Dim 2%,C1[12]
+	Dim RPROD$[12],RPCUST$[6],RPFLAG$[1]
+	Dim 1%,RESTRICTED
+	Dim 3%
+	BLANK$ = " ",BLANK$
+	! chk/open needed files
+	Let ch_cntrl=1
+	Try
+		MAT  READ #CH_CNTRL,115,20;MAXWH;
+	Else
+		Let ch_cntrl=OpenFile(-9999,Intco) \ if ch_cntrl=-1 error 42
+	End try
+	If ch[1]<=0
+		CH_Prod=Openfile(-1792,IntCo) \ if ch_prod=-1 error 42
+	Else
+		let ch_prod=ch[1]
+	Endif
+	if ch[2]<=0
+		ch_cust=OpenFile(-1808,IntCo) \ if ch_cust=-1 error 42
+	Else
+		let ch_cust=ch[2]
+	Endif
+	if ch[3]<=0
+		let ch_rprod=Openfile(-9915,IntCo) \ if ch_rprod=-1 error 42
+	Else
+		let ch_rprod=ch[3]
+	Endif
+	if ch[4]<=0
+		CH_PRWH=openfile(-1744,IntCo) \ if ch_prwh=-1 error 42
+	Else
+		let ch_prwh=ch[4]
+	Endif
+	MAT  READ #CH_CNTRL,115,20;MAXWH;
+	LET STAT=0
+	IF RCRD[1]>0
+		LET REC_PROD=RCRD[1]
+		Mat Read #CH_PROD,REC_PROD,0;A$; ! GOSUB READ_PROD:
+		LET RPROD$=A$[140,151]
+		LET CHKPROD$=A$[140,151]
+	ELSE 
+		LET STAT=1
+	ENDIF 
+	IF RCRD[2]>0
+		LET REC_CUST=RCRD[2]
+		!GOSUB READ_CUST:
+		Mat Read #CH_CUST,REC_CUST,142;C1;
+		Read #CH_CUST,REC_CUST,714;CF_CUSTGRP;
+		LET RPCUST=C1[1]
+		LET CHKCUST=C1[1]
+	ELSE 
+		LET STAT=1
+	ENDIF 
+	IF PARM[1]=0 AND PARM[2]=0 LET PARM[2]=1
+	! if rtRIM$(rprod$)="KSC101B" call programdump("tmp/rprodin!","")
+	IF STAT LET PARM[0]=-STAT \ GOTO chkrpDONE ! neg = missing record
+	IF PARM[1]=0 AND PARM[2]>=0 ! check prodwhse - see if restricted
+		LET SCR=PARM[2]
+		IF NOT(SCR) LET SCR=1
+		LET PARAM1$=CHKPROD$
+		LET PARAM1$[13]=SCR USING "##"
+		!GOSUB GET_PRWH:
+		SEARCH #CH_PRWH,2,1;PARAM1$,REC_PRWH,E
+		IF NOT(E)
+			MAT  READ #CH_PRWH,REC_PRWH,894;RESTRICTED; ! GOSUB READ_PRWH:
+		ENDIF 
+		IF E OR NOT(RESTRICTED) ! if whse not there, its ok
+			LET PARM[0]=1
+			GOTO CHKRPDone:
+		ENDIF 
+	ENDIF 
+	IF PARM[2]=-1 ! loop thru whses to see if restricted
+		LET PASS=0
+		LET PARAM1$=CHKPROD$
+	RPPRWH_LOOP: REM
+		SEARCH #CH_PRWH,3,1;PARAM1$,REC_PRWH,E
+		LET SCR=PARAM1$[13]
+		IF NOT(E) AND PARAM1$[1,12]=CHKPROD$ AND SCR<=MAXWH
+			MAT  READ #CH_PRWH,REC_PRWH,894;RESTRICTED
+			IF RESTRICTED ! flagged - see if other whses are the same
+				GOTO RPPRWH_LOOP:
+
+			ELSE ! this whse is not - so allow it
+				LET PASS=1
+			ENDIF 
+		ENDIF 
+		LET SCR=PARAM1$[13]
+		IF SCR=0 LET PASS=1
+		IF PASS
+			LET PARM[0]=1
+			GOTO CHKRPDone:
+
+		ENDIF 
+	ENDIF 
+	! flagged restricted - see if in the rprod file - if it is not - its RESTRICTED
+	LET RPKEY$=" ",RPKEY$
+	LET RPKEY$[1,12]=CHKPROD$
+	let RPKEY$[13,14]="SS"
+	LET RPKEY$[15,20]=CHKCUST USING "######"
+	SEARCH #CH_RPROD,2,1;RPKEY$,REC_RPROD,E \ IF E>2 ERROR 11000 ! GOSUB ERR_SEARCH:
+	IF NOT(E) ! found it so it's ok
+		LET PARM[0]=1
+	ELSE ! did not find it
+		LET RPKEY$=" ",RPKEY$                                                  
+		LET RPKEY$[1,12]=CHKPROD$                                              
+		let RPKEY$[13,14]="GG"   
+		LET RPKEY$[15,20]=CF_CUSTGRP USING "######"                               
+		SEARCH #CH_RPROD,2,1;RPKEY$,REC_RPROD,E \ IF E>2 ERROR 11000 ! GOSUB ERR_SEARCH:     
+		IF NOT(E) ! found it so it's ok
+			LET PARM[0]=1
+		ELSE ! did not find it.
+			!GOSUB DENIED_WINDOW:
+			Msg$="PRODUCT "+RTrim$(CHKPROD$)+" IS RESTRICTED."
+			msg$=msg$+" CUSTOMER "+STR$(CHKCUST)+" IS DENIED ACCESS."
+			LET PARM[0]=0
+		ENDIF 
+	ENDIF 
+	! GOTO CHKRPDone:
+
+	CHKRPDone: ! finished
+	! if rtRIM$(rprod$)="KSC101B" call programdump("tmp/rprodin2!","")
+	if ch[1]<=0 try close #CH_Prod Else Rem
+	if ch[2]<=0 try close #CH_Cust Else Rem
+	if ch[3]<=0 try close #CH_RPROD Else Rem
+	if ch[4]<=0 try close #CH_PRWH Else Rem
+	! passed back parm[0] - -1=record missing, 0=FAILED, 1=OK
+else
+    include "src/callsuberr.inc"
+  end try
+end sub ! chkrprod
+! 
+!--------------------------------------------------------------------
+external function getmillflg(e$,intco,chan,product$,warehouse,ordtype) 
+!get the Vendor (0=Not Mill Item) from product warehouse file/prodgroup
+!intco = company #
+!chan - product warehouse file
+! need product code, whse and order type
+Try
+! should have already checked if update stock and already a po
+! no mill items on nonstks, or if line updates stock, or zero qty order
+! we assume no credit hold (should have been checked before call)
+! this function only checks order type & prodgroup flags
+! and sends back 0 if not mill item or the Vendor # if it is.
+	DIM 1%,pgmlit,APMI,PRW1[2]
+	Dim 2%,prw2[9],B[24]
+	Dim 3%,WHMISC2[7],R[99]
+	Dim f$[20],key1$[60],K2$[60],Blank$[60]
+	Dim K3$[60]
+
+	Blank$=" ",Blank$
+	MIFLG=0 ! default = N
+	if rtrim$(product$)="" goto NOTMITM
+	if warehouse<=0 or ordtype<=0 goto NOTMITM ! gotta have 
+	ch_prwh=chan
+	if ch_prwh<=0
+		Ch_PrWh = OpenFile(-1744,intCo) \ If Ch_PrWh = -1 Error 42  !"product warehouse file
+	endif
+	ch_sot=findchannel()
+	F$="3/SORDTYPE"+Str$(Intco) \ ROpen #ch_sot,F$
+	CH_PGP=OpenFile(-9965,IntCo) \ if ch_pgp=-1 error 42 ! prodgrp
+	ch_prod=OpenFile(-1792,IntCo) \ if ch_prod=-1 error 42 ! prodfile
+	! now in sordtype file
+	Key1$=" ",Key1$
+	Key1$=ordtype using "##"
+	search #ch_sot,2,1;Key1$,R[2],E
+	if e goto NOTMITM ! not there - not allowed!
+	read #ch_sot,r[2],48;APMI;
+	IF APMI<>1 GOTO NOTMITM ! NOT A Y - no po for this ordtype
+	let k2$=" ",k2$
+	k2$[1,12]=UCASE$(product$)+Blank$ ! get prodwhse for prodgroup
+	k2$[13]=Warehouse using "##"
+	search #ch_prwh,2,1;k2$,r[3],e
+	if e goto NOTMITM ! not found = no prodgrp!
+	mat read #ch_prwh,r[3],32;prw1;
+	mat read #ch_prwh,r[3],38;prw2;
+	mat read #ch_prwh,r[3],846;WHMISC2;
+	pgmlit=0
+	if whmisc2[0]>0 and whmisc2[0]<1000 ! if no prodgrp - it's not a millitem
+		K3$=" ",k3$
+		k3$=whmisc2[0] using "###" ! 3
+		search #ch_pgp,2,1;k3$,r[4],e
+		if not(e)
+			read #ch_pgp,r[4],136;pgmlit;
+		endif
+	endif
+	if pgmlit<>1 goto NOTMITM ! not a mill item!
+	! made it through - final check - is there a vendor
+	vend=prw2[3]
+	if prw2[3]<=0
+		k3$=" ",k3$
+		K3$=K2$[1,12]
+		Search #ch_prod,2,1;K3$,R[5],E
+		if not(e) goto NOTMITM
+		mat read #ch_prod,R[5],156;b;
+		if b[24] let vend=b[24]
+	endif
+	if vend<=0 goto NOTMITM ! no vendor - NO Mill Item!
+	MIFLG=Vend ! send back the vendor
+	NOTMITM: ! done - close any files
+	if ch_sot try close #Ch_sot Else rem
+	if chan<=0 try close #ch_prwh else rem
+	If ch_pgp try close #ch_pgp Else rem
+	if ch_prod try close #ch_prod Else rem
+Else
+   include "src/callsuberr.inc"
+End Try                                                                     
+End Function MIFLG   !'"get mill item flg 
+! 
+!--------------------------------------------------------------------

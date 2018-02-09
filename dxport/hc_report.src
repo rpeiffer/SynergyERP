@@ -1,0 +1,1607 @@
+!
+!
+! hc_report.dl4 - Full transactional HYPOTHETICAL Commission report
+!
+! originated as serp450trans - many modifications later...
+!
+! loadsave -w -n 100,10 -o prog/dxport/hc_report.dl4 src/hc_report.src
+!
+
+include "src/copyright.inc"
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Function getmsg$,expandarray
+Declare External Function AddToMYReports
+Declare External Function openprinter
+
+External Lib "dxblockcustom.lib"
+Declare External Sub blockPrintersDropList
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,FormatDate2$,getuidinfo$,JDate$
+Declare External Function chkDteFrmt$,buildsort,GetUIDRec
+Declare Intrinsic Sub DateToJulian,FindF,InpBuf,String,VerifyDate,programdump
+Declare Intrinsic Function findchannel
+
+External Lib "ubsprconv.dl4"
+Declare External Function Xunit$
+
+! Option Default Dialect IRIS1
+
+!
+try
+
+! local subs and functions
+Declare Sub OpenFilesGetControlInfo,ErrorOut,ValidateInput
+Declare Sub ConvertYYMMDD2Jul,UnpackDate,SortCommFile,GetCustomer
+Declare Sub BuildSummarySort,SalesmanTotal,CustomerTotal,GetSalesName
+Declare Sub UpdateTotals,PrintHeadings
+Declare Sub PrintSalesman,PrintCustomer,PrintLine,PrintAuditTrans
+Declare Sub PrintTotals,PrintRepSummary,InsertRepSummaryRec
+Declare Sub PrintInvoiceDetail,PrintSalesmanOrderTotal
+Declare Sub DivisionTotal
+Declare Sub GetOriginalCommission,PrintOriginalCommission
+
+Def FNW(H) = Sgn(H) * (Int(Abs(H) * 1 + .5) * 1)
+Dim C1$[30],J$[75],J1$[75],J2$[20],J3$[40],J4$[75],J7$[50],K9$[50],J0$[10]
+Dim J8$[8],J9$[50],K1$[50],K2$[20],K3$[20],S1$[30],Z1$[50],X$[10],SMAT$[1]
+Dim P60$[50],CF$[1],P9$[50],COMP$[30],J5$[75],ARDATE$[10],TEMP$[10]
+Dim Kinvh$[12],Kinvl$[14],OrderDesc$[20],ahypo$[1]
+Dim 1%,Z2$[2],URECFLAG,invlS2[1],A0[11]
+Dim 1%,ARMONTH,SplitFlag,CommSource,un[2]
+Dim 1%,E,N3,N4,S4[1],X1,issueFlag,curIssueFlag
+Dim 3%,A3[13],J,S2[1],T8[20],T9[20],S6[1],AmtPaid,OLM[6],l5[3],invlS3[17],PrtTot[20]
+Dim 3%,T10[20],T11[38,20],T12[2,20],S10,S7[2],PT8[20],PT9[20],PT10[20],4%,J1
+Dim 2%,A2[5],J2,J3,J4,J7[2],J8,J9,N1,N2,R1,R3,R4,R5,S1[3],S3[1],S8,X2
+Dim 2%,C1[12],JDATE[1],ARDATE,DT3[1],JWDATE,SPAYDATE,EPAYDATE,JSPAYDATE,JEPAYDATE,JPAYDATE,3%
+Dim 2%,JARPAYDATE,L4[3],CommBaseRate[4],SLSM[9]
+Dim K98$[50],SCRATCH$[80],SNAME$[15],F$[16],L1$[20]
+Dim 3%,GP,COST,PROFIT,PRIMTH,CURMTH,AMTPAID,COMMAMT,COMMDUE
+Dim 3%,ORIGGP,ORIGSALES,ORIGCOST,ORIGPROFIT,ORIGCOMMAMT
+Dim 3%,ARREF[1],X3[9],ocs1[3],LinePrice,LineCost,UNF[6],l7[12]
+Dim 3%,D8[20],TD8[5]
+! commission audit file vars
+dim k7$[30]
+dim 1%,as1[3],as4[1]
+dim 2%,r7,as2[1]
+dim 3%,as3[5],aorigcomm,as5[5]
+dim source$[10],cas$[60]
+! original commission variables
+dim 1%,orig_SplitFlag
+dim 2%,orig_s1[3]
+dim 3%,orig_s2[1],orig_s6[1],orig_s7[2]
+
+! sort key values
+dim k1_div$[3],k1_rep$[3],k1_cust$[6],k1_invcm$[10],k1_type$[1]
+
+dim 3%
+
+
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+dim tmp$[800],tmp1$[800],tmp2$[800],Message$[600],msg$[100],rstr$[2000],webstr$[2000]
+dim action$[30],options$[30],userid$[8],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+Dim ReportDir$[128],BaseName1$[128],Statusfile$[128],action1$[30],action2$[30],custom_customer$[30]
+Dim List$[100,100] ! for lists
+! call dxopen() ! for standalone run
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+mat read #1,115,60;custom_customer$;
+Custom_customer$=UCase$(Trim$(custom_customer$))
+
+! build sort before opening any other files
+try close #9 else rem
+X2=BuildSort(e$,20,0,9) ! build a sortwork on chan#9, keysize=20w/40C
+call OpenFilesGetControlInfo()
+usrctl_ch = openfile(-9988, intco)
+USER=GetUIDRec(e$,IntCo,Userid$)
+read #usrctl_ch,user,338;ahypo$;
+close #usrctl_ch
+if ahypo$<>"Y"
+	e$ = "You do not have access to hypothetical commissions!"
+	error 10000
+end if
+Call ValidateInput()
+if not(returnStatus)
+	call ErrorOut()
+	goto OutEnd:
+end if
+returnstatus=1;message$="OK"
+
+MAXLINES = 59 ! \ If SCREENPRINT Let MAXLINES = 20
+LN = 99
+! OK - build xml header if going to browser, otherwise show report in
+! process
+if screenprint ! xml 
+	!<section>
+	tmp$ = bsdel$,"450",fdel$,rdel$
+	call addtostr(e$,rstr$,tmp$)
+	! set headings
+	tmp$="SLSM",FDEL$,"NAME",FDEL$
+	tmp$=tmp$,"CUST",fdel$,"CUSTNAME",fdel$
+	tmp$=tmp$,"INV/CM",fdel$,"DATE",fdel$
+	tmp$=tmp$,"DIV",fdel$ ! always send
+	If PRTCOST
+		tmp$=tmp$,"GP%",fdel$,"COST",fdel$,"PROFIT",fdel$
+	Endif
+	! if not(arcode) tmp$=tmp$,"PRV MNTH",fdel$
+	tmp$=tmp$,"SALES",fdel$
+	if custom_customer$ <> "CSS"
+		tmp$=tmp$,"PAID",fdel$
+	end if
+	tmp$=tmp$,"COMMISSION",fdel$
+	if custom_customer$ <> "CSS"
+		If PURGEFLAG = 1 And SUMM = 0 And PRT_PAIDONLY = 1
+			tmp$=tmp$,"PAID DATE",fdel$
+		Else
+			tmp$=tmp$,"DUE",fdel$
+		Endif
+	end if
+	If PURGEFLAG = 3 let tmp$=tmp$,"UNMRKD",fdel$
+	tmp$=tmp$,rdel$
+	call addtostr(e$,rstr$,tmp$)
+Else ! normal print - send in process
+	Call setoutput(e$,rstr$,2) !2 flag puts 0 status section in w/print in process msg, puts </page> in
+Endif
+Call SortCommFile()
+If Not(SUMM) Call BuildSummarySort()
+
+COUNT = 0;dosort=0;hdiv=-1
+! K1$ = N3 Using "###"
+! if sortdiv let k1$=sdiv using "###"
+! LOOP THROUGH SORTED COMMISSION FILE
+k1$ = " ",k1$
+do
+	Search #9,3,1;K1$,R1,E \ If E > 2 Error 11000
+	If E exit do
+	issueFlag = 1 ! default no issues (2 = issues)
+	if not(sortdiv)
+		! 1-3 = Salesrep
+		k1_rep$[1,3] = k1$[1,3]
+		if useLastCommRun issueFlag = k1$[4,4]
+		! 4-9 = Customer
+		k1_cust$[1,6] = k1$[4+useLastCommRun,9+useLastCommRun]
+		! 10-19 = Invoice / CM
+		k1_invcm$[1,10] = k1$[10+useLastCommRun,19+useLastCommRun]
+		! 20-20 = type
+		k1_type$ = k1$[20+useLastCommRun,20+useLastCommRun]
+	Else
+		! 1-3 = Divsion
+		k1_div$[1,3] = k1$[1,3]
+		! 4-6 = Salesrep
+		k1_rep$[1,3] = k1$[4,6]
+		if useLastCommRun issueFlag = k1$[7,7]
+		! 7-12 = Customer
+		k1_cust$[1,6] = k1$[7+useLastCommRun,12+useLastCommRun]
+		! 13-22 = Invoice / CM
+		k1_invcm$[1,10] = k1$[13+useLastCommRun,22+useLastCommRun]
+		! 23-23 = type
+		k1_type$ = k1$[23+useLastCommRun,23+useLastCommRun]
+	Endif
+
+	Mat Read #ch_commhypo,R1,0;S1;
+	Mat Read #ch_commhypo,R1,16;S2;
+	Mat Read #ch_commhypo,R1,28;S3;
+	Mat Read #ch_commhypo,R1,36;S4;
+	Mat Read #ch_commhypo,R1,40;S6;
+	Mat Read #ch_commhypo,R1,54;S7;
+	MAT  READ #ch_commhypo,R1,112;ocs1;
+	mat read #ch_commhypo,r1,136;SplitFlag;
+	call GetOriginalCommission()
+	COUNT = COUNT + 1
+!  	If ARCODE If S4[0] <> ARCODE Goto SkipRecord ! wrong AR Month
+! 	X2 = S1[3] \ call ConvertYYMMDD2Jul() 
+! 	if x2 = -1 let X2 = 0
+! 	JWDATE = X2
+! 	! check date ranges (only used if not using AR period)
+! 	If Not(ARCODE) If JWDATE < JDATE[0] Goto SkipRecord
+! 	If Not(ARCODE) If JWDATE > JDATE[1] Goto SkipRecord
+! 	! check salesrep range
+! 	If S1[0] < N3 Goto SkipRecord
+! 	If S1[0] > N4 exit do
+! 	if sortdiv
+! 		if hdiv=-1 let hdiv=k1$[1,3]
+! 		let cdiv=k1$[1,3]
+! 		if hdiv<>cdiv call divisionTotal()
+! 		let hdiv=k1$[1,3]
+! 	Endif
+	! S8 is current salesman, s1 is new one
+	if useLastCommRun
+		! need sub-level subtotals
+		!	invoices without issues on hypothetical
+		!	invoices with issues on hypothetical
+		!	Still need grand total as well
+		If S8
+			If S8 <> S1
+				partialTotalPrint = 1
+				Call SalesmanTotal()
+				partialTotalPrint = 0
+				Call SalesmanTotal()
+			else
+				if issueFlag <> curIssueFlag
+					partialTotalPrint = 1
+					call SalesmanTotal()
+				end if
+			end if
+		end if
+	else
+		partialTotalPrint = 0
+		If S8 If S8 <> S1 Call SalesmanTotal()
+	end if
+	If S10 If S10 <> S3[1] Call CustomerTotal()
+	If Not(S8) call GetSalesName()
+	If Not(S10) call GetCustomer()
+	CommRecType = k1_type$
+	multiplier = 1
+	If CommRecType = 6 or CommRecType = 7 or CommRecType = 9 ! negative (credit, etc.)
+		multiplier = -1
+		S6 = 0 - S6
+		AmtPaid = 0 - AmtPaid
+		S2 = 0 - S2 \ S2[1] = 0 - S2[1]
+	end if
+	If not(SUMM)
+		If CommRecType < 6 If PURGEFLAG = 1 If PRT_PAIDONLY If Not(ARPAID) Goto SkipRecord
+		call PrintLine()
+		call PrintAuditTrans()
+	end if
+	call PrintOriginalCommission()
+! 	If Not(HIST) If PURGEFLAG = 3 If UNMARK_PURGE !"cct158507
+! 		If S4[1] Let S4[1] = 0
+! 		Mat Write #ch_commhypo,R1,36;S4;
+! 	End If 
+	call UpdateTotals()
+SkipRecord: !
+loop
+! END OF THIS RANGE
+If SORTKEY ! only if salesman commission found cct123526
+	if sortdiv	! does slsmtot in divtot
+		call divisiontotal()
+	Else
+		if useLastCommRun
+			! need sub-level subtotals
+			!	invoices without issues on hypothetical
+			!	invoices with issues on hypothetical
+			!	Still need grand total as well
+			partialTotalPrint = 1
+			Call SalesmanTotal()
+			partialTotalPrint = 0
+			Call SalesmanTotal()
+		else
+			partialTotalPrint = 0
+			Call SalesmanTotal()
+		end if
+	Endif
+	finltot=9
+	call PrintTotals()
+	If Not(SUMM)
+		call PrintRepSummary()
+		if not(screenprint)
+			Print #0;""
+			LN = LN + 1
+		Endif
+		call PrintTotals()
+	End If 
+end if
+If screenprint ! dx xml
+  Call addtostr(e$,rstr$,esdel$) !end section
+  Call setoutput(e$,rstr$,1) !1 flag puts 0 status seciton in, puts </page> in
+end if
+OutEnd: ! if goto here, assumes error output already set
+End
+
+!*******************************************************
+! SUBROUTINES
+!*******************************************************
+sub UpdateTotals()
+try
+	! totals arrays
+	! T8 = SALESREP TOTALS
+	! T9 = GRAND TOTALS
+	! T10 = CUSTOMER TOTALS
+	! T11[ORDTYPE] = SALESREP TOTALS BY ORDER TYPE
+	! T12[issueFlag] = SALESPEP TOTALS BY PROBLEM FLAG 
+	!
+	! [0] = COST
+	! [5] = SALE
+	! [6] = PAID
+	! [7] = COMMISSION
+	! [8] = COMMISSION DUE
+	! [10] = ORIGINAL COST
+	! [15] = ORIGINAL SALE
+	! [17] = ORIGINAL COMISSION
+	
+	Rem TOTALS CALC
+	T9[5] = T9[5] + S2[0] \ T8[5] = T8[5] + S2[0] \ T10[5] = T10[5] + S2[0]
+	T9[15] = T9[15] + orig_s2[0] \ T8[15] = T8[15] + orig_s2[0] \ T10[15] = T10[15] + orig_s2[0]
+	if useLastCommRun
+		T12[issueFlag,5] = T12[issueFlag,5] + S2[0]
+		T12[issueFlag,15] = T12[issueFlag,15] + orig_S2[0]
+	end if
+	D8[5]=D8[5]+S2[0]
+	D8[15]=D8[15]+orig_s2[0]
+	t11[S3[0],5] = t11[s3[0],5] + s2[0]
+	t11[S3[0],15] = t11[s3[0],15] + orig_s2[0]
+	T8[0] = T8[0] + S6[0] \ T9[0] = T9[0] + S6[0] \ T10[0] = T10[0] + S6[0]
+	T8[10] = T8[10] + orig_s6[0] \ T9[10] = T9[10] + orig_s6[0] \ T10[10] = T10[10] + orig_s6[0]
+	if useLastCommRun
+		T12[issueFlag,0] = T12[issueFlag,0] + S6[0]
+		T12[issueFlag,10] = T12[issueFlag,10] + orig_s6[0]
+	end if
+	D8[0]=D8[0]+S6[0];t11[S3[0],0] = t11[s3[0],0] + S6[0]
+	D8[10]=D8[10]+orig_s6[0];t11[S3[0],10] = t11[s3[0],10] + orig_s6[0]
+	T9[6] = T9[6] + AmtPaid \ T8[6] = T8[6] + AmtPaid \ T10[6] = T10[6] + AmtPaid
+	D8[6]=D8[6]+AmtPaid;t11[S3[0],6] = t11[s3[0],6] + AmtPaid
+	T9[7] = T9[7] + S2[1] \ T8[7] = T8[7] + S2[1] \ T10[7] = T10[7] + S2[1]
+	d8[7]=d8[7]+s2[1];t11[S3[0],7] = t11[s3[0],7] + S2[1]
+	T9[17] = T9[17] + orig_s2[1] \ T8[17] = T8[17] + orig_s2[1] \ T10[17] = T10[17] + orig_s2[1]
+	d8[17]=d8[17]+orig_s2[1];t11[S3[0],17] = t11[s3[0],17] + orig_s2[1]
+	if useLastCommRun
+		T12[issueFlag,6] = T12[issueFlag,6] + AmtPaid
+		T12[issueFlag,17] = T12[issueFlag,17] + orig_s2[1]
+		if issueFlag = 1 ! no problem with hypothetical
+			T12[issueFlag,7] = T12[issueFlag,7] + S2[1]
+		end if
+	end if
+	If CF$ = "C"
+		If CommRecType < 6
+			If Abs(AmtPaid) >= Abs(S2) Or ARPAID !this is for invoices
+				T9[8] = T9[8] + S2[1];T8[8] = T8[8] + S2[1];T10[8] = T10[8] + S2[1]
+				d8[8]=d8[8]+s2[1];t11[S3[0],8] = t11[s3[0],8] + S2[1]
+				if useLastCommRun
+					T12[issueFlag,8] = T12[issueFlag,8] + S2[1]
+				end if
+			End If 
+		Else ! this is for credits or other types, no need to check applied amount
+			T9[8] = T9[8] + S2[1];T8[8] = T8[8] + S2[1];T10[8] = T10[8] + S2[1]
+			d8[8]=D8[8]+s2[1];t11[S3[0],8] = t11[s3[0],8] + S2[1]
+			if useLastCommRun
+				T12[issueFlag,8] = T12[issueFlag,8] + S2[1]
+			end if
+		End If 
+	End If 
+	If CF$ = "A"
+		If Abs(AmtPaid) >= Abs(S2) Or ARPAID
+			T9[8] = T9[8] + S2[1];T8[8] = T8[8] + S2[1];T10[8] = T10[8] + S2[1]
+			d8[8]=D8[8]+s2[1];t11[S3[0],8] = t11[s3[0],8] + S2[1]
+			if useLastCommRun
+				T12[issueFlag,8] = T12[issueFlag,8] + S2[1]
+			end if
+		End If 
+	End If 
+	If PURGEFLAG = 1
+		If CF$ = "C"
+			If CommRecType < 6
+				If Abs(AmtPaid) >= Abs(S2) Or ARPAID Let S4[1] = 1 Else Let S4[1] = 0
+			Else 
+				S4[1] = 1
+			End If 
+		End If 
+		If CF$ = "A"
+			If Abs(AmtPaid) >= Abs(S2) Or ARPAID Let S4[1] = 1 Else Let S4[1] = 0
+		End If 
+	Else 
+		If PURGEFLAG = 2 Let S4[1] = 1
+	End If 
+! 	Mat Write #ch_commhypo,R1,36;S4;
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetSalesName()
+try
+	If S8 = S1 exit sub
+	J2$ = " ",J2$ \ J2$ = S1 Using "###"
+	Search #3,2,1;J2$,R3,E \ if E>1 error 11000
+	If E
+		Let S1$ = "** ERROR ** SALESMAN NOT FOUND"
+	else
+		Mat Read #3,R3;S1$;
+	end if
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+Sub GetCustomer()
+try
+	!L_3200: Rem GET CUSTOMER
+	For X = 0 To 12 \ C1[X] = 0 \ Next X
+	If S3[1] = S10 and S10<>0 exit sub 
+	J3$ = " ",J3$ \ J3$ = S3[1] Using "######"
+	Search #4,2,1;J3$,R4,E
+	If E = 1
+		Let C1$ = "**CUSTOMER NOT FOUND"
+		if not(s3[1]) let c1$ = "** NON-CUSTOMER SPECIFIC"
+		exit sub
+	end if
+	If E error 11000
+	Mat Read #4,R4,30;C1$;
+	Mat Read #4,R4,142;C1;
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub PrintTotals()
+try
+	if screenprint ! xml
+		tmp$=fdel$,"REPORT TOTALS",fdel$
+		tmp$=tmp$,fdel$,fdel$ ! no cust/name
+		tmp$=tmp$,fdel$,fdel$ ! no inv / date
+		tmp$=tmp$,fdel$ ! no div
+		If PRTCOST
+			! tmp$=tmp$,"GP%",fdel$,"COST",fdel$,"PROFIT",fdel$
+			x3=0
+			if (PT9[5]+t9[5]) let x3=FNW((PT9[5] + T9[5] - T9[0]) / (PT9[5] + T9[5]) * 100)
+			tmp$=tmp$,LTrim$(X3 Using "-----#%"),fdel$
+			tmp$=tmp$,LTrim$(T9[0] Using "----------#.##"),fdel$
+			tmp$=tmp$,LTrim$(PT9[5] + T9[5] - T9[0] Using "---------#.##"),fdel$
+		Endif
+	! 	if not(ARCODE)
+	! 		tmp$=tmp$,LTrim$(PT9[5] Using "---------#.##"),fdel$
+	! 	Endif
+		tmp$=tmp$,LTrim$(T9[5] Using "---------#.##"),fdel$
+		tmp$=tmp$,LTrim$(T9[6] Using "---------#.##"),fdel$
+		tmp$=tmp$,LTrim$(T9[7] using "---------#.##"),fdel$
+		If PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+			tmp$=tmp$,LTrim$(T9[8] Using "---------#.##"),fdel$
+		Else
+			tmp$=tmp$,fdel$
+		End If 
+		If PURGEFLAG = 3 let tmp$=tmp$,fdel$
+		tmp$=tmp$,rdel$
+		call addtostr(e$,rstr$,tmp$)
+		exit sub ! that's all folks
+	Endif
+	call PrintHeadings(0,1)
+	Print #0;"** TOTALS **";
+	Print #0; Using "-------#.##"; Tab 35;T9[5];
+	If PRTCOST
+		Print #0; Using "-------#.##"; Tab 46;T9[0];
+		Print #0; Using "-------#.##"; Tab 56;PT9[5] + T9[5] - T9[0];
+		If (PT9[5] + T9[5]) Print #0; Using "---#%"; Tab 69;FNW((PT9[5] + T9[5] - T9[0]) / (PT9[5] + T9[5]) * 100);
+	end if
+	Print #0; Using "-------#.##"; Tab 106;T9[7];
+	Print #0;""
+	Print #0;TAB 8; "ORIGINAL COMMISSION";
+	Print #0; Using "-------#.##"; Tab 35;T9[15];
+	If PRTCOST
+		Print #0; Using "-------#.##"; Tab 46;T9[10];
+		Print #0; Using "-------#.##"; Tab 56;T9[15] - T9[10];
+		If (T9[15]) Print #0; Using "---#%"; Tab 69;FNW(((T9[15] - T9[10]) / T9[15]) * 100);
+	end if
+	Print #0; Using "-------#.##"; Tab 106;T9[17];
+	Print #0;""
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub SalesmanTotal()
+try
+	if s10 Call CustomerTotal()
+	if not(partialTotalPrint) call PrintSalesmanOrderTotal()
+	for i = 0 to 20
+		if not(partialTotalPrint)
+			PrtTot[i] = T8[i]
+		else
+			PrtTot[i] = T12[curIssueFlag,i]
+		end if
+	next i
+	call PrintHeadings(0,1)
+	if screenprint ! xml
+		tmp$=Str$(s8),fdel$,S1$[1,15]," TOTALS",fdel$
+		tmp$=tmp$,fdel$,fdel$ ! no cust/name
+		tmp$=tmp$,fdel$,fdel$ ! no inv / date
+		if Not(sortdiv) let tmp$=tmp$,fdel$ else tmp$=tmp$,Str$(Hdiv),fdel$
+		If PRTCOST
+			x3=0
+			if PrtTot[5] let x3=FNW((PrtTot[5] - PrtTot[0]) / PrtTot[5] * 100)
+			tmp$=tmp$,LTrim$(X3 Using "-----#%"),fdel$
+			tmp$=tmp$,LTrim$(PrtTot[0] Using "---------#.##"),fdel$
+			tmp$=tmp$,LTrim$(PrtTot[5] - PrtTot[0] Using "---------#.##"),fdel$
+		Endif
+		tmp$=tmp$,LTrim$(PrtTot[5] Using "---------#.##"),fdel$
+		tmp$=tmp$,LTrim$(PrtTot[6] Using "---------#.##"),fdel$
+		tmp$=tmp$,LTrim$(PrtTot[7] using "---------#.##"),fdel$
+		If PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+			tmp$=tmp$,LTrim$(PrtTot[8] Using "---------#.##"),fdel$
+		Else
+			tmp$=tmp$,fdel$
+		End If 
+		If PURGEFLAG = 3 let tmp$=tmp$,fdel$
+		tmp$=tmp$,rdel$
+		call addtostr(e$,rstr$,tmp$)
+		goto STLDone ! that's all
+	Endif
+	Print #0;""
+	if partialTotalPrint
+		if curIssueFlag = 1
+			Print #0;"**SLSM ";S8;"  HYPO YES TOTALS**";
+		else
+			Print #0;"**SLSM ";S8;"  HYPO *NO* TOTALS**";
+		end if
+	else
+		Print #0;"**SLSM ";S8;" ";S1$[1,13];" TOTALS**";
+	end if
+	Print #0; Using "-------#.##"; Tab 35;PrtTot[5];
+	If PRTCOST
+		Print #0; Using "-------#.##"; Tab 46;PrtTot[0];
+		Print #0; Using "-------#.##"; Tab 56;PrtTot[5] - PrtTot[0];
+		If PrtTot[5] Print #0; Using "---#%"; Tab 69;FNW((PrtTot[5] - PrtTot[0]) / PrtTot[5] * 100);
+	end if
+	if partialTotalPrint and curIssueFlag = 2
+		print #0;Tab 106;"NO CALCULTN";
+	else
+		Print #0; Using "-------#.##"; Tab 106;PrtTot[7];
+	end if
+	print #0;""
+	Print #0;TAB 8; "ORIGINAL COMMISSION";
+	Print #0; Using "-------#.##"; Tab 35;PrtTot[15];
+	If PRTCOST
+		Print #0; Using "-------#.##"; Tab 46;PrtTot[10];
+		Print #0; Using "-------#.##"; Tab 56;PrtTot[15] - PrtTot[10];
+		If PrtTot[15] Print #0; Using "---#%"; Tab 69;FNW((PrtTot[15] - PrtTot[10]) / PrtTot[15] * 100);
+	end if
+	Print #0; Using "-------#.##"; Tab 106;PrtTot[17];
+	print #0;""
+	STLDone: ! finish
+	if not(partialTotalPrint)
+		If Not(SUMM) call InsertRepSummaryRec()
+		clear T8[]
+		clear T11[]
+		s8 = 0
+	end if
+	curIssueFlag = 0
+	clear T12[]
+	LN = 9999
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub PrintSalesmanOrderTotal()
+try
+	if screenprint exit sub ! xml not supported at this time
+	for i = 0 to 38 ! for all the order types
+		if t11[i,0]=0 and t11[i,5]=0 and t11[i,7]=0
+			if t11[i,10]=0 and t11[i,15]=0 and t11[i,17]=0
+				goto SkipOrdType
+			end if
+		end if
+		call PrintHeadings(0,1)
+		If HEADING Call PrintSalesman()
+		if i = 0
+			OrderDesc$ = "** UNKOWN **"
+		else
+			mat read #1,62,(i-1)*20;OrderDesc$;
+			OrderDesc$ = rtrim$(OrderDesc$)
+		end if
+		if OrderDesc$ = "" let OrderDesc$ = "Order Type "+str$(i)
+		Print #0;"  ** OT ";OrderDesc$;
+		Print #0; Using "-------#.##"; Tab 35;T11[i,5];
+		If PRTCOST
+			Print #0; Using "-------#.##"; Tab 46;T11[i,0];
+			Print #0; Using "-------#.##"; Tab 56;T11[i,5] - t11[i,0];
+			If (T11[i,5]) Print #0; Using "---#%"; Tab 69;FNW((T11[i,5] - T11[i,0]) / (T11[i,5]) * 100);
+		end if
+! 		if custom_customer$ <> "CSS"
+! 			Print #0; Using "-------#.##"; Tab 94;T11[i,6];
+! 		end if
+		Print #0; Using "-------#.##"; Tab 106;T11[i,7];
+! 		if custom_customer$ <> "CSS"
+! 			If SUMM <> 0 Or PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+! 				Print #0; Using "------#.##"; Tab 112;T11[i,8];
+! 			End If 
+! 		end if
+		print #0;""
+		Print #0; TAB 8 ; "ORIGINAL COMMISSION";
+		Print #0; Using "-------#.##"; Tab 35;T11[i,15];
+		If PRTCOST
+			Print #0; Using "-------#.##"; Tab 46;T11[i,10];
+			Print #0; Using "-------#.##"; Tab 56;T11[i,15] - t11[i,10];
+			If (T11[i,15]) Print #0; Using "---#%"; Tab 69;FNW((T11[i,15] - T11[i,10]) / (T11[i,15]) * 100);
+		end if
+! 		if custom_customer$ <> "CSS"
+! 			Print #0; Using "-------#.##"; Tab 94;T11[i,6];
+! 		end if
+		Print #0; Using "-------#.##"; Tab 106;T11[i,17];
+! 		if custom_customer$ <> "CSS"
+! 			If SUMM <> 0 Or PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+! 				Print #0; Using "------#.##"; Tab 112;T11[i,8];
+! 			End If 
+! 		end if
+		print #0;""
+		Let LN = LN + 2
+	SkipOrdType: !
+	next i
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub CustomerTotal()
+try
+	call PrintHeadings(0,1)
+	If HEADING Call PrintSalesman()
+	if screenprint ! xml
+		If Not(S8) tmp$=Str$(S1),fdel$,RTrim$(S1$),fdel$
+		If S8 tmp$=Str$(S8),fdel$,RTrim$(S1$),fdel$
+		tmp$=tmp$,Str$(S10),fdel$,"TOTALS",fdel$ ! no cust/name
+		tmp$=tmp$,fdel$,fdel$ ! no inv / date
+		if not(sortdiv) let tmp$=tmp$,fdel$ Else let tmp$=tmp$,Str$(HDiv),fdel$ ! no div
+		If PRTCOST
+			x3=0
+			if (PT10[5] + T10[5]) let x3=FNW((PT10[5] + T10[5] - T10[0]) / (PT10[5] + T10[5]) * 100)
+			tmp$=tmp$,LTrim$(X3 Using "-----#%"),fdel$
+			tmp$=tmp$,LTrim$(T10[0] Using "---------#.##"),fdel$
+			tmp$=tmp$,LTrim$(PT10[5] + T10[5] - T10[0] Using "---------#.##"),fdel$
+		Endif
+	! 	if not(ARCODE)
+	! 		tmp$=tmp$,LTrim$(PT10[5] Using "---------#.##"),fdel$
+	! 	Endif
+		tmp$=tmp$,LTrim$(T10[5] Using "---------#.##"),fdel$
+		tmp$=tmp$,LTrim$(T10[6] Using "---------#.##"),fdel$
+		tmp$=tmp$,LTrim$(T10[7] using "---------#.##"),fdel$
+		If SUMM <> 0 Or PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+			tmp$=tmp$,LTrim$(T10[8] Using "---------#.##"),fdel$
+		Else
+			tmp$=tmp$,fdel$
+		End If 
+		If PURGEFLAG = 3 let tmp$=tmp$,fdel$
+		tmp$=tmp$,rdel$
+		call addtostr(e$,rstr$,tmp$)
+		goto ReInitCustTotals ! that's all
+	Endif
+	Print #0;""
+	Print #0; Using "######"; Tab 4;"** CUSTOMER ";S10;" TOTALS **";
+	Print #0; Using "-------#.##"; Tab 35;T10[5];
+	If PRTCOST
+		Print #0; Using "-------#.##"; Tab 46;T10[0];
+		Print #0; Using "-------#.##"; Tab 56;PT10[5] + T10[5] - T10[0];
+		If (PT10[5] + T10[5]) Print #0; Using "---#%"; Tab 69;FNW((PT10[5] + T10[5] - T10[0]) / (PT10[5] + T10[5]) * 100);
+	end if
+	! If Not(ARCODE) Print #0; Using "-------#.##"; Tab 74;PT10[5];
+	! Print #0; Using "-------#.##"; Tab 86;T10[5];
+! 	if custom_customer$ <> "CSS"
+! 		Print #0; Using "-------#.##"; Tab 94;T10[6];
+! 	end if
+	Print #0; Using "-------#.##"; Tab 106;T10[7];
+! 	if custom_customer$ <> "CSS"
+! 		If SUMM <> 0 Or PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+! 			Print #0; Using "------#.##"; Tab 112;T10[8];
+! 		End If 
+! 	end if
+	Print #0;""
+	Print #0; Tab 8;"ORIGINAL COMMISSION";
+	Print #0; Using "-------#.##"; Tab 35;T10[15];
+	If PRTCOST
+		Print #0; Using "-------#.##"; Tab 46;T10[10];
+		Print #0; Using "-------#.##"; Tab 56;PT10[15] + T10[15] - T10[10];
+		If (PT10[15] + T10[15]) Print #0; Using "---#%"; Tab 69;FNW((PT10[15] + T10[15] - T10[10]) / (PT10[15] + T10[15]) * 100);
+	end if
+	! If Not(ARCODE) Print #0; Using "-------#.##"; Tab 74;PT10[5];
+	! Print #0; Using "-------#.##"; Tab 86;T10[5];
+! 	if custom_customer$ <> "CSS"
+! 		Print #0; Using "-------#.##"; Tab 94;T10[6];
+! 	end if
+	Print #0; Using "-------#.##"; Tab 106;T10[17];
+! 	if custom_customer$ <> "CSS"
+! 		If SUMM <> 0 Or PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+! 			Print #0; Using "------#.##"; Tab 112;T10[8];
+! 		End If 
+! 	end if
+	Print #0;""
+	Print #0;""
+	LN = LN + 4
+	ReInitCustTotals: S10 = 0 \ clear T10[]
+	PT10[5] = 0
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub PrintRepSummary()
+try
+	LN = 999
+	K98$ = " ",K98$
+	do
+		Search #ch_98,3,1;K98$,R98,E \ If E > 2 error 11000
+		If E exit do
+		Mat Read #ch_98,R98,0;SNAME$;
+		Read #ch_98,R98,16;GP;
+		Read #ch_98,R98,22;COST;
+		Read #ch_98,R98,28;PROFIT;
+		Read #ch_98,R98,34;PRIMTH;
+		Read #ch_98,R98,40;CURMTH;
+		Read #ch_98,R98,46;AMTPAID;
+		Read #ch_98,R98,52;COMMAMT;
+		Read #ch_98,R98,58;COMMDUE;
+		Read #ch_98,R98,64;ORIGSALES;
+		Read #ch_98,R98,70;ORIGCOST;
+		Read #ch_98,R98,76;ORIGPROFIT;
+		Read #ch_98,R98,82;ORIGCOMMAMT;
+		Read #ch_98,R98,88;ORIGGP;
+		if screenprint ! xml
+			tmp$=K98$[1,3],fdel$,SNAME$[1,15]," TOTALS",fdel$
+			tmp$=tmp$,fdel$,fdel$ ! no cust/name
+			tmp$=tmp$,fdel$,fdel$ ! no inv / date
+			tmp$=tmp$,fdel$ ! no div
+			If PRTCOST
+				x3=GP
+				tmp$=tmp$,LTrim$(X3 Using "-----#%"),fdel$
+				tmp$=tmp$,LTrim$(COST Using "---------#.##"),fdel$
+				tmp$=tmp$,LTrim$(PROFIT Using "---------#.##"),fdel$
+			Endif
+		! 	if not(ARCODE)
+		! 		tmp$=tmp$,LTrim$(PRIMTH Using "---------#.##"),fdel$
+		! 	Endif
+			tmp$=tmp$,LTrim$(CURMTH Using "---------#.##"),fdel$
+			tmp$=tmp$,LTrim$(AMTPAID Using "---------#.##"),fdel$
+			tmp$=tmp$,LTrim$(COMMAMT using "---------#.##"),fdel$
+			If SUMM <> 0 Or PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+				tmp$=tmp$,LTrim$(COMMDUE Using "--------#.##"),fdel$
+			Else
+				tmp$=tmp$,fdel$
+			End If 
+			If PURGEFLAG = 3 let tmp$=tmp$,fdel$
+			tmp$=tmp$,rdel$
+			call addtostr(e$,rstr$,tmp$)
+			goto NextSummaryRec ! that's all
+		Endif
+		call PrintHeadings(0,1)
+		Print #0;""
+		Print #0;"**SLSM ";K98$[1,3];" ";SNAME$[1,13];" TOTALS**";
+		Print #0; Using "-------#.##"; Tab 35;CURMTH;
+		If PRTCOST
+			Print #0; Using "-------#.##"; Tab 46;COST;
+			Print #0; Using "-------#.##"; Tab 56;PROFIT;
+			Print #0; Using "---#%"; Tab 69;GP;
+		end if
+		! If Not(ARCODE) Print #0; Using "-------#.##"; Tab 74;PRIMTH;
+		! Print #0; Using "-------#.##"; Tab 86;CURMTH;
+! 		if custom_customer$ <> "CSS"
+! 			Print #0; Using "-------#.##"; Tab 94;AMTPAID;
+! 		end if
+		Print #0; Using "-------#.##"; Tab 106;COMMAMT;
+! 		if custom_customer$ <> "CSS"
+! 			If SUMM <> 0 Or PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+! 				Print #0; Using "------#.##"; Tab 112;COMMDUE;
+! 			End If 
+! 		end if
+		Print #0;""
+		LN = LN + 1
+		Print #0;TAB 10;"* ORIGINAL AMOUNTS *";
+		Print #0; Using "-------#.##"; Tab 35;ORIGSALES;
+		If PRTCOST
+			Print #0; Using "-------#.##"; Tab 46;ORIGCOST;
+			Print #0; Using "-------#.##"; Tab 56;ORIGPROFIT;
+			Print #0; Using "---#%"; Tab 69;ORIGGP;
+		end if
+		Print #0; Using "-------#.##"; Tab 106;ORIGCOMMAMT;
+		Print #0;""
+		LN = LN + 1
+	NextSummaryRec: !
+	loop
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub PrintLine()
+try
+	call PrintHeadings(1,1)
+	If S10 <> S3[1] If Not(HEADING) call PrintCustomer()
+	if screenprint ! xml
+		If Not(S8) tmp$=Str$(S1),fdel$,RTrim$(S1$),fdel$
+		If S8 tmp$=Str$(S8),fdel$,RTrim$(S1$),fdel$
+		tmp$=tmp$,Str$(S3[1]),fdel$,RTrim$(C1$),fdel$ ! cust/name
+		x2=S1[3] \ Call UnpackDate()
+		tmp$=tmp$,Str$(S7[1]),fdel$,X$,fdel$ ! inv / date
+		let x2=a0[5]
+		if x2=0 and sortdiv let x2=cdiv
+		tmp$=tmp$,Str$(X2),fdel$ ! div (from a/r)
+		If PRTCOST
+			x3=0
+			if S2 let x3=FNW((S2[0] - S6[0]) / S2[0] * 100)
+			tmp$=tmp$,LTrim$(X3 Using "----#%"),fdel$
+			tmp$=tmp$,LTrim$(S6[0] Using "--------#.##"),fdel$
+			tmp$=tmp$,LTrim$(S2[0] - S6 Using "--------#.##"),fdel$
+		Endif
+		tmp1$=LTrim$(S2[0] Using "--------#.##")
+		tmp$=tmp$,tmp1$,fdel$
+		if custom_customer$ <> "CSS"
+			tmp$=tmp$,LTrim$(AmtPaid Using "--------#.##"),fdel$
+		end if
+		tmp$=tmp$,LTrim$(S2[1] using "--------#.##"),fdel$
+		if custom_customer$ <> "CSS"
+			If SUMM <> 0 Or PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+				tmp1$=""
+				If CommRecType >= 6 ! it's a credit
+					If CF$ = "C"
+						tmp1$=LTrim$(S2[1] Using "-------#.##")
+					Else 
+						If Abs(AmtPaid) >= Abs(S2) Or ARPAID tmp1$=LTrim$(S2[1] Using "-------#.##")
+					End If 
+				Else 
+					If Abs(AmtPaid) >= Abs(S2) Or ARPAID tmp1$=LTrim$(S2[1] Using "-------#.##")
+				End If 
+				tmp$=tmp$,tmp1$,fdel$
+			Else
+				If A2[1]
+					X2 = A2[1] \ Call UnpackDate()
+					tmp$=tmp$,X$[1,8],fdel$
+				!Else
+				!	tmp$=tmp$,fdel$
+				End If 
+			End If 
+		end if
+		If PURGEFLAG = 3 and s4[1]
+			let tmp$=tmp$,"*",fdel$
+		Else
+			let tmp$=tmp$,fdel$
+		Endif
+		tmp$=tmp$,rdel$
+		call addtostr(e$,rstr$,tmp$)
+		goto EndLinePrint ! that's all
+	Endif
+	Print #0; Using "##########"; Tab 14;S7[1];
+	X2 = S1[3] \ Call UnpackDate()
+	Print #0; Tab 25;X$[1,8];
+	Print #0; Using "-------#.##"; Tab 35;S2[0];
+	If PRTCOST
+		Print #0; Using "-------#.##"; Tab 46;S6[0];
+		Print #0; Using "-------#.##"; Tab 56;S2[0] - S6;
+		If S2 Print #0; Using "---#%"; Tab 69;FNW((S2[0] - S6[0]) / S2[0] * 100);
+	end if
+	Rem what columns should print
+	if custom_customer$ <> "CSS"
+		print #0; using "---#.##%"; tab 75;s1[2];
+	end if
+	if SplitFlag > 0 and S7[2] <> 0
+		print #0; using "###.##%"; tab 85;s7[2];
+	else
+		if SplitFlag = -1 print #0;tab 85;" *CAT*";
+	end if
+	if issueFlag = 2
+		print #0;Tab 106;"NO CALCULTN";
+	else
+		Print #0; Using "-------#.##"; Tab 106;S2[1];
+	end if
+	If PURGEFLAG = 3 If S4[1] Print #0;"*";
+	Print #0;""
+	LN = LN + 1
+	EndLinePrint: !
+	S8 = S1
+	curIssueFlag = issueFlag
+	S10 = S3[1]
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub PrintAuditTrans()
+try
+	! print all audit transactions for a commission record
+	if screenprint exit sub ! no transactional detail for xml
+	gotFirstAudit = 0
+	k7$=" ",k7$
+	k7$[1,3] = k1_rep$[1,3]
+	k7$[4,13] = k1_invcm$[1,10]
+	pca_loop: !
+		search #ch_commahypo,3,1;k7$,r7,e \ if e>2 error 11000
+		if e goto end_pca_loop:
+		if k7$[1,3] <> k1_rep$[1,3] OR k7$[4,13] <> k1_invcm$[1,10] goto end_pca_loop:
+		if k7$[26,26] <> k1_type$[1,1] goto pca_loop: ! wrong type
+		mat read #ch_commahypo,r7,0;as1;
+		mat read #ch_commahypo,r7,16;as3;
+		mat read #ch_commahypo,r7,128;as4;
+		mat read #ch_commahypo,r7,62;cas$;
+		mat read #ch_commahypo,r7,132;as5;
+		if as1[1] = 6 or as1[1] = 7 or as1[1] = 9 ! it's a credit or negative adjustment
+			for i = 0 to 5
+				if i<2 as3[i] = 0 - as3[i]
+				if i>1 as5[i] = 0 - as5[i]
+			next i
+		end if
+		call PrintHeadings(1)
+		if not(gotFirstAudit)
+			print #0;TAB 19;"* ORIG COMM.";
+			Print #0; Using "-------#.##"; Tab 35;ocs1[2];
+			If PRTCOST
+				Print #0; Using "-------#.##"; Tab 46;ocs1[3];
+				Print #0; Using "-------#.##"; Tab 56;ocs1[2] - ocs1[3];
+				If ocs1[2] Print #0; Using "---#%"; Tab 69;FNW((ocs1[2] - ocs1[3]) / ocs1[2] * 100);
+			end if
+			print #0; using "---#.##%"; tab 75; ocs1[1];
+			Print #0; Using "-------#.##"; Tab 106;ocs1[0] * multiplier
+			ln = ln + 1
+			call PrintHeadings(1)
+			gotFirstAudit = 1
+			! print detail after showing original amount
+			if InvoiceDetail call PrintInvoiceDetail()
+		end if
+		tmp$ = "* UNKNOWN ADJ"
+		if as4[0] = 1 tmp$ = "* MANUAL ADJ"
+		if as4[0] = 2 tmp$ = "* CHARGEBACK ADJ"
+		if as4[0] = 3 tmp$ = "* TERMS DISC ADJ"
+		if as4[0] = 4 tmp$ = "* CASH DISC " + str$(as4[1])
+		if as4[0] = 5 tmp$ = "* CUST REBT ADJ"
+		if as4[0] = 6 tmp$ = "* CPI CHARGE "+rtrim$(cas$)
+		if as4[0] = 7 tmp$ = "* HB ADJ "+rtrim$(cas$)
+		if as4[0] = 8 tmp$ = "* CREDIT CARD ADJ"
+		if as4[0] = 9 tmp$ = "* AMALG ADJ"
+		print #0;tab 19;tmp$;
+		if as4[0] <> 6 and as4[0] <> 7
+			if as1[1] <> 8 and as1[1] <> 9  ! 8 and 9 straight comm adj
+		! 		print #0;tab 49;cas$;
+				Print #0; Using "-------#.##"; Tab 35;as5[3];
+				If PRTCOST
+					Print #0; Using "-------#.##"; Tab 46;as5[5];
+					Print #0; Using "-------#.##"; Tab 56;as5[3] - as5[5];
+					If as5[3] Print #0; Using "---#%"; Tab 69;FNW((as5[3] - as5[5]) / as5[3] * 100);
+				end if
+				print #0; using "---#.##%"; tab 75; as5[1];
+			end if
+		end if
+		if as4[0] = 7 or as4[0] = 8
+			Print #0; Using "-------#.##"; Tab 106;((as3[0]-as3[1]) * -1);
+		else
+			Print #0; Using "-------#.##"; Tab 106;as3[1];
+		end if
+		tmp$ = as3[4] using "&&&&&&"
+		! PRINT #0; TAB 124;tmp$[3,4]+"/"+tmp$[5,6]+"/"+tmp$[1,2];
+		print #0; ""
+		LN = LN + 1
+		call PrintHeadings(1)
+		goto pca_loop:
+	end_pca_loop: !
+	if not(gotFirstAudit)
+		! no audit entries, so print after commission line
+		if InvoiceDetail call PrintInvoiceDetail()
+	end if
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+Sub PrintOriginalCommission()
+try
+	call PrintHeadings(1,1)
+	if gotOriginal
+		if multiplier = -1
+			orig_s6 = 0 - orig_s6
+			! AmtPaid = 0 - AmtPaid
+			orig_s2 = 0 - orig_s2 \ orig_s2[1] = 0 - orig_s2[1]
+		end if
+		Print #0; Using "########"; Tab 16;orig_s7[1];
+		Print #0; Tab 25;"ORIGINAL";
+		Print #0; Using "-------#.##"; Tab 35;orig_s2[0];
+		If PRTCOST
+			Print #0; Using "-------#.##"; Tab 46;orig_s6[0];
+			Print #0; Using "-------#.##"; Tab 56;orig_s2[0] - orig_s6;
+			If orig_s2 Print #0; Using "---#%"; Tab 69;FNW((orig_s2[0] - orig_s6[0]) / orig_s2[0] * 100);
+		end if
+		Rem what columns should print
+		print #0; using "---#.##%"; tab 75;orig_s1[2];
+		if orig_SplitFlag > 0 and orig_s7[2] <> 0
+			print #0; using "###.##%"; tab 85;orig_s7[2];
+		else
+			if orig_SplitFlag = -1 print #0;tab 85;" *CAT*";
+		end if
+		Print #0; Using "-------#.##"; Tab 106;orig_s2[1];
+	else
+		! no original commission record....
+		Print #0; Tab 16; "NO ORIGINAL COMMISSION RECORD FOUND";
+	end if
+	Print #0;""
+	Print #0;""
+	LN = LN + 2
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub PrintInvoiceDetail()
+try
+	if CommRecType <> 1 and CommRecType <> 6
+		print #0;tab 29;"** Entry Not Tied to History"
+		ln = ln + 1
+		call PrintHeadings(1)
+		exit sub
+	end if
+	Let detailSign = 1
+	Kinvh$ = " ",Kinvh$
+	Kinvh$[1,2] = "30"
+	IF CommRecType = 6
+		Kinvh$[1,2] = "31"
+		detailSign = -1
+	end if
+	Kinvh$[3,12] = S7[1] using "##########"
+	search #ch_invh,2,1;Kinvh$,Rinvh,e \ if e>1 error 11000
+	if e
+		print #0;tab 29;"** Invoice History Not on File"
+		ln = ln + 1
+		call PrintHeadings(1)
+		exit sub
+	end if
+	if issueFlag = 2 ! issues - no hypothetical
+		mat read #ch_invh,Rinvh,278;SLSM;
+		mat read #ch_invh,Rinvh,600;CommBaseRate;
+	else ! no issues with hypothetical
+		search #ch_invhh,2,1;Kinvh$,Rinvhh,e \ if e>1 error 11000
+		if e
+			print #0;tab 29;"** Invoice History Not on File"
+			ln = ln + 1
+			call PrintHeadings(1)
+			exit sub
+		end if
+		mat read #ch_invhh,Rinvhh,278;SLSM;
+		mat read #ch_invhh,Rinvhh,600;CommBaseRate;
+	end if
+	slsidx = 0
+	for i = 0 to 4
+		if slsm[i] = s1[0]
+			let slsidx = i
+			let i = 5
+		end if
+	next i
+	Kinvl$ = " ",Kinvl$
+	Kinvl$[1,10] = Kinvh$[3,12]
+	do
+		search #ch_invl,3,1;Kinvl$,Rinvl,e \ if e>2 error 11000
+		if e exit do
+		if Kinvl$[1,10] <> Kinvh$[3,12] exit do
+		if issueFlag = 1 ! no issues with hypothetical calc
+			search #ch_invlh,2,1;Kinvl$,Rinvlh,e \ if e>1 error 11000
+			if e exit do ! no hypothetical line
+		end if
+		Mat Read #ch_invl,RInvl,256;invlS2;
+		If invlS2[0] = 3 Goto SkipInvLine
+		if issueFlag = 1 ! no issues with hypothetical
+			mat read #ch_invlh,RInvlh,16;l4;
+			mat read #ch_invlh,RInvlh,404;OLM;
+			mat read #ch_invlh,RInvlh,622;CommSource;
+		else
+			mat read #ch_invl,RInvl,16;l4;
+			mat read #ch_invl,RInvl,404;OLM;
+			mat read #ch_invl,RInvl,622;CommSource;
+		end if
+		mat read #ch_invl,RInvl,32;l5;
+		mat read #ch_invl,RInvl,140;l1$;
+		mat read #ch_invl,RInvl,168;l7;
+		mat read #ch_invl,RInvl,250;un;
+		mat read #ch_invl,RInvl,260;invlS3;
+		mat read #ch_invl,RInvl,452;unf;
+		! if split by category and the salesrep on the line
+		! is not for this rep, skip it
+		if SplitFlag = -1 and l4[1] <> s1[0] goto SkipInvLine
+		! print line
+		If P9$[34,34] = "O"
+			LinePrice = L5[0] ! Total Price
+			LineCost = invlS3[13] ! Total Cost
+		Else
+			LinePrice = L5[3] ! Total Price
+			LineCost = invlS3[12] ! Total Cost
+		end if
+		print #0; Tab 22;L1$[1,12];
+		! print #0; Tab 23;"LINE # ";Kinvl$[11,13];
+		Print #0; Using "-------#.##"; Tab 35;LinePrice * detailSign;
+		If PRTCOST
+			Print #0; Using "-------#.##"; Tab 46;LineCost * detailSign;
+			Print #0; Using "-------#.##"; Tab 56;(LinePrice - LineCost)*detailSign;
+			If LinePrice Print #0; Using "---#%"; Tab 69;FNW((LinePrice - LineCost) / LinePrice * 100);
+		end if
+		if custom_customer$ <> "CSS"
+			if CommSource ! override commission rate in effect
+				print #0; using "---#.##%"; tab 75;OLM[5];
+			else
+				print #0; using "---#.##%"; tab 75;CommBaseRate[slsidx];
+			end if
+		else
+			! central sanitary wants to see the commission amount
+			if SplitFlag > 0 and S7[2] <> 0
+				print #0; using "-$$$$&.&&"; tab 75; olm[6]* (s7[2] / 100);
+			else
+				print #0; using "-$$$$&.&&"; tab 75; olm[6]
+			end if
+		end if
+		print #0; tab 86;"Ship Qty: ";
+		if unf[0]
+			tmp$ = Xunit$(un[0], ch_ccode)
+			print #0; using "--,---,--&.&&"; (L7[4] / unf[0]);" ";tmp$;
+			if l7[3]
+				print #0; " ("; (L7[3] / unf[0]);" BO)";
+			end if
+		else
+			print #0; "      * N/A *";
+		end if
+		print #0; ""
+		ln = ln + 1
+		call PrintHeadings(1)
+	SkipInvLine: !
+	loop
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub PrintCustomer()
+try
+	! everywhere this is called, we know we have enough room
+	! for the line, so no need to call PrintHeadings
+	If not(SUMM) and not(screenprint)
+		if screenprint exit sub ! sent every line
+		Print #0; Using "######"; Tab 0;S3[1];
+		Print #0; Tab 8;C1$[1,30]
+		LN = LN + 1
+	end if
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub PrintSalesman()
+try
+	If not(SUMM) and not(screenprint)
+		If Not(S8)
+			Print #0; Using "###";"SALESMAN ";S1;" ";S1$;
+		else
+			Print #0; Using "###";"SALESMAN ";S8;" ";S1$;
+		end if
+		if useLastCommRun
+			if issueFlag = 2
+				print #0;"  (NO Hypothetical Calculations Done) "
+			else
+				print #0;"  (Hypothetical Calculations Done) "
+			end if
+		else
+			print #0;" "
+		end if
+		Print #0;" "
+		LN = LN + 2
+	end if
+	SALESMAN = 1
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub PrintHeadings(doSubHeadings,...)
+try
+	enter extraLinesNeeded
+else
+	extraLinesNeeded = 0
+end try
+try
+	if screenprint exit sub ! has already!
+	HEADING = 0
+	If LN + extraLinesNeeded < MAXLINES exit sub 
+	!If J2 If SCREENPRINT Input @0,23;"PRESS <CR> TO CONTINUE "J$ \ Print 'CS';
+	If J2 If Not(SCREENPRINT) Print #0;"\14\";
+	J2 = J2 + 1 \ LN = 5
+	If Not(SCREENPRINT) Print #0;"\15\";
+	Print #0; Tab 10;J8$; Tab (64 - Len(COMP$) / 2);COMP$; Tab 120;"PAGE";J2
+	Print #0;" - 450 - ";Msc$(3);
+	print #0; Tab 47; "H Y P O T H E T I C A L   C O M M I S S I O N"
+	Print #0; Tab 0;"CUST #";
+	Print #0; Tab 8;"CUSTOMER";
+	Print #0; Tab 18;"INV/CM";
+	Print #0; Tab 27;"DATE";
+	print #0; tab 40;"SALE $";
+	If PRTCOST
+		print #0; tab 53;"COST";
+		print #0; tab 62;"PROFIT";
+		Print #0; Tab 70;"GP %";
+	end if
+	if custom_customer$ <> "CSS"
+		print #0; tab 77;"COMM %";
+	end if
+	print #0; tab 86;"SPLT %";
+	Print #0; Tab 109;"COMM AMT";
+	Print #0;" "
+	Print #0;"\15\";
+	HEADING = 1
+	if doSubHeadings
+		call PrintSalesman()
+		call PrintCustomer()
+	end if
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub SortCommFile()
+try
+	! sort commission file
+	COUNT = 0
+	K1$ = N3 Using "###"
+	do
+		Search #ch_commhypo,3,1;K1$,R1,E
+		If E = 2 exit do
+		If E error 11000
+		Mat Read #ch_commhypo,R1,0;S1;
+		Mat Read #ch_commhypo,R1,28;S3;
+		Mat Read #ch_commhypo,R1,36;S4;
+		Mat Read #ch_commhypo,R1,52;SMAT$;
+		Mat Read #ch_commhypo,R1,54;S7;
+		COUNT = COUNT + 1
+		call GetCustomer()
+		! division check - needs a/r!
+		dosort=9
+! 		call CheckAR()
+! 		if a0[5]<SDiv or a0[5]>ediv goto nextCommissionRecs
+		K9$ = " ",K9$
+		issueFlag = 1 ! no issues
+		if useLastCommRun
+			CommRecType = k1$[14,14]
+			if CommRecType = 1 or CommRecType = 6
+				Kinvh$ = " ",Kinvh$
+				Kinvh$[1,2] = "30"
+				IF CommRecType = 6
+					Kinvh$[1,2] = "31"
+					detailSign = -1
+				end if
+				Kinvh$[3,12] = k1$[4,13]
+				search #ch_invhh,2,1;Kinvh$,Rinvhh,e \ if e>1 error 11000
+				if e issueFlag = 2 ! issues
+			end if
+		end if
+		if not(sortdiv)
+			! 1-3 = Salesrep
+			! 4-4 = issue flag only used if using last commission run
+			!       will cause all offsets below to be shifted
+			!       by 1 byte if used
+			! 4-9 = Customer
+			! 10-19 = Invoice / CM
+			! 20-20 = type
+			K9$[1,3] = K1$[1,3]
+			if useLastCommRun k9$[4,4] = issueFlag using "#"
+			K9$[4+useLastCommRun,9+useLastCommRun] = S3[1] Using "######"
+			K9$[10+useLastCommRun] = K1$[4]
+		Else
+			! 1-3 = Divsion
+			! 4-6 = Salesrep
+			! 7-7 = issue flag only used if using last commission run
+			!       will cause all offsets below to be shifted
+			!       by 1 byte if used
+			! 7-12 = Customer
+			! 13-22 = Invoice / CM
+			! 23-23 = type
+			k9$[1,3]=a0[5] using "###"
+			k9$[4,6]=k1$[1,3]
+			if useLastCommRun k9$[7,7] = issueFlag using "#"
+			k9$[7+useLastCommRun,12+useLastCommRun]=S3[1] using "######"
+			k9$[13+useLastCommRun]=k1$[4]
+		Endif
+		Search #9,4,1;K9$,R1,E
+		If E error 11000
+		SORTKEY = SORTKEY + 1
+	nextCommissionRec: !
+	loop
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub BuildSummarySort()
+try
+	ch_98 = findchannel()
+	SCRATCH$ = "[1:256] 6/SUMTMP" + Str$(Spc(6)) + "!"
+	Build #ch_98,SCRATCH$
+	R98 = 25 \ Search #ch_98,0,1;SCRATCH$,R98,E \ If E error 11000
+	R98 = 1000 \ Search #ch_98,0,0;SCRATCH$,R98,E \ If E error 11000
+	R98 = 0 \ Search #ch_98,1,0;SCRATCH$,R98,E \ If E error 11000
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub InsertRepSummaryRec()
+try
+	K98$ = " ",K98$
+	K98$[1,3] = S8 Using "###"
+	Search #ch_98,2,1;K98$,R98,E \ If E > 2 error 11000
+	If E = 1 ! "insert record
+		K98$[1,3] = S8 Using "###"
+		E = 2
+		Search #ch_98,1,0;K98$,R98,E
+		If E error 11000
+		Search #ch_98,4,1;K98$,R98,E
+		If E error 11000
+		SNAME$[1,15] = S1$[1,15]
+		If T8[5]
+			GP = FNW((T8[5] - T8[0]) / T8[5] * 100)
+		Else 
+			GP = 0
+		End If 
+		If (T8[15])
+			ORIGGP = FNW(((T8[15] - T8[10]) / T8[15]) * 100)
+		Else 
+			ORIGGP = 0
+		End If 
+		COST = T8[0]
+		PROFIT = T8[5] - T8[0]
+		PRIMTH = 0
+		CURMTH = T8[5]
+		AMTPAID = T8[6]
+		COMMAMT = T8[7]
+		COMMDUE = T8[8]
+		ORIGSALES = T8[15]
+		ORIGCOST = T8[10]
+		ORIGPROFIT = T8[15] - T8[10]
+		ORIGCOMMAMT = T8[17]
+		Mat Write #ch_98,R98;SNAME$;
+		Write #ch_98,R98,16;GP;
+		Write #ch_98,R98,22;COST;
+		Write #ch_98,R98,28;PROFIT;
+		Write #ch_98,R98,34;PRIMTH;
+		Write #ch_98,R98,40;CURMTH;
+		Write #ch_98,R98,46;AMTPAID;
+		Write #ch_98,R98,52;COMMAMT;
+		Write #ch_98,R98,58;COMMDUE;
+		Write #ch_98,R98,64;ORIGSALES;
+		Write #ch_98,R98,70;ORIGCOST;
+		Write #ch_98,R98,76;ORIGPROFIT;
+		Write #ch_98,R98,82;ORIGCOMMAMT;
+		Write #ch_98,R98,88;ORIGGP;
+		SUM_COUNT = SUM_COUNT + 1
+	End If 
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+Sub UnpackDate()
+try
+	! *UNPACK DATE  X2 TO X$
+	X$ = " ",X$ \ X$[10] = ""
+	X$[1,3] = Int(X2 / 10 ^ 2 - Int(X2 / 10 ^ 4) * 10 ^ 2) + 10 ^ 2 Using "###"
+	X$[4,6] = Fra(X2 / 10 ^ 2) * 10 ^ 2 + 10 ^ 2 Using "###"
+	X$[7,9] = Int(X2 / 10 ^ 4) + 10 ^ 2 Using "###"
+	X$[4,4] = "/" \ X$[7,7] = "/" \ X$ = X$[2]
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+Sub ConvertYYMMDD2Jul()
+try
+	! CONVERT YYMMDD TO JULIAN (x2=-1 NOGOOD, x2<>-1=OKAY)
+	if x2<=0
+		let x2 = -1
+		exit sub
+	end if
+	X$ = X2 Using "&&&&&&"
+	Call DateToJulian(1,X$,X$,E)
+	If E
+		let x2 = -1
+		exit sub
+	end if
+	X2 = X$[1,5]
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+Sub OpenFilesGetControlInfo()
+try
+	Mat Read #1,60,50;P60$;
+	For J = 2 To 7
+		Read J1
+		if J1 <> -1
+			Read #1,88,Abs(J1);J$;
+			If J < 0 Ropen #J,J$ Else Open #J,J$
+		end if
+	Next J
+	Data "-2240","-1824","-1808","-1504","-1408","-1"
+	ch_comm = 2
+	ch_commhist = openfile(-9932, intCO) \ if ch_commhist = -1 error 42
+
+	ch_commhypo = openfile(-9905, intCO) \ if ch_commhypo = -1 error 42
+	ch_commahypo = openfile(-9904, intCO) \ if ch_commahypo = -1 error 42
+
+	ch_invh=OpenFile(-1136,intCo) \ If ch_invh = -1 Error 42
+	ch_invl=OpenFile(-1184,intCo) \ If ch_invl = -1 Error 42
+	! hypothetical invoice header file
+	ch_invhh = openfile(-9908, intCO) \ if ch_invhh = -1 error 42
+	! hypothetical invoice line file
+	ch_invlh = openfile(-9907, intCO) \ if ch_invlh = -1 error 42
+
+	ch_ccode=OpenFile(-1728,intCo) \ If ch_ccode = -1 Error 42
+	! used if hypothetical driven off of last commission run
+	tmp$ = "6/COMMPAIDHYPO"+str$(intCO)
+	call findf(tmp$, e)
+	if not(e)
+		ch_commlog = -1
+	else
+		ch_commlog = findchannel()
+		ropen #ch_commlog,tmp$
+	end if
+	Read #1,3;COMP$;
+	Mat Read #1,0,100;J8$;
+	Mat Read #1,0,108;ARDATE;
+	Mat Read #1,0,120;ARMONTH;
+	Mat Read #1,19,50;P9$;
+	CF$ = P60$[37,37]
+	ARDATE$ = ARDATE Using "&&&&&&"
+else
+  include "src/callsuberr.inc"
+end try
+End Sub
+
+Sub ValidateInput()
+try
+	returnStatus = 0 ! default bad status
+	EPAYDATE = 591231;SPAYDATE = 700101
+	SORTKEY = 0
+	ARCODE = 0
+	YEAR_ = 0
+	N3 = 0
+	N4 = 999
+	SUMM = 0
+	PRTCOST = 0
+	InvoiceDetail = 0
+	SDiv=0;EDiv=99;sortdiv=0
+
+	! no summary only on transactional report
+	! call dxget("TOTONLY",tmp$)
+	! summ = 0
+	call dxget("COSTGP",tmp$)
+	j1=0 \ if ucase$(tmp$)="Y" let j1=1
+	PRTCOST = 0 \ If J1 Let PRTCOST = 1
+! 	onchannelno=0 ! zero for channel 
+! 	printchan = openprinter(e$,onchannelno) 
+! 	Toscreen=0
+! 	if printchan=-1 let Toscreen=1 ! to browser
+! 	let SCREENPRINT=toscreen
+	returnStatus = 1 ! yup - all good now
+	call dxget("INVDET",tmp$)
+	if ucase$(tmp$) = "Y" InvoiceDetail = 1
+	useLastCommRun = 0
+	call dxget("USELASTCOMMRUN", tmp$)
+	if ucase$(tmp$) = "Y" useLastCommRun = 1
+	if useLastCommRun and ch_commlog = -1
+		e$ = "Could not locate data from last commission run!"
+		error 10000
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub DivisionTotal()
+try
+	if s10 Call CustomerTotal()
+	call SalesmanTotal()
+	call PrintHeadings(0,1)
+	if screenprint ! xml
+		tmp$=Str$(HDiv),fdel$," DIV TOTALS",fdel$
+		tmp$=tmp$,fdel$,fdel$ ! no cust/name
+		tmp$=tmp$,fdel$,fdel$ ! no inv / date
+		tmp$=tmp$,Str$(HDiv),fdel$ ! already sent - send again?
+		If PRTCOST
+			x3=0
+			if (TD8[5] + d8[5]) let x3=FNW((TD8[5] + D8[5] - D8[0]) / (TD8[5] + D8[5]) * 100)
+			tmp$=tmp$,LTrim$(X3 Using "-----#%"),fdel$
+			tmp$=tmp$,LTrim$(D8[0] Using "---------#.##"),fdel$
+			tmp$=tmp$,LTrim$(TD8[5] + D8[5] - D8[0] Using "---------#.##"),fdel$
+		Endif
+	! 	if not(ARCODE)
+	! 		tmp$=tmp$,LTrim$(TD8[5] Using "---------#.##"),fdel$
+	! 	Endif
+		tmp$=tmp$,LTrim$(D8[5] Using "---------#.##"),fdel$
+		tmp$=tmp$,LTrim$(D8[6] Using "---------#.##"),fdel$
+		tmp$=tmp$,LTrim$(D8[7] using "---------#.##"),fdel$
+		If SUMM <> 0 Or PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+			tmp$=tmp$,LTrim$(D8[8] Using "---------#.##"),fdel$
+		Else
+			tmp$=tmp$,fdel$
+		End If 
+		If PURGEFLAG = 3 let tmp$=tmp$,fdel$
+		tmp$=tmp$,rdel$
+		call addtostr(e$,rstr$,tmp$)
+		goto DVTLDone ! that's all
+	Endif
+	Print #0;""
+	Print #0;"**DIV ";HDiv;" TOTALS**";
+	Print #0; Using "-------#.##"; Tab 35;D8[5];
+	If PRTCOST
+		Print #0; Using "-------#.##"; Tab 46;D8[0];
+		Print #0; Using "-------#.##"; Tab 56;TD8[5] + D8[5] - D8[0];
+		If (TD8[5] + D8[5]) Print #0; Using "---#%"; Tab 69;FNW((TD8[5] + D8[5] - D8[0]) / (TD8[5] + D8[5]) * 100);
+	end if
+	! If Not(ARCODE) Print #0; Using "-------#.##"; Tab 74;TD8[5];
+	! Print #0; Using "-------#.##"; Tab 86;D8[5];
+	if custom_customer$ <> "CSS"
+		Print #0; Using "-------#.##"; Tab 94;D8[6];
+	end if
+	Print #0; Using "-------#.##"; Tab 106;D8[7];
+	if custom_customer$ <> "CSS"
+		If SUMM <> 0 Or PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+			Print #0; Using "------#.##"; Tab 112;D8[8];
+		End If 
+	end if
+	print #0;""
+
+	Print #0;TAB 8;"ORIGINAL COMMISSION";
+	Print #0; Using "-------#.##"; Tab 35;D8[15];
+	If PRTCOST
+		Print #0; Using "-------#.##"; Tab 46;D8[10];
+		Print #0; Using "-------#.##"; Tab 56;TD8[15] + D8[15] - D8[10];
+		If (TD8[15] + D8[15]) Print #0; Using "---#%"; Tab 69;FNW((TD8[15] + D8[15] - D8[10]) / (TD8[15] + D8[15]) * 100);
+	end if
+	! If Not(ARCODE) Print #0; Using "-------#.##"; Tab 74;TD8[5];
+	! Print #0; Using "-------#.##"; Tab 86;D8[5];
+! 	if custom_customer$ <> "CSS"
+! 		Print #0; Using "-------#.##"; Tab 94;D8[6];
+! 	end if
+	Print #0; Using "-------#.##"; Tab 106;D8[17];
+! 	if custom_customer$ <> "CSS"
+! 		If SUMM <> 0 Or PURGEFLAG <> 1 Or PRT_PAIDONLY = 0
+! 			Print #0; Using "------#.##"; Tab 112;D8[8];
+! 		End If 
+! 	end if
+	print #0;""
+	
+	DVTLDone: ! finish
+	clear D8[]
+	TD8[5] = 0
+	LN = 9999
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+Sub GetOriginalCommission()
+try
+	gotOriginal = 0
+	clear orig_s1[]
+	clear orig_s2[]
+	clear orig_s6[]
+	clear orig_s7[]
+	tmp$ = " ",tmp$
+	tmp$[1,3] = s1[0] using "###"
+	if not(sordiv)
+		tmp$[4] = k1$[10+useLastCommRun]
+	else
+		tmp$[4] = k1$[13+useLastCommRun]
+	end if
+	ch_tmp = ch_comm
+	search #ch_comm,2,1;tmp$,comm_rec,e \ if e>1 error 11000
+	if e
+		ch_tmp = ch_commhist
+		search #ch_commhist,2,1;tmp$,comm_rec,e \ if e>1 error 11000
+	end if
+	if e exit sub
+	gotOriginal = 1
+	Mat Read #ch_tmp,comm_rec,0;orig_s1;
+	Mat Read #ch_tmp,comm_rec,16;orig_s2;
+	Mat Read #ch_tmp,comm_rec,40;orig_s6;
+	Mat Read #ch_tmp,comm_rec,54;orig_s7;
+	mat read #ch_tmp,comm_rec,136;orig_SplitFlag;
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+Sub ErrorOut()
+try
+	ReturnStatus = 0 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)    
+	Message$ = e$                                              
+	Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)     
+	Call AddToStr(e$,rstr$,WebStr$)                            
+	Call SetOutPut(e$,rstr$)                                   
+else
+  include "src/callsuberr.inc"
+end try
+End Sub
+
+
+else ! MAIN TRY
+	include "src/callmainerrnet.inc"
+end try
+End

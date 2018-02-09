@@ -1,0 +1,464 @@
+! --- serpcpi_cbr.dl4
+!
+! GTI High Burden Chargeback Report
+!
+!
+! loadsave -w -n 100,10 -o prog/dxport/gtihb.dl4 src/gtihb.src
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+include "src/inc/filesslsm.inc"
+
+!
+Declare Intrinsic Sub InpBuf,String,Findf,programdump,DateToJulian,JulianToDate
+Declare Intrinsic Sub Time
+!Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,getuidrec
+
+External Lib "ubsprconv.dl4"
+Declare External Function xunit$
+
+! Internal Subroutines and Functions
+Declare Sub OpenFilesAndGetControlInfo,GetParameters,ReadCommRec,CheckIfAlreadyDone
+Declare Sub ProcessCommRec,PrintHeader,SalesrepTotals
+Declare Sub ProcessInvoiceLine,PrintLine
+Declare Sub CreateCommissionAdjustment
+
+dim 1%,user
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200],List$[50,200],3%
+b$=" ",b$
+dim message$[150],webstr$[200]
+
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+! record structures
+dim sr. as sslsm
+! keys
+dim K_invl$[50],K_sr$[50],K_comm$[16],K_comma1$[28],K_comma2$[32]
+! record numbers
+dim 3%,R_invl,R_sr,R_comm,R_comma
+! specific commission variables
+dim 1%,s4[1],SplitFlag,SplitType
+dim 2%,s1[3],s3[1]
+dim 3%,s2[1],s6[1],s7[2],cs9[3],commsrvchg,ocs1[3],commSeq
+dim smat$[2]
+Dim 3%,AORIGCOMM
+Dim 1%,AS1[3],AS4[1],USER
+Dim 2%,AS2[1]
+Dim 3%,AS3[5],AS_$[60],SOURCE$[10],AS5[5]
+
+! everything else
+dim P9$[50],mode$[1],pageHeading$[132]
+dim l1$[20],doubleDash$[132]
+dim 2%,pageNo,lineNo,maxLines,jdate,SplitPercent,l4[3]
+dim 3%,repTotal[1],invl_s3[17],adjAmount
+
+!
+! M A I N   L O G I C
+!
+call OpenFilesAndGetControlInfo()
+call GetParameters()
+doubleDash$ = "=",doubleDash$
+if toBrowser
+	e$ = "Browser option not supported yet.  Please re-select printer."
+	error 10000
+	!<section>
+	tmp$ = bsdel$,"GTIHB",fdel$,rdel$
+	Call addtostr(e$,rstr$,tmp$)
+end if
+maxLines = 60
+if not(toBrowser) call setoutput(e$,rstr$, 2)
+
+
+! loop through commission records look for high burden items
+lineNo = 999
+K_comm$ = " ",K_comm$
+do
+	search #CH_COMM,3,1;K_comm$,R_comm,e
+	if e>2 error 11000
+	if e exit do
+	i = k_comm$[14,14]
+	if i<>1 and i<>6 goto SkipCommissionRec ! only system inv/cm...
+	call CheckIfAlreadyDone()
+	if alreadyDone goto SkipCommissionRec
+	! check for break in salesrep here
+	call ReadCommRec()
+	if conversionFlag
+		if s1[3] > cutoffDate goto SkipCommissionRec
+	end if
+	if not(currSales) or currSales <> s1[0]
+		! do salesrep totals
+		call SalesrepTotals()
+		currSales = s1[0]
+		clear repTotal[]
+		repLines = 0
+		commSeq = 0
+		K_sr$ = " ",K_sr$
+		K_sr$[1,3] = currSales using "###"
+		R_sr = filegetsslsm(e$,CH_SR,"=",1,K_sr$,sr.)
+		if R_sr <= 0
+			clear sr.
+			sr.Name$ = "NOT ON FILE!"
+		end if
+		lineNo = maxLines + 1 ! make sure next line we print prints header
+	end if
+	call ProcessCommRec()
+	SkipCommissionRec: ! already been processed
+loop
+if repLines
+	call SalesrepTotals()
+end if
+
+OutEnd: !
+If toBrowser
+	Call addtostr(e$,rstr$,esdel$) !end section
+	call setoutput(e$,rstr$,1)
+End If
+try Close else rem
+! 
+! 
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end
+
+
+! ***********************************************************************
+! Nobody but us subroutines down here
+! ***********************************************************************
+
+Sub OpenFilesAndGetControlInfo()
+Try
+	CH_SR=OpenFile(-1824,IntCo) \ if ch_sr=-1 Error 42 ! salesrep
+	CH_INVL=OpenFile(-1184,IntCo) \ if ch_invl=-1 Error 42 ! invoice line
+	CH_COMM=OpenFile(2240,IntCo) \ if ch_comm=-1 Error 42 ! commission
+	CH_COMMA=OpenFile(9931,IntCo) \ if ch_comma=-1 error 42 ! commission audit
+	Mat Read #1,19,50;P9$;
+	USER=GetUIDRec(e$,IntCo,Userid$)
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! OpenFilesAndGetControlInfo
+
+Sub GetParameters()
+Try
+	!
+	! get parameters from block ID
+	!
+	! add # of days looking forward to age date:
+	! IE I want to see what the charegbacks would be 7 days from now.
+
+	call dxget("AUDITONLY", tmp$) \ auditOnly = tmp$
+
+	! this is for conversion purposes only
+	call dxget("DOCONVERSION", tmp$) \ conversionFlag = tmp$
+	call dxget("CUTOFFDATE", tmp$) \ cutoffDate = tmp$
+	if conversionFlag and not(cutoffDate)
+		e$ = "If doing conversion, you must enter a cutoff date!"
+		error 10000
+	end if
+	tmp$ = cutoffDate using "&&&&&&"
+	tmp2$ = tmp$[5,6]+tmp$[1,4]
+	cutoffDate = tmp2$
+	
+
+	pageHeading$ = "High Burden Charge Back Report"
+	if conversionFlag
+		pageHeading$ = pageHeading$ + " ** CONVERSION ** "
+	end if
+	pageHeading$ = pageHeading$ +"  Audit Only: "
+	if auditOnly
+		pageHeading$ = pageHeading$ + "YES"
+	else
+		pageHeading$ = pageHeading$ + "NO"
+	end if
+
+	toBrowser = 0
+	try
+		i = Chf(0)
+	else
+		toBrowser = spc(8)
+	end try
+	if toBrowser and toBrowser <> 49 error toBrowser
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! GetParameters
+
+Sub CheckIfAlreadyDone()
+try
+	alreadyDone = 0
+	! see if there are any "HIGH BURDEN" line items
+	! if there are any "HIGH BURDEN" adjustments
+	! for this commission record, it has been
+	! done already
+	k_comma1$ = " ",k_comma1$
+	K_comma1$[1,13] = k_comm$[1,13]
+	do
+		search #CH_COMMA,3,1;k_comma1$,R_comma,e
+		if e>2 error 11000
+		if e exit do
+		if k_comma1$[1,13] <> k_comm$[1,13] exit do
+		if k_comma1$[26,26] = k_comm$[14,14] ! same type
+			mat read #CH_COMMA,R_comma,128;as4;
+			if as4[0] = 7 
+				alreadyDone = 1
+				exit sub ! HB chargeback already done
+			end if
+		end if
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CheckIfAlreadyDone
+
+Sub ReadCommRec()
+try
+	mat read #ch_comm,r_comm;s1
+	mat read #ch_comm,r_comm,16;s2
+	mat read #ch_comm,r_comm,28;s3
+	mat read #ch_comm,r_comm,36;s4
+	mat read #ch_comm,r_comm,40;s6
+	mat read #ch_comm,r_comm,52;smat$
+	mat read #ch_comm,r_comm,54;s7
+	mat read #ch_comm,r_comm,112;ocs1
+	mat read #ch_comm,r_comm,136;SplitFlag
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadCommRec
+
+Sub ProcessCommRec()
+Try
+	! search through invoice to find "HIGH BURDEN" items
+	printedOne = 0
+	newComm = 0
+	K_invl$ = " ",K_invl$
+	let k_invl$[1,10] = s7[1] using "##########"
+	do
+		search #ch_invl,3,1;k_invl$,R_invl,e
+		if e>2 error 11000
+		if e exit do
+		if val(k_invl$[1,10]) <> s7[1] exit do
+		call ProcessInvoiceLine()
+	loop
+	if newComm
+		repTotal[1] = repTotal[1] + (newComm * multiplier)
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ProcessCommRec
+
+Sub ProcessInvoiceLine()
+Try
+	lineChargeback = 0
+	Mat Read #CH_invl,R_invl,16;l4;
+	mat read #ch_invl,R_invl,140;l1$;
+	Mat Read #CH_invl,R_invl,260;invl_S3;
+	
+	l1$ = ucase$(l1$)
+	if l1$[1,2] <> "HB" exit sub ! not a high burden item
+	! make sure this salesrep is on this line - might mot be
+	! the case if sales category split was used
+	if SplitFlag = -1 and l4[1] <> s1[0] exit sub ! not for this rep
+	adjAmount = fnr(invl_s3[12] * .05)
+	if conversionFlag let adjAmount = 0
+	! adjusts the loaded cost (effecting overall gross profit)
+	! which is then re-multiplied by the
+	! commission percent to calculate the new amount
+	! IN ADDITION, if splits are in play, we need to figure
+	! out exactly how much of this amount should ding this
+	! rep
+	SplitPercent = 1 ! defualt to this dude gets the whole thing
+	if SplitFlag = 1 or SplitFlag = 3 ! commission or GP$ split
+		SplitPercent = s7[2] / 100
+	end if
+	if conversionFlag
+		newComm = s2[1]
+	else
+		newComm = fnr((s2[0] - (s6[0] + adjAmount)) * (s1[2]/100) * SplitPercent)
+	end if
+	call PrintLine()
+	call CreateCommissionAdjustment()
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ProcessInvoiceLine
+
+Sub PrintHeader()
+Try
+	if lineNo < maxLines exit sub ! no need to print a header
+	! need to print one
+	if pageNo > 0 print #0;"\14\" ! form feed
+	pageNo = pageNo + 1
+	Print #0;" - GTIHB -"; Tab (Int(66 - (Len(pageHeading$) / 2)));pageHeading$
+	tmp$ = "" \ Call Time(tmp$)
+	Print #0; Tab 1;"DATE ";tmp$;
+	tmp$ = "FOR SALESREP: "+ltrim$(sr.SlsmNum$)+" - "+rtrim$(sr.Name$)
+	Print #0;Tab (Int(66 - (Len(tmp$) / 2)));tmp$;
+	Print #0; Using "PAGE ###"; Tab 119;pageNo
+	Print #0;" "
+	Print #0; "INV/CM";
+	print #0; Tab 12;"    NUMBER";
+	print #0; Tab 23;"PRODUCT";
+	print #0; tab 36;"INV SALES $";
+	PRINT #0; Tab 49;"INV OLD COST";
+	print #0; Tab 62;"INV NEW COST";
+	Print #0; Tab 75;"   RATE";
+	print #0; Tab 83;"SPLIT %";
+	print #0; Tab 91;" OLD COMMISS";
+	PRINT #0; TAB 104;" NEW COMMISS"
+	print #0; doubleDash$
+	lineNo = 5
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintHeader
+
+Sub PrintLine()
+Try
+	call PrintHeader()
+	if not(printedOne)
+		if K_comm$[14,14] =  "6"
+			print #0;"CREDIT MEMO";
+			multiplier = -1
+		else
+			print #0;"INVOICE";
+			multiplier = 1
+		end if
+		print #0; tab 12; K_comm$[4,13];
+		printedOne = 1
+		! add old commission amount to totals
+		repTotal[0] = repTotal[0] + (s2[1] * multiplier)
+	end if
+	print #0; tab 23; l1$[1,12];
+	print #0; tab 36; S2[0] * multiplier using "---------.&&";
+	print #0; tab 49; S6[0] * multiplier using "---------.&&";
+	print #0; tab 62; (S6[0] + adjAmount) * multiplier using "---------.&&";
+	print #0; tab 75; S1[2] using "##&.&&%";
+	print #0; tab 83; SplitPercent * 100 using "##&.&&%";
+	print #0; tab 91; S2[1] * multiplier using "---------.&&";
+	print #0; tab 104; newComm * multiplier using "---------.&&"
+	lineNo = lineNo + 1
+	repLines = replines + 1
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintLine
+
+
+Sub SalesrepTotals()
+Try
+	if not(repLines) exit sub ! no charge backs for this rep
+	if lineNo >= maxLines lineNo = maxLines + 1 ! need 2 lines here
+	call PrintHeader()
+	print #0;""
+	print #0;"*** TOTALS FOR SALESREP: "+ltrim$(sr.SlsmNum$)+" - "+rtrim$(sr.Name$);
+	print #0; tab 91; repTotal[0] using "---------.&&";
+	print #0; tab 104; repTotal[1] using "---------.&&"
+	lineNo = lineNo + 1
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! SalesrepTotals
+
+Sub CreateCommissionAdjustment()
+Try
+	if auditOnly
+		s2[1] = newComm
+		s6[0] = s6[0] + adjAmount
+		exit sub ! don't actually do it.
+	end if
+	! update commission record
+	!
+	! Create AUDIT adjustment
+	!
+	k_comma1$ = " ",k_comma1$
+	K_comma1$[1,13] = k_comm$[1,13]
+	K_comma1$[26,26] = k_comm$[14,14]
+	i=0
+	do
+		k_comma1$[14,15] = Tim(8) Using "&&"
+		k_comma1$[16,17] = Tim(9) Using "&&"
+		k_comma1$[18,19] = Tim(10) Using "&&"
+		k_comma1$[20,21] = Tim(11) Using "&&"
+		k_comma1$[22,23] = Tim(12) Using "&&"
+		k_comma1$[24,25] = Tim(13) Using "&&"
+		Search #ch_comma,2,1;k_comma1$,R_comma,E
+		If Not(E)
+			i=i+1
+			Signal 3,20 ! pause for new tims
+			IF X9>10 error 11000
+		else
+			exit do
+		Endif
+	loop
+	E = 2 \ Search #ch_comma,1,0;k_comma1$,R_comma,E
+	If E error 11000
+	Search #ch_comma,4,1;k_comma1$,R_comma,E
+	If E error 11000
+	k_comma2$ = " ",k_comma2$
+	k_comma2$[1,6] = s3[1] Using "######"
+	k_comma2$[7,29] = K_comma1$[4,26]
+	k_comma2$[30,32] = k_comma1$[1,3]
+	Search #ch_comma,4,2;k_comma2$,R_comma,E \ If E Error 11000
+	AS1[0] = S1[0]
+	AS1[1] = val(k_comm$[14,14]);AS1[2] = 0;AS1[3] = Spc(6)
+	AS2[0] = s3[1]
+	AS2[1] = USER
+	AS3[0] = S2[1]
+	s2[1] = newComm
+	AS3[1] = s2[1]
+	AS3[2] = S7[1]
+	AS3[3] = s1[1]
+	AS3[4] = K_comma1$[14,19]
+	AS3[5] = K_comma2$[20,25]
+	AORIGCOMM = 0
+	AS4[0] = 7
+	AS4[1] = 0
+	AS5[0] = s1[2]
+	AS5[1] = s1[2]
+	AS5[2] = s2[0]
+	AS5[3] = s2[0]
+	AS5[4] = s6[0]
+	s6[0] = s6[0] + adjAmount
+	AS5[5] = s6[0]
+	SOURCE$ = "GTIHB"
+	if not(conversionFlag)
+		AS_$="HIGH BURDEN ADJUSTMENT FOR PRODUCT: "+l1$[1,12]+b$
+	else
+		AS_$="HIGH BURDEN ADJ (CONVERSION) FOR PROD: "+l1$[1,12]+b$
+	end if
+	Mat Write #ch_comma,R_comma;AS1
+	Mat Write #ch_comma,R_comma,8;AS2
+	Mat Write #ch_comma,R_comma,16;AS3
+	Mat Write #ch_comma,R_comma,52;SOURCE$
+	Mat Write #ch_comma,R_comma,62;AS_$
+	Write #ch_comma,R_comma,122;AORIGCOMM
+	Mat Write #ch_comma,R_comma,128;AS4
+	Mat Write #ch_comma,R_comma,132;AS5;
+	! update actual commission record - don't release lock
+	Mat Write #ch_comm,R_comm,16;S2
+	Mat Write #ch_comm,R_comm,40;s6
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CreateCommissionAdjustment
+
+
+end

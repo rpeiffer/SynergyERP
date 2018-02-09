@@ -1,0 +1,954 @@
+! >>> Program custdel
+!
+! description Check if customer is used (& delete) 
+!
+! loadsave -w -n 100,10 -o prog/dxport/custdel.dl4 src/custdel.src
+!
+! 1.0 mm/dd/yyyy change??
+!
+include "src/copyright.inc" ! dx
+Rem taken from MXCUSTDEL - Customer Delete / check
+Rem FOR SPICERS: CCT 74920 - Also used as Ut921
+Rem DATE: 04/19/1995
+Rem Add patches from 2009
+! Last: 05/09/1995 - check / allow delete if only non-vital files
+!       04/11/2003 - zyc cct166835 problem with "Last Date Account Opened"
+!       06/24/2003 - zyc cct168998 do not delete bill-to cust code if in use
+!       09/22/2004 - zyc cct182589 add directory 5 for 2/scustomer#
+! this is not an interactive delete or Mass Delete!
+! mass delete (921) will call here on each customer meeting criteria
+!#comment
+!Note: Non Vital Files have to be added &/or Changed in three areas!
+!	1) File Open Changed from ROpen to Open. Then Add the Call $ReadRef
+!	   to Make Read only (E=1 - ReadOnly, E=0 - Read/Write)
+!	2) Add To the List Displayed & Checked
+!		a) Display FileName Added above NVDel: Routine
+!		b) Checked for in the ChkVital: Routine
+!	3) Add to the NonVital Delete Routine. (DelOFle: Routine)
+!	   Delete all Keys and Return Records
+!#endcomment
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: SEP 17, 2008  12:23:51
+Rem /w2/papermaster/r2005//usr/acct/jcs/work/custom/synergy.net.r9/mxcustdel.src (univ2) [jcs] {54299}
+Rem  Copyright (c) 2008 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+! J0=mode  -1=Check Only - No delete & stop on first found (DELONLYFLAG? NO)
+!		  -11=customer Delete (cust maint)
+!		   -9=Audit Only (as in 921-does all range checks there!)
+!			0=Range Delete
+! cust$ = customer code, k1=cust Rec (neg=delete nonvital) (MUST HAVE!)
+! tmp$ = string that holds where used files
+! ch[] = 0=Coid #, 1=Cntrl fle, 
+! E$, rstr$ = web variables
+! SEND BACK J0: 0=OK,DELETE, 1=ERROR, 2=FOUND, 3=SEARCH ERROR, 9=NO CUSTREC
+External Lib "cszone.lib"
+Declare External Sub mxedcszone
+Declare Intrinsic Sub DateToJulian,FormatDate,InpBuf,JulianToDate,ReadRef,VerifyDate
+Declare Intrinsic Sub FindF,programdump
+Declare Intrinsic function findchannel
+External Lib "libgeneral.lib" !general routines
+  Declare External Sub suberr,mainerr,getsession,setoutput,addtostr,CreateNetStatus
+  Declare External Function getmsg$,expandarray
+! Option Default Dialect IRIS1
+If Err 0 Gosub ERR_TRAP
+!Com 2%,K1[1]
+Enter J0,Cust$,K1,Tmp$,CH[],e$,rstr$
+
+Dim nextblockid$[8],Message$[400],WebStr$[600],msg$[100]
+Dim buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp1$[2000]
+Dim J$[16],Key0$[80],D$[8],D1$[8],P9$[50],P60$[50],P61$[256],DELONLYFLAG$[1]
+Dim CUSTKEY$[20],KEY1$[80],KEY2$[80],KEY3$[80],KEY4$[80],KEY5$[80]
+Dim KEY5$[80],KEY6$[80]
+Dim 1%,CH_CNTRL,LPT,CH_CUST,CH_NOTE,CH_SPEC,CH_CALL,CH_CCRH,CH_WORK,CH_SALE
+Dim 1%,CH_CONTLIST,X1[9],COID,ARCHIVEFILE
+Dim 1%,wfile[50],FNDFILE[50],WORK1,2%,WORK2,3%,WORK3,4%,WORK4,WORK$[60]
+Dim A0$[68],FILE$[16],REASON$[30],SYSDATE$[8],CNAME$[30]
+Dim SCUST$[10],ECUST$[10],CONTRACT$[6]
+Rem {begin src/inc/dim.cust.i}
+Dim A3$[22],BT$[20],U2$[60],A2$[30],A1$[142]
+Dim 2%,A0[3],C1[12],REC,C3[1]
+Dim 1%,S0[20],SUB_,SZN,C7[4],C0,C2[2],C8,C11[2]
+Dim 3%,C4[6],C10[5],CFIN[8],U1,C9,C5[5],C6[9],C12[1]
+Rem {end dim.cust.i}
+Dim 1%,I,AUDITO,CUSTMNT,J1,J9,J2,DELOTHR,NONVITAL,VITALFLE,DIR,POS0,DELNV
+Dim 2%,E,SALEDATE,ACCTDATE,JLSALE,JADATE,CUSTDELNO,JDSALE,JLACCT
+Dim 2%,FOUND,FOUND1,ODATE,CUSTNO,X2[9],LPR1[3]
+Dim 2%,RB1[5],lpdir5
+Dim 3%,WREC,S1[12,2],REC_CUST,REC_NOTE,NODEL,TREC,RCN3[3]
+If K1<0 let delnv=1;k1=Abs(k1) ! if <0 wants nonvital deleted
+If K1 <= 0 Let J0 = 9 \ Goto OUTEND ! MUST HAVE IT!
+If J0 = -1 Let edit_flag=1 ! as a check only (FOR ?)
+If J0=-11 let CustMnt=1 ! Cust entry/edit delete
+If J0=-9 let AuditO=1 ! 921 - audit only
+let coid=ch[0]
+CH_Cntrl=ch[1]
+J0 = 1
+For I = 2 To 90 ! 99  90+=files open in dl4 (KEEP 'EM OPEN!!)
+  Try Close #I Else Rem
+Next I
+If Err 0 Gosub ERR_TRAP
+! COID = Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64)
+! CH_CNTRL = 1;LPT = 0
+Mat Read #CH_CNTRL,19,50;P9$;
+Mat Read #CH_CNTRL,60,50;P60$;
+Mat Read #CH_CNTRL,61,0;P61$;
+Read #CH_CNTRL,88,1808;J$[1,16]; \ CH_CUST = 2 \ Open #CH_CUST,J$
+Read #CH_CNTRL,88,720;J$[1,16]; \ CH_NOTE = 3 \ Open #CH_NOTE,J$
+Read #CH_CNTRL,88,1680;J$[1,16]; \ CH_SPEC = 4 \ Open #CH_SPEC,J$
+Read #CH_CNTRL,88,736;J$[1,16]; \ CH_CALL = 5 \ Open #CH_CALL,J$
+Read #CH_CNTRL,88,2064;J$[1,16]; \ CH_SALE = 6 \ Open #CH_SALE,J$
+If P60$[20,20] = "Y"
+  Read #CH_CNTRL,88,336;J$[1,16]; \ CH_CCRH = 7 \ Open #CH_CCRH,J$
+End If 
+J$ = "2/contlist" + Str$(COID)
+CH_CONTLIST = 8 \ Open #CH_CONTLIST,J$
+FLEGRP1: Rem "File Group #1 (in case too many open files)
+Read #CH_CNTRL,88,224;FILE$; \ Open #11,FILE$ \ wfile[1] = 11
+E = 1 \ Call ReadRef(E,wfile[1])
+Read #CH_CNTRL,88,304;FILE$; \ Open #12,FILE$ \ wfile[2] = 12
+Read #CH_CNTRL,88,512;FILE$; \ Ropen #13,FILE$ \ wfile[3] = 13
+Read #CH_CNTRL,88,816;FILE$; \ Ropen #14,FILE$ \ wfile[4] = 14
+Read #CH_CNTRL,88,992;FILE$; \ Open #15,FILE$ \ wfile[5] = 15
+E = 1 \ Call ReadRef(E,wfile[5])
+Read #CH_CNTRL,88,1136;FILE$; \ Ropen #16,FILE$ \ wfile[6] = 16
+Read #CH_CNTRL,88,1280;FILE$; \ Ropen #17,FILE$ \ wfile[7] = 17
+Read #CH_CNTRL,88,1376;FILE$; \ Open #18,FILE$ \ wfile[8] = 18
+E = 1 \ Call ReadRef(E,wfile[8])
+Read #CH_CNTRL,88,1408;FILE$; \ Ropen #19,FILE$ \ wfile[9] = 19
+Read #CH_CNTRL,88,1504;FILE$; \ Ropen #20,FILE$ \ wfile[10] = 20
+FLEGRP2: Rem "file group #2
+Read #CH_CNTRL,88,1648;FILE$; \ Ropen #21,FILE$ \ wfile[11] = 21
+Read #CH_CNTRL,88,1808;FILE$; \ Ropen #22,FILE$ \ wfile[12] = 22
+Read #CH_CNTRL,88,1840;FILE$; \ Ropen #23,FILE$ \ wfile[13] = 23
+Read #CH_CNTRL,88,1904;FILE$; \ Open #24,FILE$ \ wfile[14] = 24
+E = 1 \ Call ReadRef(E,wfile[14])
+Read #CH_CNTRL,88,1936;FILE$; \ Open #25,FILE$ \ wfile[15] = 25
+E = 1 \ Call ReadRef(E,wfile[15])
+Read #CH_CNTRL,88,2016;FILE$; \ Ropen #26,FILE$ \ wfile[16] = 26
+Read #CH_CNTRL,88,2112;FILE$; \ Open #27,FILE$ \ wfile[17] = 27
+E = 1 \ Call ReadRef(E,wfile[17])
+Read #CH_CNTRL,88,2576;FILE$; \ Ropen #28,FILE$ \ wfile[18] = 28
+Read #CH_CNTRL,88,2592;FILE$; \ Ropen #29,FILE$ \ wfile[19] = 29
+Read #CH_CNTRL,88,2848;FILE$; \ Ropen #30,FILE$ \ wfile[20] = 30
+FLEGRP3: Rem "file group #3
+Read #CH_CNTRL,88,2880;FILE$; \ Open #31,FILE$ \ wfile[21] = 31
+E = 1 \ Call ReadRef(E,wfile[21])
+Read #CH_CNTRL,88,2928;FILE$; \ Open #32,FILE$ \ wfile[22] = 32
+E = 1 \ Call ReadRef(E,wfile[22])
+If P9$[24,24] = "Y"
+  Read #CH_CNTRL,88,3088;FILE$; \ Ropen #33,FILE$ \ wfile[23] = 33
+  Read #CH_CNTRL,88,3232;FILE$; \ Ropen #34,FILE$ \ wfile[24] = 34
+  Read #CH_CNTRL,88,3264;FILE$; \ Ropen #35,FILE$ \ wfile[25] = 35
+End If 
+Read #CH_CNTRL,88,2832;FILE$; \ Ropen #36,FILE$ \ wfile[26] = 36
+If P61$[64,64] = "Y" ! "ship list last pricing delete
+  FILE$ = "3/SLLSTPRC" + Str$(COID)
+  Open #37,FILE$ \ wfile[27] = 37
+Else
+  wfile[27]=0
+End If 
+wfile[28] = 0
+If P61$[28,28] = "Y"
+  FILE$ = "4/invarchindx" + Str$(Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64))
+  Call FindF(FILE$,ARCHIVEFILE)
+  If ARCHIVEFILE <> 0
+    Ropen #38,FILE$
+    wfile[28] = 38
+  End If 
+End If 
+Read #CH_CNTRL,88,320;FILE$; \ Open #88,FILE$
+Read #CH_CNTRL,3,0;CNAME$;
+Read #CH_CNTRL,3,164;SYSDATE$;
+Read #CH_CNTRL,19,50;P9$;
+Read #CH_CNTRL,60,50;P60$;
+SALEDATE = 0;ACCTDATE = 0
+! the 921 does all date checking etc!
+STARTDEL: Rem "read Cust, Check Dates, Delete
+If Err 0 Gosub ERR_TRAP
+Let REC_CUST = K1;NODATE = 1 ! for ALL - as called 1 at a time
+JDSALE = 0;JLACCT = 0;A0$ = " ",A0$
+Rem {begin src/inc/read.cust.i}
+Mat Read #CH_CUST,REC_CUST,0;A1$
+Mat Read #CH_CUST,REC_CUST,142;C1
+Mat Read #CH_CUST,REC_CUST,194;C2
+Mat Read #CH_CUST,REC_CUST,200;C3
+Mat Read #CH_CUST,REC_CUST,208;C0
+Mat Read #CH_CUST,REC_CUST,210;C4
+Mat Read #CH_CUST,REC_CUST,252;C5
+Mat Read #CH_CUST,REC_CUST,288;C6
+Mat Read #CH_CUST,REC_CUST,348;A2$
+Mat Read #CH_CUST,REC_CUST,378;C7
+Mat Read #CH_CUST,REC_CUST,388;A3$
+Mat Read #CH_CUST,REC_CUST,410;C8
+Mat Read #CH_CUST,REC_CUST,412;C9
+Mat Read #CH_CUST,REC_CUST,418;SUB_
+Mat Read #CH_CUST,REC_CUST,420;U1
+Mat Read #CH_CUST,REC_CUST,426;U2$
+Mat Read #CH_CUST,REC_CUST,486;A0
+Mat Read #CH_CUST,REC_CUST,502;S0
+Mat Read #CH_CUST,REC_CUST,544;CFIN
+Mat Read #CH_CUST,REC_CUST,598;SZN
+Mat Read #CH_CUST,REC_CUST,600;BT$
+Mat Read #CH_CUST,REC_CUST,620;REC
+Mat Read #CH_CUST,REC_CUST,624;C10
+Mat Read #CH_CUST,REC_CUST,660;C11
+Mat Read #CH_CUST,REC_CUST,668;C12
+Rem {end read.cust.i}
+If AUDITO Unlock #CH_CUST
+Let CUSTKEY$ = C1[1] Using "######"
+
+KEY1$ = CUSTKEY$
+Search #CH_NOTE,2,1;KEY1$,REC_NOTE,E \ If E > 1 Gosub ERR_SEARCH
+!If E And NODATE Goto DODEL ! a 921 thing
+!If E And Not(NODATE) Goto NEXTCUST ! a 921 thing
+if not(e)
+	Mat Read #CH_NOTE,REC_NOTE,100;A0$;
+	Read #CH_NOTE,REC_NOTE,168;ODATE;
+Endif
+
+DODEL: Rem "Start Delete Process
+If Not(CUSTMNT) ! IT'S FROM 921
+  If C1[8] <> 0
+    REASON$ = "Prevent Mass Delete"
+    Gosub PRNT_EXCPT
+	FOUND=FOUND+1
+    if Edit_Flag Goto NEXTCUST
+  End If 
+End If 
+DELOTHR = 0;NONVITAL = 0
+Gosub CHECKFILE
+If FOUND And DELNV Gosub CHKVITAL
+If Not(FOUND)
+  Gosub DELCUST
+End If 
+
+NEXTCUST: Rem "Check if Need to Do Loop
+If FOUND Let j0 = 2 
+If j0 = 1 Let j0 = 0
+Goto OUTEND
+
+DELCUST: Rem "Delete Cust,Note,Spec,Call,Sales,CrHist
+FOUND = 0
+If AUDITO Goto DELEND ! we DON'T DELETE!
+If Err 0 Gosub ERR_TRAP
+Rem Delete Customer Keywords FIRST Before anything else (NEED NOTES FILE!)
+X1 = 5;WREC = REC_CUST
+KEY6$ = " ",KEY6$;WORK1 = 0
+Call "CSLKEYWRD.DL4",KEY6$,WREC,WORK1,X1,e$,COID
+KEY5$ = " ",KEY5$
+KEY5$[1,3] = C1[2] Using "###"
+KEY5$[4,9] = CUSTKEY$
+KEY5$[10,10] = " "
+Search #CH_CUST,5,5;KEY5$,WREC,E \ If E > 1 Gosub ERR_SEARCH
+KEY4$ = " ",KEY4$;KEY4$ = BT$[1,20] + CUSTKEY$
+Search #CH_CUST,5,4;KEY4$,WREC,E \ If E > 1 Gosub ERR_SEARCH
+KEY3$ = " ",KEY3$;KEY3$ = A3$[1,6]
+Search #CH_CUST,5,3;KEY3$,WREC,E \ If E Gosub ERR_SEARCH
+KEY2$ = " ",KEY2$;KEY2$ = A1$[31,44] + CUSTKEY$
+Search #CH_CUST,5,2;KEY2$,WREC,E \ If E Gosub ERR_SEARCH
+KEY1$ = " ",KEY1$;KEY1$ = CUSTKEY$
+Search #CH_CUST,5,1;KEY1$,WREC,E \ If E Gosub ERR_SEARCH
+E = 3;WREC = REC_CUST
+Search #CH_CUST,1,0;KEY1$,WREC,E \ If E Gosub ERR_SEARCH
+Key0$ = KEY1$
+Search #CH_NOTE,5,1;Key0$,WREC,E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Goto DELSPEC
+E = 3 \ Search #CH_NOTE,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+DELSPEC: Rem "Delete Spec
+Key0$ = " ",Key0$;Key0$[1,6] = CUSTKEY$[1,6]
+NEXTSPEC: Rem "Loop Thru for all
+Search #CH_SPEC,3,1;Key0$,WREC,E \ If E = 2 Goto DELCALL
+If E Gosub ERR_SEARCH
+If Key0$[1,6] <> CUSTKEY$ Goto DELCALL
+Search #CH_SPEC,5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+E = 3 \ Search #CH_SPEC,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+Goto NEXTSPEC
+DELCALL: Rem "Delete Call Notes
+Key0$ = " ",Key0$;Key0$[1,6] = CUSTKEY$[1,6]
+NEXTCALL: Rem "Loop Thru All
+Search #CH_CALL,3,1;Key0$,WREC,E \ If E = 2 Goto DELHIST
+If E Gosub ERR_SEARCH
+If Key0$[1,6] <> CUSTKEY$ Goto DELHIST
+Search #CH_CALL,5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+E = 3 \ Search #CH_CALL,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+Goto NEXTCALL
+DELHIST: Rem "Delete
+If P60$[20,20] = "Y"
+  Key0$ = CUSTKEY$
+  Search #CH_CCRH,5,1;Key0$,WREC,E \ If E > 1 Gosub ERR_SEARCH
+  If Not(E)
+    E = 3 \ Search #CH_CCRH,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+  End If 
+End If 
+DELMCSZONE: Rem "delete Customer/ShipList MultiZone
+If P61$[34,34] = "Y" ! "NOT VITAL - delete 3/CSZONE# recs for Customer
+  CUSTNO = CUSTKEY$;CUSTNO = 0 - CUSTNO
+  X2[1] = 0;X2[2] = 0
+  KEY2$ = " ",KEY2$;KEY3$ = " ",KEY3$;KEY3$ = "-0"
+  Call MXEDCSZONE(e$,Coid,CUSTNO,X2[1],KEY2$[1,30],KEY3$,X2[2])
+End If 
+DELCONTLIST: Rem delete address book info
+Key0$ = "CS" + CUSTKEY$
+Search #CH_CONTLIST,3,1;Key0$,WREC,E \ If E > 2 Gosub ERR_SEARCH
+If Not(E)
+  If Key0$[3,8] = CUSTKEY$[1,6]
+    Search #CH_CONTLIST,5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+    E = 3
+    Search #CH_CONTLIST,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+    Goto DELCONTLIST
+  End If 
+End If 
+!! need shipping notes delete (ALWAYS NON-VITAL!)
+Chan=findchannel()
+j$="2/custshnote"+Str$(COID)
+Open #chan,j$
+Key0$=CustKey$
+Search #chan,2,1;Key0$,WRec,e
+if not(e) ! found one
+	search #chan,5,1;key0$,R,E
+	if not(e)
+		let e=3;R=Wrec
+		Search #chan,1,0;Key0$,R,E
+		if e gosub err_search
+	Endif
+Endif
+try close #chan Else Rem
+! delete customer credit card id
+j$="2/custccid"+Str$(COID)
+Call FindF(j$,tmp3)
+if tmp3<>0
+	Chan=findchannel()
+	Open #chan,j$
+	Key0$=CustKey$
+	Search #chan,2,1;Key0$,WRec,e
+	if not(e) ! found one
+		search #chan,5,1;key0$,R,E
+		if not(e)
+			let e=3;R=Wrec
+			Search #chan,1,0;Key0$,R,E
+			if e gosub err_search
+		Endif
+	Endif	
+	Try close #chan  Else Rem
+endif
+DELEND: Rem "End of Delete Routine
+Return
+CHKVITAL: Rem "Check if the Found files can be safely deleted
+VITALFLE = 0
+For WORK1 = 0 To 50
+  If FNDFILE[WORK1]
+    VITALFLE = 1
+    If FNDFILE[WORK1] = wfile[1] ! "Sales Plan
+      VITALFLE = 0
+    Else 
+      If FNDFILE[WORK1] = wfile[5] ! "Credit Check File
+        VITALFLE = 0
+      Else 
+        If FNDFILE[WORK1] = wfile[14] ! "Lost Sales
+          VITALFLE = 0
+        Else 
+          If FNDFILE[WORK1] = wfile[17] ! "ShipList
+            VITALFLE = 0
+          Else 
+            If FNDFILE[WORK1] = wfile[22] ! "MSDS History
+              VITALFLE = 0
+            End If 
+          End If 
+        End If 
+      End If 
+    End If 
+    If FNDFILE[WORK1] = wfile[2] ! rebate contracts
+      VITALFLE = 0
+    Else 
+      If FNDFILE[WORK1] = wfile[15] ! "special price file
+        VITALFLE = 0
+      Else 
+        If FNDFILE[WORK1] = wfile[8] ! "last price file
+          VITALFLE = 0
+        Else 
+          If FNDFILE[WORK1] = wfile[21] ! " contract header
+            VITALFLE = 0
+          Else 
+            If FNDFILE[WORK1] = wfile[27] ! last price ship to
+              VITALFLE = 0
+            End If 
+          End If 
+        End If 
+      End If 
+    End If 
+  End If 
+  If VITALFLE Return 
+Next WORK1
+!If CUSTMNT And Not(VITALFLE) Gosub CONFDEL ! it's sent!
+If Not(AUDITO) If Not(VITALFLE) Gosub DELOFLE
+If AUDITO If Not(VITALFLE) Let FOUND = 0
+Return 
+ 
+DELOFLE: Rem "Delete the NonVital Files - then Allow Delete
+DELOTHR = 9
+For WORK1 = 0 To 50
+  If FNDFILE[WORK1]
+    If FNDFILE[WORK1] = wfile[1] ! "Sales Plan
+      E = 0 \ Call ReadRef(E,wfile[1])
+      Key0$ = " ",Key0$;Key0$ = CUSTKEY$
+      Search #wfile[1],5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3
+      Search #wfile[1],1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 1 \ Call ReadRef(E,wfile[1])
+      REASON$ = "SALES PLAN - 1 DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If 
+    If FNDFILE[WORK1] = wfile[5] ! "Credit Check File
+      E = 0 \ Call ReadRef(E,wfile[5])
+      Key0$ = " ",Key0$;NODEL = 0;Key0$[1,6] = CUSTKEY$
+CCLOOP: Rem "Loop Thru All For Cust In Credit Check File
+      Search #wfile[5],3,1;Key0$,WREC,E \ If E = 2 Goto CCDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,6] <> CUSTKEY$[1,6] Goto CCDONE
+      Search #wfile[5],5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3 \ Search #wfile[5],1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      NODEL = NODEL + 1
+      Goto CCLOOP
+CCDONE: Rem "Done with this Customer
+      E = 1 \ Call ReadRef(E,wfile[5])
+      REASON$ = "CREDIT CHECK - " + Str$(NODEL) + " DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If 
+    If FNDFILE[WORK1] = wfile[14] ! "Lost Sales
+      E = 0 \ Call ReadRef(E,wfile[14])
+      Key0$ = " ",Key0$;NODEL = 0;Key0$[1,6] = CUSTKEY$
+LSLOOP: Rem "Loop thru Dir 2 of Lost Sales
+      Search #wfile[14],3,2;Key0$,WREC,E \ If E = 2 Goto LSDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,6] <> CUSTKEY$[1,6] Goto LSDONE
+      KEY1$ = " ",KEY1$;KEY1$ = Key0$[7,18] + Key0$[1,6] + Key0$[19,24]
+      Search #wfile[14],5,2;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #wfile[14],5,1;KEY1$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3 \ Search #wfile[14],1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      NODEL = NODEL + 1
+      Goto LSLOOP
+LSDONE: Rem "Done With Lost Sales
+      E = 1 \ Call ReadRef(E,wfile[14])
+      REASON$ = "LOST SALES - " + Str$(NODEL) + " DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If 
+    If FNDFILE[WORK1] = wfile[17] ! "Ship List
+      E = 0 \ Call ReadRef(E,wfile[17])
+      Key0$ = " ",Key0$;NODEL = 0;Key0$[1,6] = CUSTKEY$
+SLLOOP: Rem "Loop thru All Ship list #'s for this Customer
+      Search #wfile[17],3,1;Key0$,WREC,E \ If E = 2 Goto SLDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,6] <> CUSTKEY$[1,6] Goto SLDONE
+      X1 = 6;WORK3 = WREC
+      KEY6$ = " ",KEY6$;WORK1 = 0
+      Call "CSLKEYWRD.DL4",KEY6$,WORK3,WORK1,X1,e$,COID
+      Read #wfile[17],WREC,0;WORK$[1,30];
+      KEY1$ = " ",KEY1$;KEY1$[1,15] = WORK$[1,15];KEY1$[16] = WREC Using "#####"
+      Search #wfile[17],5,2;KEY1$,WREC,E \ If E Gosub ERR_SEARCH
+      Search #wfile[17],5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3 \ Search #wfile[17],1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      NODEL = NODEL + 1
+      If P61$[64,64] = "Y" ! "ship list last pricing delete
+        E = 3
+        CUSTNO = CUSTKEY$[1,6];J$ = ""
+        X1 = 0;X2 = Key0$[8,13]
+        X1[1] = wfile[8];X1[2] = wfile[27];X1[3] = wfile[17]
+        Call "MX117SLDEL.DL4",CUSTNO,X1,X1,X2,J$,X1[],X1,E,e$,COID
+      End If 
+      Goto SLLOOP
+SLDONE: Rem "Done With ShipList
+      E = 1 \ Call ReadRef(E,wfile[17])
+      REASON$ = "SHIP LIST - " + Str$(NODEL) + " DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+      E = 9
+      CUSTNO = CUSTKEY$[1,6];NODEL = 0
+      X1 = 0;X2 = -1
+      Call "CUSTSHPSALES.DL4",CUSTNO,X2,E,X1,NODEL,e$,COID
+      REASON$ = "SHIP TO SALES- " + Str$(NODEL) + " DELETED" \ Gosub PRNT_EXCPT
+    End If 
+    If FNDFILE[WORK1] = wfile[22] ! "MSDS History
+      Key0$ = " ",Key0$;Key0$[1,6] = CUSTKEY$
+      CH_WORK = wfile[22];NODEL = 0
+      E = 0 \ Call ReadRef(E,CH_WORK)
+NEXTMSDS: Rem "Loop thru for All MSDS Sheets for Customer
+      Search #CH_WORK,3,1;Key0$,WREC,E \ If E = 2 Goto MSDSDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,6] <> CUSTKEY$ Goto MSDSDONE
+      Search #CH_WORK,5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3 \ Search #CH_WORK,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      NODEL = NODEL + 1
+      Goto NEXTMSDS
+MSDSDONE: Rem "Done Change Found Flag & Allow Cust Delete
+      E = 1 \ Call ReadRef(E,CH_WORK)
+      REASON$ = "MSDS HISTORY - " + Str$(NODEL) + " DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If 
+    Rem LAST PRICE DELETE !!
+    If FNDfile[WORK1] = wfile[8] ! delete last price
+      Key0$ = " ",Key0$;Key0$[1,6] = CUSTKEY$
+      CH_WORK = wfile[8];NODEL = 0
+      E = 0 \ Call ReadRef(E,CH_WORK)
+NEXTLSTPR: Rem loop thru all lastprice for customer
+      Search #CH_WORK,3,1;Key0$,WREC,E \ If E = 2 Goto LSTPRDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,6] <> CUSTKEY$ Goto LSTPRDONE
+      Mat Read #CH_WORK,WREC,198;LPR1;
+      Search #CH_WORK,5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      KEY2$ = " ",KEY2$;KEY2$ = Key0$[1,10] + Key0$[37,40] + Key0$[11,36]
+      Search #CH_WORK,5,2;KEY2$,WREC,E \ If E Gosub ERR_SEARCH
+      KEY2$ = " ",KEY2$;KEY2$ = Key0$[1,10]
+      KEY2$[11,16] = 999999 - LPR1[2] Using "######"
+      KEY2$[17,46] = Key0$[11,40]
+      Search #CH_WORK,5,3;KEY2$,WREC,E \ If E Gosub ERR_SEARCH
+      KEY2$ = " ",KEY2$
+      KEY2$[1,10] = Key0$[31,40];KEY2$[11,30] = Key0$[11,30]
+      KEY2$[31] = Key0$[1,10]
+      Search #CH_WORK,5,4;KEY2$,WREC,E \ If E Gosub ERR_SEARCH
+	  search #ch_work,1,5;key2$,lpdir5,e
+	  if not(e) !! there is a dir 5
+			LET KEY2$=" ",KEY2$ 
+			key2$[1,20]=key0$[11,30];key2$[21,30]=key0$[1,10]
+			key2$[31]=key0$[31,40]
+			search #ch_work,5,5;key2$,wrec,e \ if e gosub err_search:
+	  endif
+      E = 3 \ Search #CH_WORK,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      NODEL = NODEL + 1
+      If P61$[64,64] = "Y" ! "ship list last pricing delete
+        E = 2
+        CUSTNO = CUSTKEY$[1,6];X2 = 0
+        X1 = 0;J$ = Key0$[11,22]
+        X1[1] = wfile[8];X1[2] = wfile[27];X1[3] = wfile[17]
+        Call "MX117SLDEL.DL4",CUSTNO,X1,X1,X2,J$,X1[],X1,E,e$,COID
+      End If 
+      Goto NEXTLSTPR
+LSTPRDONE: Rem Done Change found flag & allow cust delete
+      E = 1 \ Call ReadRef(E,CH_WORK)
+      REASON$ = "LAST PRICE   - " + Str$(NODEL) + " DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If 
+    Rem SPECIAL PRICE DELETE !!
+    If FNDFILE[WORK1] = wfile[15] ! delete special price
+      Key0$ = " ",Key0$;Key0$[1,6] = CUSTKEY$
+      CH_WORK = wfile[15];NODEL = 0
+      E = 0 \ Call ReadRef(E,CH_WORK)
+NEXTSPCPR: Rem loop thru all spcprice for customer
+      Search #CH_WORK,3,1;Key0$,WREC,E \ If E = 2 Goto SPCPRDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,6] <> CUSTKEY$ Goto SPCPRDONE
+      Search #CH_WORK,5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      Rem non-contracts -- do not delete from directory 2
+      E = 3 \ Search #CH_WORK,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      NODEL = NODEL + 1
+      Goto NEXTSPCPR
+SPCPRDONE: Rem Done Change found flag & allow cust delete
+      E = 1 \ Call ReadRef(E,CH_WORK)
+      REASON$ = "SPECIAL PRICE- " + Str$(NODEL) + " DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If 
+    Rem CONTRACT DELETE !!
+    If FNDFILE[WORK1] = wfile[21] ! delete from contracts
+      Key0$ = " ",Key0$;Key0$[1,6] = CUSTKEY$
+      CH_WORK = wfile[21];NODEL = 0
+      E = 0 \ Call ReadRef(E,CH_WORK)
+      Rem for special price file also
+      E = 0 \ Call ReadRef(E,wfile[15])
+NEXTCONTRACT: Rem loop thru all spcprice for customer
+      Rem thru 2nd directory of contract file
+      Search #CH_WORK,3,2;Key0$,WREC,E \ If E = 2 Goto CONTRACTDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,6] <> CUSTKEY$ Goto CONTRACTDONE
+      Search #CH_WORK,5,2;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      KEY2$ = " ",KEY2$;KEY2$[1,6] = Key0$[7,12]
+      KEY2$[7,12] = Key0$[1,6]
+      Search #CH_WORK,5,3;KEY2$,WREC,E \ If E Gosub ERR_SEARCH
+      NODEL = NODEL + 1
+      Rem! do not delete contract in dir 1 or return rec#
+      Rem! must verify if contract is in use by other
+      CONTRACT$ = Key0$[7,12]
+      KEY3$ = " ",KEY3$;KEY3$[1,6] = CONTRACT$[1,6]
+      Search #CH_WORK,3,3;KEY3$,TREC,E
+      If E And E <> 2 Gosub ERR_SEARCH
+      If Not(E)
+        If KEY3$[1,6] = CONTRACT$[1,6] Goto NEXTCONTRACT
+      End If 
+      Rem not used by any other customer's delete
+      KEY3$ = " ",KEY3$
+      KEY3$[1,6] = CONTRACT$[1,6]
+      Search #CH_WORK,5,1;KEY3$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3 \ Search #CH_WORK,1,0;KEY3$,WREC,E \ If E Gosub ERR_SEARCH
+      Rem now delete contract from special price
+      KEY3$ = " ",KEY3$;KEY3$[1,6] = CONTRACT$[1,6]
+DELNXTSPC: Rem from contracts delete special price
+      Search #wfile[15],3,1;KEY3$,TREC,E \ If E = 2 Goto NEXTCONTRACT
+      If E Gosub ERR_SEARCH
+      If KEY3$[1,6] <> CONTRACT$[1,6] Goto NEXTCONTRACT
+      Search #wfile[15],5,1;KEY3$,TREC,E \ If E Gosub ERR_SEARCH
+      KEY4$ = " ",KEY4$;KEY4$[1,12] = KEY3$[7,18]
+      KEY4$[13,18] = KEY3$[1,6]
+      Search #wfile[15],5,2;KEY4$,TREC,E \ If E Gosub ERR_SEARCH
+      E = 3 \ Search #wfile[15],1,0;KEY4$,TREC,E \ If E Gosub ERR_SEARCH
+      Goto DELNXTSPC
+CONTRACTDONE: Rem Done Change found flag & allow cust delete
+      E = 1 \ Call ReadRef(E,CH_WORK)
+      E = 1 \ Call ReadRef(E,wfile[15])
+      REASON$ = "CONTRACTS    - " + Str$(NODEL) + " DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If 
+    Rem REBATE CONTRACT DELETE
+    If FNDFILE[WORK1] = wfile[2] ! delete from rebate
+      Key0$ = " ",Key0$;Key0$[1,6] = CUSTKEY$
+      CH_WORK = wfile[2];NODEL = 0
+      E = 0 \ Call ReadRef(E,CH_WORK)
+NEXTREBATE: Rem loop thru all rebates
+      Rem thru 2nd directory of contract file
+      Search #CH_WORK,3,2;Key0$,WREC,E \ If E = 2 Goto REBATEDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,6] <> CUSTKEY$ Goto REBATEDONE
+      Search #CH_WORK,5,2;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      KEY2$ = " ",KEY2$;KEY2$[1,6] = Key0$[7,12]
+      KEY2$[7,12] = Key0$[1,6]
+      Search #CH_WORK,5,3;KEY2$,WREC,E \ If E Gosub ERR_SEARCH
+      NODEL = NODEL + 1
+      Rem! do not delete rebate contract in dir 1 or return rec#
+      Rem! must verify if rebate contract is in use by other
+      CONTRACT$ = Key0$[7,12]
+      KEY3$ = " ",KEY3$;KEY3$[1,6] = CONTRACT$[1,6]
+      Search #CH_WORK,3,3;KEY3$,TREC,E
+      If E And E <> 2 Gosub ERR_SEARCH
+      If Not(E)
+        If KEY3$[1,6] = CONTRACT$[1,6] Goto NEXTREBATE
+      End If 
+      Rem not used by any other customer's delete
+      Mat Read #CH_WORK,WREC,0;RCN3;
+      KEY4$ = " ",KEY4$
+      KEY4$[1,6] = RCN3[3] Using "######"
+      KEY4$[7,12] = CONTRACT$[1,6]
+      Search #CH_WORK,5,4;KEY4$,WREC,E \ If E Gosub ERR_SEARCH
+      KEY3$ = " ",KEY3$
+      KEY3$[1,6] = CONTRACT$[1,6]
+      Search #CH_WORK,5,1;KEY3$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3 \ Search #CH_WORK,1,0;KEY3$,WREC,E \ If E Gosub ERR_SEARCH
+      Rem now delete rebate contracts from rebatedtl
+      KEY3$ = " ",KEY3$;KEY3$[1,6] = CONTRACT$[1,6]
+DELNXTREBDETL: Rem from contracts delete reb detail
+      Search #88,3,1;KEY3$,TREC,E \ If E = 2 Goto NEXTREBATE
+      If E Gosub ERR_SEARCH
+      If KEY3$[1,6] <> CONTRACT$[1,6] Goto NEXTREBATE
+      Mat Read #88,TREC,12;RB1;
+      Search #88,5,1;KEY3$,TREC,E \ If E Gosub ERR_SEARCH
+      KEY4$ = " ",KEY4$;KEY4$[1,12] = KEY3$[7,18]
+      KEY4$[13,18] = KEY3$[1,6]
+      Search #88,5,2;KEY4$,TREC,E \ If E Gosub ERR_SEARCH
+      KEY5$ = " ",KEY5$;KEY5$[1,6] = RB1[1] Using "######"
+      KEY5$[7,18] = KEY3$[1,12]
+      Search #88,5,3;KEY5$,TREC,E \ If E Gosub ERR_SEARCH
+      E = 3 \ Search #88,1,0;KEY3$,TREC,E \ If E Gosub ERR_SEARCH
+      Goto DELNXTREBDETL
+REBATEDONE: Rem Done Change found flag & allow cust delete
+      E = 1 \ Call ReadRef(E,CH_WORK)
+      REASON$ = "REBATES      - " + Str$(NODEL) + " DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If 
+    Rem SHIP TO LAST PRICE DELETE !!
+    If P61$[64,64]="Y" and FNDFILE[WORK1] = wfile[27] ! delete ship to last price
+      Key0$ = " ",Key0$;Key0$[1,6] = CUSTKEY$
+      CH_WORK = wfile[27];NODEL = 0
+NEXTSHIPPR: Rem loop thru all ship to lastprice for customer
+      Search #CH_WORK,3,1;Key0$,WREC,E \ If E = 2 Goto SHIPPRDONE
+      If E Gosub ERR_SEARCH
+      If Key0$[1,6] <> CUSTKEY$ Goto SHIPPRDONE
+      Mat Read #CH_WORK,WREC,198;LPR1;
+      Search #CH_WORK,5,1;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      KEY2$ = " ",KEY2$
+      KEY2$[1,16] = Key0$[1,16]
+      KEY2$[17,20] = Key0$[37,40];KEY2$[21,40] = Key0$[17,36]
+      Search #CH_WORK,5,2;KEY2$,WREC,E \ If E Gosub ERR_SEARCH
+      KEY2$ = " ",KEY2$
+      KEY2$[1,16] = Key0$[1,16]
+      KEY2$[17,22] = 999999 - LPR1[2] Using "######"
+      KEY2$[23,46] = Key0$[17,40]
+      Search #CH_WORK,5,3;KEY2$,WREC,E \ If E Gosub ERR_SEARCH
+      KEY2$ = " ",KEY2$
+      KEY2$[1,6] = Key0$[1,6]
+      KEY2$[7,10] = Key0$[13,16]
+      KEY2$[11,30] = Key0$[17,36]
+      KEY2$[31,36] = Key0$[7,12]
+      KEY2$[37,40] = Key0$[37,40]
+      Search #CH_WORK,5,4;KEY2$,WREC,E \ If E Gosub ERR_SEARCH
+      E = 3 \ Search #CH_WORK,1,0;Key0$,WREC,E \ If E Gosub ERR_SEARCH
+      NODEL = NODEL + 1
+      Goto NEXTSHIPPR
+SHIPPRDONE: Rem Done Change found flag & allow cust delete
+      REASON$ = "SHIP TO LAST PRICE- " + Str$(NODEL) + " DELETED" \ Gosub PRNT_EXCPT
+      FOUND = FOUND - 1
+    End If 
+  End If 
+Next WORK1
+DELOTHR = 0;NONVITAL = 1
+If FOUND < 0 Let FOUND = 0
+Return 
+CHECKFILE: Rem "Using wfile[xx](Channel) Check Directory go for Next File
+FOUND = 0
+!If Fra(COUNT / 100) = 0
+!  Print @0,22;"Cust: ";CUSTKEY$;" Checking For Activity, Please Wait. ."
+!End If 
+COUNT = COUNT + 1
+For I = 0 To 50 \ FNDFILE[I] = 0 \ Next I
+If wfile[1] > 0
+  REASON$ = "SALES PLAN"
+  CH_WORK = wfile[1]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[2] > 0
+  REASON$ = "REBATE FILE"
+  CH_WORK = wfile[2]
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[3] > 0
+  REASON$ = "WORK ORDERS"
+  CH_WORK = wfile[3]
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[4] > 0
+  REASON$ = "CONSIGNMENT CUSTOMER"
+  CH_WORK = wfile[4]
+  FOUND1 = 0
+  For WREC = 1 To Chf(CH_WORK) - 1
+    Read #CH_WORK,WREC,0;WORK2;
+    If WORK2 = C1[1] Let FOUND1 = 9
+  Next WREC
+  If FOUND1
+    FOUND = FOUND + 1;FNDFILE[FOUND] = CH_WORK
+    Gosub PRNT_EXCPT
+  End If 
+End If 
+If wfile[5] > 0
+  REASON$ = "CREDIT CHECK"
+  CH_WORK = wfile[5]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[6] > 0
+  REASON$ = "INVOICE HISTORY"
+  CH_WORK = wfile[6]
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[7] > 0
+  REASON$ = "QUOTE FILES"
+  CH_WORK = wfile[7]
+  DIR = 2;POS0 = 2 \ Gosub CHKDIRO
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[8] > 0
+  REASON$ = "LAST PRICE"
+  CH_WORK = wfile[8]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[9] > 0
+  REASON$ = "A/R HISTORY"
+  CH_WORK = wfile[9]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[10] > 0
+  REASON$ = "ACCT RECEIVABLE"
+  CH_WORK = wfile[10]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[11] > 0
+  REASON$ = "DEPT SALES"
+  CH_WORK = wfile[11]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[12] > 0 ! "we'll have to check Bill To / Post To
+  REASON$ = "BILL TO NUMBER"
+  CH_WORK = wfile[12]
+  Key0$ = " ",Key0$;FOUND1 = 0
+NEXTBILL: Rem "Search Through WHOLE File for Bill To
+  Search #CH_WORK,3,1;Key0$,WREC,E \ If E = 2 Goto BILLDONE
+  If E Gosub ERR_SEARCH
+  If Key0$ = CUSTKEY$ Goto NEXTBILL
+  Read #CH_WORK,WREC,158;WORK2;
+  If WORK2 = C1[1] Let FOUND1 = 1 \ Goto BILLDONE
+  If P61$[41,41] = "Y" ! "A/R Posting Customer in use
+    Read #CH_WORK,WREC,674;WORK3;
+    If WORK3 = C1[1] Let FOUND1 = 2 \ Goto BILLDONE
+  End If 
+  Goto NEXTBILL
+BILLDONE: Rem "Done Looking Through Cust File
+  If FOUND1
+    If FOUND1 = 2 Let REASON$ = "POST TO NUMBER"
+    FOUND = FOUND + 1;FNDFILE[FOUND] = CH_WORK
+    Gosub PRNT_EXCPT
+  End If 
+End If 
+If wfile[13] > 0
+  REASON$ = "ORDER FILES"
+  CH_WORK = wfile[13]
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[14] > 0
+  REASON$ = "LOST SALES"
+  CH_WORK = wfile[14]
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[15] > 0
+  REASON$ = "SPECIAL PRICING"
+  CH_WORK = wfile[15]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[16] > 0
+  REASON$ = "CUST/PROD SALES"
+  CH_WORK = wfile[16]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If CH_SALE > 0
+  REASON$ = "CUSTOMER SALES"
+  Mat Read #CH_SALE,REC_CUST,4;S1;
+  FOUND1 = 0
+  For I = 0 To 12
+    If S1[I,0] Or S1[I,1] Or S1[I,2] Let FOUND1 = 1
+  Next I
+  If FOUND1
+    FOUND = FOUND + 1;FNDFILE[FOUND] = CH_SALE
+    Gosub PRNT_EXCPT
+  End If 
+End If 
+If wfile[17] > 0
+  REASON$ = "SHIPLIST CUSTOMER"
+  CH_WORK = wfile[17]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[18] > 0
+  REASON$ = "BACK ORDERS"
+  CH_WORK = wfile[18]
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[19] > 0
+  REASON$ = "BACK ORDER XREF"
+  CH_WORK = wfile[19]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[20] > 0
+  REASON$ = "ORD DISC/SIZE"
+  CH_WORK = wfile[20]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[21] > 0
+  REASON$ = "CONTRACT PRICE"
+  CH_WORK = wfile[21]
+  DIR = 2 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[22] > 0
+  REASON$ = "MSDS HISTORY"
+  CH_WORK = wfile[22]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If P9$[24,24] = "Y"
+  If wfile[23] > 0
+    REASON$ = "RENTAL ORDER"
+    CH_WORK = wfile[23]
+    DIR = 2 \ Gosub CHKDIR
+    If FOUND1 Gosub PRNT_EXCPT
+  End If 
+  If wfile[24] > 0
+    REASON$ = "RENTAL SALES"
+    CH_WORK = wfile[24]
+    DIR = 1 \ Gosub CHKDIR
+    If FOUND1 Gosub PRNT_EXCPT
+  End If 
+  If wfile[25] > 0
+    REASON$ = "RENTAL INV HISTORY"
+    CH_WORK = wfile[25]
+    DIR = 2 \ Gosub CHKDIR
+    If FOUND1 Gosub PRNT_EXCPT
+  End If 
+End If 
+If wfile[26] > 0
+  REASON$ = "DELV'Y ADD ON"
+  CH_WORK = wfile[26]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[27] > 0
+  REASON$ = "SHIP TO LAST PRICE"
+  CH_WORK = wfile[27]
+  DIR = 1 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+If wfile[28] > 0
+  REASON$ = "INVOICE ARCHIVE HISTORY"
+  CH_WORK = wfile[28]
+  DIR = 3 \ Gosub CHKDIR
+  If FOUND1 Gosub PRNT_EXCPT
+End If 
+Return 
+PRNT_EXCPT: Rem "print the Files / reasons
+
+If Found<=0 let tmp$="CUSTOMER: ",CUSTKEY$,"  ",A1$[31,60],"  USED IN: " 
+tmp$=tmp$+"  "+Str$(Found)+" "+Reason$ ! add to sendback string
+IF EDIT_FLAG GOTO NEXTCUST
+Return 
+
+CHKDIR: Rem "Check for Cust in first 6 Chars on Directory Dir
+FOUND1 = 0
+Key0$ = " ",Key0$;Key0$ = CUSTKEY$
+Search #CH_WORK,2,DIR;Key0$,WREC,E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Return 
+Goto SHOFOUND
+CHKDIRO: Rem "check in other than first 6 Chars
+FOUND1 = 0
+Key0$ = " ",Key0$;Key0$[POS0] = CUSTKEY$
+Search #CH_WORK,2,DIR;Key0$,WREC,E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Return 
+SHOFOUND: Rem "Set Found1 Flag & Record File # in FndFile
+FOUND1 = 9;FOUND = FOUND + 1
+FNDFILE[FOUND] = CH_WORK
+Return 
+ERR_SEARCH: Rem
+ENUM = E ;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+Msc$(4)
+e$=msg$;j0=3
+Call programdump("tmp/custdelse!","")
+goto OutEnd ! err_msg ! Error 10000
+Return ! End
+ERR_MSG: ! send message
+ReturnStatus=1 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)
+Message$=E$
+	  call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  call SetOutPut(e$,rstr$)
+End
+OUTEND: Rem "Done, Where to Go
+If Err 0 Gosub ERR_TRAP
+
+For I = 2 To 90 ! 99
+  Try Close #I Else Rem
+Next I
+END
+Rem {begin rtn.error.s}
+Err_Trap: ! pm 
+!
+include "src/callmainerrnet.inc"
+End
+!

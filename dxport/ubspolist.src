@@ -1,0 +1,216 @@
+! ubspolist.src
+!
+! supporting library of vendor routines for browser
+!
+! 1.0 09/17/07
+!
+! loadsave -w -n 100,10 -o prog/dxport/ubspolist.dl4 src/ubspolist.src
+!
+include "src/copyright.inc"
+!
+! sub & functions for list library
+!
+!  S  GetVendPolist	get list of po's from the pohead file
+
+
+include "src/inc/filea80vm.inc" ! "vendor file
+include "src/inc/filepohead.inc" ! 
+
+
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+Declare External Sub UserCntrl
+
+
+
+
+Declare Intrinsic Sub Env,FormatDate,JuliantoDate,DatetoJulian
+
+! --------------------------------------------------------------------------------------
+External Sub Getpolist(e$,vers,List$[],maxcnt,intCo,ReturnStatus,Message$)
+  ! Creates a list of the vendor's A/p Detail
+  !
+  ! e$         : error message
+  ! vers		: version - 0
+  ! List$[]    : VEndor Data list
+  ! maxcnt		: max # of lines for list$[]
+  ! intCo      : company id #
+  ! ReturnStatus : .net status
+  ! Message$	: .net message
+try
+!
+   dim 1%,tmp1,Dir,poc,apType,F,ARH,CTLChan,vendChan
+	dim 2%,tmp2,tmpcnt,Age[7],apDate,DT3[5],X2
+	dim 2%,Y,IDate,vendid
+    dim 3%,tmp3,pohrec,apBal,vendRec, specs[10]
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[500]
+    dim tmp$[200],tmp1$[200],WebStr$[500],Message$[200]
+	dim vendKey$[64],Mode$[2],blank$[100],P61$[256],pokey$[64]
+	dim P9$[50],P60$[50],P1$[60],Mask$[12],X$[10],vend$[64]
+	dim postatus$[160]
+!
+	dim poh. as pohead
+	
+	dim vend. as a80vm
+!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	Call DXGet("vendid",vend$) \ vendid=vend$
+	vend$=vendid using "######"
+	vend$ = vend$+"            "
+	vend$[7]="" ! "cut after 6 chars
+  ! Open any files for this program
+    CTLChan=OpenFile(-9999,intCo) \ If CTLChan = -1 Error 42
+	vendChan=OpenFile(-2400,intCo) \ If vendChan = -1 Error 42
+	POHC = OpenFile(-2416,intCo)  \ If POHC=-1  Error 42    ! PO Head 
+	PODC = OpenFile(-2432,intCo)  \ If PODC=-1  Error 42    ! PO Line
+	NSC  = OpenFile(-2448,intCo)  \ If NSC=-1   Error 42    ! NonStock
+	PRC  = OpenFile(-1792,intCo)  \ If PRC=-1   Error 42    ! Product
+	read #CTLChan,0,108;apDate; ! system ap Date
+	mat read #CTLChan,19,50;p9$; ! system flags
+	mat read #CTLChan,60,50;p60$; ! system flags
+	mat read #CTLChan,61,0;P61$; ! system flags
+
+    poC=OpenFile(-2416,intCo) \ if poc= -1 Error 42 ! not found = pohead
+	
+    
+                                                               
+  LET POSTATUS$="ENTERED   PRINTED   REGISTEREDOPEN      IN PROCESSREC. REG'DCLOSED     "                                                                          
+  LET POSTATUS$[101]="DM ENTEREDDM PRINTEDDM REGISTRDM CLOSED "                   
+                      
+	! as the type above is going to be used for Ref detail lookup - USE SAME TYPES!
+	Mask$="-------#.##"
+	tmpcnt=maxcnt
+	clear List$[]
+	ReturnStatus = 1
+	Message$="OK"
+!
+ 
+	vend$[7]="" ! make sure its only 6
+	mode$="=" ! "exact match or next
+	Dir=1 ! "of vendor code / Ref
+	vendKey$=vend$
+	vendRec=filegeta80vm(e$,vendChan,mode$,dir,vendKey$,vend.)
+	if vendRec<=0
+	  Clear vend.
+	  ReturnStatus = 0
+	  Message$="vendor Not Found"
+	endif
+	
+	!! heading !!! 
+	List$[0]=bsdel$,"PO LIST",fdel$
+	WebStr$="ID",fdel$,"Name",fdel$,"Contact",fdel$,"Phone"
+	!List$[1]=WebStr$
+	!WebStr$=vend$,fdel$,RTrim$(vend.Name$),fdel$ ! ID & Name
+	!webstr$=webstr$+vend.contact$,fdel$
+	!webstr$=webstr$+vend.telephonenumber$,fdel$
+	!List$[2]=WebStr$
+	!List$[3]=esdel$ ! could be 3 sections (1=header,2=current ap)
+	
+	!
+	!row=4 ! starting row for data
+	let row=1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	vendKey$=vend$
+	if vendRec>0
+	  if vers<=1 ! vers=0 curr only, 1=both curr & hist! , 2=hist only
+	  	!List$[row]=bsdel$,"CURRENT  AP",fdel$
+		!row=row+1
+		WebStr$="PO No",fdel$
+		
+		WebStr$=WebStr$,"Date",fdel$,"Due Date",fdel$
+		Webstr$=WebStr$,"Amount",fdel$  
+		WebStr$=WebStr$,"Wh",fdel$,"Type",fdel$
+		Webstr$=WebStr$,"Status",fdel$	
+		Webstr$=WebStr$,"Vend Ref",fdel$	
+		List$[row]=WebStr$
+		row=row+1
+	  pokey$=vend$[1,6]+"" ! "   " (for mode$ >= )
+	  Mode$=">=" ! "match or PREV
+	  Dir=2 ! "start w/ vend/ref (may switch to dir=2 - vend/date order)
+	  Do
+	   pohrec=filegetpohead(e$,poc,Mode$,dir,pokey$,poh.)
+       if pohrec<0 or pokey$[1,len(vendKey$)]<>vendKey$ exit do
+		Mode$=">" ! "get prev/next
+		Dir=2! "dir 1/2
+		tmp$=poh.purchaseorder using "######"
+	    WebStr$=tmp$,fdel$ ! 
+	    	if poh.orderdate<>0 ! it's yymmdd
+		  tmp$=PDate$(poh.orderDate) ! 
+		else
+		  tmp$="        "
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! order date
+	        if poh.Duedate<>0 ! it's yymmdd
+		  tmp$=PDate$(poh.DueDate) ! 
+		else
+		  tmp$="        "
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! due date
+		specs[0]=CTLChan ! CNTRL
+		specs[1]=PODC ! POLINE
+		specs[2]=PRC  ! PROD
+		specs[3]=NSC  ! NONSTOCK
+		specs[5]=poh.status ! PO STATUS
+		specs[6]=poh.purchaseorder ! PO NUMBER
+		specs[7]=0  ! old status - for possible later use
+		call "ubscalcpototals.dl4",370,specs[]  ! get better total info
+		if specs[5]
+			tmp3=specs[5]
+		else
+			tmp3=poh.totamt
+		endif
+		 WebStr$=WebStr$,RTrim$(tmp3 using Mask$),fdel$ !  amount
+		let tmp$=poh.warehouse using "##"
+                WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! warehouse
+		let tmp$="  "
+		if poh.type=0 let tmp$=" W"
+		if poh.type=1 let tmp$=" D"
+		if poh.type=0 let tmp$=" I"
+		if poh.type=0 let tmp$="IW"
+		if poh.type=0 let tmp$="ID"
+		if poh.type=0 let tmp$="II"
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! type
+		tmp$="          "
+	        IF poh.status>=1 AND poh.status<=16
+			let tmp$= postatus$[poh.status*10-9,poh.status*10]
+	        endif
+		if poh.status=90 or poh.status=91
+			let tmp$="In Process"
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! status
+		WebStr$=WebStr$,RTrim$(poh.vendorref$),fdel$ ! Vendor ref #
+	   
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+	   Loop
+	  end if  ! of vers
+	  If Vers=1 ! need end of section if both sent
+		 List$[row]=esdel$ ! end of current ap section
+		 row=row+1
+		 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Endif
+    ! possibilty of current only or both
+	
+	endif ! valid vend rec
+	If poc>0 Close #poc
+	IF POHC>0 close #pohc 
+	IF PODC>0 close #podc 
+	IF NSC>0 close #nsc 
+	IF PRC>0 close #prc 
+	
+	!
+	List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! Getvendapopen
+
+
+! --------------------------------------------------------------------------------------

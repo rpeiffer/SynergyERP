@@ -1,0 +1,1496 @@
+! -- libgeneral.lib
+! supporting library of general routines for browser
+!
+! loadsave -w -n 100,10 -o prog/dxport/libgeneral.lib src/libgeneral.src
+!
+! 1.0 04/23/07 updated, added GetUserPort
+!
+include "src/copyright.inc"
+!
+declare intrinsic function findchannel,fmtof,crc32,callstat$,dateusing$,trim$,encfnm$
+declare intrinsic sub programdump,bytecopy,env,findf,stringsearch,getglobals
+External lib "utillib.lib"
+declare external function GetSessionParameter$
+!
+! List of Subs and functions for Library
+!
+!   S   MainErr           Error routine for main routines
+!   S   SubErr            Error routine for sub routines
+!   S   SearchErr         Error routine for search errors
+!   S   GetSession        Gets key session variables and sets default u_ initially
+!   S   SetOutput         .net, sets output string,page,dxclose
+!   F   expandarray       expands array to 50 more rows, returns # of rows
+!   S   addtostr          contatenates strings/string arrays to string
+!   S   CheckForPdf       Checks to see if pdf report is completed and can be linked to
+!   F   OpenPrinter       Opens selected Printer, returns channel #
+!   S   CreateNetStatus   .net, creates status section
+!   S   CustInfoHeading   .net, creates the customer information heading
+!   S   ARInvListHeading  .net, creates the a/r invoice list heading
+!   S   CustInfoRecord    .net, creates a customer information record
+!   S   GetDelimiters     .net, get section, record & field delimiters
+!   S   XMLtoExcel        Convert xml string to tab delimited text file for Excel
+!   F   AddToMyReports    write disk file print info to 6/myreports# for future access
+!   S   Dialcode          format phone number for faxes
+!   F   GetParameter      get parameter from either GetSessionParameter or dxget
+!   S   ERPCronSuccess    call this function to indicate "success" for an ERP Cron (Assistant) Job
+!
+external lib "ubsfunc.dl4"
+declare external function OpenFile,GetUIDRec
+!
+External Lib "libgeneral.lib"
+Declare External Sub GetDelimiters
+!
+External Lib "dxblockguigeneral.lib"
+Declare External function blockguipopup$
+!
+Declare External Sub CreateNetStatus,SetOutput,addtostr
+Declare External Function addtomyreports
+!
+include "src/inc/filecust.inc"
+!
+! ---------------------------------------------------------
+external sub MainErr(e$,spc8,...)
+	!
+	! call from /try/else of main routines (assumes suberr already executed)
+	! pass spc(8) value, buttonlist and nextlist
+	! pass optional rstr$, passed it is assumed to return .net status string
+	! return
+	!
+	try enter buttonlist$[],... else dim buttonlist$[1,1]
+	try enter nextlist$[],... else dim nextlist$[1,1]
+	try 
+		enter rstr$,...
+	else 
+		dim rstr$[1]
+		rstr$="0"  !flag that normal xport error handling, not .net
+	end try
+	try enter noClose else dim %1,noClose
+	dim tmp$[100]
+	dim optiondir$[60],from$[100],too$[100],pdumpdir$[200],fname$[60],holdfname$[200],userid$[8],subj$[150],slash$[2]
+	dim i$[1],sessionid$[20],callingprogramname$[60],errtype$[10],orgName$[50]
+	
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	if erpCron let rstr$ = " " ! avoid falling into dxgui stuff in error handler
+
+	!any error # under 10000 is a dl4 basic error, any error # >=19000and <20000 is hard file error to be logged
+	if len(e$)>8 if e$[1,8]="syserror" !disruptive error, log it & email it   syserror or syserrorfile
+		if erpCron goto skip ! cron jobs not supported at the moment
+		call dxget("s_user.id",userid$)
+		!errlogchan=findchannel()
+		!open #errlogchan,"openerrfile or use OpenFile routine
+		!print #errlogchan,-4;e$
+		!close #errlogchan
+		!
+		!email error
+		!goto skip
+		emailchan=findchannel()
+		call env(1,"EMAILFROM",from$)
+		call env(1,"EMAILTO",too$)
+		!!!too$="joel@dynamic.com" !temp test
+		call dxget("S_ORG.NAME", orgName$)
+		subj$="Error report - Company: ",orgName$," - ",dateusing$(tim#(0),"YYYY/MM/DD HH:NN:SS")," Userid ",userid$
+		open #emailchan,"(From="+from$+",subject="+subj$+",AttachAs=Mime) "+too$   as "email"
+		print #emailchan;subj$
+		print #emailchan;
+		print #emailchan;e$
+		print #emailchan;
+		!
+		!find the last dump for this user id to attach to email
+		call env(1,"DL4PORTDUMP",pdumpdir$)
+		slashpos=pos(pdumpdir$, = "/",-1)  \slash$="/" !finds last forward slash(unix) 
+		if slashpos=0 let slashpos=pos(pdumpdir$,="\\\\",-1) \slash$="\\" !or double back slash(win)
+		pdumpchan=findchannel()
+		open #pdumpchan,pdumpdir$[1,slashpos-1] as "sorted directory"
+		do
+			read #pdumpchan;fname$
+			if fname$="" exit do
+			if len(fname$)>6 if fname$[1,6]=dateusing$(tim#(0),"YYMMDD") if pos(fname$,=rtrim$(ucase$(userid$))) let holdfname$=pdumpdir$[1,slashpos-1],slash$,fname$
+		loop
+		if holdfname$<>"" add #emailchan;holdfname$ else print #emailchan;"No programdump file found"
+		close #emailchan
+		skip:
+		!
+	end if
+	!
+	!
+	! Call dxget("SESSION",sessionid$)
+	sessionid$ = GetParameter$("SESSION")
+	if sessionid$="" and not(erpCron) let rstr$="" !indiciates dl4 gui process
+	!
+	if erpCron ! from cron job - possibly ERP assistant
+		print e$
+	else if rstr$="" !dl4gui abort
+		if len(e$)>8 if e$[1,8]="syserror" !disruptive error, abort
+			Print 'XX';
+			!fontcolor = Guicolorword("red")
+			Print PChr$(16711680);'FONTCOLOR'
+			Print e$
+			Input "Press enter "i$
+			Print
+			Call DXSet("focus","") !clear on abort error
+			!chain back to menu  "MX000"   in callmainerr.inc
+		end if
+		! show error message in popup, with ok button
+		i$ = blockguipopup$("E",e$,"","O")
+		!calling program will need to do the chain "dxblockgui.dl4" if dxget(1,focus)<>  else chain back to menu MX000 in callmainerr.inc
+	else if rstr$="0" !std xport error format to msg.html page or other html page if 20000 up
+		if spc8< 20000  !20000 up don't override e$ or output
+			try call dxget("s_view.optiondir",optiondir$) else optiondir$="dxstd/"
+			call dxset("output",optiondir$+"msg.html")
+		end if
+		call dxset("s_msg",e$)
+		if len(e$)>3 if e$[1,3]="msg" call dxset("s_msgno",e$[4])
+		call dxset("buttonlist",buttonlist$[])  !msg page buttons
+		call dxset("nextlist",nextlist$[])      !button functions
+		!
+		Try call dxclose() Else Rem
+		!
+	else !.Net string format
+		dim webstr$[500],bsdel$[20],esdel$[20]
+		call env(1,"BSDEL",bsdel$)
+		call env(1,"ESDEL",esdel$)
+		bsdelpos=pos(rstr$,= bsdel$,-1) !last <section> pos
+		esdelpos=pos(rstr$,= esdel$,-1) !last </section> pos
+		if esdelpos<bsdelpos !need to add an end section
+			webstr$=esdel$ 
+			call addtostr(e$,rstr$,webstr$)
+		end if
+		webstr$=""
+		flag=0 !in custm,prodm,etc 0=error, 1=ok
+		callingprogramname$=callstat$(1,errtype$)!if !0=ok, <>0 (1) = error in dxblock
+		if pos(ucase$(callingprogramname$),="BLOCK") let flag=1
+		! for page block reports- flag=0 for no error, flag=1 error
+		If Not(FLAG)                                         
+			Try                                                
+				Call dxget("OPTION",Too$)                        
+				If UCase$(RTrim$(Too$)) = "DXBLOCKX" Let FLAG = 1
+			Else                                               
+				Rem                                              
+			End Try                                            
+		End If
+		! if no close set, this must be coming from a
+		! "called" dl4 program (I.E. call "dl4_prog",parm$,...)
+		! where the parent process still assumes the DynamicX
+		! session is open, otherwise finish it off
+		if not(noClose)
+			call createnetstatus(e$,flag,e$,webstr$)
+			call addtostr(e$,rstr$,webstr$)
+			call setoutput(e$,rstr$)
+		end if
+	end if
+	!
+end sub ! mainerr
+!
+! ---------------------------------------------------------
+external sub SubErr(e$,spc8,spc10,msc2$,...)
+	try
+		enter addlMsg$
+	else
+		dim addlMsg$[1]
+		addlMsg$ = ""
+	end try
+	!
+	! call from try/else of subroutines to populate e$ error string
+	! pass spc(8) value, spc(10) value, msc$(2) value
+	! returns populated e$
+	!
+	
+	dim errtype$[10]
+	dim pname$[100]
+	dim tmp$[100],saveAddl$[100]
+	dim userid$[10]
+	dim 2%,idrec,cterr
+	dim 3%,offdate
+
+	saveAddl$ = addlMsg$ ! never know, might have passed in same var as referenced in e$
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	if spc8 < 10000 
+		let e$ = "syserror ",spc8," ",msc2$," at ",str$(spc10)," in "
+		try
+			for callstack=1 to 10
+				e$=e$,callstat$(callstack,errtype$),":",errtype$,";"
+			next callstack
+		else
+		end try
+		if saveAddl$ <> "" e$=e$," ",saveAddl$
+	end if
+	if spc8 <> 10000
+		!
+		! log error to standard error log if possible
+		!
+		el_ch = findchannel()
+		try
+			open #el_ch,"1/errorlog"
+			pname$=callstat$(1,errtype$)
+			bpos = 1
+			do
+				search pname$[bpos],"/",pos1 ! "just parse out name
+				if not(pos1) exit do
+				let bpos=(bpos+pos1)
+			loop
+			search pname$[bpos],":",pos1
+			if pos1 pname$[bpos+ pos1 - 1] = ""
+			tmp$ = GetParameter$("S_USER.AppID")
+			try let intCo=Val(tmp$) else let intCo=1 !company #
+			userid$ = ucase$(GetParameter$("S_USER.ID"))
+			userid$=userid$,"        "
+			idRec = GetUIDRec(e$,IntCo,Userid$)
+			cterr = 0
+			! base year in unibasic is 1980, but in dl4 it is 1988
+			! just to be extra safe will calculate needed offset for dl4
+			! based on unibasic never changing its base year
+			offdate=1980-spc(20)
+			if offdate>0
+				offdate=offdate*12*31*24
+				! 12 months * 31 days(language assumes 31 day months) * 24 hours
+			else
+				offdate=0
+			endif
+			if enum=157 let cterr=err(8) ! "indexed file error
+			! write error out to formatted file:
+			! note: ERP errors are err number + 2000
+			! progname,error number,error line,company ID,
+			! user ID rec, date, time, ctree error
+			write #el_ch,chf(el_ch);pname$[bpos],spc8+2000,spc10,intCo,idRec,spc(2)+offdate,spc(3),cterr;
+			close #el_ch
+		else
+			e$=e$,"  Couldn't log error!"
+		end try
+	end if
+end sub
+
+external sub SearchErr(e$, se, spc10,...)
+	try
+		enter addlMsg$
+	else
+		dim addlMsg$[1]
+		addlMsg$ = ""
+	end try
+	!
+	! try / else error 11000 (search error)
+	!
+	! se (search error number) (NOTE, if this is set to 0, we will consider
+	! it an UNKOWN value)
+	!
+	! spc(10) value
+	!
+	dim errtype$[11]
+	dim pname$[100]
+	dim tmp$[100],saveAddl$[100]
+	dim userid$[10]
+	dim 2%,idrec,cterr
+	dim 3%,offdate
+
+	saveAddl$ = addlMsg$ ! never know, might have passed in same var as referenced in e$
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	errtype$ = "* UNKNOWN *"
+	if se errtype$ = str$(se)
+	let e$ = "syserror SEARCH ERROR ",errtype$," at ",str$(spc10)," in "
+	try
+		for callstack=1 to 10
+			e$=e$,callstat$(callstack,errtype$),":",errtype$,";"
+		next callstack
+	else
+	end try
+	if saveAddl$ <> "" e$=e$," ",saveAddl$
+	!
+	! log error to standard error log if possible
+	!
+	el_ch = findchannel()
+	try
+		open #el_ch,"1/errorlog"
+		pname$=callstat$(1,errtype$)
+		bpos = 1
+		do
+			search pname$[bpos],"/",pos1 ! "just parse out name
+			if not(pos1) exit do
+			let bpos=(bpos+pos1)
+		loop
+		search pname$[bpos],":",pos1
+		if pos1 pname$[bpos + pos1 - 1] = ""
+		tmp$ = GetParameter$("S_USER.AppID")
+		try let intCo=Val(tmp$) else let intCo=1 !company #
+		userid$ = ucase$(GetParameter$("S_USER.ID"))
+		userid$=userid$,"        "
+		idRec = GetUIDRec(e$,IntCo,Userid$)
+		cterr = 0
+		if enum=157 let cterr=err(8) ! "indexed file error
+		! base year in unibasic is 1980, but in dl4 it is 1988
+		! just to be extra safe will calculate needed offset for dl4
+		! based on unibasic never changing its base year
+		offdate=1980-spc(20)
+		if offdate>0
+			offdate=offdate*12*31*24
+			! 12 months * 31 days(language assumes 31 day months) * 24 hours
+		else
+			offdate=0
+		endif
+		! write error out to formatted file:
+		! note: ERP search errors are err number + 3000
+		! progname,error number,error line,company ID,
+		! user ID rec, date, time, ctree error
+		write #el_ch,chf(el_ch);pname$[bpos],se+3000,spc10,intCo,idRec,spc(2)+offdate,spc(3),cterr;
+		close #el_ch
+	else
+		e$=e$,"  Couldn't log error!"
+	end try
+end sub
+
+! 
+!
+! ---------------------------------------------------------
+external sub GetSession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,...)
+  !
+  ! Initializes U_ fields at session startup
+  ! Also loads session. structure with session variables ??or individual fields
+  ! sets up .net delimiters
+  !
+  ! Optionals
+  !   action1$  : 2nd action parameter
+  !   action2$  : 3rd action parameter
+  !   action3$  : 4th action parameter
+  !   action4$  : 5th action parameter
+  !   action5$  : 6th action parameter
+  !
+  try
+   !
+   try enter action1$,... else dim action1$[20]
+   try enter action2$,... else dim action2$[20]
+   try enter action3$,... else dim action3$[20]
+   try enter action4$,... else dim action4$[20]
+   try enter action5$ else dim action5$[20]
+   !
+   Declare External Function GetInitRstr$
+   
+   Dim v1$[64],filename$[100],3%,PortNo,tmp$[100],tmp2$[100],sessionid$[200]
+   Dim fieldname$[80],value$[80],groupid$[1],ASPID$[20]
+   dim 1%,a5[10],2%,decimal,apdate,ardate,shipdate,NoUpper$[10,50]
+
+   ! do the things first that can be set even if this is
+   ! running from cron
+   userid$ = ucase$(GetParameter$("S_USER.ID")) !user id
+   userid$=userid$,"        "
+   intCo = GetParameter$("S_USER.AppID") !company #
+   if not(intCo) let intCo = 1
+   CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+   ! delimiters
+   bsdel$="<section>" ! beginning section
+   esdel$="</section>" ! ending section
+   rdel$="</eor>" ! end of row 
+   fdel$="</eof>" ! end of field
+
+   action$ = ucase$(GetParameter$("action"))
+   action1$ = ucase$(GetParameter$("action1"))
+   action2$ = ucase$(GetParameter$("action2"))
+   action3$ = ucase$(GetParameter$("action3"))
+   action4$ = ucase$(GetParameter$("action4"))
+   action5$ = ucase$(GetParameter$("action5"))
+
+   call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+   if erpCron exit sub ! Session variables already set, we've set what we can so exit
+
+   call env(1,"UBSASPID",ASPID$)
+   ASPID$ = rtrim$(ASPID$)
+
+   !
+   ! define parameters that should not have there "case" messed with
+   let NoUpper$[1] = "imgsvrip"
+   let NoUpper$[2] = "mysql_server"
+   let NoUpper$[3] = "mysql_user"
+   let NoUpper$[4] = "mysql_password"
+   let NoUpper$[5] = "mysql_db"
+   let NoUpper$[6] = "webpath"
+   let NoUpper$[7] = "mysql_erpsched_user"
+   let NoUpper$[8] = "mysql_erpsched_password"
+   Call dxget("SESSION",sessionid$)
+   !
+   if userid$="ADMIN" let userid$="S35" !for live block demos
+   if userid$="" let userid$="S35" !for testing low security live blocks.....remove later
+   userid$=userid$,"        "
+   !
+   Call DXGet("S_USER.Userdef1",tmp$) ! Salesman Number
+   try let intSls=Val(tmp$) else let intSls=0  !salesman #
+   !
+   !don't need .net Call DXGet("S_VIEW.OptionDIR",optiondir$) 
+   !don't need .net Call dxget("s_view.mergedir",mergedir$)
+   Call dxget("option",options$) \ options$ = UCase$(options$)
+   !
+   !
+   CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+   !
+   !
+   call dxget("u_port",tmp$)
+   PortNo=tmp$
+   if tmp$="" !first time in, initialize everything
+	!set u_port
+	FileName$="cntrl/usercntrl"
+	Chan=FindChannel()
+	ropen #Chan,FileName$
+	!
+	V1$=UserId$
+	search #Chan,2,1;V1$,r1,e1
+	if e1=0
+		mat read #chan,r1,300;PortNo;
+		call dxset("u_port",str$(PortNo))
+		call dxset(0,"u_port",str$(PortNo)) !incoming table
+		mat read #chan,r1,386;a5; !cost lvels
+		tmp$=""
+		for i=0 to 3
+			tmp$=tmp$,str$(a5[i])
+		next i
+		call dxset("u_costlevels",tmp$)
+		call dxset(0,"u_costlevels",tmp$)
+	else
+		try close #Chan else rem
+		e$="Can't find User Id ",V1$," in ",FileName$ \ error 10000
+	endif
+	close #Chan
+	!
+	!set salespro messages file --------------------------------
+	call dxset("u_messagefile","sfmsg.txt")
+	!
+	!set u_ fields first time in  for salespro -----------------
+	!read sfsystem & sfsystemcustom files
+	!path$=getprogrampath$()  !current program path, where dxport resides
+	For file=0 to 1
+		FileName$="sfsystem.txt"
+		if file let filename$="sfsystemcustom.txt"
+		Chan=FindChannel()
+		ropen #Chan,FileName$ as "profile"
+		!systemwide option flags for salespro
+		try
+			search #Chan;"salespro" !search for salespro section, case insensitive
+			mode=-2
+			Do
+				read #chan,mode;fieldname$,value$
+				mode=-1
+				if len(value$)>1
+					if value$[len(value$)]="\15\" let value$=value$[1,len(value$)-1]
+				end if
+				let DoUpper = 1
+				for i = 1 to 10
+					if fieldname$ = NoUpper$[i]
+						let DoUpper= 0
+						let i = 10
+					end if
+				next i
+				! MySQL database - take into account asp and multi-company
+				if fieldname$ = "mysql_db" and value$ <> ""
+					if ASPID$<>"" let value$ = value$,"_",ASPID$
+					! NOPE - all companies must have their own aspid instance
+					! if intCo > 1 let value$ = value$,str$(intCo)
+				end if
+				if DoUpper
+					Call dxset("u_"+fieldname$,UCase$(value$))
+				else
+					Call dxset("u_"+fieldname$,value$)
+				end if
+			Loop
+		else
+			if spc(8)<>52
+				include "src/callsuberr.inc"
+			end if
+		end try
+		close #chan
+	next file
+	!end salespro fields ---------------------------
+	!
+	!set default round and decimal flags
+	read #ctlc,115,44;decimal; \ if decimal=0 let decimal=2 !default
+	call dxset("u_decimal",str$(decimal))
+	read #ctlc,19,50;tmp$; \ tmp$=tmp$[42,42]
+	call dxset("u_round",tmp$)
+	let groupid$="0" ! default to always to 0... for ap files
+	call dxset("u_group",groupid$)
+	call dxset("u_promptdefaults","Y") ! allowed to save new promptdefaults to block defs
+	read #ctlc,0,134;apdate; !current ap date yymmdd format
+	tmp$=apdate using "&&&&&&" \tmp2$=tmp$[3,4],"/",tmp$[1,2] !mm/yy
+	call dxset("u_apdate",tmp2$)
+	yy=tmp$[1,2]\mm=tmp$[3,4]\mm=mm+1\if mm>12 let mm=1\let yy=yy+1
+	tmp2$=mm using "&&","/",yy using "&&"
+	call dxset("u_nextapdate",tmp2$)
+  end if !u_port="" (tmp$) !first time in, initialize everything
+  !! set these fields each get session
+  
+  read #ctlc,0,108;ardate; !ar aging datte yymmddd
+  tmp$=ardate using "&&&&&&" \tmp2$=tmp$[3,4],"/",tmp$[5,6],"/",tmp$[1,2]
+  call dxset("u_ardate",tmp2$)
+  read #ctlc,03,188;shipdate;
+  tmp$=shipdate using "&&&&&&" \tmp2$=tmp$[3,4],"/",tmp$[5,6],"/",tmp$[1,2]
+  call dxset("u_shipdate",tmp2$)
+   !
+   ! set environment variables
+   call env(2,"PORTNO",str$(PortNo))
+   call env(2,"DRIVERDIR","$/usr/ub/sys/") !directory of printer drivers
+   call env(2,"REPORTDIR","files/reports")       !directory for disk reports
+   ! call env(2,"IMGSVRIP","192.0.50.126/imvu/")  !image server ip for pdf's
+   Call dxget("u_imgsvrip",tmp$)
+   call env(2,"IMGSVRIP",tmp$)  !image server ip for pdf's
+	call dxget("u_webpath",tmp$)
+   if tmp$="" let tmp$="/u/image/imvu"
+   call env(2,"WEBPATH",tmp$)  !path on image server to pdf's
+   call env(2,"DL4PORTDUMP",msc$(1)+"/dump/%DATE%%TIME%%SUSERID%%PORTNO%%PROGNAME%.wri")
+   call env(2,"DL4EMAILSERVER","127.0.0.1")
+   call env(2,"EMAILFROM","system@ubsys.com")
+   call env(2,"EMAILTO","dl4@ubsys.com")
+   call env(2,"SUSERID",rtrim$(userid$))
+   call env(2,"LOCALCODE","9,")
+   !
+   ! .net setup (bsdel$, esdel$, rdel$, fdel$, rstr$)
+   !
+   ! set environment variables for .net
+   call env(2,"BSDEL",bsdel$)
+   call env(2,"ESDEL",esdel$)
+   call env(2,"RDEL",rdel$)
+   call env(2,"FDEL",fdel$)
+   !
+   ! initialize string to transmit to .net
+   rstr$=GetInitRstr$(e$)
+   !
+ else
+   include "src/callsuberr.inc"
+ end try
+ !
+end sub !GetSession
+
+external Function GetInitRstr$(e$)
+try
+	dim rstr$[300]
+	dim action$[20],action1$[20],action2$[20],action3$[20],action4$[20],action5$[20]
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],sessionid$[200],options$[100]
+	dim 3%
+
+	options$ = ucase$(GetParameter$("option"))
+	action$ = ucase$(GetParameter$("action"))
+	action1$ = ucase$(GetParameter$("action1"))
+	action2$ = ucase$(GetParameter$("action2"))
+	action3$ = ucase$(GetParameter$("action3"))
+	action4$ = ucase$(GetParameter$("action4"))
+	action5$ = ucase$(GetParameter$("action5"))
+	call env(1,"BSDEL",bsdel$)
+	call env(1,"ESDEL",esdel$)
+	call env(1,"RDEL",rdel$)
+	call env(1,"FDEL",fdel$)
+	sessionid$ = GetParameter$("SESSION")
+	rstr$ = ""
+	if sessionid$<>""
+		rstr$='fx',"<page>SESSION=",sessionid$,fdel$
+		rstr$=rstr$,"OPTION=",options$,fdel$
+		rstr$=rstr$,"ACTION=",action$
+		if action1$ let rstr$=rstr$,fdel$,"ACTION1=",action1$
+		if action2$ let rstr$=rstr$,fdel$,"ACTION2=",action2$
+		if action3$ let rstr$=rstr$,fdel$,"ACTION3=",action3$
+		if action4$ let rstr$=rstr$,fdel$,"ACTION4=",action4$
+		if action5$ let rstr$=rstr$,fdel$,"ACTION5=",action5$
+		rstr$=rstr$,fdel$,rdel$ ! initialize return string
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+ !
+end Function rstr$
+
+!
+! ---------------------------------------------------------
+external sub setoutput(e$,rstr$,...)
+!
+!sets rstr$ with end of page delimiter, output page & closes
+!optional, setstatus flag, if nonzero, set returnstatus of 0 ok, if 2 default message$ to 'Report in Process'
+!optional, message$, returnstatus of 0 with a message
+!
+option string redim is legal
+!  
+Try
+	try enter setstatus,... else let setstatus=0
+	try enter message$ else dim message$[100]
+	dim tmp$[100]
+	
+	
+	if setstatus
+		dim webstr$[500]
+		! status section, returnstatus is 0 indicating ok, but could have a message as well
+		if message$="" if setstatus=2 let message$="Report in Process..."
+		call CreateNetStatus(e$,ReturnStatus,Message$,webstr$)
+		call AddToStr(e$,rstr$,webstr$)
+	end if
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	if erpCron exit sub
+	!
+	dim mdir$[60]
+	!
+	Call dxget("s_view.mergedir",mdir$)
+	call dxset("rstr",rstr$+"</page>") ! add end of page dilimiter
+	call dxset("output",mdir$+"netstr.html")
+	try call dxclose() else rem
+	!
+else
+  include "src/callsuberr.inc"
+end try
+ !
+end sub !setoutput
+!
+! ---------------------------------------------------------
+!dfaudit
+!
+! logs a data file change in the audit log file
+!	(normally called by fileupdate* function in libfile*.lib's)
+! pass auditchan  channel # audit log is open on, or -1 if needs opened/closed
+! pass file$  filed defs file id
+! pass type$  A=add,C=change,D=delete
+! pass key1$   key 1 of record or record # if no keys
+! pass old?   binary image of record added,deleted or before changed
+! optionally pass new?  binary image of record after change
+! optionally pass reason$  reason for change
+! future,if needed, optionally pass user$ and option$
+! returns 0 if worked or neg if failed with error message in e$
+external function dfaudit(e$,auditchan,file$,type$,key1$,old?,...)
+	try enter new?,... else dim new?[1]
+	try enter reason$ else dim reason$[1]
+try
+	dim rfile$[20],ruserid$[20],roptionid$[20],rtype$[1],rkey$[30],rreason$[80],4%,rdate
+	dim k1$[62],k2$[62],tmp$[20]
+	if file$="" let e$="dfaudit missing file id" \ error 10000
+	rfile$=lcase$(file$)
+	rtype$=ucase$(type$)
+	if rtype$<>"A" if rtype$<>"C" if rtype$<>"D" let e$="dfaudit A/C/D type invalid" \ error 10000
+	rdate=tim(8)*10000000000+tim(9)*100000000+tim(10)*1000000+tim(11)*10000+tim(12)*100+tim(13) !yymmddhhmmss
+	call dxget("S_user.id",ruserid$)
+	call dxget("option",roptionid$)
+	rkey$=key1$
+	rreason$=reason$
+	if auditchan<0 !open it
+		Call dxget("S_USER.AppID",tmp$) !company #
+		Try Let intCo = Val(tmp$) Else Let intCo = 1 !company #
+		rauditchan=openfile("dfaudit",intco)
+	else
+		rauditchan=auditchan
+	end if
+	e1=2
+	search #rauditchan,1,0;k1$,r1,e1
+	If e Let e$ = "syserrorfile dfaudit libgeneral mode (m)=",1," keyno (k)=",0," r=",r1," e=",e1," keyval (k$)=",k1$\error 10000
+	write #rauditchan,r1;rfile$,rdate,ruserid$,roptionid$,rtype$,rkey$,rreason$;
+	mat write #rauditchan,r1,200;old?;
+	mat write #rauditchan,r1,3300;new?;
+	k1$=rfile$,"                    "
+	k1$=k1$[1,20],rkey$,"                              "
+	k1$=k1$[1,50],rdate using "&&&&&&&&&&&&"
+	search #rauditchan,4,1;k1$,r1,e1
+	If e Let e$ = "syserrorfile dfaudit libgeneral mode (m)=",4," keyno (k)=",1," r=",r1," e=",e1," keyval (k$)=",k1$\error 10000
+	k2$=k1$[1,20],k1$[51],k1$[21,50]  !fileid,date,key
+	search #rauditchan,4,2;k2$,r1,e1
+	If e Let e$ = "syserrorfile dfaudit libgeneral mode (m)=",4," keyno (k)=",2," r=",r1," e=",e1," keyval (k$)=",k2$\error 10000
+	!
+	if auditchan<0 try close #rauditchan else rem
+else
+	include "src/callsuberr.inc"
+end try
+!
+end function 0 !dfaudit
+
+!
+! ---------------------------------------------------------
+external function expandarray(e$,array$[],...)
+try enter expandAmount else let expandAmount = 50 ! default 50 rows
+  !
+  !expand 1 0r 2 dim string array, adding another group of rows, return new rowcnt
+ try
+  !
+  if ubound(array$[],0)>1 !it's 2 dimensional field level
+   dim array$[ubound(array$[],1),ubound(array$[],2)+expandAmount,fmtof(array$)]
+  else
+   dim array$[ubound(array$[],1)+expandAmount,fmtof(array$)]
+  end if
+ else
+  include "src/callsuberr.inc"
+ end try
+ !
+end function ubound(array$[],1) !expandarray
+!
+! ---------------------------------------------------------
+external sub addtostr(e$,rstr$,...)
+	!
+	!concatentate strings or string arrays to rstr$
+	option string redim is legal
+	!
+  try
+	! 
+	dim fdel$[10],rdel$[10],esdel$[10]
+	dim 3%,endStr
+	
+	if rstr$[1,15] = 'fx'+"<page>SESSION=" let isRstr = 1
+	
+	call env(1,"FDEL",fdel$)
+	call env(1,"RDEL",rdel$)
+	call env(1,"ESDEL",esdel$)
+	do
+		try 
+			enter array$[],...
+			array=1
+		else
+			try
+				enter string$,...
+				array=0
+			else
+				!done
+				exit sub
+			end try
+		end try
+		!
+		if array !add the array
+			if ubound(array$[],0)>1 !it's 2 dimensional field level
+				!we assume it is [column,row]
+				lenneeded=fmtof(array$)*ubound(array$[],1)+len(fdel$)*ubound(array$[],2)+50
+				dim tmp$[lenneeded]
+				for i=0 to ubound(array$[],2) !each row
+					if array$[0][i]="" exit for !if first column of row is null we're done
+					for j=0 to ubound(array$[],1) !each column in row
+						endStr = len(tmp$) + 1
+						if j<>ubound(array$[],1)
+							tmp$[endStr]=array$[j][i],fdel$
+						else
+							tmp$[endStr]=array$[j][i]
+						end if
+					next j
+					lenneeded=len(rstr$)+(len(tmp$)*(ubound(array$[],2)-i+1))+50
+					if lenneeded>fmtof(rstr$)
+						spc8 = 0
+						try
+							dim rstr$[lenneeded+500]
+						else
+							spc8 = spc(8)
+								
+						end try
+						if spc8
+							if spc8 = 86
+								! too big!  Trash rstr$ as it
+								! will be garbage and we don't want
+								! it showing up in dumps (too big)
+								! + if this is THE rstr$ can cause
+								! other issues
+								rstr$ = "" ! trash it as it will be garbage anyway
+								! if it is THE rstr, reinit the beginning for
+								! error message delivery to .net
+								if isRstr rstr$ = GetInitRstr$(e$)
+							end if
+							error spc8 ! let the error happen now
+						end if
+					end if
+					endStr = len(rstr$)+1
+					if tmp$<>esdel$
+						rstr$[endStr]=tmp$,rdel$
+					else
+						rstr$[endStr]=tmp$
+					end if
+					tmp$=""
+				next i
+				clear tmp$
+			else !one-dim row level
+				!
+				lenneeded=len(rstr$)+ubound(array$[],1)*(fmtof(array$)+len(rdel$))
+				if lenneeded>fmtof(rstr$) !need to expand rstr
+					spc8 = 0
+					try
+						dim rstr$[lenneeded+50]
+					else
+						spc8 = spc(8)
+							
+					end try
+					if spc8
+						if spc8 = 86
+							! too big!  Trash rstr$ as it
+							! will be garbage and we don't want
+							! it showing up in dumps (too big)
+							! + if this is THE rstr$ can cause
+							! other issues
+							rstr$ = "" ! trash it as it will be garbage anyway
+							! if it is THE rstr, reinit the beginning for
+							! error message delivery to .net
+							if isRstr rstr$ = GetInitRstr$(e$)
+						end if
+						error spc8 ! let the error happen now
+					end if
+				end if
+				for i=0 to ubound(array$[],1)
+					if array$[i]="" exit for
+					! NO - 2 adds to a long string referencing itself
+					! is not the way to go...
+					! 1 add where we know the end of the string and thus don't
+					! have an assignment which references itself definitely
+					! enhances performance
+					!
+					! rstr$=rstr$,array$[i] \ if array$[i]<>esdel$ let rstr$=rstr$,rdel$
+					endStr = len(rstr$) + 1
+					if array$[i]<>esdel$
+						let rstr$[endStr] = array$[i],rdel$
+					else
+						let rstr$[endStr]=array$[i]
+					end if
+				next i
+				free array$
+			end if !one or two dim array
+		else
+			lenneeded=len(rstr$)+len(string$)+50
+			if lenneeded>fmtof(rstr$) !need to expand
+				spc8 = 0
+				try
+					dim rstr$[lenneeded]
+				else
+					spc8 = spc(8)
+						
+				end try
+				if spc8
+					if spc8 = 86
+						! too big!  Trash rstr$ as it
+						! will be garbage and we don't want
+						! it showing up in dumps (too big)
+						! + if this is THE rstr$ can cause
+						! other issues
+						rstr$ = "" ! trash it as it will be garbage anyway
+						! if it is THE rstr, reinit the beginning for
+						! error message delivery to .net
+						if isRstr rstr$ = GetInitRstr$(e$)
+					end if
+					error spc8 ! let the error happen now
+				end if
+			end if
+			endStr = len(rstr$) + 1
+			rstr$[endStr]=string$
+			free string$
+		end if
+	loop
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+ !
+end sub !addtostr
+!
+! ---------------------------------------------------------
+external sub CheckForPdf(e$)
+  !
+  ! checks to see if pdf report is done being generated
+  ! if so redirects to it, else redirects to check again
+  try
+   dim msc2$[100]
+   dim mergedir$[60],FileNm$[100],Imgsvrip$[50],WebPath$[50],tmp$[100]
+   call env(1,"IMGSVRIP",Imgsvrip$)  !image server ip for pdf's
+   call env(1,"WEBPATH",WebPath$)  !path on image server to pdf's
+   call dxget("filenm",FileNm$)
+   !here method !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   signal 3,20 ! pause 2 out of the gate as the here file may be there, but report still not complete
+   tmp$=webPath$,"/",FileNm$,".here"
+   call FindF(tmp$,x1)
+   goto skip2
+   !end here method !!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+   !still growing method !!!!!!!!!!!!!!!!!!!!!!!!
+   tmp$=webPath$,"/",FileNm$
+   call FindF(tmp$,x1)
+   if x1 !file is there open it, is it still growing
+    c=findchannel()
+	open #c,tmp$ 
+	size1=CHF(400+c) !get file size in bytes
+	signal 3,20 !wait 2 secs
+	size2=CHF(400+c)
+	signal 3,20
+	size3=CHF(400+c)
+	if size1<>size2 or size1<>size3 or size2<>size3 let x1=0 !still growing,wait
+   end if
+   !end still growing method !!!!!!!!!!!!!!!!!!!!
+   skip2:
+   if x1=0 !its not there yet
+      ! e$='fx'+"option=testprt&action=checkforpdf&filenm=",Filenm$ !??change to SFDASH
+	  signal 3,30 ! 3 second additional pause between attempts
+	  e$='fx'+"option=SFDASH&action=checkforpdf&filenm=",Filenm$ !??change to SFDASH
+   else
+      e$="http://",Imgsvrip$,Filenm$
+   end if
+   call dxset("nextlist",e$)
+   call dxget("s_view.mergedir",mergedir$)
+   call dxset("output",mergedir$+"ubsredirect.html")
+
+ else
+  include "src/callsuberr.inc"
+ end try
+ !
+end sub !CheckForPdf
+!
+! ---------------------------------------------------------
+external sub CheckForPdfgui(e$)
+  !
+  ! checks to see if pdf report is done being generated
+  ! if so systems out to adobe viewer from dl4term
+  try
+   dim msc2$[100]
+   dim mergedir$[60],FileNm$[100],Imgsvrip$[50],WebPath$[50],tmp$[200],tmp2$[200]
+   call env(1,"WEBPATH",WebPath$)  !path on image server to pdf's
+   call env(1,"WEBFILENAME",FileNm$)
+   do
+    tmp$=webPath$,"/",FileNm$   !!!,".here"   
+    call FindF(tmp$,x1)
+    if x1=0 !its not there yet, wait 2 seconds and try again
+      signal 3,20
+    else
+	  tmp$=webPath$,"/",FileNm$
+      tmp2$="''C:\\Program Files\\Adobe\\Reader 8.0\\Reader\\AcroRd32.exe'' U:/",tmp$  !should put path to adobe in config file and mapped drive letter to server
+	  system 33,tmp2$,s
+	  exit do
+    end if
+   loop
+   call env(2,"WEBFILENAME","") !clear it
+ else
+  include "src/callsuberr.inc"
+ end try
+ !
+end sub !CheckForPdfgui
+!
+! ----------------------------------------
+External Function OpenPrinter(e$,...)
+ !optionally pass channel # to open printer on
+ !optionally, pass in flag to specify rather than overwriting disk file name, append prefix to make unique
+Try
+	try enter printchan,... else let printchan=-1
+	try enter noOverwrite else let noOverwrite=0
+	!
+	dim msc2$[100]
+	dim Printer$[70],PrinterType$[2]
+	dim tmp$[100],Dir$[100],FileNm$[100],newFileName$[100],csvvar$[4]
+	dim Emailto$[50],Emailfrom$[50],Subject$[50],CC1$[50],CC2$[50]
+	dim BCC$[50],Comments$[200]
+	dim P1$[10],P2$[20],tmp$[100]
+	dim optiondir$[60],mergedir$[60],drvrdir$[50],platform$[20],PTR$[50],SYS$[750]
+	dim NUMCOP$[4]
+	dim blank$[100] \ blank$=" ",blank$
+	dim 3%,PortNo
+	dim blockid$[8]
+	try call getglobals("blockx",0,blockid$) else rem
+	!
+	call env(1,"DRIVERDIR",drvrdir$)
+	call env(1,"PLATFORM",platform$)
+	!
+	call dxget("u_port",tmp$)
+	PortNo=tmp$ ! port # from usercntrl file
+	!
+	! call dxget("Printer",Printer$) ! printer name selected
+	printer$ = GetParameter$("Printer")
+	if printer$="-1" exit function -1 ! signifies return xml stream to browser
+	PrinterType$=rtrim$(Printer$[1,2]) ! Printer type / record #
+	!
+	LptChan=FindChannel()
+	Open #LptChan,"cntrl/cntrl.lpt"
+	!
+	if printchan<0 let PrintChan=findchannel() ! channel for printer or device
+	!
+	select case PrinterType$
+		case "D" ! Disk File
+			FileNm$=LCASE$(GetParameter$("FileName"))
+			csvvar$=""
+			Try
+				tmp$ = GetParameter$("CSV")
+				if rtrim$(tmp$)<>"" let csvvar$=".csv"	
+			else
+				let csvvar$=""
+			end try
+			call env(1,"REPORTDIR",dir$)
+		!
+			If Platform$ = "WIN" let Dir$=Dir$,"\\" else Dir$=Dir$,"/"
+			tmp$=Dir$,FileNm$
+			if rtrim$(csvvar$)<>""
+				let tmp$=tmp$,csvvar$
+			endif
+			call FindF(tmp$,x1)
+			if x1 ! file already exists
+				if noOverwrite
+					! attempt to create unique file name
+					for i=1 to 999
+						tmp$=Dir$,FileNm$
+						newFilename$ = tmp$,i using "_&&&"
+						if rtrim$(csvvar$)<>""
+							let newfilename$=newfilename$,csvvar$
+						endif
+						call findf(newFilename$, x1)
+						if not(x1)
+							FileNm$ = FileNm$,i using "_&&&"
+							tmp$ = newFilename$
+							i = 1000
+						else
+							if i=999
+								e$ = "Cannot create unique disk file name!!"
+								error 10000
+							end if
+						end if
+					next i
+				else
+					kill tmp$
+				end if
+			end if
+			build #PrintChan,+tmp$
+			close #PrintChan
+			open #PrintChan,tmp$
+			let tmp$=filenm$
+			if rtrim$(csvvar$)<>"" let tmp$=tmp$+csvvar$
+			ok=AddToMyReports(tmp$) ! (FileNm$)
+			!
+		case "M" ! e-mail
+			call dxget("emailto",Emailto$)
+			call dxget("emailfrom",Emailfrom$)
+			call dxget("emailsubject",Subject$)
+			call dxget("emailcc1",CC1$)
+			call dxget("emailcc2",CC2$)
+			call dxget("emailbbc",BCC$)
+			call dxget("emailcomments",Comments$)
+			SYS$=drvrdir$,"email.report -f ''",Emailfrom$,"''"," -t ''",Emailto$
+			SYS$=SYS$,"'' -s ''",Subject$,"''"  
+			IF CC1$<>"" LET SYS$=SYS$," -C ''",CC1$,"''"            
+			IF CC2$<>"" LET SYS$=SYS$," -C ''",CC2$,"''"            
+			IF BCC$<>"" LET SYS$=SYS$," -b ''",BCC$,"''"            
+			IF Comments$<>"" LET SYS$=SYS$," -c ''",Comments$,"''" 
+			open #PrintChan,SYS$
+		case "A" ! archive
+			! bypass for now
+			!
+		case "P" ! display pdf
+			!Filenm$="pdfreport",str$(PortNo),"!",str$(int(RND(999999))),".pdf"
+			filenm$ = "pdfreports",portno using "&&&&","_",int(rnd(999999)) using "&&&&&&&&&&&.pdf"  ! maintain filename length
+			call env(2,"WEBFILENAME",Filenm$)
+			ptr$=drvrdir$+"sptrpdfdpdx"
+			open #PrintChan,PTR$
+			!now point to redirect page to keep checking with checkforpdf to display when report complete
+			! e$='fx'+"option=testprt&action=checkforpdf&filenm=",Filenm$ !?? change to SFDASH
+			!!if blockid$="445" !new method
+			!
+			call env(2,"PDF",filenm$) !save for createnetstatus
+			!!else !old method
+			!!e$='fx'+"option=SFDASH&action=checkforpdf&filenm=",Filenm$ !?? change to SFDASH
+			!!call dxset("nextlist",e$)
+			!!call dxget("s_view.mergedir",mergedir$)
+			!!call dxset("output",mergedir$+"ubsredirect.html")
+			
+			!!Try call dxclose() Else rem
+			!!end if !445
+			exit function PrintChan
+		case else ! Printer / CRT
+			recno=PrinterType$
+			READ #LptChan,recno;P1$;
+			READ #LptChan,recno,10;P2$;
+			!
+			! open printer
+			if platform$ <> "WIN"
+				PTR$ = rtrim$(drvrdir$+lcase$(P1$[2])+" "+NUMCOP$) ! set device and number of copies
+			else
+				! --- PTR$ = P2$ +" "+ workfile$()
+			endif
+		    !
+			Try
+				open #PrintChan,trim$(PTR$)
+				!
+			else
+				F=spc(8)  
+				e$="CANNOT ACCESS PRINTER:  ERROR STATUS =",F," "
+				If F = 42 let e$=e$,"(DEVICE FILE NOT FOUND)"
+				If F = 72 let e$=e$,"(DEVICE NOT ACCESSIBLE)"
+				If F = 73 let e$=e$,"(DEVICE NOT ONLINE)"
+				If F = 74 let e$=e$, "(DEVICE REQUIRES MANUAL INTERVENTION)"
+				If F = 76 let e$=e$,"(DEVICE IS OPENED ELSEWHERE)"
+				error 10000
+			end try
+	end select
+	!
+	close #LptChan
+	!
+	!!if blockid$<>"445" !old method
+	!!e$="Report in Process..."
+	!!call dxset("s_msg",e$)
+	!
+	!!call dxget("s_view.optiondir",optiondir$)
+	!!call dxset("output",optiondir$+"msg.html")
+	!
+	!!try call dxclose() else rem !let web page go on its way
+	!!end if !445
+	!
+else
+	include "src/callsuberr.inc"
+end try
+end function PrintChan ! OpenPrinter
+!
+! ----------------------------------------
+external sub CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+  !
+  ! creates the return status section for .net
+  !
+  !   ReturnStatus  : is the return code for .net
+  !   WebStr$       : the string for the section
+  !
+try
+	!
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],tmp$[100]
+	dim MessageStr$[500],filenm$[100],nextblockid$[8],deleteok$[1]
+	dim MySQLID$[10]
+	!
+	call env(1,"BSDEL",bsdel$)
+	call env(1,"ESDEL",esdel$)
+	call env(1,"RDEL",rdel$)
+	call env(1,"FDEL",fdel$)
+	!
+	WebStr$=bsdel$,"status",fdel$,rdel$
+	WebStr$=WebStr$,"Status",fdel$,"Message",fdel$
+	call env(1,"PDF",filenm$) !if printing pdf, pdf filename
+	if filenm$<>"" let WebStr$=WebStr$,"PDF",fdel$
+	call env(1,"MYSQL_REPORT_ID",MySQLID$)
+	if MySQLID$<>"" let WebStr$=WebStr$,"MYSQL_REPORT_ID",fdel$
+	call env(1,"NEXTBLOCK",nextblockid$) !if chaining to next blockid
+	if nextblockid$<>"" let WebStr$=WebStr$,"Nextblockid",fdel$
+	call env(1,"DXDELETE",deleteok$) !flag on maint, whether to show Delete button or not
+	if deleteok$<>"" let WebStr$=WebStr$,"Delete",fdel$
+	Webstr$=WebStr$,rdel$
+	MessageStr$=Message$
+	if len(Message$)>3 if Message$[1,3]="msg" let MessageStr$=getmsg$(e$,Message$[4]) !fromview msg file
+	WebStr$=WebStr$,str$(ReturnStatus),fdel$,MessageStr$,fdel$
+	if filenm$<>"" let WebStr$=WebStr$,filenm$,fdel$
+	if MySQLID$<>"" let WebStr$=WebStr$,MySQLID$,fdel$
+	if nextblockid$<>"" let WebStr$=WebStr$,Nextblockid$,fdel$
+	if deleteok$<>"" let WebStr$=WebStr$,deleteok$,fdel$
+	WebStr$=WebStr$,rdel$
+	WebStr$=WebStr$,esdel$
+	! let the cron job see the message
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	if erpCron print MessageStr$
+else
+	include "src/callsuberr.inc"
+end try
+  !
+end sub ! CreateNetStatus
+!
+! ----------------------------------------
+External Sub CustInfoHeading(e$,row,List$[])
+  !
+  ! Create customer information heading for .net
+  !
+  try
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20]
+	dim WebStr$[300]
+	!
+	call env(1,"BSDEL",bsdel$)
+    call env(1,"ESDEL",esdel$)
+    call env(1,"RDEL",rdel$)
+    call env(1,"FDEL",fdel$)
+    !
+	List$[0]=bsdel$,"CustInfo",fdel$ ! beginning section
+	!
+	WebStr$="ID",fdel$,"CustID",fdel$,"BillToID",fdel$,"CustName",fdel$,"Contact",fdel$ ! headings
+	WebStr$=WebStr$,"Address1",fdel$,"Address2",fdel$,"City",fdel$
+	WebStr$=WebStr$,"State",fdel$,"Zip",fdel$,"Phone",fdel$
+	List$[1]=WebStr$
+	!
+	row=2
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! CustomerInfoHeading
+!
+!--------------------------------------------------------------------
+External Sub ARInvListHeading(e$,row,List$[])
+  !
+  ! Create A/R invoice heading for .net
+  !
+  try
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20]
+	dim webstr$[500]
+	!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+    !
+ 	List$[0]=bsdel$,"ARLIST",fdel$
+	!
+	WebStr$="ID",fdel$,"Customer",fdel$,"Invoice Date",fdel$,"Doc #",fdel$
+	WebStr$=Webstr$,"Type",fdel$,"Due Date",fdel$
+	WebStr$=WebStr$,"Orig Amt",fdel$,"Open Amt",fdel$,"Disc Avl.",fdel$ ! has type
+	WebStr$=WebStr$,"Add. Disc",fdel$,"Pay",fdel$,"Payment Amt",fdel$
+	WebStr$=WebStr$,"Balance",fdel$,"WH",fdel$,"Div.",fdel$,"Disputed",fdel$
+    List$[1]=WebStr$
+	!
+	row=2
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ARInvListHeading
+!
+!--------------------------------------------------------------------
+External Sub CustInfoRecord(e$,WebStr$,SearKey$,cust. as cust)
+  !
+  ! Create customer information record for .net
+  !
+  try
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20]
+	!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+    !
+	WebStr$=SearKey$,fdel$ ! id (key)
+	WebStr$=Webstr$,str$(Cust.CustomerCode),fdel$ ! cust id
+	WebStr$=WebStr$,str$(Cust.CustomerBillTo),fdel$ ! customer bill to #
+	WebStr$=WebStr$,rtrim$(Cust.Name$),fdel$ ! customer name
+	WebStr$=WebStr$,rtrim$(Cust.Contact$),fdel$ ! Contact
+	WebStr$=WebStr$,rtrim$(Cust.Addr1$),fdel$ ! address #1
+	WebStr$=WebStr$,rtrim$(Cust.Addr2$),fdel$ !address #2
+	WebStr$=WebStr$,rtrim$(Cust.City$),fdel$ ! city
+	WebStr$=WebStr$,rtrim$(Cust.State$),fdel$ ! state
+	WebStr$=WebStr$,rtrim$(Cust.Zip4$),fdel$ ! zip code
+	WebStr$=WebStr$,rtrim$(Cust.Phone$),fdel$ ! telephone
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+
+end sub ! CustInfoRec
+!
+!--------------------------------------------------------------------
+External Sub GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+  !
+  ! Get .net delimters
+  !     bsdel$  :  beginning section
+  !     esdel$  :  end of section
+  !     rdel$   :  end of row
+  !     Fdel$   :  end of field
+  !
+  try
+	!
+	call env(1,"BSDEL",bsdel$)
+    call env(1,"ESDEL",esdel$)
+    call env(1,"RDEL",rdel$)
+    call env(1,"FDEL",fdel$)
+    !
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetDelimiters
+!
+!
+external function getmsg$(e$,msglabel$,...)
+! opens user's text message file and returns text for message # or label
+! message file that is opened is defined in user's org's view 
+! default is dxmsg.txt 
+! (use message #'s 1000-1999 for errors,2000-2999 for descriptive (or label))
+! pass msglabel$ the message label or number to return associated message text 
+!      chan optional channel # message file is open on, if -1 use file defined in u_messagefile (sfmsg.txt)
+!      file$ optional name of message file to open
+! returns msg$ message text
+!
+ option string redim is legal
+ try
+  try enter chan else chan=-2
+  try enter filename$ else dim filename$[60]
+  !
+  dim msg$[80*4],sendmsg$[80*4]
+  !
+  if chan<0
+   if filename$=""
+    call dxget("s_view.messagefile",filename$)
+    if chan=-1 call dxget("u_messagefile",filename$)
+   end if
+   chan = findchannel()
+   ropen #chan,filename$ as "text"
+  end if
+  do
+   read #chan;msg$
+   if msg$="" exit do
+   if len(msg$)>1 and msg$[len(msg$)]="\15\" let msg$=msg$[1,len(msg$)-1]
+   try
+    !see if value pair
+    if p := pos(msg$, = ":") if msglabel$ = msg$[1,p-1]
+     sendmsg$ = msg$[p + 1]
+     exit do
+    end if
+   else
+   end try
+   !see if a section 
+   if msg$="[",msglabel$,"]"
+    do
+	 read #chan;msg$
+	 if msg$="" exit do
+     if len(msg$)>1 and msg$[len(msg$)]="\15\" let msg$=msg$[1,len(msg$)-1]
+	 if msg$[1,1]="[" if msg$[len(msg$)]="]" exit do
+     lenneeded=len(sendmsg$)+len(msg$)
+     if lenneeded>fmtof(sendmsg$) !need to expand
+          dim sendmsg$[lenneeded+400]
+     end if
+     sendmsg$=sendmsg$,msg$
+	loop
+    exit do !exit main loop
+   end if !section     
+  loop
+  if sendmsg$="" let sendmsg$=msglabel$
+ else
+  include "src/callsuberr.inc" 
+ end try
+end function 'FX'+sendmsg$ !getmsg$  (FX allows html tags to be sent)
+!
+! ----------------------------------------------------
+External Sub XMLtoExcel(e$,TextFile$,rstr$)
+  !
+  !  converts xml string to a tab delimited text file for excel
+  !
+  !  e$           : programming error desc
+  !  TextFile$    : text file to create
+  !  rstr$        : XML string to convert
+  !
+  Try
+    !
+	dim tmprow$[1500],tmpfield$[500],textline$[1500]
+    dim fdel$[10],rdel$[10],esdel$[10],bsdel$[10]
+	dim 1%,Chan,3%
+	X=len(rstr$) \ dim tmprstr$[X] 
+	!
+    call env(1,"FDEL",fdel$)
+    call env(1,"RDEL",rdel$)
+	call env(1,"BSDEL",bsdel$)
+    call env(1,"ESDEL",esdel$)
+	!
+	call FindF(TextFile$,tmp)
+	if tmp kill TextFile$
+	Chan=FindChannel() ! channel to build text file
+	build #chan,Textfile$ as "TEXT"
+	Close #chan
+	Open #chan,TextFile$
+	!
+	! initial string setup
+	call StringSearch(rstr$,bsdel$,BegPos) 
+    if BegPos<1 let BegPos=1 else BegPos=BegPos+len(bsdel$)
+	call StringSearch(rstr$,esdel$,EndPos) 
+    if EndPos<1 let EndPos=len(rstr$) else EndPos=EndPos-1
+	tmprstr$=rstr$[BegPos,EndPos]
+	!
+	! get end of row
+XMLNextRow:
+	Call StringSearch(tmprstr$,rdel$,EndRow)
+    if EndRow>0
+	  tmprow$=tmprstr$[1,EndRow-1]
+	  tmprstr$=tmprstr$[EndRow+len(rdel$)] ! for next row
+	  textline$=""
+XMLNextField:
+      Call StringSearch(tmprow$,fdel$,EndField)
+	  if EndField>0
+	    if Endfield>1 let tmpfield$=tmprow$[1,EndField-1] else tmpfield$=""
+	    textline$=textline$,tmpfield$,'HT'
+	    tmprow$=tmprow$[EndField+len(fdel$)]
+	    goto XMLNextField
+      endif
+	  ;#chan;TextLine$
+	  goto XMLNextRow
+	endif
+	close #chan
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+End Sub ! XMLtoExcel
+!
+! ---------------------------------------------------------
+External Function AddToMYReports(fname$)
+include "src/myreports.inc"
+option string redim is legal
+  Try
+	Dim tmp$[255],scratch$[255],myrkey$[26]
+	Dim userid$[8],datetime$[14],blockid$[3],dfname$[100]
+	Dim 3%
+	Dim MYR. as MYReports
+	!
+	intco = GetParameter$("S_USER.AppID") !company #
+	!
+	MYR.userid$=ucase$(rtrim$(GetParameter$("S_USER.ID")))+"        " ! fill out to 8
+	!
+	MYR.blockid$ = GetParameter$("BLOCKID") !blockid
+	if MYR.blockid$ = ""
+		MYR.blockid$ = "N/A"
+	end if
+	!
+	MYR.datetime$[1,4]=Tim(8) using "20&&"  ! CCYY
+	MYR.datetime$[5,6]=Tim(9) using "&&"	! MM
+	MYR.datetime$[7,8]=Tim(10) using "&&"	! DD
+	MYR.datetime$[9,10]=Tim(11) using "&&"	! hh
+	MYR.datetime$[11,12]=Tim(12) using "&&"	! mm
+	MYR.datetime$[13,14]=Tim(13) using "&&"	! ss
+	!
+	MYR.fname$=fname$
+	!
+	ch_myrpt=FindChannel()
+	open #ch_myrpt,"6/myreports"+str$(intco)
+	myrkey$=MYR.userid$+MYR.datetime$+MYR.blockid$
+
+	Try 
+	! r=-1 for error
+		search #ch_myrpt,2,1;myrkey$,r,e
+		if not(e)
+			pause 20 ! have a duplicate... pause 2 seconds & try again
+			MYR.datetime$[13,14]=Tim(13) using "&&"	! ss
+			myrkey$=MYR.userid$+MYR.datetime$+MYR.blockid$
+			search #ch_myrpt,2,1;myrkey$,r,e
+			r=0
+			if e<>1 let r=-1 ! still duplicate
+		else
+			r=0
+		endif
+		if not(r)
+			e=2 \ search #ch_myrpt,1,0;myrkey$,r,e
+			if not(e)
+				Search #ch_myrpt,4,1;myrkey$,r,e
+				if not(e)
+					write record #ch_myrpt,r;MYR.;
+				else
+					let r=-1
+				endif
+			else
+				let r=-1
+			endif
+		endif
+	else
+		r=-1
+	end try
+	close #ch_myrpt
+  else
+    ! include "src/callsuberr.inc"
+  end try
+End Function R
+! ---------------------------------------------------------
+External Sub Dialcode(phonenumber$)
+	! Enter PHONENUMBER$
+	MAXLEN = Len(PHONENUMBER$) + 4
+	Dim LOCALCODE$[10],PHONEOUT$[MAXLEN]
+	LOCALCODE$ = "LOCALCODE"
+	System 28,LOCALCODE$
+	PHONEOUT$ = ""
+	For X = 1 To Len(PHONENUMBER$)
+	  If PHONENUMBER$[X,X] >= "0" And PHONENUMBER$[X,X] <= "9"
+		PHONEOUT$ = PHONEOUT$ + PHONENUMBER$[X,X]
+	  End If 
+	Next X
+	If PHONEOUT$[1,1] = "1" Let PHONEOUT$ = PHONEOUT$[2]
+	If LOCALCODE$ And PHONEOUT$[1,Len(LOCALCODE$)] = LOCALCODE$
+	  PHONEOUT$ = PHONEOUT$[Len(LOCALCODE$) + 1]
+	End If 
+	PHONENUMBER$ = PHONEOUT$
+	If Len(PHONEOUT$) >= 10
+	  PHONENUMBER$ = "1" + PHONEOUT$
+	End If 
+End Sub
+! ---------------------------------------------------------
+
+External Function GetParameter$(paramName$)
+	dim retval$[1024],tmp$[100]
+	dim 3%
+	retval$ = ""
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	if erpCron ! running from cron
+		retval$ = GetSessionParameter$(paramName$)
+	else
+		call dxget(paramName$,retval$)
+
+	end if
+end function retval$
+
+External Sub ERPCronSuccess()
+	dim tmp$[100]
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	if erpCron PRINT ">>ERP_FROM_CRON SUCCESS<<"
+end sub

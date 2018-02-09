@@ -1,0 +1,5767 @@
+!"SFCR" === description  cash receipts entry
+!
+!loadsave -w -n 100,10 -o prog/dxport/sfcr.dl4 src/sfcr.src
+!"SFCR" 1.0 05/07/07
+!
+! custom_customer$
+! Omaha - task#12643/cct#146696 cust#3910&1919 desc disp po#/order#
+! Omaha - task#12643/ cct172894 -cust terms=4(net 30), don't disp discount
+include "src/copyright.inc"
+!
+include "src/inc/filecust.inc" ! customer
+include "src/inc/filesaract.inc" ! a/r file
+include "src/inc/filecashfle.inc" ! cash receipts
+include "src/inc/filecashother.inc" ! other discounts
+include "src/inc/filecashacc.inc" ! bank
+include "src/inc/filecashrecf.inc" ! misc a/r cash
+include "src/inc/filearproof.inc" ! a/r cross check
+include "src/inc/fileartermcode.inc" ! a/r term codes
+include "src/inc/fileinvh.inc" ! invoice history
+include "src/inc/filesaracth.inc" ! a/r invoice history
+include "src/inc/filesfcashfle.inc" ! temp cash receipts
+Include "src/inc/fileprtdefault.inc" ! port defaults 
+Include "src/inc/filedivifle.inc" ! division file
+Include "src/inc/filewhinfoz.inc" ! warehouse file
+Include "src/inc/fileglglmz.inc" ! gl master file
+Include "src/inc/filearup.inc" ! artemp file
+Include "src/inc/filesorddep.inc" ! deposit file
+include "src/inc/fileordhead.inc" ! order header, order shipto, order rot
+Include "src/inc/filecustccid.inc" ! customer credit card id file
+include "src/inc/filecustnotes.inc" ! customer notes file
+! for multicurrency
+include "src/inc/filecurrency.inc" ! currency exchange file
+!
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Sub CustInfoHeading,CustInfoRecord,ARInvListHeading
+!
+External Lib "libdroplist.lib"
+Declare External sub OtherCashDropList,JECashDropList,BankDropList,CustDropList
+!
+External Lib "liblist.lib"
+Declare External Sub ARInvList, ARInvListCurr
+!
+External Lib "libtable.lib"
+Declare External Function GetARTypeDesc$
+!
+External Lib "libgeneralcode.lib"
+Declare External Function ConvertDate
+!
+External Lib "ubsfunc.dl4"
+Declare External Sub GetPortDefault
+Declare External Function OpenFile,PDate$,getuidrec,getuidinfo$,formatdate2$
+Declare External Sub ArBuck,UserCntrl,LogAccess
+!
+External Lib "getordtypd.lib"
+Declare External Function Getordtypd$
+!
+External Lib "ubscrload.dl4" 
+Declare External Sub Crload
+
+External Lib "getdivname.lib"          
+Declare External Function getdivname$
+
+ External Lib "getartermd.lib"        
+ Declare External Function getartermd$
+!
+Declare Intrinsic Sub DateToJulian,JulianToDate,VerifyDate,CheckNumber,FindF
+
+Declare Intrinsic Function FindChannel
+!
+Declare sub OpenFiles,TotalOtherDisc
+Declare sub VerifyDocument,VerifyCustomer,CustomerDropList,ARInvoiceList
+Declare sub GetPostVariables,CreateTempCash,DeleteTempCash
+Declare sub CustInfoHead,GETPOSTCUST
+Declare sub CustArAge,VerifyBank,ExitBank,BankCRList,DelCREnTry,UpdArproof,DelArTran
+Declare sub GetCustDArTrans,calctermdate,GetDirARAGE,DelDirAr,UpDirArproof
+Declare Sub GetdateArTrans,submitdateArTrans,ardateaud,getpaydesc, submitpaydesc
+Declare Sub OrderList, PostDeposit,GetDeposit,DelDeposit
+declare Sub ArTransList,custheading,getbanktotals,prntBANKTOTALS
+Declare Sub GetCustCCID, SubmitCustCCID
+Declare Sub CurrConvUP,CurrConvDown
+Declare Function GetBank,VerifyBankAndDate,ChkInUse
+!
+!--------------------------------------------------------------------
+!
+!
+! ** main procedure
+!
+!
+try
+  !
+  dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! error handling variables
+  dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[500]
+  dim Section$[30],Field$[10,30]
+  dim mergedir$[60],action$[20],action1$[20],options$[20]
+  dim Company$[2],UserID$[8],a2$[50]
+  dim usr$[40],3%,uidrec[1],IUDesc$[128]
+  Dim arbuck$[5,10],artermd$[16],divname$[24],3%,arbucket[5]
+  dim custom_customer$[30]
+  !
+  dim 1%,ch_curr,keycurr$[50],3%,rec_curr
+   Dim 1%,cnvcu[10],3%,cnvca[10]
+  dim 1%,portnum,age,type,ardir,a5[10]
+  dim 1%,tmp1,intCo,intSls,CTLC,BankRec,errflag,WH,Div,CRFlg
+  dim 2%,tmp2,maxcnt \ maxcnt=50 ! max records in arrays
+  dim 3%,tmp3,JDepositDate,DocNo
+  dim 3%,rec_uac
+  dim 3%,t5[6],aramt,payamt,balamt
+  
+  dim keycust$[30],keytmp$[30],3%,billtopost,ordpost,rec_cust
+  !
+  dim OtherCashList$[maxcnt,100],JECashList$[maxcnt,100],BankList$[maxcnt,100]
+  dim List$[maxcnt,500]
+  dim BankID$[3],DepositDate$[10],logfname$[50],P9$[50],P60$[50],P61$[256]
+  dim CustNo$[6],SearKey$[64],BegKey$[64],mode$[3]
+  dim Desc$[50],PayFlag$[1],RecType$[1],DocNo$[10],ARInvKey$[64],InvType$[3]
+  dim tmp$[200],tmp1$[200],WebStr$[500],Message$[200]
+  dim keycr$[50],keydep$[50],keyar$[50]
+  dim keyar1$[50],keyar2$[50],keyar3$[50],keyrod$[50],keyar4$[50],keyar5$[50]
+  dim M2$[2],Mamt$[11],custkey$[6], ARDiscDate$[10],arduedate$[10]
+  dim 3%,rec_tmp,rec_ar,rec_rod     
+  dim blank$[200] \ blank$=" ",blank$
+  dim M3$[3] \ M3$="###"
+  dim M6$[6] \ M6$="######"
+  dim M10$[10] \ M10$="##########"
+ 
+    M2$="##"  \ Mamt$="-------#.##"
+  !
+  dim Cust. as cust ! customer
+  dim ARI. as saract ! a/r file
+  dim CR. as cashfle ! cash receipts
+  dim CO. as cashother ! other discounts
+  dim Bank. as cashacc ! bank
+  dim MC. as cashrecf ! misc a/r cash
+  dim ARCC. as arproof ! a/r cross check
+  dim Term. as artermcode ! a/r term codes
+  dim InvHist. as invh ! invoice history
+  dim ARIH. as saracth ! a/r invoice history
+  dim SFCR. as sfcashfle ! temp cash receipts
+  dim SFCRTmp. as sfcashfle
+  Dim prt. As prtdefault ! port defaults
+  dim div. as divifle ! division
+  Dim wh. As whinfo ! warehouse file!
+  dim glm. as glglm ! gl master file
+  dim dar. as arup ! direct ar filedim roh. as roh ! order header
+  dim ros. as ros ! order ship to file
+  dim rot. as rot ! order total file
+  dim roh. as roh ! order header file
+  dim rod. as sorddep ! order deposit lines
+  dim ccid. as custccid ! customer credit card file
+  dim curr. as currency ! currency file
+  dim cnotes. As custnotes
+  dim 3%
+  Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+  Def FNS(H) = Int(Abs(H) * 100) * .01 * Sgn(H) ! rounding to nearest penny
+  call dxopen()
+  Call dxget("S_USER.AppID",tmp$) !company #               
+                                                         
+  Try Let intCo = Val(tmp$) Else Let intCo = 1 !company #  
+  ctlc = OpenFile(9999,intCo) \ If ctlc = -1 Error 42 !control   ! openning with read/write
+  call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$)
+  call LogAccess(e$)
+  Call GetPortDefault(e$,intco,UserID$,portnum,rec_uac,prt.)
+  !
+  call dxget("s_view.mergedir",mergedir$)
+  let logfname$="/tmp/crlog"+trim$(userid$)+".txt!"
+  !
+  call OpenFiles()
+  !
+  Mat Read #ctlc,19,50;P9$; ! sys flags
+  Mat Read #ctlc,60,50;p60$; ! more flags
+  Mat Read #ctlc,61,0;P61$; ! rest of flags
+  Mat read #ctlc,115,60;custom_customer$;
+  Custom_customer$=UCase$(Trim$(custom_customer$))
+  Call UserCntrl(USERID$,A2$,A5[],status,intCo)
+  select case action$
+    case "INPUT" ! initial screen setup  doc = CR_001_001.Input 
+	  !
+      call OtherCashDropList(e$,OtherCashList$[],bsdel$,esdel$,fdel$,maxcnt,COChan)
+      call AddToStr(e$,rstr$,OtherCashList$[])
+      !
+      call JECashDropList(e$,JECashList$[],bsdel$,esdel$,fdel$,maxcnt,MCChan)
+      call AddToStr(e$,rstr$,JECashList$[])
+      !
+	  call BankDropList(e$,List$[],bsdel$,esdel$,fdel$,maxcnt,BankChan)
+	  call AddToStr(e$,rstr$,List$[])
+	  !
+      clear list$[]
+      list$[0]=bsdel$,"BANKDEFAULT",FDEL$
+      List$[1] = "BANKID",fdel$
+      LET TMP3=prt.crbanknum 
+      if tmp3<=0 let tmp3=1
+      if tmp3>99 let tmp3=1
+      webstr$ =(tmp3 using "###"),fdel$  
+	  !clear bank.
+	  !clear curr.
+	  !if p61$[136,136]="Y" 
+	  !	let bankrec=tmp3
+	  !Read record #BankChan,BankRec;Bank.;
+		! if bank.currid<>0
+		!	ch_curr=findchannel()
+		!	tmp$="2/CURRENCY"+str$(Intco)
+		!	ROpen #ch_curr,tmp$
+		!	let keycurr$=bank.currid using "####"
+		!	search #ch_curr,2,1;keycurr$,rec_curr,e
+		!	if e<>0
+		!		let curr.desc$="Currency ID is not on File "
+		!	else
+		!		read record #ch_curr,rec_curr;curr.;
+		!	endif
+		!	try
+		!		close #ch_curr
+		!	else
+		!		rem
+		!	end try
+	    !endif
+	  !else
+		!webstr$=webstr$+"",fdel$
+		!webstr$=websrt$+"",fdel$
+		!		webstr$=webstr$+rtrim$(curr.desc$)+fdel$
+      List$[2] = webstr$ 
+      list$[3]=esdel$
+       call AddToStr(e$,rstr$,List$[])
+      ! CRBankNum
+	  ! if tiebacks to commissions are active, disable certain fields in "header" of
+	  ! cash receipts
+	  clear list$[]
+	  list$[0]=bsdel$,"DISCOUNTFLAGS",fdel$
+	  list$[1]="ARDISC",fdel$,"OTHERDISC",fdel$,"DEPOSITFLAG",fdel$,"MULTICURRENCY",fdel$
+	  if p61$[93,93] = "Y"
+		list$[2] = "Y",fdel$
+	  else
+		list$[2] = "N",fdel$
+	  end if
+	  if p61$[92,92] = "Y"
+		list$[2]=list$[2]+"Y"+fdel$
+	  else
+		list$[2]=list$[2]+"N"+fdel$
+	  end if
+	  let tmp$="N"
+	  if p61$[94,94]="Y" let tmp$="Y"
+	  list$[2]=list$[2]+tmp$+fdel$
+	  let tmp$="N"
+	  if p61$[136,136]="Y" let tmp$="Y"
+	  list$[2]=list$[2]+tmp$+fdel$
+	  list$[3]=esdel$
+	  call AddToStr(e$,rstr$,list$[])
+	  call SetOutput(e$,rstr$)
+      !
+    case "GETBANK" ! bank selected   doc = CR_001_002
+		dim 1%,armonth,2%,crmonth,3%
+      !
+      call dxget ("bankid",BankID$)
+      call dxget ("depositdate",DepositDate$)
+	  
+	  !
+	  if action1$="ACCEPT"
+		if rtrim$(depositdate$)=""
+			let returnstatus=0
+			let message$="No Deposit Date Submitted"
+			goto endgetbank:
+		endif
+		read #ctlc,0,120;armonth;
+		read #ctlc,52,32;crmonth;
+		if armonth=crmonth
+			let returnstatus=0
+			let message$="Cash Receipts Has Been Accepted For The Month "
+			goto endgetbank:
+		endif
+	    !
+        UpdStatus=VerifyBankAndDate(BankID$,DepositDate$,WebStr$,Message$) ! get bank & deposit date
+	    !
+		if UpdStatus=0 ! bank & deposit date OK
+		  Bank.InprocessFlag=1 ! bank in use
+          ! --- write record #BankChan,BankRec;Bank.;
+		   write record #BankChan,BankRec;Bank.; !
+          call dxset("u_crbankid",str$(BankRec))
+          call dxset("u_crdepositdate",str$(JDepositDate)) ! julian
+		  !
+		  ! .net, status section
+		  ReturnStatus=1 ! OK
+		  Message$="OK"
+        else
+		  ReturnStatus=0 ! error
+        endif
+	  endif
+	  !
+	  If action1$="CANCEL"
+	    !
+        BankRec=GetBank(BankID$) ! get bank record
+		if BankID$="" call dxget ("u_crbankid",BankID$)
+		if BankRec>=0 
+		  Bank.InprocessFlag=0 ! free bank in use
+		  write record #BankChan,BankRec;Bank.;
+		  !
+          call dxset("u_crbankid","")
+          call dxset("u_crdepositdate","")
+		  !
+		  ! .net, status section
+		  ReturnStatus=1 ! OK
+		  Message$="OK"
+        else
+		  ReturnStatus=0 ! error
+		  Message$="Error canceling, can't find Bank id ",BankRec
+		endif
+	  endif
+      !
+	  endgetbank: ! end getbankcall
+	  goto bypasscurr: 
+	  clear list$[]
+	  List$[0] = bsdel$,"Currency",fdel$                    
+	  WebStr$ = "CurrencyId",fdel$                                     
+	  WebStr$ = WebStr$,"CurrencyName",fdel$              
+	  List$[1] = WebStr$    
+	  let row=2
+	  if p61$[136,136]="Y"
+			WebStr$ = str$(bank.currid),fdel$   
+			if bank.currid<>0
+				ch_curr=findchannel()
+				tmp$="2/CURRENCY"+str$(Intco)
+				ROpen #ch_curr,tmp$
+				let keycurr$=bank.currid using "####"
+				search #ch_curr,2,1;keycurr$,rec_curr,e
+				if e<>0
+					let curr.desc$="Currency ID is not on File "
+				else
+					read record #ch_curr,rec_curr;curr.;
+				endif
+				try
+					close #ch_curr
+				else
+					rem
+				end try
+			else
+				curr.desc$=""
+			endif
+			webstr$=webstr$+rtrim$(curr.desc$)+fdel$
+			List$[row] = WebStr$                                 
+			row = row + 1                                        
+	  endif
+	  let list$[row]=esdel$
+	  call AddToStr(e$,rstr$,List$[])
+	  bypasscurr: ! 
+      call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+  	  !
+	  call SetOutput(e$,rstr$)
+	  !
+	case "GETCUSTOMER" ! create A/R invoice list, customer selected    doc: CR_001_003.GETCUSTOMER
+	  !
+	  call dxget ("searchkey",SearKey$)
+	  SearKey$=ucase$(SearKey$)
+	  !
+	  isnumber=1 ! 1 = numeric   0 = alpha
+	  Try call CheckNumber(SearKey$) else isnumber=0
+	  !
+	  ! search a/r invoice, if found changes action1$ to VERIFYCUSTOMER
+	  if action1$="VERIFYDOCUMENT" call VerifyDocument() 
+	  !
+	  ! search customer, if found changes action1$ to CUSTOMERDROPLIST or ARLIST
+	  if action1$="VERIFYCUSTOMER" call VerifyCustomer() 
+	  !
+	  ! create customer drop down list
+	  if action1$="CUSTOMERDROPLIST" call CustomerDropList()
+	  !
+	  if action1$="ARLIST" call ARInvoiceList()
+	  !
+	  call SetOutput(e$,rstr$)
+	  !
+	case "GETPOSTCUST"
+		call GETPOSTCUST()
+		call SetOutput(e$,rstr$)
+
+    case "POSTJE" ! post journal entry
+	  !
+	  RecType$="J"
+	  Try
+		 Call dxsave(0,logfname$) !\ ! Stop 
+		 !Call dxsave(0,"/x1/xslspro/md.txt!") !\ ! Stop 
+	  else
+		! did not create log file
+	  End Try
+	  returnstatus=1
+	  message$="OK"
+	  call GetPostVariables(RecType$)
+	  if returnstatus<>0
+	  call CreateTempCash(RecType$)
+	  endif
+      ! stop
+	  !
+	  ! --- update papermaster cash receipts
+	  !
+	  if returnstatus<>0
+		Call crload ( userid$,rectype$,sfcr.doc$,returnstatus,message$)
+	  endif
+          call DeleteTempCash()
+	  !
+	  ! .net, status section
+	 ! ReturnStatus=1! OK
+	  !Message$="OK"
+      call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  !
+	  call SetOutPut(e$,rstr$)
+	  !
+    case "POSTADJ" ! post adjustment
+	  !
+	  RecType$="A"
+	  Try
+		 Call dxsave(0,logfname$)
+		 ! Stop
+	  Else
+		! did not create log file
+	  End Try
+	  returnstatus=1
+	  message$="OK"
+	  call GetPostVariables(RecType$)
+	  if returnstatus<>0
+		call CreateTempCash(RecType$)
+	  endif
+	  !
+	  ! --- update papermaster cash receipts
+	  !
+	  if returnstatus<>0
+		Call crload ( userid$,rectype$,sfcr.doc$,returnstatus,message$)
+	  endif
+          call DeleteTempCash()
+	  !
+	  ! .net, status section
+	 ! ReturnStatus=1 ! OK
+	 ! Message$="OK"
+      call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  !
+	  call SetOutPut(e$,rstr$)
+	
+	  
+    Case "CUSTARAGE" ! customer a/r age bucket
+	let currid=0
+	if p61$[136,136]="Y"
+		Try
+			CNC = OpenFile(-720,intCo) \ If CNC = -1 Error 42 !custnotes
+			let searkey$=custid using "######"
+			CNRec = filegetcustnotes(e$,CNC,"=",1,searkey$,cnotes.)
+			If CNRec <= 0 Clear cnotes. 
+			try
+				close #cnc
+			else
+				rem
+			end try
+		else
+			rem
+		end try
+		let currid=cnotes.currid
+		If cnotes.currid<0 or cnotes.currid>7999 let currid=0
+	endif	
+	Call CustArAge(currid)
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	  !
+	  call SetOutPut(e$,rstr$)
+case "CUSTARLIST" ! create A/R invoice list, customer selected
+	let returnstatus=1
+	let message$="OK"
+	call dxget ("searchkey",SearKey$)
+	SearKey$=ucase$(SearKey$)
+	tmp3=SearKey$ \ SearKey$=tmp3 using M6$
+	 mode$="="
+	 dirno=1
+	 CustRec=FileGetCust(e$,CustChan,mode$,dirno,SearKey$,cust.)
+	 if CustRec>=0 ! record found
+		let tmp$=cust.CustomerCode using "######"
+		call dxset("U_CRCUST",trim$(tmp$))
+		! action1$="ARLIST"
+		SearKey$=cust.CustomerCode using M6$ ! bill to customer                                                                         
+	  else
+		ReturnStatus=0 ! error not found
+		Message$="Customer ",str$(tmp3)," not found"
+		goto endcustarlist:
+	  endif
+	  endcustarlist: !
+	  ardir=2 ! directr
+	  call artranslist() ! section for
+	  call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  call SetOutPut(e$,rstr$)
+
+    !
+	  ! ****** start Droplist *******
+    case "DROPLIST" !   send droplists 
+          if action1$="CASHLISTS"
+		call FileDropListDivifle(e$,List$[],100,ch_div) ! DIVISION LIST 
+		call AddToStr(e$,rstr$,List$[])
+		call FileDropListWhinfoz(e$,List$[],100,ch_wh)
+		call AddToStr(e$,rstr$,List$[])
+	   endif
+	  !
+	  if action1$="WHINFO"
+		 call FileDropListWhinfoz(e$,List$[],100,ch_wh)
+		 call AddToStr(e$,rstr$,List$[])
+	  endif
+	  
+	  if action1$="DIVIFLE"
+		call FileDropListDivifle(e$,List$[],100,ch_div)
+		call AddToStr(e$,rstr$,List$[])
+	  endif
+	  If action1$="BANKACC"
+		call BankDropList(e$,List$[],bsdel$,esdel$,fdel$,maxcnt,BankChan)
+		call AddToStr(e$,rstr$,List$[])
+	 Endif
+	
+	If Action1$ = "ARTRANTYPE"
+		Clear list$[]
+		List$[0] = bsdel$,"ARTypeDroplist",fdel$                    
+		WebStr$ = "Id",fdel$                                     
+		WebStr$ = WebStr$,"Description",fdel$
+		list$[1]=webstr$
+		list$[2]="1",fdel$,"Invoice",fdel$
+		list$[3]="2",fdel$,"Service Charge",fdel$
+		List$[4]="3",Fdel$,"Returned Check",fdel$
+		list$[5]="4",Fdel$,"Debit Adjustment",fdel$
+		list$[6]="5",Fdel$,"Late Charge",fdel$
+		list$[7]="6",fdel$,"Credit Memo",fdel$
+		List$[8]="7",fdel$,"Unapplied Credit",fdel$
+		list$[9]="8",fdel$,"Credit Adjustment",fdel$
+		list$[10]="9",fdel$,"Payment",fdel$
+		LIST$[11]="0",fdel$,"None",fdel$
+		list$[12]=esdel$
+		Call AddToStr(e$,rstr$,List$[])                        
+	endif
+ 
+	  call SetOutput(e$,rstr$)
+    ! -----   end droplist action ------
+
+    case "POSTRC" ! returned check
+	  !
+	  RecType$="R"
+	  Try
+		 Call dxsave(0,logfname$)
+		 ! Stop 
+	   Else
+		! did not create log file
+	  End Try
+	  returnstatus=1
+	  message$="OK"
+          call GetPostVariables(RecType$)
+	  if returnstatus<>0
+		call CreateTempCash(RecType$)
+	  endif
+	  !
+	  ! --- update papermaster cash receipts
+	  if returnstatus<>0
+		Call crload ( userid$,rectype$,sfcr.doc$,returnstatus,message$)  !
+	  endif
+	  call DeleteTempCash()
+	  !
+	  ! .net, status section
+	  !ReturnStatus=1 ! OK
+	 ! Message$="OK"
+      call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  !
+	  call SetOutPut(e$,rstr$)
+	  !
+	case "POSTAR"
+     	!!! cut out section !!!!
+	  !
+	  RecType$="I" ! a/r invoice payment
+	  Try
+		 Call dxsave(0,logfname$)
+	   Else
+		! did not create log file
+	  End Try
+	   returnstatus=1
+	  message$="OK"
+	call dxget("totalcount",tmp$)
+	if rtrim$(tmp$)="0" ! unapplied
+		arcnt=0
+		RecType$="U" ! unapplied
+		call GetPostVariables(RecType$)
+		if returnstatus<>0
+			call CreateTempCash(RecType$)
+		else
+			goto EndPostAr: ! error occurred
+		endif
+	else
+		! applied
+		ctr=tmp$
+		for arcnt = 1 to ctr
+			call GetPostVariables(RecType$)
+			
+			if returnstatus<>0
+				call CreateTempCash(RecType$)
+			endif
+		next arcnt
+	endif
+
+	  !
+	  ! --- update papermaster cash receipts
+	  if returnstatus<>0
+		Call crload ( userid$,rectype$,sfcr.doc$,returnstatus,message$)
+	  endif
+	  
+	EndPostAr: ! delete keys for user! End Post Ar  
+	BegKey$=SFCR.UserID$! ,SFCR.RecType$
+	let searKey$=begkey$
+	if len(begkey$)>1
+		do
+			search #sfcrchan,3,1;searkey$,recno,e
+			if e<>0 exit do
+			if searkey$[1,len(begkey$)]<>begkey$ exit do
+			search #sfcrchan,5,1;searkey$,recno,e
+			let e=3\search #sfcrchan,1,0;searkey$,recno,e
+			!mode$="d" ! delete
+			!UpdStatus=fileupdatesfcashfle(e$,SFCRChan,mode$,SFCRRecNo,SFCR.) ! call deletetempcash()
+		loop
+	endif
+
+	
+	 
+	  !
+	  ! .net, status section
+	  ! ReturnStatus=1 ! OK
+	  ! Message$="OK"
+      call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  !
+	  call SetOutPut(e$,rstr$)
+
+       CASE "DELETECR"
+		returnstatus=1
+		Message$="OK"
+		If Action1$="BANKCRLIST"
+			Call bankcrlist()
+		else
+			if ACTION1$="DELCRENTRY"
+				call DelCREntry()
+			else 
+				IF ACTION1$="VERIFYBANK" ! verify status of bank ! done
+					call verifybank()
+				else
+					if ACTION1$="EXITBANK" ! reset flags of bank
+						call exitbank()
+					else
+						let returnstatus=0
+						let message$="Invalid Action1 "+rtrim$(action1$)
+					endif
+				endif
+			endif
+		endif
+		!call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		!call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+	! cash recepts payment descript
+	 CASE "GETPAYDESC"
+		returnstatus=1
+		Message$="OK"
+		call getpaydesc()
+		!call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		!call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+
+	CASE "SUBMITPAYDESC"
+		returnstatus=1
+		message$="OK"
+		call submitpaydesc()
+		call SetOutput(e$,rstr$)
+	
+	CASE "GETBANKTOTALS"
+		returnstatus=1
+		message$="OK"
+		call getbanktotals()
+		call SetOutput(e$,rstr$)
+
+	CASE "GETORDERLIST"
+		returnstatus=1
+		Message$="OK"
+		call OrderList()
+		call SetOutPut(e$,rstr$)
+
+	CASE "POSTDEPOSIT"
+		returnstatus=1
+		Message$="OK"
+		call POSTDEPOSIT()
+		call SetOutPut(e$,rstr$)
+
+	CASE "GETDEPOSIT" ! Get Existing Deposits for an order
+		returnstatus=1
+		Message$="OK"
+		call GETDEPOSIT()
+		call SetOutPut(e$,rstr$)
+	
+	CASE "DELDEPOSIT" ! Get Existing Deposits for an order
+		returnstatus=1
+		Message$="OK"
+		call DELDEPOSIT()
+		call SetOutPut(e$,rstr$)
+	
+	
+	CASE "DIRECTAR"
+		dim xdate$[10]
+		dim 1%,darflag,2%,dardate,3%
+		If ucase$(rtrim$(action1$))="STARTDIRAR"
+			
+			returnstatus=1
+			let message$="OK"
+			call FileDropListArtermcode(e$,List$[],100,termchan)
+			call AddToStr(e$,rstr$,List$[])
+			call FileDropListWhinfoz(e$,List$[],100,ch_wh)
+			call AddToStr(e$,rstr$,List$[])
+			call FileDropListDivifle(e$,List$[],100,ch_div)
+			call AddToStr(e$,rstr$,List$[])
+			! gl flag
+			clear list$[]
+			List$[0] = bsdel$,"GLMDroplist",fdel$                    
+			WebStr$ = "Id",fdel$                                     
+			WebStr$ = WebStr$,"Description",fdel$              
+			List$[1] = WebStr$                                       
+			If p9$[17,17]="Y" ! 
+				Dim keyglm$[12]
+				ch_glm = OpenFile(-176,intco) \ If ch_glm = -1 Error 42 ! GLM 
+				row = 2                                                
+				tmpcnt = maxcnt ! 2000                                 
+				keyglm$ = " ",keyglm$                                  
+				Do                                                     
+					Search #ch_glm,3,1;keyglm$,glmrec,e                  
+					If e > 0 Exit Do                                     
+					Read Record #ch_glm,glmrec;glm.;                     
+					If glm.rectype$[1,1] = "0" ! normal posting account  
+						WebStr$ = keyglm$,fdel$                            
+						WebStr$ = WebStr$,RTrim$(glm.Desc$),fdel$ 
+						List$[row] = WebStr$                                 
+						row = row + 1                                        
+						If row > tmpcnt Let tmpcnt = expandarray(e$,List$[]) 
+					End If 
+				Loop
+			endif
+			Call AddToStr(e$,rstr$,List$[])                        
+			Call AddToStr(e$,rstr$,esdel$) ! end of section 
+			! DROPlist of transaction type
+			Clear list$[]
+			List$[0] = bsdel$,"ARTypeDroplist",fdel$                    
+			WebStr$ = "Id",fdel$                                     
+			WebStr$ = WebStr$,"Description",fdel$
+			list$[1]=webstr$
+			list$[2]="1",fdel$,"Invoice",fdel$
+			list$[3]="2",fdel$,"Service Charge",fdel$
+			List$[4]="3",Fdel$,"Returned Check",fdel$
+			list$[5]="4",Fdel$,"Debit Adjustment",fdel$
+			list$[6]="5",Fdel$,"Late Charge",fdel$
+			list$[7]="6",fdel$,"Credit Memo",fdel$
+			List$[8]="7",fdel$,"Unapplied Credit",fdel$
+			list$[9]="8",fdel$,"Credit Adjustment",fdel$
+			Call AddToStr(e$,rstr$,List$[])                        
+			Call AddToStr(e$,rstr$,esdel$) ! end of section 
+			clear list$[]
+			List$[0] = bsdel$,"DirectARFlag",fdel$                    
+			WebStr$ = "GLFlag",fdel$                                     
+			WebStr$ = WebStr$,"ARDate",fdel$
+			WebStr$ = WebStr$,"MULTICURRENCY",fdel$
+			list$[1]=webstr$
+			let tmp$=p9$[17,17]
+			if p9$[17,17]="M" let tmp$="N" ! maintenance no - no gl used
+			webstr$=tmp$,fdel$
+			read #ctlc,0,108;dardate;
+			If dardate                                   
+				xdate$ = pdate$(dardate)                     
+			  Else                                               
+				xdate$ = " ",xdate$                              
+			End If                                             
+			WebStr$ = WebStr$,RTrim$(xdate$),FDEL$ ! current ar date 
+			let tmp$="N"\if p61$[136,136]="Y" let tmp$="Y"
+			webstr$=webstr$,tmp$,fdel$
+			list$[2]=webstr$
+			Call AddToStr(e$,rstr$,List$[])                        
+			Call AddToStr(e$,rstr$,esdel$) ! end of section 
+			!  status/error section 
+			READ #ctlc,20,4;darflag
+			if darflag<=1
+				let darflag=1
+				write #ctlc,20,4;darflag;
+			else
+				let returnstatus=0
+				message$="Direct A/R in Process Elsewhere"                            
+            
+				IF darflag=2 let message$="Direct A/R Journal in Process"
+				if darflag=3 let message$="Direct A/R Journal Has been Accepted"
+			endif
+			Call CreateNetStatus(e$,returnstatus,message$,WebStr$) 
+			Call AddToStr(e$,rstr$,WebStr$)                        
+		endif ! action1$=STARTDIRAR
+		IF ucase$(rtrim$(action1$))="GETCUST"
+			returnstatus=1
+			message$="OK"
+			Call Dxget("CustId",tmp$)
+			tmp3=tmp$
+			custid=tmp3
+			let searkey$=tmp3 using "######"
+			mode$="="
+			dirno=1
+			CustRec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+			if custrec<0
+				ReturnStatus=0 ! error not found
+				Message$="Customer ",trim$(searkey$)," not found"
+			Endif
+			clear list$[]
+			List$[0] = bsdel$,"CustInfo",fdel$                    
+			WebStr$ = "CustId",fdel$                                     
+			WebStr$ = WebStr$,"Name",fdel$
+			Webstr$ = webstr$,"Addr1",fdel$
+			Webstr$ = webstr$,"Addr2",fdel$
+			Webstr$ = webstr$,"Addr3",fdel$
+			Webstr$ = webstr$,"Term",fdel$
+			Webstr$ = webstr$,"Wh",fdel$
+			Webstr$ = webstr$,"Div",fdel$
+			Webstr$ = webstr$,"ARDate",fdel$
+			Webstr$ = webstr$,"TermDesc",fdel$
+			Webstr$ = webstr$,"WhName",fdel$
+			Webstr$ = webstr$,"DivName",fdel$
+			Webstr$ = Webstr$,"CurrencyId",fdel$
+			Webstr$ = Webstr$,"CurrencyName",fdel$
+			list$[1]=webstr$
+			if returnstatus=1
+				webstr$=str$(custid),fdel$
+				webstr$=webstr$+rtrim$(cust.name$),fdel$
+				webstr$=webstr$+rtrim$(cust.addr1$),fdel$
+				webstr$=webstr$+rtrim$(cust.addr2$),fdel$
+				let tmp$=""
+				let tmp$=rtrim$(cust.city$)
+				if rtrim$(tmp$)<>"" let tmp$=tmp$+", "
+				let tmp$=tmp$+rtrim$(cust.state$)+" "
+				let tmp$=tmp$+rtrim$(cust.zip4$)
+				let webstr$=webstr$+tmp$,fdel$
+				let webstr$=webstr$+str$(cust.terms),fdel$
+				!let tmp3=cust.defaultwhse! set to default warehouse
+				let tmp3=prt.wh
+				if tmp3<=0
+					let tmp3=cust.defaultwhse! set to default warehouse
+				endif
+				if tmp3<=0 let tmp3=1
+				let webstr$=webstr$+str$(tmp3),fdel$ ! warehouse
+				clear wh.
+				If tmp3 > 0                                      
+					 Read Record #ch_wh,(tmp3 - 1);wh.;             
+				End If                
+				let tmp3=cust.division
+				if tmp3<=0
+					let tmp3=prt.div! set to default division
+				endif
+				if tmp3<=0 let tmp3=1
+				let webstr$=webstr$+str$(tmp3),fdel$ ! division
+				
+				tmp$ = ""                                        
+				If tmp3 > 0                                      
+					 divname$ = getdivname$(ch_div,tmp3,IntCo)          
+				End If                        
+
+
+				read #ctlc,0,108;dardate;
+				If dardate                                   
+					xdate$ = pdate$(dardate)                     
+				 Else                                               
+					xdate$ = " ",xdate$                              
+				End If                                             
+				WebStr$ = WebStr$,RTrim$(xdate$),FDEL$ ! current ar date
+				artermd$ = ""                                       
+				If CUST.terms > 0 And CUST.terms <= 99              
+					artermd$ = getartermd$(TERMCHAN,CUST.terms,IntCo) 
+				End If
+				Webstr$=webstr$,rtrim$(artermd$),fdel$
+				WebStr$ = WebStr$ + RTrim$(wh.whname$) + fdel$ 
+				WebStr$ = WebStr$ + RTrim$(divname$) + fdel$ 
+				if p61$[136,136]<>"Y"
+					let cnotes.currid=0
+				else
+					clear cnotes.
+					Try
+						CNC = OpenFile(-720,intCo) \ If CNC = -1 Error 42 !custnotes
+						let searkey$=custid using "######"
+						CNRec = filegetcustnotes(e$,CNC,"=",1,searkey$,cnotes.)
+						If CNRec <= 0 Clear cnotes. 
+						try
+							close #cnc
+						else
+							rem
+						end try
+					else
+						rem
+					end try
+				endif
+				If cnotes.currid<0 or cnotes.currid>7999 let cnotes.currid=0
+				Webstr$=webstr$+str$(cnotes.currid),fdel$
+				let curr.desc$=""
+				if p61$[136,136]="Y" and cnotes.currid<>0
+					ch_curr=findchannel()
+					tmp$="2/CURRENCY"+str$(Intco)
+					ROpen #ch_curr,tmp$
+					let keycurr$=cnotes.currid using "####"
+					search #ch_curr,2,1;keycurr$,rec_curr,e
+					if e<>0
+						let curr.desc$="Currency ID is not on File "
+					else
+						read record #ch_curr,rec_curr;curr.;
+					endif
+					try
+						close #ch_curr
+					else
+						rem
+					end try
+				else
+					curr.desc$=""
+				endif
+				webstr$=webstr$+rtrim$(curr.desc$)+fdel$
+				let list$[2]=webstr$
+			endif
+			Call AddToStr(e$,rstr$,List$[])                        
+			Call AddToStr(e$,rstr$,esdel$) ! end of section 1- GETCUST
+			! AR BALANCE SECTION
+			if returnstatus=1
+				let currid=0
+				if p61$[136,136]="Y" let currid=cnotes.currid
+				call custarage(currid)
+			else
+				list$[0]=bsdel$,"CustArAge",fdel$
+				List$[1]="Bucket"+fdel$+"Dollars"+fdel$
+				Call AddToStr(e$,rstr$,List$[])                 
+				Call AddToStr(e$,rstr$,esdel$) ! end of section - cust age
+			endif
+			! direct a/r transactions for customer
+			call getcustdartrans(currid)
+			Call CreateNetStatus(e$,returnstatus,message$,WebStr$) 
+			Call AddToStr(e$,rstr$,WebStr$)      
+
+		Endif ! action1$=GETCUST
+		
+		If ucase$(rtrim$(action1$))="CALCTERMS"
+			Dim tmpdate$[20]
+			dim 3%,rec_term,jtmpdate,jardate,tmpdate,discdate,duedate,discamt
+			dim 3%,trandate
+			returnstatus=1
+			let message$="OK"
+			Call Dxget ("TERMS",tmp$)
+			let rec_term=tmp$
+			if rec_term<=0 or rec_term>99
+				let returnstatus=0
+				let message$="Invalid Terms Code"
+				goto endcalcterms:
+			endif
+			read record #termchan,rec_term,0;term.;
+			Call Dxget ("DATE",tmpdate$)
+			Call VerifyDate(tmpDate$,tmp$,errflag,1) ! returns in yyyymmdd
+			let trandate=tmp$[3,8]
+			If errflag = 0                                                        
+				Call DateToJulian(5,tmp$,tmp1$,errflag)                             
+				jtmpdate= tmp1$
+			endif
+			if errflag
+				let returnstatus=0
+				let message$="Invalid Date"
+				goto endcalcterms:
+
+			End If                                                                
+			Read #ctlc,0,108;dardate;
+			tmp$ = ardate Using "&&&&&&" ! yymmdd format                          
+			Call DateToJulian(1,tmp$,tmp1$,errflag) 
+			let jardate=tmp1$
+			Call Dxget("TYPE",tmp$)
+			let type=tmp$
+			let discdate=trandate
+			let duedate=trandate
+			let discamt=0
+			if type=1 or type=4 or type=6 !                     
+				if Term.DiscountDays<>99 and Term.DiscountDays<>0 ! cod or not days
+					let days=term.discountdays
+					let calcdate=trandate
+					call calctermdate(days,trandate,calcdate)
+					let discdate=calcdate
+				endif
+				if Term.TermsDueDays<>99 and Term.TermsDueDays<>0 ! cod or not due date
+					let days=term.TermsDueDays
+					let calcdate=trandate
+					call calctermdate(days,trandate,calcdate)
+					let duedate=calcdate
+				endif
+				Call Dxget ("AMOUNT",tmp$)
+				let tmp3=tmp$
+				if tmp3<>0 and term.Discount<>0
+					LET discamt=FNR((tmp3)*term.Discount/100)
+				endif
+			endif
+	                endcalcterms: ! 
+			clear list$[]
+			list$[0]=bsdel$,"TermsCalc",fdel$
+			List$[1]="DiscDate"+fdel$+"DiscAmt"+fdel$+"DueDate"+fdel$
+			if returnstatus=1
+				let xdate$=""
+				if discdate<>0
+					let xdate$=pdate$(discdate)
+				endif
+				webstr$=xdate$+fdel$
+				let webstr$=webstr$+(discamt using "#########.##")+fdel$
+				let xdate$=""
+				if duedate<>0
+					let xdate$=pdate$(duedate)
+				endif
+				webstr$=webstr$+XDATE$+fdel$
+				list$[2]=webstr$
+			endif
+			Call AddToStr(e$,rstr$,List$[])                 
+			Call AddToStr(e$,rstr$,esdel$) ! end of section - cust age
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+	  	endif ! action1$=calcterms
+
+		If ucase$(rtrim$(action1$))="GETDIRENTRY"
+			dim keyar$[50]
+			Dim 2%,endrec 
+			dim 3%,rec_dar,rec_tmp,duedate,trandate
+			let returnstatus=1
+			let message$="OK"
+			ch_dar = OpenFile(1520,intco) \ If ch_dar = -1 Error 42 ! direct ar file 
+			Call Dxget("ENTRYNUM",tmp$)
+			rec_dar=tmp$
+			IF rec_dar<=0
+				let returnstatus=0
+				let message$="Invalid Entry Number "
+				goto endgetdirent:
+			endif
+			if rec_dar>0
+				Try
+					Read #ch_dar,0;endrec;  
+				else
+					let endrec=0
+					write #ch_dar,0;endrec;
+				end try
+				If rec_dar > endrec
+					returnstatus=0
+					Message$="Invalid Entry Number "
+					goto endgetdirent:
+				endif
+			endif
+			read record #ch_dar,rec_dar,0;dar.;
+			if not(dar.CustomerCode)
+				returnstatus=0
+				Message$="Entry Number "+str$(rec_dar)+" has already been deleted."
+				goto endgetdirent: ! endsubmitdar:
+			endif
+			endgetdirent: ! delete this
+			list$[0]=bsdel$,"DirArEntry",fdel$
+			webstr$=""
+			webstr$="Trans",fdel$
+			webstr$=webstr$+"Date",fdel$
+			webstr$=webstr$+"Type",fdel$
+			webstr$=webstr$+"Amount",fdel$
+			webstr$=webstr$+"Terms",fdel$
+			webstr$=webstr$+"Description",fdel$
+			webstr$=webstr$+"Wh",fdel$
+			webstr$=webstr$+"Div",fdel$
+			webstr$=webstr$+"DiscDate",fdel$
+			webstr$=webstr$+"DueDate",fdel$
+			webstr$=webstr$+"DiscAmt",fdel$
+			webstr$=webstr$+"GLAcct",fdel$
+			Webstr$=webstr$+"EntryNum",fdel$
+			Webstr$=webstr$+"CustId",fdel$
+			list$[1]=webstr$
+			if returnstatus=1
+				webstr$=Str$(dar.ReferenceNo),fdel$
+				let xdate$=""
+				if dar.TranDate<>0
+					let xdate$=pdate$(dar.TranDate)
+				endif
+				webstr$=webstr$+xdate$,fdel$
+				let type=INT(FRA(dar.AgeTypeCount)*100) 
+				webstr$=webstr$+str$(type),fdel$
+				webstr$=webstr$+(dar.OrigAmt using "##########.##"),fdel$
+				webstr$=webstr$+str$(dar.Terms),fdel$
+				webstr$=webstr$+rtrim$(dar.EntryDescription$),fdel$
+				webstr$=webstr$+str$(dar.Whse),fdel$
+				webstr$=webstr$+str$(dar.Division),fdel$
+				let xdate$=""
+				if dar.DiscDateTerms<>0
+					let xdate$=pdate$(dar.DiscDateTerms)
+				endif
+				webstr$=webstr$+xdate$,fdel$
+				let xdate$=""
+				if dar.DueDate1<>0
+					let xdate$=pdate$(dar.DueDate1)
+				endif
+				webstr$=webstr$+xdate$,fdel$
+				webstr$=webstr$+(dar.TermsDisc),fdel$
+				if p9$[17,17]="Y" ! gl in on
+					webstr$=webstr$+str$(dar.glacct),fdel$
+				else
+					webstr$=webstr$+"",fdel$
+				endif
+				webstr$=webstr$+str$(rec_dar),fdel$
+				webstr$=webstr$+str$(dar.CustomerCode),fdel$
+			        list$[2]=webstr$
+			
+			endif ! returnstatus
+			Call AddToStr(e$,rstr$,List$[])                 
+			Call AddToStr(e$,rstr$,esdel$) ! end of section - cust age
+			
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+		Endif ! action1$=getdirentry
+		! end getdirentry
+
+		If ucase$(rtrim$(action1$))="SUBMITDIRAR"
+			dim keyar$[50]
+			Dim 2%,endrec 
+			dim 3%,rec_dar,rec_tmp,duedate,trandate
+			dim odar. as arup
+			dim cdar. as arup
+			clear odar.
+			let returnstatus=1
+			let message$="OK"
+			Call Dxget("CUSTID",tmp$)
+			tmp3=tmp$
+			custid=tmp3
+			let searkey$=tmp3 using "######"
+			mode$="="
+			dirno=1
+			CustRec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+			if custrec<0
+				ReturnStatus=0 ! error not found
+				Message$="Customer ",trim$(searkey$)," not found"
+				goto endsubmitdar:
+			Endif
+			let currid=0;currfact=0
+			if p61$[136,136]="Y"
+				Try
+					CNC = OpenFile(-720,intCo) \ If CNC = -1 Error 42 !custnotes
+					let searkey$=custid using "######"
+					CNRec = filegetcustnotes(e$,CNC,"=",1,searkey$,cnotes.)
+					If CNRec <= 0 Clear cnotes. 
+					let currid=cnotes.currid
+					If cnotes.currid<0 or cnotes.currid>7999 let currid=0
+					try
+						close #cnc
+					else
+						rem
+					end try
+					if cnotes.currid<>0
+						ch_curr=findchannel()
+						tmp$="2/CURRENCY"+str$(Intco)
+						ROpen #ch_curr,tmp$
+						let keycurr$=cnotes.currid using "####"
+						search #ch_curr,2,1;keycurr$,rec_curr,e
+						if not(e)
+							read record #ch_curr,rec_curr;curr.;
+							let currfact=curr.ExcRate
+						endif
+						try
+							close #ch_curr
+						else
+						rem
+						end try
+					else
+						let currfact=0
+					endif
+				else
+					rem
+				end try
+			endif	
+			ch_dar = OpenFile(1520,intco) \ If ch_dar = -1 Error 42 ! direct ar file 
+			Call Dxget("ENTRYNUM",tmp$)
+			rec_dar=tmp$
+			if rec_dar>0
+				try
+					Read #ch_dar,0;endrec;  
+				else
+					let endrec=0
+					write #ch_dar,0;endrec;
+				end try
+				If rec_dar > endrec
+					returnstatus=0
+					Message$="Invalid Entry Number "
+					goto endsubmitdar:
+				endif
+				read record #ch_dar,rec_dar,0;odar.;
+				if not(odar.CustomerCode)
+					returnstatus=0
+					Message$="Entry Number "+str$(rec_dar)+" has already been deleted."
+					goto endsubmitdar:
+				endif
+				if odar.CustomerCode<>Custid
+					returnstatus=0
+					Message$="Entry Number "+str$(rec_dar)+" belongs to customer "+str$(odar.customercode)
+					goto endsubmitdar:
+				endif
+				
+				Call Dxget ("DELENT",tmp$)
+				if ucase$(rtrim$(tmp$))="Y"
+					call deldirar(custrec,rec_dar) ! removes from cust ar age and from arproof
+					goto endsubmitdar:
+				endif
+			endif
+			clear dar.
+
+			Call Dxget("TRANS",tmp$)
+			let dar.ReferenceNo=tmp$
+			if dar.ReferenceNo<=0 or dar.ReferenceNo>99999999
+				let returnstatus=0
+				let message$="Invalid Transaction Number Submitted "
+				goto endsubmitdar:
+			endif
+			Call Dxget("TYPE",tmp$)
+			let type=tmp$
+			if type<1 or type>8
+				let returnstatus=0
+				let message$="Invalid Transaction Type Submitted "
+				goto endsubmitdar:
+			endif
+			! verify if in a/r file
+			let keyar$=" ",keyar$
+			let keyar$[1,6]=Custid using "######"
+			let keyar$[7,16]=dar.ReferenceNo using "##########"
+			let keyar$[17,17]=type using "#"
+			search #arichan,2,1;keyar$,rec_ar,e
+			if not(e)
+				let returnstatus=0
+				let message$="Transaction "+str$(dar.ReferenceNo)+" For Customer "+str$(custid)+" Already on File"
+				goto endsubmitdar:
+			endif
+			if p60$[3,3]="Y"! verify if in a/r history file
+				search #ARHistChan,2,1;keyar$,rec_ar,e
+				if not(e)
+					let returnstatus=0
+					let message$="Transaction "+str$(dar.ReferenceNo)+" For Customer "+str$(custid)+" Already in History File"
+					goto endsubmitdar:
+				endif
+			endif
+			! verify if already entered on another entry
+			try
+				Read #ch_dar,0;endrec;  
+			else
+				let endrec=0
+				write #ch_dat,0;endrec;
+			end try
+			If endrec > 0                                                 
+				For rec_tmp = 1 To endrec                                   
+					Read Record #ch_dar,rec_tmp,0;cdar.;                       
+					If cdar.CustomerCode = custid And dar.ReferenceNo = cdar.ReferenceNo and Rec_tmp<>Rec_dar
+						if type = Int(Fra(cdar.AgeTypeCount) * 100)
+							let returnstatus=0
+							let message$="Transaction "+str$(dar.ReferenceNo)+" For Customer "+str$(custid)+" Already on Entry "+str$(rec_tmp)
+							goto endsubmitdar:
+						endif
+					endif
+				next rec_tmp
+			endif
+			if p9$[17,17]="Y"
+				Call Dxget("GLACCT",tmp$)
+				let dar.glacct=tmp$
+				if not (dar.glacct)
+					let returnstatus=0
+					let message$="Invalid G/L Account Number Entered"
+					goto endsubmitdar:
+				endif
+			endif
+			Call Dxget("DATE",tmp$)      
+			xdate$ = formatdate2$(tmp$) ! from MM/DD/YYYY to yyyymmdd 
+			dar.TranDate = xdate$[3,8]
+			! convert to julian
+			xdate$=dar.TranDate using "&&&&&&"
+			Call DateToJulian(5,xdate$,xdate$,errflag)
+			if errflag
+				let returnstatus=0
+				let message$="Invalid Transaction Date Entered"
+				goto endsubmitdar:
+			endif
+			!let dar.TranDate=xdate$ ! save in julian format
+			Call Dxget("DISCDATE",tmp$)      
+			xdate$ = formatdate2$(tmp$) ! from MM/DD/YYYY to yyyymmdd 
+			dar.DiscDateTerms = xdate$[3,8]
+			! convert to julian
+			xdate$=dar.DiscDateTerms using "&&&&&&"
+			Call DateToJulian(5,xdate$,xdate$,errflag)
+			if errflag
+				let returnstatus=0
+				let message$="Invalid Discount Date Entered"
+				goto endsubmitdar:
+			endif
+			Call Dxget("DUEDATE",tmp$)      
+			xdate$ = formatdate2$(tmp$) ! from MM/DD/YYYY to yyyymmdd 
+			dar.DueDate1 = xdate$[3,8]
+			! convert to julian
+			xdate$=dar.DueDate1 using "&&&&&&"
+			Call DateToJulian(5,xdate$,xdate$,errflag)
+			if errflag
+				let returnstatus=0
+				let message$="Invalid Due Date Entered"
+				goto endsubmitdar:
+			endif
+			Call Dxget("TERMS",tmp$)
+			dar.Terms=tmp$
+			if dar.terms<1 or dar.terms>99
+				let returnstatus=0
+				let message$="Invalid Terms Entered "
+				goto endsubmitdar:
+			endif
+			Call Dxget("WH",tmp$)
+			LET TMP3=TMP$
+			if TMP3<1 or TMP3>99
+				let returnstatus=0
+				let message$="Invalid Warehouse Entered "
+				goto endsubmitdar:
+			endif
+			let dar.Whse=tmp$
+			Call Dxget("DIV",tmp$)
+			let tmp3=tmp$
+			if tmp3<1 or tmp3>99
+				let returnstatus=0
+				let message$="Invalid Division Entered"
+				goto endsubmitdar:
+			endif
+			let dar.division=tmp$
+			Call Dxget("AMOUNT",tmp$)
+			let dar.OrigAmt=tmp$
+			if fra(dar.OrigAmt*100)<>0
+				let returnstatus=0
+				let message$="Amount exceeds 2 decimals places"
+				goto endsubmitdar:
+			endif
+			
+				
+			Call DXget("DISCAMT",TMP$)
+			let dar.TermsDisc=tmp$
+			if fra(dar.TermsDisc*100)<>0
+				let returnstatus=0
+				let message$="Discount Amount exceeds 2 decimals places"
+				goto endsubmitdar:
+			endif
+			Call Dxget("DESCRIPTION",tmp$)
+			let dar.EntryDescription$=rtrim$(tmp$)+ "               "
+			if p61$[136,136]="Y" and currid<>0 and currfact<>0
+				let dar.currid=currid
+				let dar.currfact=currfact
+				let amount=dar.OrigAmt
+				call currconvdown(amount,currfact)
+				amount=fns(amount)
+				let dar.OrigAmt=amount
+				if dar.TermsDisc<>0
+					let amount=dar.TermsDisc
+					call currconvdown(amount,currfact)
+					amount=fns(amount)
+					let dar.TermsDisc=amount
+				endif
+			endif
+			let duedate=dar.duedate1
+			let trandate=dar.trandate
+			Call GetDirARAGE(age,type,custrec,duedate,trandate)
+			dar.AgeTypeCount=age+(Type/100)
+			! need type
+			let dar.customercode=custid
+			if rec_dar>0
+				call deldirar(custrec,rec_dar) ! removes from cust ar age and from arproof
+			else
+				Try
+					Read #ch_dar,0;endrec;
+				else
+					let endrec=0
+					write #ch_dar,0;endrec;
+				end try
+				if endrec<0 let endrec=0               
+				LET endrec=endrec+1                
+				IF endrec>(chf(ch_dar))
+					returnstatus=0
+					let message$="Entry File is Full. Please accept existing entries."
+					goto endsubmitdar:
+				endif
+				let rec_dar=endrec
+				Write #ch_dar,0;endrec;
+			endif
+			write record #ch_dar,rec_dar,0;dar.;
+			! update customer file
+			If (dar.OrigAmt) <> 0                                                        
+				If age > 5 Let age = 5                      
+				If P9$[19,19] = "N" And type > 5 Let age = 1                   
+				aramt = dar.origamt                                                                  
+				If P9$[19,19] = "Y" And type > 5 Let aramt = - aramt           
+				Mat Read #custchan,custrec,210;t5                   
+				t5[age] = t5[age] +aramt                                      
+				Mat Write #custchan,custrec,210;t5; 
+				! update ar proof
+				! Call UpDirArproof(aramt) ! UPDATE AR PROOF -- done in 315 accept
+			EndIf        
+			endsubmitdar: ! end
+			list$[0]=bsdel$,"DirArSubmit",fdel$
+			List$[1]="Entry"+fdel$
+			if returnstatus=1 and rec_dar<>0
+				list$[2]=str$(rec_dar),fdel$
+			endif
+			Call AddToStr(e$,rstr$,List$[])                 
+			Call AddToStr(e$,rstr$,esdel$) ! end of section - cust age
+			! AR BALANCE SECTION
+			if returnstatus=1
+				call custarage(currid)
+			else
+				list$[0]=bsdel$,"CustArAge",fdel$
+				List$[1]="Bucket"+fdel$+"Dollars"+fdel$
+				Call AddToStr(e$,rstr$,List$[])                 
+				Call AddToStr(e$,rstr$,esdel$) ! end of section - cust age
+			endif
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+		Endif ! action1$=submitdar
+		If ucase$(rtrim$(action1$))="EXITDIRAR"
+			dim 1%,darflag
+			let returnstatus=1
+			let message$="OK"
+			READ #ctlc,20,4;darflag      
+			IF darflag=1 LET darflag=0      
+			WRITE #ctlc,20,4;darflag;
+			Call CreateNetStatus(e$,returnstatus,message$,WebStr$) 
+			Call AddToStr(e$,rstr$,WebStr$)
+		endif ! action1$="EXITDIRAR"
+				
+
+		call SetOutPut(e$,rstr$) ! end of action "DIRECTAR"
+! ===================  End DIRECTAR ===================================	 
+		
+! 927 -- a/r Due Date Edit
+Case "GETDATEARTRANS"
+	ReturnStatus=1
+	Message$="OK"
+	call getdateaRtrans()
+	call SetOutPut(e$,rstr$)
+Case "SUBMITDATEARTRANS" 
+	ReturnStatus=1
+	Message$="OK"
+	call submitdateaRtrans()
+	call SetOutPut(e$,rstr$)  !
+! end 927 due date edit 
+
+
+Case "CUSTCREDCRDID"
+	ReturnStatus=1
+	Message$="OK"
+	If rtrim$(ACTION1$)="GETCUSTCCID"
+		call getcustccid()
+	endif
+	if rtrim$(ACTION1$)="SUBMITCUSTCCID"
+		call submitcustccid()
+	endif
+	call SetOutPut(e$,rstr$)  
+
+
+    end select
+    !
+  try call dxclose() else rem
+else
+  include "src/callmainerrnet.inc"
+  ! call dxclose()
+end try
+end
+! 
+!--------------------------------------------------------------------
+
+!!!! this is a cut out section from POSTAR !!!!
+  RecType$="B" ! bank
+	  Try
+		 Call dxsave(0,logfname$)
+		 ! Stop 
+	   Else
+		! did not create log file
+	  End Try
+      call GetPostVariables(RecType$)
+      call CreateTempCash(RecType$)
+	  !
+	  ! --- update papermaster cash receipts
+	  !Call crload ( userid$,rectype$,sfcr.doc$,returnstatus,message$)
+      call DeleteTempCash()
+	  !
+	  RecType$="U" ! unapplied
+	  Try
+		 Call dxsave(0,logfname$)
+		 ! Stop 
+	   Else
+		! did not create log file
+	  End Try
+      call GetPostVariables(RecType$)
+      call CreateTempCash(RecType$)
+	  !
+	  ! --- update papermaster cash receipts
+	  !Call crload ( userid$,rectype$,sfcr.doc$,returnstatus,message$)
+      call DeleteTempCash()
+! end cut out section
+!--------------------------------------------------------------------
+
+sub OpenFiles()
+  !
+  ! Open files for cash receipts
+  !
+  Try
+    !
+    CustChan = OpenFile(1808,intCo) \ If CustChan = -1 Error 42  ! customer
+    ARIChan = OpenFile(1504,intCo) \ If ARIChan = -1 Error 42  ! a/r invoice
+    CRChan = OpenFile(1536,intCo) \ If CRChan = -1 Error 42  ! cash receipt
+    COChan = OpenFile(1488,intCo) \ If COChan = -1 Error 42  ! cash other
+    BankChan = OpenFile(1456,intCo) \ If BankChan = -1 Error 42  ! bank
+    MCChan = OpenFile(1440,intCo) \ If MCChan = -1 Error 42  ! misc a/r cash
+    ProofChan = OpenFile(400,intCo) \ If ProofChan = -1 Error 42  ! a/r cross check
+    TermChan = OpenFile(9981,intCo) \ If TermChan = -1 Error 42  ! a/r term codes
+    InvHistChan = OpenFile(1136,intCo) \ If InvHistChan = -1 Error 42  ! invoice history
+    ARHistChan = OpenFile(1408,intCo) \ If ARHistChan = -1 Error 42  ! a/r inv history
+    SFCRChan = OpenFile(10015,intCo) \ If SFCRChan = -1 Error 42  ! temp cash receipts
+    Ch_div = OpenFile(-688,intco) \ If Ch_div = -1 Error 42 !DIVISION
+    ch_wh = OpenFile(-2768,intco) \ If ch_wh = -1 Error 42 !" warehouse fi
+    !
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+function GetBank(BankID$)
+  !
+  ! Reads the bank record
+  !   BankID$ : Bank's record # or -1 if record not found
+  !
+  try
+    !
+    dim 2%,BankRec
+    !
+    BankRec=BankID$
+    try read record #BankChan,BankRec;Bank.; else BankRec=-1
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+end function BankRec ! GetBank
+! 
+!--------------------------------------------------------------------
+Function VerifyBankAndDate(BankRec$,DepositDate$,WebStr$,Message$)
+  ! 
+  ! Verifies the bank record # and deposit date from web. Reads the bank record
+  ! and converts the deposit date to julian format.  Creates the string to
+  ! send back to the web (WebStr$)
+  !
+  Try
+    !
+    Naflag=0
+    Message$=""
+    UpdStatus=0 ! update status, returns negative if a problem
+    WebStr$=""
+    Iudesc$=""
+    call VerifyDate(DepositDate$,tmp$,errflag,1) ! returns in yyyymmdd
+	let tmp3=tmp$[1,4]! check the year
+	if tmp3<1984 let errflag=99
+    if errflag=0
+		call DateToJulian(5,tmp$,tmp1$,errflag)
+		JDepositDate=tmp1$
+    endif
+    if errflag<>0
+		UpdStatus=-9 ! invalid date
+		Message$=Message$+"Deposit date is invalid"
+	  !error 10000
+    endif
+    if updstatus=0
+	BankRec=GetBank(BankID$) ! get and lock bank record
+	if bankrec<0
+		let updstatus=-1
+		let message$=message$+"Bank Not on File "
+	endif
+	if BankRec>=0 if Bank.InprocessFlag>1
+		if bankrec>0
+			NAFlag=ChkInUse(IUDesc$,BankRec,Bank.)
+			if naflag<>0 and iudesc$<>""
+				let message$=message$+" "+iudesc$
+			endif
+		endif
+		updstatus=-2
+		IF IUDESC$=""
+			let message$=message$+"Bank in Process "
+		ENDIF
+		let BankRec=-2 ! Bank in use
+	endif
+	If BankRec>0 ! valid bank
+		NAFlag=ChkInUse(IUDesc$,BankRec,Bank.)
+		if naflag<>0 and iudesc$<>""
+			let message$=message$+" "+iudesc$
+		endif
+	Endif
+	!
+	if BankRec<0 let UpdStatus=BankRec ! -1=invalid bank id, -2=in use
+   endif
+    !
+    clear list$[]
+	  List$[0] = bsdel$,"Currency",fdel$                    
+	  WebStr$ = "CurrencyId",fdel$                                     
+	  WebStr$ = WebStr$,"CurrencyName",fdel$              
+	  List$[1] = WebStr$    
+	  let row=2
+	  if p61$[139,139]="Y" and bank.currid<>0 and bankrec>0 
+			WebStr$ = str$(bank.currid),fdel$   
+			if bank.currid<>0
+				ch_curr=findchannel()
+				tmp$="2/CURRENCY"+str$(Intco)
+				ROpen #ch_curr,tmp$
+				let keycurr$=bank.currid using "####"
+				search #ch_curr,2,1;keycurr$,rec_curr,e
+				if e<>0
+					let curr.desc$="Currency ID is not on File "
+				else
+					read record #ch_curr,rec_curr;curr.;
+				endif
+				try
+					close #ch_curr
+				else
+					rem
+				end try
+			else
+				curr.desc$=""
+			endif
+			webstr$=webstr$+rtrim$(curr.desc$)+fdel$
+	 else
+		Webstr$="",fdel$,"",fdel$
+	 endif
+	 List$[row] = WebStr$                                 
+	 row = row + 1                                        
+	  let list$[row]=esdel$
+	  call AddToStr(e$,rstr$,List$[])
+	If UpdStatus=0 and NAFlag>1 let UpdStatus=NAFlag
+    !
+    if UpdStatus=0 ! bank found
+	  !
+	  Message$="OK" ! message
+	  !
+    else
+      !
+	  tmp$=""
+	  If UPDStatus<0 ! problem w/bank or date
+		!if UpdStatus=-1 or UpdStatus=-4 let Message$="Can't find Bank record"
+		!!if UpdStatus=-2 or UpdStatus=-5 let Message$="Bank is in use"
+		!if UpdStatus>=-4 let Message$=Message$," & "
+		!if UpdStatus>=-3 let Message$=Message$,"Invalid deposit date"
+	  Else ! is status problem
+		Message$=IUDesc$ ! as passed
+		If Message$="" let Message$="In Process Elsewhere."
+	  Endif
+      !
+    endif
+    !
+    ! --- tmp1$=str$(UpdStatus),fdel$,tmp$,rdel$,esdel$ ! status & message
+    tmp1$=str$(UpdStatus),fdel$,"yes",rdel$,esdel$ ! temp line
+    call AddToStr(e$,WebStr$,tmp1$)
+    !
+  else
+    include "src/callsuberr.inc"
+  end try
+end function UpdStatus ! BankStatus
+!
+!--------------------------------------------------------------------
+sub VerifyDocument()
+  !
+  ! Checks Document # from web, if found changes action1$ to VerifyCustomer
+  ! if not sends error message back to web
+  !
+  Try
+	dim keyar$[50]
+	if isnumber=1 ! document #
+	  let InvhistRec=0
+	  tmpdoc=SearKey$
+	  for cnt=30 to 31
+	    SearKey$=cnt using "##"
+	    SearKey$=SearKey$,tmpdoc using M10$
+	    mode$="="
+	    dirno=1
+	    InvHistRec=filegetinvh(e$,InvHistChan,Mode$,dirno,SearKey$,InvHist.)
+	    if InvHistRec>0 goto endinvhistchk: !  let cnt=31 ! order history record found
+	  next cnt
+    endif 
+	!
+	endinvhistchk: ! 
+	if isnumber=1 if InvHistRec>0 ! a/r invoice found
+	!SearKey$=InvHist.CustNum using M6$ ! Bill to customer
+		SearKey$=InvHist.BillTo using M6$ ! Bill to customer
+		if p61$[41,41]<>"Y" goto founddoccust: ! no post to info
+		IF INVHIST.BILLTO<>INVHIST.CustNum  ! bill to customer <> order cust
+			let billtopost=0
+			let ordpost=0
+			let keycust$=invhist.billto using "######"
+			search #custchan,2,1;keycust$,rec_cust,e
+			if not(e)
+				read #custchan,rec_cust,674;billtopost;
+			else
+				let searkey$=invhist.custnum using M6$ ! set to ordering customer since bill to customer is not found
+				goto founddoccust:
+			endif			
+			let keycust$=invhist.custnum using "######"
+			search #custchan,2,1;keycust$,rec_cust,e
+			if e<>0
+				goto founddoccust:
+			endif
+			mat read #custchan,rec_cust,674;ordpost;
+			if ordpost=billtopost goto founddoccust: ! post to customer for bill to and ordering cust are the same
+			! check if transaction is under ordering customer's post to 
+			let keyar$=" ",keyar$
+			let keyar$[1,6]=ordpost using "######"
+			let keyar$[7,16]=invhist.invnum using "##########"
+			if invhist.status=31 and invhist.InvNum=0
+				let keyar$[7,16]=invhist.ordnum using "##########"
+			endif
+			let keyar$[17,22]=invhist.billto using "######"
+			let keytmp$[1,22]=keyar$[1,22]
+			search #arichan,3,4;keyar$,rec_ar,e
+			if not(e)
+				if keytmp$[1,22]=keyar$[1,22]
+					let searkey$=invhist.custnum using M6$ ! set to ordering customer since trans in under ordering cust post to
+				endif
+			endif
+		endif
+	  founddoccust: ! 
+	  if p61$[136,136]="Y" 
+		call dxget("u_crbankid",tmp$) \ BankRec=tmp$ ! bank id	
+		 Read Record #BankChan,BankRec;Bank.;
+		 IF BANK.CURRID<>0 and invhist.custnum<>0
+			if invhist.currid<>bank.currid
+				returnstatus=0
+			   let Message$="Transaction for Customer "+str$(invhist.custnum)+" Not Valid Currency for this Bank "
+			 endif
+			goto NoDocFnd: 
+		endif
+	  endif
+	  action1$="VERIFYCUSTOMER"
+	else
+	  !
+	  ! status section
+	  ReturnStatus=0 ! error, not found
+	  Message$="Document ",str$(tmpdoc)," not found"
+	  NoDocFnd: ! 
+	  call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  call custheading() ! section for customer heading
+	  call artranslist() ! section for 
+	endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! verifydocument
+!
+!--------------------------------------------------------------------
+sub VerifyCustomer()
+  !
+  ! Checks customer text from web or customer # for verifydocument call
+  ! if found changes action1$ to either arlist orVerifyCustomer
+  ! if not sends error message back to web
+  !
+  Try
+    if isnumber=1 ! customer number
+	  tmp3=SearKey$ \ SearKey$=tmp3 using M6$
+	  mode$="="
+	  dirno=1
+	  CustRec=FileGetCust(e$,CustChan,mode$,dirno,SearKey$,cust.)
+	  if CustRec>=0 ! record found
+	    if p61$[41,41]<>"Y" let cust.arpostcust=cust.CustomerCode
+		if not(cust.arpostcust) or p61$[41,41]<>"Y"
+			let cust.arpostcust=cust.customerbillto
+		endif
+		let tmp$=Cust.ArPostCust using "######"
+		
+		call dxset("U_CRCUST",trim$(tmp$))
+		! action1$="ARLIST"
+		SearKey$=Cust.ARPostCust using M6$ ! bill to customer                                      
+		ReturnStatus = 2                                       
+		Message$ = "arlist"                                    
+	  else
+		ReturnStatus=0 ! error not found
+		Message$="Customer ",str$(tmp3)," not found"
+	  endif
+	  if p61$[136,136]="Y" 
+			call dxget("u_crbankid",tmp$) \ BankRec=tmp$ ! bank id	
+			Read Record #BankChan,BankRec;Bank.;
+			IF BANK.CURRID<>0
+				tmp$=Cust.ArPostCust using "######"
+				clear cnotes.
+				Try
+					CNC = OpenFile(-720,intCo) \ If CNC = -1 Error 42 !custnotes
+					let searkey$=Cust.ARPostCust using "######"
+					CNRec = filegetcustnotes(e$,CNC,"=",1,searkey$,cnotes.)
+					If CNRec <= 0 Clear cnotes. 
+					try
+						close #cnc
+					else
+						rem
+					end try
+				else
+					rem
+				end try
+				IF BANK.CURRID<>Cnotes.CURRID
+					LET RETURNSTATUS=0
+					let message$="Customer is not the same currency as Bank "
+				endif
+			endif
+	  endif
+	  
+	  call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  call custheading() ! section for customer heading
+	  call artranslist() ! section for 
+		
+    else
+	  action1$="CUSTOMERDROPLIST" !create customer drop list
+    endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! verifycustomer
+!
+!
+!--------------------------------------------------------------------
+sub GETPOSTCUST()
+  
+  Try
+    Let returnstatus=1
+	let message$="OK" 
+	call dxget ("POSTCUSTID",SearKey$)
+	SearKey$=ucase$(SearKey$)
+	tmp3=SearKey$ \ SearKey$=tmp3 using M6$
+	mode$="="
+	dirno=1
+	CustRec=FileGetCust(e$,CustChan,mode$,dirno,SearKey$,cust.)
+	if CustRec<0 ! record found
+		let returnstatus=0
+		Let message$="Customer "+trim$(searkey$)+" Not on File "
+	ELSE
+		if p61$[136,136]="Y" 
+			call dxget("u_crbankid",tmp$) \ BankRec=tmp$ ! bank id	
+			Read Record #BankChan,BankRec;Bank.;
+			if bank.currid<0 or bank.currid>9999 let bank.currid=0
+			clear cnotes.
+			if bank.currid<>0 
+				Try
+					CNC = OpenFile(-720,intCo) \ If CNC = -1 Error 42 !custnotes
+					let searkey$=Cust.ARPostCust using "######"
+					CNRec = filegetcustnotes(e$,CNC,"=",1,searkey$,cnotes.)
+					If CNRec <= 0 Clear cnotes. 
+					try
+						close #cnc
+					else
+						rem
+					end try
+				else
+					rem
+				end try
+				IF BANK.CURRID<>Cnotes.CURRID
+					LET RETURNSTATUS=0
+					let message$="Customer is not the same currency as Bank "
+				endif
+			endif
+		endif
+	endif
+	
+	list$[0]=bsdel$,"CustInfo",fdel$
+	webstr$=""
+	webstr$=webstr$+"CustId"+fdel$
+	webstr$=webstr$+"CustName"+fdel$
+	webstr$=webstr$+"Contact"+fdel$
+	webstr$=webstr$+"Address1"+fdel$
+	webstr$=webstr$+"Address2"+fdel$
+	webstr$=webstr$+"City"+fdel$
+	webstr$=webstr$+"State"+fdel$
+	webstr$=webstr$+"Zip"+fdel$
+	webstr$=webstr$+"Phone"+fdel$
+	list$[1]=webstr$
+	!
+	row=2
+	if returnstatus>0
+		webstr$=""
+		webstr$=webstr$+str$(cust.CustomerCode)+fdel$
+		webstr$=webstr$+rtrim$(cust.Name$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Contact$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Addr1$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Addr2$)+fdel$
+		webstr$=webstr$+rtrim$(cust.City$)+fdel$
+		webstr$=webstr$+rtrim$(cust.State$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Zip4$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Phone$)+fdel$
+		LIST$[ROW]=WEBSTR$
+		let row=row+1
+	endif
+	list$[row]=esdel$
+	Call AddToStr(e$,rstr$,List$[])
+
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)	
+else
+	let returnstatus=0
+	let message$="Error Getting Posting Customer "
+end try
+end sub ! getpostcust
+!--------------------------------------------------------------------
+sub CustomerDropList()
+  !
+  ! Creates a customer drop down list
+  !
+  Try
+	!
+	! status section
+	ReturnStatus=1
+	Message$="customer drop list"
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	!
+	! customer information section
+	
+	Section$="CustInfo"
+	Field$[0]="CustomerCode" ! customer #
+	Field$[1]="CustomerBillTo" ! bill to customer #
+	Field$[2]="Name$" ! customer name
+	Field$[3]="Contact$" ! contact
+	Field$[4]="Addr1$" ! address line 1
+	Field$[5]="Addr2$" ! address line 2
+	Field$[6]="City$" ! city
+	Field$[7]="State$" ! state
+	Field$[8]="Zip4$" ! zip code
+	Field$[9]="Phone$" ! telephone #
+	    !
+	clear List$[]
+	Dir=2
+	 call filedroplistcust(e$,list$[],maxcnt,CustChan,Section$,Field$[],Dir,SearKey$)
+	call AddToStr(e$,rstr$,List$[])
+	 
+	!
+	! a/r list section
+	row=0 \ clear List$[]
+	call ARInvListHeading(e$,row,List$[])
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+    ! 
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! customerdroplist
+!
+!--------------------------------------------------------------------
+sub ARInvoiceList()
+  !
+  ! Creates a customer drop down list
+  !
+  Try
+	!
+	! status section
+	ReturnStatus=2
+	Message$="arlist"
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	!
+	! customer information section
+	row=0 \  clear List$[]
+        !call CustInfoHeading(e$,row,List$[])
+
+	!
+	!SearKey$=Cust.CustomerCode using M6$
+	! call CustInfoRecord(e$,WebStr$,SearKey$,cust.)
+	!List$[row]=WebStr$
+	!List$[row+1]=esdel$
+	!call AddToStr(e$,rstr$,List$[])
+	Call CustInfoHead()
+	!
+	! a/r list section
+	let bank.currid=0
+	if p61$[136,136]="Y" 
+		call dxget("u_crbankid",tmp$) \ BankRec=tmp$ ! bank id	
+		Read Record #BankChan,BankRec;Bank.;
+		if bank.currid<0 or bank.currid>9999 let bank.currid=0
+	endif
+	call ARInvListCurr(e$,SearKey$,List$[],ARIChan,bank.currid) ! create a/r list
+	call AddToStr(e$,rstr$,List$[])
+	!
+	
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! arinvoicelist
+!
+!--------------------------------------------------------------------
+sub CustInfoHead()
+  !
+  ! getcustomerinfo
+  !
+  Try
+	clear list$[]
+	list$[0]=bsdel$,"CustInfo",fdel$
+	webstr$=""
+	webstr$="ID"+fdel$
+	webstr$=webstr$+"CustId"+fdel$
+	webstr$=webstr$+"BillToId"+fdel$
+	webstr$=webstr$+"CustName"+fdel$
+	webstr$=webstr$+"Contact"+fdel$
+	webstr$=webstr$+"Address1"+fdel$
+	webstr$=webstr$+"Address2"+fdel$
+	webstr$=webstr$+"City"+fdel$
+	webstr$=webstr$+"State"+fdel$
+	webstr$=webstr$+"Zip"+fdel$
+	webstr$=webstr$+"Phone"+fdel$
+	webstr$=webstr$+"Whse"+fdel$
+	webstr$=webstr$+"WhseName"+fdel$
+	webstr$=webstr$+"Div"+fdel$
+	webstr$=webstr$+"DivName"+fdel$
+	list$[1]=webstr$
+	mode$="="
+	dirno=1
+	CustRec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+	if custrec<0
+		ReturnStatus=0 ! error not found
+		Message$="Customer ",trim$(searkey$)," not found"
+	else
+		webstr$=""
+		webstr$=trim$(searkey$)+fdel$
+		webstr$=webstr$+str$(cust.CustomerCode)+fdel$
+		webstr$=webstr$+str$(cust.CustomerBillTo)+fdel$
+		webstr$=webstr$+rtrim$(cust.Name$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Contact$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Addr1$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Addr2$)+fdel$
+		webstr$=webstr$+rtrim$(cust.City$)+fdel$
+		webstr$=webstr$+rtrim$(cust.State$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Zip4$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Phone$)+fdel$
+		!let tmp3=cust.defaultwhse
+		let tmp3=prt.wh
+		if tmp3<=0
+			let tmp3=cust.defaultwhse
+		endif
+		if tmp3<=0 let tmp3=1
+		webstr$=webstr$+str$(tmp3)+fdel$
+		if tmp3>0
+			read record #ch_wh,(tmp3-1);wh.;
+		endif
+			
+		webstr$=webstr$+rtrim$(wh.whname$)+fdel$
+		tmp3=cust.division
+		if not(tmp3)
+			let tmp3=prt.div
+		endif
+		if tmp3<=0 let tmp3=1
+		let tmp$=""
+		if tmp3>0
+			                                       
+			tmp$ = getdivname$(ch_div,tmp3,intCo)
+		endif
+		webstr$=webstr$+str$(tmp3)+fdel$
+		webstr$=webstr$+rtrim$(tmp$)+fdel$
+		list$[2]=webstr$
+	endif
+	Call AddToStr(e$,rstr$,List$[])                 
+	Call AddToStr(e$,rstr$,esdel$) ! end of section 
+	
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! custinfohead
+!
+!--------------------------------------------------------------------
+!--------------------------------------------------------------------
+sub TotalOtherDisc(OtherDisc)
+  !
+  ! Totals other discount amounts
+  try
+    !
+    OtherDisc=SFCR.OtherDisc1+SFCR.OtherDisc2+SFCR.OtherDisc3+SFCR.OtherDisc4
+    OtherDisc=OtherDisc+SFCR.OtherDisc5+SFCR.OtherDisc6+SFCR.OtherDisc7
+    OtherDisc=OtherDisc+SFCR.OtherDisc8+SFCR.OtherDisc9+SFCR.OtherDisc10
+    !
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetOtherDisc
+!
+! **** start CustArAge ***
+!--------------------------------------------------------------------
+sub CustArAge(currid)
+  !
+  ! getcustaragebalance
+  !
+  Try
+	returnstatus=1
+	message$="OK"
+	clear list$[]
+	list$[0]=bsdel$,"CustArAge",fdel$
+	Call Dxget("CustId",tmp$)
+	tmp3=tmp$
+	let searkey$=tmp3 using "######"
+	List$[1]="Bucket"+fdel$+"Dollars"+fdel$
+	mode$="="
+	dirno=1
+	CustRec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+	if custrec<0
+		ReturnStatus=0 ! error not found
+		Message$="Customer ",trim$(searkey$)," not found"
+	else
+		if p61$[136,136]="Y" and currid<>0
+			for ctr=0 to 5\let arbucket[ctr]=0\next ctr
+			let keyar$=" ",keyar$
+			let keyar$[1,6]=Custid using "######"
+			do
+				search #arichan,3,1;keyar$,rec_ar,e
+				if e<>0 exit do
+				let tmp3=keyar$[1,6]
+				if tmp3<>custid exit do
+				read record#arichan,rec_ar;ARI.;
+				let aramt=0
+				if ari.currid=currid
+					let aramt=ari.OrigAmt-ari.PriorCredit-ari.CurrentCredit
+					if ari.currfact<>0
+						call currconvup(aramt,ari.currfact)
+						let aramt=fnr(aramt)
+					endif
+					If (aramt) <> 0  
+						let age=0
+						LET TYPE=int(fra(ari.AgeTypeCount)*100)
+						let duedate=ari.duedate1
+						let trandate=ari.date
+						Call GetDirARAGE(age,type,custrec,duedate,trandate)                                                      
+						If age > 5 Let age = 5                      
+						If P9$[19,19] = "N" And type > 5 Let age = 1                                                                                  
+						If P9$[19,19] = "Y" And type > 5 Let aramt = - aramt 
+						arbucket[age] = arbucket[age] +aramt                                      
+					endif
+				endif
+			loop
+		else
+			let arbucket[0]=cust.CurrentArAgeBal
+			let arbucket[1]=cust.AgeArAmt1
+			let arbucket[2]=cust.AgeArAmt2
+			let arbucket[3]=cust.AgeArAmt3
+			let arbucket[4]=cust.AgeArAmt4
+			let arbucket[5]=cust.UnappliedCredit 
+		endif
+		Call ArBuck(arbuck$[],intCo)
+		List$[2]=rtrim$(Arbuck$[1])+fdel$+str$(arbucket[0])+fdel$ ! cust.CurrentArAgeBal)+fdel$
+		List$[3]=rtrim$(ARBuck$[2])+fdel$+Str$(arbucket[1])+fdel$ ! cust.AgeArAmt1)+fdel$
+		List$[4]=rtrim$(ARBuck$[3])+fdel$+Str$(arbucket[2])+fdel$ !cust.AgeArAmt2)+fdel$
+		List$[5]=rtrim$(ARBuck$[4])+fdel$+Str$(arbucket[3])+fdel$ !cust.AgeArAmt3)+fdel$
+		List$[6]=rtrim$(ARBuck$[5])+fdel$+Str$(arbucket[4])+fdel$ !cust.AgeArAmt4)+fdel$
+		if arbucket[5] <> 0 ! unapplied cust.UnappliedCredit
+			let tmp$="Unapplied Cr"
+			List$[7]=rtrim$(tmp$)+fdel$+str$(arbucket[5])+fdel$ !cust.UnappliedCredit)+fdel$
+		else
+			list$[7]=""+fdel$+""+fdel$
+		endif
+		! tmp3=((cust.CurrentArAgeBal+cust.AgeArAmt1+cust.AgeArAmt2+cust.AgeArAmt3+cust.AgeArAmt4)-cust.UnappliedCredit)
+		tmp3=0
+		for ctr=0 to 4
+			let tmp3=tmp3+arbucket[ctr]
+		next ctr
+		let tmp3=tmp3-arbucket[5]
+		List$[8]=rtrim$(ARBuck$[0])+fdel$+Str$(tmp3)+fdel$
+	endif
+	Call AddToStr(e$,rstr$,List$[])                 
+	Call AddToStr(e$,rstr$,esdel$) ! end of section 
+	                         
+	
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! custagear
+!
+!--------------------------------------------------------------------
+sub GetCustDArTrans(currid)
+  !
+  ! get customers direct a/r transactions
+  !
+  Try
+	dim 3%,rec_dar,2%,endrec
+	clear list$[]
+	list$[0]=bsdel$,"CustDirArTrans",fdel$
+	webstr$=""
+	webstr$="Trans",fdel$
+	webstr$=webstr$+"Date",fdel$
+	webstr$=webstr$+"Type",fdel$
+	webstr$=webstr$+"Amount",fdel$
+	webstr$=webstr$+"Terms",fdel$
+	webstr$=webstr$+"Description",fdel$
+	webstr$=webstr$+"Wh",fdel$
+	webstr$=webstr$+"Div",fdel$
+	webstr$=webstr$+"DiscDate",fdel$
+	webstr$=webstr$+"DueDate",fdel$
+	webstr$=webstr$+"DiscAmt",fdel$
+	webstr$=webstr$+"GLAcct",fdel$
+	Webstr$=webstr$+"EntryNum",fdel$
+	list$[1]=webstr$
+	let row=2
+	let tmpcnt=maxcnt
+	if returnstatus=1
+		Call Dxget("CustId",tmp$)
+		custid=tmp$
+		ch_dar = OpenFile(1520,intco) \ If ch_dar = -1 Error 42 ! direct ar file 
+		Try
+			read #ch_dar,0;endrec;
+		else
+			let endrec=0
+			write #ch_dar,0;endrec;
+		end try
+		if endrec>0
+			for rec_dar=1 to endrec
+				read record #ch_dar,rec_dar,0;dar.;
+				if dar.customercode=custid and dar.customercode<>0
+					webstr$=Str$(dar.ReferenceNo),fdel$
+					let xdate$=""
+					if dar.TranDate<>0
+						let xdate$=pdate$(dar.TranDate)
+					endif
+					webstr$=webstr$+xdate$,fdel$
+					let type=INT(FRA(dar.AgeTypeCount)*100) 
+					webstr$=webstr$+str$(type),fdel$
+					let tmp3=dar.OrigAmt 
+					IF P61$[136,136]="Y" and dar.currfact>0 and tmp3<>0
+						call currconvup(tmp3,dar.currfact)
+						let tmp3=fnr(tmp3)
+					endif 
+					webstr$=webstr$+(tmp3 using "##########.##"),fdel$ ! original amount
+					webstr$=webstr$+str$(dar.Terms),fdel$
+					webstr$=webstr$+rtrim$(dar.EntryDescription$),fdel$
+					webstr$=webstr$+str$(dar.Whse),fdel$
+					webstr$=webstr$+str$(dar.Division),fdel$
+					let xdate$=""
+					if dar.DiscDateTerms<>0
+						let xdate$=pdate$(dar.DiscDateTerms)
+					endif
+					webstr$=webstr$+xdate$,fdel$
+					let xdate$=""
+					if dar.DueDate1<>0
+						let xdate$=pdate$(dar.DueDate1)
+					endif
+					webstr$=webstr$+xdate$,fdel$
+					let tmp3=dar.TermsDisc
+					IF P61$[136,136]="Y" and dar.currfact>0 and tmp3<>0
+						call currconvup(tmp3,dar.currfact)
+						let tmp3=fnr(tmp3)
+					endif
+					webstr$=webstr$+(tmp3),fdel$ ! term discount
+					if p9$[17,17]="Y" ! gl in on
+						webstr$=webstr$+str$(dar.glacct),fdel$
+					else
+						webstr$=webstr$+"",fdel$
+					endif
+					webstr$=webstr$+str$(rec_dar),fdel$
+				        list$[row]=webstr$
+					let row=row+1
+					If row > tmpcnt Let tmpcnt = expandarray(e$,List$[]) 
+				endif! dar.customercode=custid 
+			next rec_dar
+		endif! endrec>0
+
+	endif ! returnstatus
+	Call AddToStr(e$,rstr$,List$[])                 
+	Call AddToStr(e$,rstr$,esdel$) ! end of section 
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! getcustdartrans
+!--------------------------------------------------------------------
+Sub calctermdate(days,trandate,calcdate)
+Try
+	Dim 2%,d3[2]               
+	LET xdate$=trandate USING "&&&&&&"                      
+	LET D3[0]=xdate$[3,4];D3[1]=xdate$[5,6];D3[2]=xdate$[1,2]
+	if days>=0 ! calculate based on days         
+		Call DateToJulian(5,xdate$,xdate$,errflag)   !CALL 25,1,xdate$,xdate$,Errflag   ! from yymmdd to julian                              
+		if errflag goto endcalctermdate: !IF E LET D3[0]=0 \ GOTO L_8150:                  
+		LET tmp3=xdate$;tmp3=tmp3+DAYS;xdate$=tmp3 USING "&&&&&&"        
+		Call JulianToDate(1,xdate$,xdate$,errflag)!CALL 27,1,D$,D$,E   ! from julian to mm/dd/yy 
+		if errflag goto endcalctermdate:
+		!IF E LET E=0 \ GOSUB ERR_SEARCH:                 
+		LET D3[0]=xdate$[1,2];D3[1]=xdate$[4,5];D3[2]=xdate$[7,8]    
+		IF D3[0] LET CALCDATE=D3[2]*10^4+D3[0]*10^2+D3[1]
+	else
+		 LET D3[0]=D3[0]+1 \ IF D3[0]>12 LET D3[0]=1;D3[2]=D3[2]+1   
+		 IF CDAY IF D3[1]>CDAY LET D3[0]=D3[0]+1                     
+		 LET D3[1]=ABS(DAYS)                                         
+		 IF D3[0]>12 LET D3[0]=1;D3[2]=D3[2]+1                       
+		 IF D3[2]>99 LET D3[2]=D3[2]-100 
+		 do
+			LET XDATE$=D3[2]*10^4+D3[0]*10^2+D3[1] USING "&&&&&&"   
+			Call DateToJulian(5,xdate$,xdate$,errflag)   ! CALL 25,XDATE$,XDATE$,E 
+			if not(errflag) exit do                 
+			LET D3[1]=D3[1]-1                                           
+			IF D3[0]=2 IF D3[1]<28 exit do                         
+			IF D3[0]<>2 IF D3[1]<30 exit do                       
+		loop
+		IF D3[0] LET CALCDATE=D3[2]*10^4+D3[0]*10^2+D3[1]
+	endif
+	endcalctermdate: ! end calculating the date
+
+else
+    include "src/callsuberr.inc"
+  end try
+end sub ! callcalctermdate
+!
+!--------------------------------------------------------------------
+sub GetPostVariables(RecType$)
+  !
+  try
+	!
+    call dxget("u_crbankid",tmp$) \ BankRec=tmp$ ! bank id
+    call dxget("u_crdepositdate",tmp$) \ JDepositDate=tmp$ ! deposit date, julian
+	DepositDate=ConvertDate(e$,JDepositDate,2,5) ! yyyymmdd
+	let tmp$=depositdate using "&&&&&&&&"
+	let tmp3=tmp$[1,4]
+	if tmp3<1984
+		let returnstatus=0
+		let message$="Invalid Deposit Date Submitted"
+		exit sub
+	endif
+	DepositDate$=tmp$[5,6],"/",tmp$[7,8],"/",tmp$[1,4]! MM/DD/YYYY
+	Call VerifyDate(DepositDate$,tmp$,errflag,1) ! returns in yyyymmdd
+	if errflag<>0
+		let returnstatus=0
+		let message$="Invalid Deposit Date Submitted"
+		exit sub
+	endif
+	
+
+
+
+	  !
+	select case RecType$
+	  case "A" ! adjustment
+	    !
+	    call dxget("code",PayFlag$) ! B or W
+	    call dxget("amount",tmp$) \ PayAmt=tmp$ ! amount
+		If fra(Payamt*100)<>0
+			let returnstatus=0
+			let message$="Amount exceeds to 2 decimals places"
+		endif
+	    call dxget("wh",tmp$) \ tmp3=tmp$ ! warehouse
+	    if tmp3<=0 or tmp3>99
+		let returnstatus=0
+		let message$="Invalid Warehouse for Transaction Submitted "
+	    endif
+	    wh=tmp3
+	    call dxget("div",tmp$) \tmp3=tmp$ ! \ Div=tmp$ ! division
+	    if tmp3<=0 or tmp3>99
+		let returnstatus=0
+		let message$="Invalid Division for Transaction Submitted "
+	    endif
+	    div=tmp3
+	    call dxget("desc",Desc$) ! description
+	    call dxget("RefNo",tmp$) \ DocNo=tmp$ ! reference / doc #
+	    IF not (sfcr.customercode)
+		call dxget("U_CRCUST",tmp$)  ! reference / doc #
+		SFCR.CUSTOMERCODE=TMP$
+		let ari.customercode=sfcr.customercode
+		let cust.customercode=sfcr.customercode
+		let ari.currid=0
+		let ari.currfact=0
+		IF P61$[136,136]="Y"
+			call dxset("u_crbankid",str$(BankRec))
+			if  bankrec<>0 
+				Read record #BankChan,BankRec;Bank.;
+				if bank.currid<>0
+					ch_curr=findchannel()
+					tmp$="2/CURRENCY"+str$(Intco)
+					ROpen #ch_curr,tmp$
+					let keycurr$=bank.currid using "####"
+					search #ch_curr,2,1;keycurr$,rec_curr,e
+					if e<>0
+						let curr.desc$="Currency ID is not on File "
+					else
+						read record #ch_curr,rec_curr;curr.;
+						let ari.currid=curr.currid
+						let ari.currfact=curr.excrate
+					endif
+					try
+						close #ch_curr
+					else
+						rem
+					end try
+	    		endif
+			endif
+		endif
+	    ENDIF
+	    !
+	  case "B" ! bank
+	    !
+		call dxget("bankamt",tmp$) \ PayAmt=tmp$ ! amount
+		if fra(payamt*100)<>0
+			let returnstatus=0
+			let message$="Amount exceeds 2 decimals places"
+		endif
+		call dxget("bankdesc",Desc$) ! description
+		call dxget("bankcheck",tmp$) \ DocNo=tmp$ ! check / doc $
+		call dxget("bankwh",tmp$) \tmp3=tmp$ !\ WH=tmp$ ! warehouse
+		if tmp3<=0 or tmp3>99
+			let returnstatus=0
+			let message$="Invalid Warehouse for Payment Submitted "
+		endif
+		wh=tmp3
+		call dxget("bankdiv",tmp$) \tmp3=tmp$ ! \ Div=tmp$ ! division
+		if tmp3<=0 or tmp3>99
+			let returnstatus=0
+			let message$="Invalid Division for Payment Submitted "
+		 endif
+		 div=tmp3
+		call dxget("bankdiscamt",tmp$) \ DiscAmt=tmp$ ! discount amt
+		if fra(DiscAmt*100)<>0
+			let returnstatus=0
+			let message$="Disc Amount exceeds 2 decimals places"
+		endif
+
+		! call dxget("bankdiscamt",tmp$) \ PayDiscAmt=tmp$ ! discount amt!
+	  case "I" ! a/r invoice payments
+	    !
+		call dxget("arkey"+str$(arcnt),ARInvKey$) ! a/r invoice key, dir #
+		call dxget("custno"+str$(arcnt),tmp$) \ CustNo=tmp$ ! customer id
+		call dxget("invdate"+str$(arcnt),tmp$) \ InvDate=tmp$ ! invoice date
+		call dxget("docno"+str$(arcnt),tmp$) \ DocNo=tmp$ ! reference / doc #
+		call dxget("doctype"+str$(arcnt),InvType$) ! invoice type (code)
+		call dxget("duedate"+str$(arcnt),tmp$) \ DueDate=tmp$ ! due date
+		call dxget("origamt"+str$(arcnt),tmp$) \ OrigAmt=tmp$ ! original invoice amt
+		call dxget("openamt"+str$(arcnt),tmp$) \ OpenAmt=tmp$ ! open invoice amt
+		call dxget("discamt"+str$(arcnt),tmp$) \ DiscAmt=tmp$ ! discount amt
+		if fra(discamt*100)<>0
+			let returnstatus=0
+			let message$="Amount exceeds 2 decimals places"
+		endif
+		call dxget("addttotaldisc"+str$(arcnt),tmp$) \ OtherDiscTotal=tmp$ ! total other discount
+		call dxget("payamt"+str$(arcnt),tmp$) \ PayAmt=tmp$ ! payment amt
+		if fra(payamt*100)<>0
+			let returnstatus=0
+			let message$="Amount exceeds 2 decimals places"
+		endif
+		if payamt<0 and origamt>0
+			let returnstatus=0
+			let message$="Negative Payment Made to Transaction "+str$(DocNo)
+		endif
+		if origamt<0 and payamt>0
+			let returnstatus=0
+			let message$="Positive Payment Made to Credit Transaction "+str$(DocNo)
+		endif
+
+		call dxget("openbal"+str$(arcnt),tmp$) \ BalAmt=tmp$ ! balance remaining
+		call dxget("wh"+str$(arcnt),tmp$) \ tmp3=tmp$ ! warehouse
+		if tmp3<=0 or tmp3>99
+			let returnstatus=0
+			let message$="Invalid Warehouse for A/R Transaction Submitted "
+		endif
+		wh=tmp3
+		call dxget("div"+str$(arcnt),tmp$) 
+		if tmp3<=0 or tmp3>99
+			let returnstatus=0
+			let message$="Invalid Division for A/R Transaction Submitted "
+		endif
+		Div=tmp3 ! division
+		call dxget("addtdisc1code"+str$(arcnt),tmp$) \ DiscCode1=tmp$ ! other discount record #
+        call dxget("addtdisc2code"+str$(arcnt),tmp$) \ DiscCode2=tmp$ ! other discount record #
+		call dxget("addtdisc3code"+str$(arcnt),tmp$) \ DiscCode3=tmp$ ! other discount record #
+		call dxget("addtdisc4code"+str$(arcnt),tmp$) \ DiscCode4=tmp$ ! other discount record #
+		call dxget("addtdisc5code"+str$(arcnt),tmp$) \ DiscCode5=tmp$ ! other discount record #
+		call dxget("addtdisc6code"+str$(arcnt),tmp$) \ DiscCode6=tmp$ ! other discount record #
+		call dxget("addtdisc7code"+str$(arcnt),tmp$) \ DiscCode7=tmp$ ! other discount record #
+		call dxget("addtdisc8code"+str$(arcnt),tmp$) \ DiscCode8=tmp$ ! other discount record #
+		call dxget("addtdisc9code"+str$(arcnt),tmp$) \ DiscCode9=tmp$ ! other discount record #
+		call dxget("addtdisc10code"+str$(arcnt),tmp$) \ DiscCode10=tmp$ ! other discount record #
+		call dxget("addtdisc1amt"+str$(arcnt),tmp$) \ OtherDisc1=tmp$ ! other discount amount
+        if fra(OtherDisc1*100)<>0
+			let returnstatus=0
+			let message$="Other Disc Amount exceeds 2 decimals places"
+		endif
+		call dxget("addtdisc2amt"+str$(arcnt),tmp$) \ OtherDisc2=tmp$ ! other discount amount
+		if fra(OtherDisc2*100)<>0
+			let returnstatus=0
+			let message$="Other Disc Amount exceeds 2 decimals places"
+		endif
+		call dxget("addtdisc3amt"+str$(arcnt),tmp$) \ OtherDisc3=tmp$ ! other discount amount
+		if fra(OtherDisc3*100)<>0
+			let returnstatus=0
+			let message$="Other Disc Amount exceeds 2 decimals places"
+		endif
+		call dxget("addtdisc4amt"+str$(arcnt),tmp$) \ OtherDisc4=tmp$ ! other discount amount
+		if fra(OtherDisc4*100)<>0
+			let returnstatus=0
+			let message$="Other Disc Amount exceeds 2 decimals places"
+		endif
+		call dxget("addtdisc5amt"+str$(arcnt),tmp$) \ OtherDisc5=tmp$ ! other discount amount
+		if fra(OtherDisc5*100)<>0
+			let returnstatus=0
+			let message$="Other Disc Amount exceeds 2 decimals places"
+		endif
+		call dxget("addtdisc6amt"+str$(arcnt),tmp$) \ OtherDisc6=tmp$ ! other discount amount
+		if fra(OtherDisc6*100)<>0
+			let returnstatus=0
+			let message$="Other Disc Amount exceeds 2 decimals places"
+		endif
+		call dxget("addtdisc7amt"+str$(arcnt),tmp$) \ OtherDisc7=tmp$ ! other discount amount
+		if fra(OtherDisc7*100)<>0
+			let returnstatus=0
+			let message$="Other Disc Amount exceeds 2 decimals places"
+		endif
+		call dxget("addtdisc8amt"+str$(arcnt),tmp$) \ OtherDisc8=tmp$ ! other discount amount
+		if fra(OtherDisc8*100)<>0
+			let returnstatus=0
+			let message$="Other Disc Amount exceeds 2 decimals places"
+		endif
+		call dxget("addtdisc9amt"+str$(arcnt),tmp$) \ OtherDisc9=tmp$ ! other discount amount
+		if fra(OtherDisc9*100)<>0
+			let returnstatus=0
+			let message$="Other Disc Amount exceeds 2 decimals places"
+		endif
+		call dxget("addtdisc10amt"+str$(arcnt),tmp$) \ OtherDisc10=tmp$ ! other discount amount
+	    if fra(OtherDisc10*100)<>0
+			let returnstatus=0
+			let message$="Other Disc Amount exceeds 2 decimals places"
+		endif
+	        !
+	  case "J" ! journal entry
+	    !
+        call dxget("account",tmp$) \ GLAcct=tmp$ ! g/l account #
+	    call dxget("amount",tmp$) \ PayAmt=tmp$ ! amount
+		if fra(PayAmt*100)<>0
+			let returnstatus=0
+			let message$="Amount exceeds 2 decimals places"
+		endif
+	    call dxget("desc",Desc$) ! description
+	   ! call dxget("desc",Desc$) ! description
+		call dxget ("bankid",BankID$)
+		 call dxget ("depositdate",DepositDate$)
+		!
+	  case "R" ! returned check
+	    !
+	    call dxget("check",tmp$) \ DocNo=tmp$ ! check / reference #
+	    call dxget("amount",tmp$) \ PayAmt=tmp$ ! amount
+		if fra(PayAmt*100)<>0
+			let returnstatus=0
+			let message$="Amount exceeds 2 decimals places"
+		endif
+	    call dxget("wh",tmp$) \ tmp3=tmp$ ! warehouse
+	    if tmp3<=0 or tmp3>99
+			let returnstatus=0
+			let message$="Invalid Warehouse for Transaction Submitted "
+	    endif
+	    wh=tmp3
+	    call dxget("div",tmp$) \ tmp3=tmp$ ! division
+	    if tmp3<=0 or tmp3>99
+			let returnstatus=0
+			let message$="Invalid Division for  Transaction Submitted "
+	    endif
+	    div=tmp3
+	    call dxget("desc",Desc$) ! description
+	    IF not (sfcr.customercode)
+		call dxget("U_CRCUST",tmp$)  ! reference / doc #
+		SFCR.CUSTOMERCODE=TMP$
+		let ari.customercode=sfcr.customercode
+		let cust.customercode=sfcr.customercode
+	    ENDIF
+	    !
+	    !
+	  case "U" ! unapplied check
+	    !
+		call dxget("bankamt",tmp$) \ PayAmt=tmp$ ! amount
+		if fra(PayAmt*100)<>0
+			let returnstatus=0
+			let message$="Amount exceeds 2 decimals places"
+		endif
+		call dxget("bankdesc",Desc$) ! description
+		call dxget("bankcheck",tmp$) \ DocNo=tmp$ ! check / doc $
+		call dxget("bankwh",tmp$) \ WH=tmp$ ! warehouse
+		call dxget("bankdiv",tmp$) \ Div=tmp$ ! division
+		call dxget("bankdiscamt",tmp$) \ DiscAmt=tmp$ ! discount amt
+		if fra(DiscAmt*100)<>0
+			let returnstatus=0
+			let message$="Discount Amount exceeds 2 decimals places"
+		endif
+		call dxget("remainbal",tmp$) \ PayAmt=tmp$ ! remaining check balance
+		if fra(PayAmt*100)<>0
+			let returnstatus=0
+			let message$="Amount exceeds 2 decimals places"
+		endif
+		call dxget("U_CRCUST",tmp$)  ! reference / doc #
+		! bank discounts 
+		for ctr=1 to 10
+			call dxget("bankdiscamt"+str$(ctr),tmp$)
+			let tmp3=tmp$
+			if tmp3<>0
+				let message$="Invalid to leave an Other Discount Amount For Unapplied Payment "
+				let returnstatus=0
+			endif
+		next ctr
+		if discamt<>0
+			let message$="Invalid to leave a Discount Amount For Unapplied Payment "
+			let returnstatus=0
+		endif
+		SFCR.CUSTOMERCODE=TMP$
+		let ari.customercode=sfcr.customercode
+		let cust.customercode=sfcr.customercode
+		!
+    end select
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! getpostvariables
+!
+!--------------------------------------------------------------------
+sub CreateTempCash(RecType$)
+  !
+  Try
+	
+	clear SFCR.
+	clear SFCRTmp.
+	!
+        SFCR.UserID$=UserID$,blank$ ! xport user id
+        SFCR.RecType$=RecType$,blank$ ! cash receipt record type
+	SFCR.Doc$=DocNo using M10$ ! reference / doc #
+	sfcr.doc$=sfcr.doc$+blank$
+	SFCR.Bank=BankRec ! bank record #
+	!SFCR.PaymentDate=ConvertDate(e$,DepositDate,1,5) ! deposit date (julian)
+	SFCR.PaymentDate=DepositDate ! YYYYMMDD deposit date 
+	if RecType$="J" let SFCR.Doc$=Blank$ ! journal entry
+	! let sfcrtmp.=sfcr.
+    !
+	SFCnt=0
+	for xtr=1 to 999
+		Mode$="="
+		Dir=1
+		SFCR.Count$=xtr using M3$ ! counter
+		searKey$=SFCR.UserID$,SFCR.RecType$,SFCR.Doc$,sfcr.Count$
+		RecNo=filegetsfcashfle(e$,SFCRChan,mode$,Dir,SearKey$,SFCRtmp.)
+		if RecNo<0 goto enddupchk:
+	next xtr
+	let returnstatus=0
+	let message$="Exceeds 999 Limits of Transactions Per Entry "
+	exit sub
+	! error
+	enddupchk: ! Duplicate entry check
+		
+		
+
+    !
+	Select case RecType$
+	  case "A" ! adjustments
+	    !
+		SFCR.PayFlag$=PayFlag$ ! B / W, bad debt or write off
+		SFCR.PayAmt=PayAmt ! amount
+		SFCR.WH=WH ! warehouse
+		SFCR.Div=Div ! division
+		SFCR.Desc$=Desc$,Blank$ ! description
+		if not(sfcr.customercode)
+		 call dxget("U_CRCUST",tmp$)  ! reference / doc #
+		  SFCR.CUSTOMERCODE=TMP$
+		ENDIF	
+		!
+	 case "B" ! bank
+	    !
+		SFCR.PayAmt=PayAmt ! amount
+		SFCR.Desc$=Desc$,Blank$ ! description
+		SFCR.WH=WH ! warehouse
+		SFCR.Div=Div ! division
+		SFCR.DiscAmt=DiscAmt ! discount amount
+		SFCR.PaymentDate=DepositDate ! payment date
+
+		!
+	  case "I" ! a/r invoice payments
+		sfcr.ARInvKey$=ARInvKey$ 
+	    !SFCR.CustNo=CustNo ! customer id
+		SFCR.InvDate=invdate  ! invoice date
+		!S!FCR.Doc$=str$(docno) !  reference / doc #
+		SFCR.Doc$=DocNo using M10$ ! reference / doc #
+		sfcr.doc$=sfcr.doc$+blank$
+		
+		SFCR.InvType$=InvType$ ! invoice type (code)
+	    	SFCR.PayAmt=PayAmt ! amount
+		SFCR.Desc$=Desc$,Blank$ ! description
+		SFCR.WH=WH ! warehouse
+		SFCR.Div=Div ! division
+		SFCR.DiscAmt=DiscAmt ! discount amount
+		SFCR.PaymentDate=DepositDate ! payment date
+                SFCR.DueDate= DueDate! due date
+		SFCR.OrigAmt=OrigAmt ! original invoice amt
+		SFCR.OpenAmt=OpenAmt ! open invoice amt
+		SFCR.DiscAmt=DiscAmt! discount amt
+		SFCR.OtherDiscTotal=OtherDiscTotal ! total other discount
+		SFCR.PayAmt=PayAmt ! payment amt
+		SFCR.BalAmt=BalAmt ! balance remaining
+		SFCR.WH=WH ! warehouse
+		SFCR.Div=Div ! division
+		SFCR.DiscCode1=DiscCode1 ! other discount record #
+		SFCR.DiscCode2=DiscCode2 ! other discount record #
+		SFCR.DiscCode3=DiscCode3 ! other discount record #
+		SFCR.DiscCode4=DiscCode4 ! other discount record #
+		SFCR.DiscCode5=DiscCode5! other discount record #	
+		SFCR.DiscCode6=DiscCode6 ! other discount record #
+		SFCR.DiscCode7=DiscCode7 ! other discount record #
+		SFCR.DiscCode8=DiscCode8 ! other discount record #
+		SFCR.DiscCode9=DiscCode9 ! other discount record #
+		SFCR.DiscCode10=DiscCode10 ! other discount record #
+		SFCR.OtherDisc1=OtherDisc1 ! other discount amount
+		SFCR.OtherDisc2=OtherDisc2 ! other discount amount
+		SFCR.OtherDisc3=OtherDisc3 ! other discount amount
+		SFCR.OtherDisc4=OtherDisc4 ! other discount amount
+		SFCR.OtherDisc5=OtherDisc5 ! other discount amount
+		SFCR.OtherDisc6=OtherDisc6 ! other discount amount
+		SFCR.OtherDisc7=OtherDisc7 ! other discount amount
+		SFCR.OtherDisc8=OtherDisc8 ! other discount amount
+		SFCR.OtherDisc9=OtherDisc9 ! other discount amount
+		SFCR.OtherDisc10=OtherDisc10 ! other discount amount
+		if not(sfcr.customercode)
+		 call dxget("U_CRCUST",tmp$)  ! reference / doc #
+		  SFCR.CUSTOMERCODE=TMP$
+		ENDIF	
+		let sfcr.billcustomer=custno
+	  case "J" ! journal entry
+	    !
+		SFCR.Journal= glacct! Journal
+		!SFCR.PayAmt=PayAmt
+		sfcr.payamt=(payamt*(-1))
+		SFCR.Desc$=Desc$,Blank$
+		SFCR.PaymentDate=DepositDate ! payment date
+		!
+	  case "R" ! returned check
+	    !
+		SFCR.PayAmt=PayAmt ! amount
+		SFCR.WH=WH ! warehouse
+		SFCR.Div=Div ! division
+		SFCR.Desc$=Desc$,Blank$ ! description
+		if not(sfcr.customercode)
+		 call dxget("U_CRCUST",tmp$)  ! reference / doc #
+		  SFCR.CUSTOMERCODE=TMP$
+		ENDIF	
+		!
+	  case "U" ! unapplied check
+	    !
+		SFCR.PayAmt=PayAmt ! remaining bal
+		SFCR.PaymentDate=DepositDate ! payment date
+		SFCR.WH=WH ! warehouse
+		SFCR.Div=Div ! division
+		call dxget("U_CRCUST",tmp$)  ! reference / doc #
+		SFCR.CUSTOMERCODE=TMP$
+		let ari.customercode=sfcr.customercode
+		let cust.customercode=sfcr.customercode
+		SFCR.InvDate=depositdate  ! invoice date
+		!SFCR.Doc$=str$(docno) !  reference / doc #
+		SFCR.Doc$=DocNo using M10$ ! reference / doc #
+		sfcr.doc$=sfcr.doc$+blank$
+		let invtype$="9"
+		if payamt<0 let invtype$="4"
+		SFCR.InvType$=InvType$ ! invoice type (code)
+	    	SFCR.PayAmt=PayAmt ! amount
+		SFCR.Desc$=Desc$,Blank$ ! description
+		SFCR.WH=WH ! warehouse
+		SFCR.Div=Div ! division
+		SFCR.DiscAmt=DiscAmt ! discount amount
+		SFCR.PaymentDate=DepositDate ! payment date
+		sfcr.billcustomer=sfcr.customercode
+
+           
+		!
+    end select
+	!
+	mode$="a" ! add
+	UpdStatus=fileupdatesfcashfle(e$,SFCRChan,mode$,SFCRRecNo,SFCR.)
+	SFCRRecNo=UpdStatus
+	read record #sfcrchan,sfcrrecno;sfcr.;
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! CreateTempCash
+!
+!--------------------------------------------------------------------
+sub DeleteTempCash()
+  !
+  Try
+    !
+	mode$="d" ! delete
+	UpdStatus=fileupdatesfcashfle(e$,SFCRChan,mode$,SFCRRecNo,SFCR.)
+	! call dxset("U_CRCUST",trim$(tmp$))
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! deletetempcash
+!
+!--------------------------------------------------------------------
+Function ChkInUse(IUDesc$,BankRec,Bank. as cashacc)
+	! pass in the bank selected (after getting it)
+	! will check if Entry is possible
+	! and pass back an in use/not allowed flag
+Try
+	Dim 1%,P0[1023],TUDesc$[20]
+	Mat read #ctlc,120;P0;
+	P0=0;IUDesc$=""
+	UIDRec=0
+	IF P0[302]<>0 LET P0=2
+	IF P0[304]<>0 LET P0=3
+	IF P0[305]<>0 LET P0=5
+	IF P0[306]<>0 LET P0=3
+	IF P0[311]<>0 LET P0=5
+	IF P0[227]<>0 LET P0=5
+	READ #ctlc,20,8;CRFlg;  
+	IF CRFlg>1 let p0=CRFlg ! always checked(allow multi-entry)
+	If P60$[6,6]="Y" and BankRec>0 ! c/r by bank
+		if Bank.InprocessFlag>1 let p0=bank.Inprocessflag
+	Endif
+	Let NAFlag=p0
+	if p0<=1 let naflag=0
+	If P0<=1 exit function NAFlag ! exit w/zero or 1 now
+	If P0=2 ! verify in process
+		IUDesc$="VERF.LIST(302)"
+		If P60$[6,6]="Y" IUDesc$=IUDesc$+" OR 306"
+		IUDesc$=IUDesc$+" IN PROCESS"
+		If p0[302]<>0 or P0[306]<>0
+			Let uidrec=p0[302]
+			If P60$[6,6]="Y" and uidrec=0 Let uidrec=P0[306]
+			Usr$=GetUIDInfo$(e$,IntCo,UidRec)
+		Endif
+	Endif
+	If P0=3 ! journal in process
+		IUDesc$="JOURNAL(304)"     
+		If P60$[6,6]="Y" IUDesc$=IUDesc$+" OR 306"
+		IUDesc$=IUDesc$+" IN PROCESS"
+		If p0[304]<>0 Or P0[306]<>0
+			Let uidrec=p0[304]
+			If P60$[6,6]="Y" and uidrec=0 Let uidrec=P0[306]
+			Usr$=GetUIDInfo$(e$,IntCo,UidRec)
+		Endif
+	Endif
+	If P0=4 ! journal was run - not accepted
+		IUDesc$="Cash Receipts Journal has been run. "
+		IUDesc$=Iudesc$+"Accept/Update must be run before additional entries may be entered."
+		!JOURNAL(304) HAS BEEN RUN BUT NOT ACCEPTED"
+		!IUDesc$=IUDesc$+" THE JOURNAL AND ACCEPT(304 & 305) MUST BE RUN "   
+		!IUDesc$=IUDesc$+"BEFORE MORE ENTRIES CAN BE MADE"
+	Endif
+	If P0=5 ! accept in process
+		IUDesc$="ACCEPT(305, 311, 320 OR 227) IN PROGRESS"
+		LET UIDREC=0                                       
+		IF P0[305] LET UIDREC=INT(P0[305])                 
+		IF NOT(UIDREC) IF P0[311] LET UIDREC=INT(P0[311])  
+		IF NOT(UIDREC) IF P0[227] LET UIDREC=INT(P0[227])  
+		IF UIDREC  
+			Usr$=GetUIDInfo$(e$,IntCo,UidRec)
+		Endif
+	Endif
+	If UIDRec ! has user info
+		TUDesc$=USR$[21]
+		TUDesc$=RTrim$(TUDesc$)
+		If TUDesc$<>""
+			IUDesc$=IUDesc$+ " BY USER "+TUDesc$
+		Endif
+	Endif
+	If P0<>0 and p0<>4  let iudesc$=iudesc$+" - CANNOT RUN ENTRY"
+else
+    include "src/callsuberr.inc"
+  end try
+end function NAFlag ! ChkInUse
+!
+!--------------------------------------------------------------------
+!--------------------------------------------------------------------
+
+sub VerifyBank()
+ 
+  Try
+	Dim 1%,armonth,2%,crmonth,3%
+	returnstatus=1
+	read #ctlc,0,120;armonth;
+	read #ctlc,52,32;crmonth;
+	if armonth=crmonth
+		let returnstatus=0
+		let message$="Cash Receipts Has Been Accepted For The Month "
+		goto endverifybank:
+	endif
+	Call dxget("bankid",BankID$)
+	let bankid=bankid$
+	if bankid<=0 or bankid>chf(bankchan)
+		let returnstatus=0
+		let message$="Invalid Bank Number Entered " 
+		goto endverifybank:
+	endif
+	bankrec=bankid
+	Read Record #BankChan,BankRec;Bank.;
+	NAFlag=ChkInUse(IUDesc$,BankRec,Bank.)
+	If naflag>1
+		let returnstatus=0
+		let message$=iudesc$
+		goto endverifybank:
+	endif
+	if bank.LastEntryAccpt=bank.NextEntry
+		let returnstatus=0
+		let message$="No Entries Open For Bank "+str$(bankid)
+		goto endverifybank:
+	endif
+	let bank.inprocessflag=1
+	Write Record #BankChan,BankRec;Bank.;
+	endverifybank: ! end bank verify
+	 Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)  
+	 Call AddToStr(e$,rstr$,WebStr$)                         
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! VerifyBank
+! 
+!--------------------------------------------------------------------
+
+
+sub ExitBank()
+ 
+  Try
+	returnstatus=1
+	message$="OK"
+	Call dxget("bankid",BankID$)
+	let bankid=bankid$
+	if bankid<=0 or bankid>chf(bankchan)
+		let returnstatus=0
+		let message$="Invalid Bank Number Entered " 
+		goto endexitbank:
+	endif
+	Read Record #BankChan,BankId;Bank.
+	if bank.InprocessFlag=1 let bank.Inprocessflag=0
+	Write Record #BankChan,BankId;Bank.;
+	endexitbank: ! end bank verify
+	 Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)  
+	 Call AddToStr(e$,rstr$,WebStr$)                         
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! ExitBank
+
+!--------------------------------------------------------------------
+
+sub BankCRList()
+ 
+  Try
+	returnstatus=1
+	message$="OK"
+	Call dxget("bankid",BankID$)
+	let bankid=bankid$
+	if bankid<=0 or bankid>chf(bankchan)
+		let returnstatus=0
+		let message$="Invalid Bank Number Entered " 
+		goto endbankcrlist:
+	endif
+	Read Record #BankChan,BankId;Bank.;
+	clear list$[]
+	List$[0] = bsdel$,"CREntryList",fdel$    
+	webstr$ = "EntryNum",fdel$              
+	webstr$ = webstr$,"CustID",fdel$  
+	webstr$ = webstr$,"CustName",fdel$  
+	webstr$ = webstr$,"BankAmount",fdel$    
+	List$[1] = webstr$                  
+	row = 2                             
+	tmpcnt = maxcnt                     
+	tmpent=0
+	keycr$=" ",keycr$
+	keycr$[1,2]=bankid using "##"
+	If bank.LastEntryAccpt>0
+		keycr$[3,7]=bank.LastEntryAccpt using "#####"
+		keycr$[8]="9"
+	endif
+	do
+		search #crchan,3,1;keycr$,rec_cr,e
+		if e>0 exit do
+		let tmp3=keycr$[1,2]
+		if tmp3<>bankid exit do
+		tmp3=keycr$[3,7]
+		if tmp3<=bank.LastEntryAccpt goto endsrchcrlist:
+		read record #crchan,rec_cr,0;cr.;
+		if tmpent<>cr.EntryNumber
+			let tmpent=cr.EntryNumber
+			if cr.EntryType=0 goto endsrchcrlist: ! deleted entry -- bypass 
+			webstr$=""
+			webstr$=str$(cr.EntryNumber),fdel$ 
+			if cr.EntryType<>6 
+				webstr$=webstr$+str$(cr.CustomerCode),fdel$
+				webstr$=webstr$+rtrim$(cr.CustomerName$),fdel$
+				let amount=cr.BankAmount
+				if p61$[136,136]="Y" 
+					if cr.currfact<>0
+						call currconvup(amount,cr.currfact)
+						let amount=fnr(amount)
+					endif
+				endif
+				webstr$=webstr$+str$(Amount),fdel$ ! cr.BankAmount
+			else
+				webstr$=webstr$+"J/E",Fdel$
+				webstr$=webstr$+rtrim$(cr.JeDescription$),fdel$
+				let amount=cr.CreditAmount-cr.DebitAmount
+				if p61$[136,136]="Y" 
+					if cr.currfact<>0
+						call currconvup(amount,cr.currfact)
+						let amount=fnr(amount)
+					endif
+				endif
+				webstr$=webstr$+str$(Amount),fdel$ ! cr.CreditAmount-cr.DebitAmount
+			endif
+				
+			let list$[row]=webstr$
+			row=row+1
+			 If row > tmpcnt Let tmpcnt = expandarray(e$,List$[])
+		End If                                              
+    		endsrchcrlist: ! End search list
+	loop
+	
+	endbankcrlist: ! end bank list
+	List$[row] = esdel$ ! end of section delimiter   
+	! 
+	 Call AddToStr(e$,rstr$,List$[]) ! "add the list from subs to string 
+	 Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)  
+	 Call AddToStr(e$,rstr$,WebStr$)                         
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! BankCrList
+	
+!--------------------------------------------------------------------
+sub DelCREntry() ! delete cash receipts entry
+ 
+  Try
+    dim dCR. as cashfle ! cash receipts
+	dim 3%,rec_chk,keychk$[50]
+	returnstatus=1
+	message$=""
+	Call dxget("bankid",BankID$)
+	let bankid=bankid$
+	if bankid<=0 or bankid>chf(bankchan)
+		let returnstatus=0
+		let message$="Invalid Bank Number Entered " 
+		goto enddelcrentry:
+	endif
+	Read Record #BankChan,BankId;Bank.;
+	Call dxget("TTLENTRY",tmp$)
+	let ttlent=tmp$
+	if ttlent<=0
+		let returnstatus=0
+		let message$="No Entries Selected for Delete " 
+		goto enddelcrentry:
+	endif
+	for ctr=TTLENT TO 1 STEP -1 ! 1 to ttlent
+		Call dxget("EntryNum"+str$(ctr),tmp$)
+		let entnum=tmp$
+		if entnum<=0 or entnum>99999
+			!let returnstatus=0
+			!message$=message$+"Invalid Entry Number "+str$(entnum) 
+			goto getnxtent:
+		endif
+		if entnum<=bank.LastEntryAccpt 
+			let returnstatus=0
+			let message$=message$+"Entry "+str$(entnum)+" Accepted-No Delete" 
+			goto getnxtent: ! enddelcrentry:
+		endif
+		keycr$=" ",keycr$
+		keycr$[1,2]=bankid using "##"
+		keycr$[3,7]=entnum using "#####"
+		search #crchan,3,1;keycr$,rec_cr,e
+		if e
+			let returnstatus=0
+			let message$=message$+" Entry "+str$(entnum)+" Not Found"
+			goto getnxtent: ! enddelcrentry:
+		endif
+		let tmp3=keycr$[1,2]
+		if tmp3<>bankid
+			let returnstatus=0
+			let message$=Message$+" Entry "+str$(entnum)+" Not Found"
+			goto getnxtent: !  enddelcrentry:
+		endif
+		let tmp3=keycr$[3,7]
+		if tmp3<>entnum
+			let returnstatus=0
+			let message$=message$+" Entry "+str$(entnum)+" Not Found"
+			goto getnxtent: ! goto enddelcrentry:
+		endif
+		Read record #crchan,rec_cr,0;cr.;
+		if cr.EntryType=0
+			let returnstatus=0
+			let message$=message$+" Entry "+str$(entnum)+" Already Deleted."
+			goto getnxtent: ! enddelcrentry:
+		endif
+		If cr.entrytype>6
+			IF p61$[94,94]<>"Y"
+				let returnstatus=0
+				let message$=message$+" Entry "+str$(entnum)+"Invalid C/R Type. Not Deleted."
+				goto getnxtent:
+			endif
+			endif
+			if cr.EntryType=7 ! deposit
+				If P61$[94,94]<>"Y" 
+					let returnstatus=0
+					let message$=message$+" Entry "+str$(entnum)+"Invalid C/R Type. Not Deleted."
+					goto getnxtent:
+				endif
+				ch_rod = openfile(10106,intCo) 
+				if ch_rod<0
+					let returnstatus=0
+					let message$=message$+" Entry "+str$(entnum)+"Order Deposit File Not Found"
+					goto getnxtent:
+				endif
+				let keyrod$=" ",keyrod$
+				let keyrod$[1,6]= CR.CustomerCode using "######"
+				let keyrod$[7,12]=CR.JournalEntryType using "######" ! order #
+				let keyrod$[13,14]=CR.OthrCrAdjType using "##" ! deposit #
+				Search #ch_rod,2,1;keyrod$,rec_rod,e
+				if not (e)
+					Read Record #ch_rod,rec_rod;rod.; 
+					 mode$ = "d" ! delete                                          
+					 UpdStatus = fileupdatesorddep(e$,ch_rod,mode$,rec_rod,rod.)
+				endif 
+				try close #ch_rod Else rem
+			endif
+			if cr.EntryType=8 
+			        if p61$[94,94]="Y"
+				let returnstatus=0
+				let message$=message$+"Applied Deposit to Invoice Entry "+str$(entnum)+" Not Deleted."
+				goto getnxtent:
+				endif
+			endif
+			if cr.EntryType=9
+				if  p61$[94,94]="Y"
+				let returnstatus=0
+				let message$=message$+"Deleted Deposit Entry "+str$(entnum)+" Not Deleted."
+				goto getnxtent:
+				endif
+			endif
+
+			if cr.EntryType>9
+				Returnstatus=0
+				let message$=message$+" Entry "+str$(entnum)+"Invalid C/R Type. Not Deleted."
+				goto getnxtent: ! goto enddelcrentry: let message$="Error in Deleting Entry. Invalid C/R Type"
+			
+			endif
+		! verify entry 
+		If cr.SaractRecFrom>0 ! d[3]>0 ! has an a/r record #
+			 ! read a/r record 
+			read record #arichan,cr.SaractRecFrom,0;ari.;         
+			If FRA(ARI.AgeTypeCount*100)>=.1 !IF FRA(D3[3]*100)>=.1  ! has had additional entries applied  
+				IF ARI.CurrentCredit<>0 !IF T2[2]
+					let returnstatus=0
+					let message$=message$+" Entry "+str$(entnum)+" Used in Other Entries. Not Deleted."
+					goto getnxtent: ! enddelcrentry:
+				endif 
+			endif
+		endif
+		
+		do
+			search #crchan,3,1;keycr$,rec_cr,e
+			if e>0 exit do
+			let tmp3=keycr$[1,2]
+			if tmp3<>bankid exit do
+			let tmp3=keycr$[3,7]
+			if tmp3<>entnum exit do
+			read record #crchan,rec_cr,0;cr.;
+			If cr.entrytype>6
+				IF p61$[94,94]<>"Y"
+				let returnstatus=0
+				let message$=message$+" Entry "+str$(entnum)+"Invalid C/R Type. Not Deleted."
+				goto getnxtent:
+				endif
+			endif
+			if cr.EntryType=7 ! deposit
+				If P61$[94,94]<>"Y" 
+					let returnstatus=0
+					let message$=message$+" Entry "+str$(entnum)+"Invalid C/R Type. Not Deleted."
+					goto getnxtent:
+				endif
+				ch_rod = openfile(10106,intCo) 
+				if ch_rod<0
+					let returnstatus=0
+					let message$=message$+" Entry "+str$(entnum)+"Order Deposit File Not Found"
+					goto getnxtent:
+				endif
+				let keyrod$=" ",keyrod$
+				let keyrod$[1,6]= CR.CustomerCode using "######"
+				let keyrod$[7,12]=CR.JournalEntryType using "######" ! order #
+				let keyrod$[13,14]=CR.OthrCrAdjType using "##" ! deposit #
+				Search #ch_rod,2,1;keyrod$,rec_rod,e
+				if not (e)
+					Read Record #ch_rod,rec_rod;rod.; 
+					 mode$ = "d" ! delete                                          
+					 UpdStatus = fileupdatesorddep(e$,ch_rod,mode$,rec_rod,rod.)
+				endif 
+				try close #ch_rod Else rem
+			endif
+			if cr.EntryType=8 
+			        if p61$[94,94]="Y"
+				let returnstatus=0
+				let message$=message$+"Applied Deposit to Invoice Entry "+str$(entnum)+" Not Deleted."
+				goto getnxtent:
+				endif
+			endif
+			if cr.EntryType=9
+				if  p61$[94,94]="Y"
+				let returnstatus=0
+				let message$=message$+"Deleted Deposit Entry "+str$(entnum)+" Not Deleted."
+				goto getnxtent:
+				endif
+			endif
+
+			if cr.EntryType>9
+				Returnstatus=0
+				let message$=message$+" Entry "+str$(entnum)+"Invalid C/R Type. Not Deleted."
+				goto getnxtent: ! goto enddelcrentry: let message$="Error in Deleting Entry. Invalid C/R Type"
+			
+			endif
+			If cr.SaractRecFrom>0 ! d[3]>0 ! has an a/r record #
+				! read a/r record 
+				read record #arichan,cr.SaractRecFrom,0;ari.;
+			     	If FRA(ARI.AgeTypeCount*100)>=.1 !IF FRA(D3[3]*100)>=.1  ! has had additional entries applied 
+					IF ARI.CurrentCredit<>0 !IF T2[2]
+						let returnstatus=0
+						let message$=message$+"Entry "+str$(entnum)+" Used in Other Entries. Not Deleted."
+						goto getnxtent: ! enddelcrentry:
+					endif
+					
+				endif
+			endif
+			if cr.EntryType<=0
+				Returnstatus=0
+				let message$=message$+" Entry "+str$(entnum)+"Invalid C/R Type. Not Deleted."
+				goto getnxtent: ! goto enddelcrentry: 
+			endif
+			If cr.entrytype>6
+				IF p61$[94,94]<>"Y"
+				let returnstatus=0
+				let message$=message$+" Entry "+str$(entnum)+"Invalid C/R Type. Not Deleted."
+				goto getnxtent:
+				endif
+			endif
+			if cr.EntryType=7 ! deposit
+				If P61$[94,94]<>"Y" 
+					let returnstatus=0
+					let message$=message$+" Entry "+str$(entnum)+"Invalid C/R Type. Not Deleted."
+					goto getnxtent:
+				endif
+				ch_rod = openfile(10106,intCo) 
+				if ch_rod<0
+					let returnstatus=0
+					let message$=message$+" Entry "+str$(entnum)+"Order Deposit File Not Found"
+					goto getnxtent:
+				endif
+				let keyrod$=" ",keyrod$
+				let keyrod$[1,6]= CR.CustomerCode using "######"
+				let keyrod$[7,12]=CR.JournalEntryType using "######" ! order #
+				let keyrod$[13,14]=CR.OthrCrAdjType using "##" ! deposit #
+				Search #ch_rod,2,1;keyrod$,rec_rod,e
+				if not (e)
+					Read Record #ch_rod,rec_rod;rod.; 
+					 mode$ = "d" ! delete                                          
+					 UpdStatus = fileupdatesorddep(e$,ch_rod,mode$,rec_rod,rod.)
+				endif 
+				try close #ch_rod Else rem
+			endif
+			if cr.EntryType=8 
+			        if p61$[94,94]="Y"
+				let returnstatus=0
+				let message$=message$+"Applied Deposit to Invoice Entry "+str$(entnum)+" Not Deleted."
+				goto getnxtent:
+				endif
+			endif
+			if cr.EntryType=9
+				if  p61$[94,94]="Y"
+				let returnstatus=0
+				let message$=message$+"Deleted Deposit Entry "+str$(entnum)+" Not Deleted."
+				goto getnxtent:
+				endif
+			endif
+
+			if cr.EntryType>9
+				Returnstatus=0
+				let message$=message$+" Entry "+str$(entnum)+"Invalid C/R Type. Not Deleted."
+				goto getnxtent: ! goto enddelcrentry: let message$="Error in Deleting Entry. Invalid C/R Type"
+			
+			endif
+		loop
+		
+	    ! let verify if used in future entries
+		keycr$=" ",keycr$
+		keycr$[1,2]=bankid using "##"
+		keycr$[3,7]=entnum using "#####"
+		srchcrchk: ! 
+		search #crchan,3,1;keycr$,rec_cr,e
+		if e>0 goto startcrdel: 
+		let tmp3=keycr$[1,2]
+		if tmp3<>bankid goto startcrdel:
+		let tmp3=keycr$[3,7]
+		if tmp3<>entnum goto startcrdel:
+		read record #crchan,rec_cr,0;cr.
+		if cr.EntryType=0 goto srchcrchk: ! deleted item
+		for ctx=1 to 99
+			let keychk$=" ",keychk$
+			let keychk$[1,2]=ctx using "##"
+			let keychk$[3,7]=entnum using "#####"
+			if ctx=bankid let keychk$[8]="999"
+			do
+				search #crchan,3,1;keychk$,rec_chk,e
+				if e=2 goto startcrdel:
+				if e<>0 goto getnxtbnkdel:
+				let tmp3=keychk$[1,2]
+				if tmp3<>ctx 
+					if (tmp3-1) > 1 and ctx<>99 and (tmp3-1)<>ctx
+						let ctx=tmp3-1
+					endif
+					goto getnxtbnkdel:
+				endif
+				let tmp3=keychk$[3,7]
+				if tmp3>entnum
+					read record #crchan,rec_chk,0;dcr.
+					if dcr.entrynumber=0 goto getnxtcrchk: ! deleted
+					if dcr.CustomerCode<>cr.CustomerCode goto getnxtcrchk:
+					if cr.SaractRecTo<>0
+						if cr.SaractRecTo=dcr.SaractRecTo
+							let returnstatus=0
+							let message$=message$+" Entry "+str$(entnum)+" Used in Other Entries. Not Deleted."
+							goto enddelcrentry:
+						endif
+						if cr.SaractRecTo=dcr.SaractRecFrom  
+							let message$=message$+" Entry "+str$(entnum)+" Used in Other Entries. Not Deleted."
+							goto enddelcrentry:
+						endif
+					endif
+					if cr.SaractRecFrom<>0
+						if cr.SaractRecFrom=dcr.SaractRecTo
+							let returnstatus=0
+							let message$=message$+" Entry "+str$(entnum)+" Used in Other Entries. Not Deleted."
+							goto enddelcrentry:
+						endif
+						if cr.SaractRecFrom=dcr.SaractRecFrom  
+							let message$=message$+" Entry "+str$(entnum)+" Used in Other Entries. Not Deleted."
+							goto enddelcrentry:
+						endif
+					endif
+				endif
+				goto getnxtcrchk1: 
+				getnxtcrchk: ! 
+				let tmp3=keycr$[3,7]
+				let tmp3=tmp3+1 \ if tmp3>99999 goto getnxtbnkdel:
+				let keycr$=" ",keycr$
+				let keycr$[1,2]=ctx using "###"
+				let keycr$[3,7]=tmp3 using "######"
+				getnxtcrchk1: ! 
+			loop
+			getnxtbnkdel: ! getnxtbnkdel
+		next ctx
+		startcrdel: ! 	! ok so we made it here lets delete it now	
+		keycr$=" ",keycr$
+		keycr$[1,2]=bankid using "##"
+		keycr$[3,7]=entnum using "#####"
+		Do
+			search #crchan,3,1;keycr$,rec_cr,e
+			if e>0 exit do
+			let tmp3=keycr$[1,2]
+			if tmp3<>bankid exit do
+			let tmp3=keycr$[3,7]
+			if tmp3<>entnum exit do
+			read record #crchan,rec_cr,0;cr.
+			if cr.EntryType=1 ! payment
+				if cr.SaractRecTo>0
+					read record #arichan,cr.SaractRecTo,0;ari.
+					if (cr.DebitAmount-cr.CreditAmount)<>0
+						ari.CurrentCredit=ari.CurrentCredit-cr.DebitAmount-cr.CreditAmount!LET T2[2]=T2[2]-T[2]-T[3]
+						LET TYPE=int(fra(ari.AgeTypeCount)*100)
+						Let age=int(ari.AgeTypeCount)
+						If Int(FRA(ARI.AgeTypeCount*100)*10)>=1
+							let ARI.AgeTypeCount=ARI.AgeTypeCount-.001
+							let tmp3=int(fra(ari.AgeTypeCount)*100)
+							if tmp3<>type
+								ari.AgeTypeCount=age+(type/100)
+							endif
+						endif
+					endif
+					if cr.DiscountAmount<>0
+						ari.CRDiscAmount=ari.CRDiscAmount-cr.DiscountAmount
+					endif
+					write record #arichan,cr.SaractRecTo,0;ari.;
+					! update age buckets
+					if (cr.DebitAmount+cr.CreditAmount)<>0
+						Let age=int(ari.AgeTypeCount)
+						if age>5 let age=5 ! LET I=INT(D3[3]) \ IF I>5 LET I=5                
+						LET TYPE=int(fra(ari.AgeTypeCount)*100) ! INT(FRA(D3[3])*100) 
+						LET ARAMT=cr.DebitAmount+cr.CreditAmount 
+						If type>5
+							IF P9$[19,19]="N" LET age=1                                          
+							IF P9$[19,19]="Y" LET ARAMT=-ARAMT ! reverse for aging credits
+						endif
+						mat read #custchan,cr.CustomerFileRec,210;t5
+						LET T5[age]=T5[age]+ARAMT
+						mat write #custchan,cr.CustomerFileRec,210;t5;
+						LET ARAMT=cr.CreditAmount-cr.DebitAmount 
+						call UpDArproof(ARAMT) ! UPDATE AR PROOF
+					endif
+				endif
+				if cr.SaractRecFrom>0
+					let rec_ar=cr.SaractRecFrom
+					call delartran(rec_ar)
+		       		endif
+			Endif ! type =1	
+			if cr.EntryType=2 or cr.EntryType=3!            
+				mat read #custchan,cr.CustomerFileRec,210;t5                       
+				if cr.SaractRecFrom>0 ! IF D[3]  
+					read record #arichan,cr.SaractRecFrom,0;ari.
+					Let age=int(ari.AgeTypeCount)
+					if age>5 let age=5 ! LET I=INT(D3[3]) \ IF I>5 LET I=5                
+					LET TYPE=int(fra(ari.AgeTypeCount)*100) ! INT(FRA(D3[3])*100)                     
+					IF P9$[19,19]="N" AND TYPE>5 LET age=1             
+				ELSE                                                 
+					LET age=0                                            
+					IF P9$[19,19]="N" AND cr.TypeOfActivity>5 LET age=1               
+				ENDIF                                                
+				IF cr.TypeOfActivity<>4 LET ARAMT=cr.CreditAmount ELSE  LET ARAMT=ABS(cr.CreditAmount)  
+				IF P9$[19,19]="Y"                                    
+					IF cr.TypeOfActivity<>4 LET ARAMT=-ARAMT                        
+				ENDIF
+				let aramt=aramt*(-1)
+				LET T5[age]=T5[age]+ARAMT
+				mat write #custchan,cr.CustomerFileRec,210;t5;
+				LET ARAMT=cr.CreditAmount-cr.DebitAmount 
+				call UpDArproof(ARAMT) ! UPDATE AR PROOF
+				if cr.SaractRecFrom>0
+					let rec_ar=cr.SaractRecFrom
+					call delartran(rec_ar)
+	               		endif
+			endif
+			if cr.EntryType=4
+				mat read #custchan,cr.CustomerFileRec,210;t5                       
+				LET age=0                                            
+				aramt=cr.DebitAmount			
+				LET T5[age]=T5[age]+ARAMT
+				mat write #custchan,cr.CustomerFileRec,210;t5;
+				LET ARAMT=cr.CreditAmount-cr.DebitAmount 
+				call UpDArproof(ARAMT)! UPDATE AR PROOF
+				if cr.SaractRecFrom>0
+					 let rec_ar=cr.SaractRecFrom
+					call delartran(rec_ar)
+                   		endif
+			endif
+			if cr.EntryType=5 ! nsf
+				mat read #custchan,cr.CustomerFileRec,210;t5
+				LET age=0                                            
+				aramt=-(ABS(cr.bankamount))			
+				LET T5[age]=T5[age]+ARAMT
+				mat write #custchan,cr.CustomerFileRec,210;t5;
+				LET ARAMT=cr.CreditAmount-cr.DebitAmount 
+				call UpDArproof(ARAMT)! UPDATE AR PROOF
+				if cr.SaractRecFrom>0
+					read record #arichan,cr.SaractRecFrom,0;ari.
+					let rec_ar=cr.SaractRecFrom
+					call delartran(rec_ar)
+                   		endif
+
+			endif
+			if cr.EntryType=6 ! journal entry
+				! just need to delete the cashfle records
+			endif
+			if cr.EntryType=7 ! deposit
+				If P61$[94,94]="Y" 
+					ch_rod = openfile(10106,intCo) 
+					if ch_rod>0
+						let keyrod$=" ",keyrod$
+						let keyrod$[1,6]= CR.CustomerCode using "######"
+						let keyrod$[7,12]=CR.JournalEntryType using "######" ! order #
+						let keyrod$[13,14]=CR.OthrCrAdjType using "##" ! deposit #
+						Search #ch_rod,2,1;keyrod$,rec_rod,e
+						if not (e)
+							Read Record #ch_rod,rec_rod;rod.; 
+							mode$ = "d" ! delete                                          
+							UpdStatus = fileupdatesorddep(e$,ch_rod,mode$,rec_rod,rod.)
+						endif
+						Try Close #ch_rod Else Rem
+					endif
+				endif
+			endif
+			let tiebreaker=keycr$[8,10]
+			if tiebreaker=1
+				let cr.EntryType=0
+				Let cr.Warehouse = 0 
+				Let cr.TypeOfActivity = 0 
+				Let cr.SaractRecTo = 0          
+				Let cr.SaractRecFrom = 0       
+				Let cr.PaymentDate = 0        
+				Let cr.JournalEntryType = 0       
+				Let cr.OthrCrAdjType = 0                         
+				Let cr.OtherDiscntType = 0                        
+				Let cr.DivisionCode = 0                    
+				Let TransactionNumber = 0     
+				let cr.bankamount=0        
+				Let DebitAmount = 0        
+				Let CreditAmount = 0        
+				Let DiscountAmount = 0        
+				Let LastPayment = 0        
+				Let FreightAllowance = 0  
+				LET cr.currfact=0
+				write record #crchan,rec_cr,0;cr.;
+			else
+				search #crchan,5,1;keycr$,rec_cr,e
+				let e=3\search #crchan,1,0;keycr$,rec_cr,e
+			endif
+			aramt=0
+		loop
+		getnxtent:  ! get the next entry
+	next ctr
+	enddelcrentry: ! end bank list
+	If returnstatus=1
+		let message$="Delete Complete"
+	endif
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)                      
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DELCRENTRY
+	
+!--------------------------------------------------------------------
+
+
+sub UpDArproof(ARAMT) ! updates the ar proof file for cash receipts
+ 
+  Try
+	 read record #proofchan,0,0; ARCC.
+	 arcc.NetCRDaily=arcc.NetCRDaily+aramt
+	 write record #proofchan,0,0; ARCC.;
+	 let aramt=0       
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! UpdArproof
+
+!--------------------------------------------------------------------
+sub DelArTran(rec_Ar) ! deletes ar transactions
+ 
+  Try
+	read record #arichan,rec_ar,0;ari.                 
+	let rec_tmp=rec_ar                                 
+	LET type=INT(FRA(ari.AgeTypeCount)*100) USING "#"  
+	LET keyar1$=ari.CustomerCode USING "######"        
+	LET keyar1$[7]=ari.ReferenceNo USING "##########"  
+	LET keyar1$[17,17]=type  USING "#"                                                        
+	SEARCH #arichan,2,1;keyar1$,rec_tmp,E              
+	IF not(e) !                                        
+		SEARCH #arichan,5,1;keyar1$,rec_tmp,E      
+	endif                                              
+	LET keyar1$[7]=ari.Date USING "######"             
+	LET keyar1$[13]=ari.ReferenceNo USING "##########" 
+	LET keyar1$[23,23]=type USING "#"                     
+	SEARCH #arichan,2,2;keyar1$,rec_tmp,E              
+	if not(e)                                          
+		SEARCH #arichan,5,2;keyar1$,rec_tmp,E      
+	endif 
+	                                                
+	LET keyar2$=" ",keyar2$;keyar2$[1,6]=ari.PostingCust USING "######"        
+	LET keyar2$[7]=keyar1$;keyar2$[30,30]=" "                                      
+	SEARCH #arichan,2,3;keyar2$,rec_tmp,E                                      
+	IF NOT(E) ! "delete - if found                                             
+		SEARCH #arichan,5,3;keyar2$,rec_tmp,E                              
+	ENDIF                                                                      
+	LET keyar2$=" ",keyar2$;keyar2$[1,6]=ari.PostingCust USING "######" ! keyar2$[1,6]                          
+	LET keyar2$[7,16]=ari.ReferenceNo USING "##########" ! keyar2$[19,28]                                           
+	LET keyar2$[17,22]=ari.CustomerCode USING "######" ! keyar2$[7,12]                                           
+	LET keyar2$[23,23]=type USING "#"  ! keyar2$[29]                                                
+	SEARCH #arichan,2,4;keyar2$,Rec_tmp,E                                      
+	IF NOT(E) ! "delete if found                                               
+		SEARCH #arichan,5,4;keyar2$,rec_tmP,E                              
+	ENDIF                                                                      
+	LET keyar2$=" ",keyar2$;keyar2$[1,6]=ari.PostingCust USING "######" ! keyar2$[1,6] keyar2$[1,6]                               
+	LET keyar2$[7]=ari.Date USING "######"  !LET keyar2$[7,22]=keyar2$[13,28]                                           
+	LET keyar2$[13]=ari.ReferenceNo USING "##########" ! LET keyar2$[23,28]=keyar2$[7,12]
+	LET keyar2$[23,28]=ari.CustomerCode USING "######" ! keyar2$[7,12]  
+	LET keyar2$[29,29]=type USING "#"  ! keyar2$[29]                                                
+	SEARCH #arichan,2,5;keyar2$,rec_tmp,E                                      
+	IF NOT(E) ! "if found delete it 
+	        SEARCH #arichan,5,5;keyar2$,rec_tmp,E 
+	endif                                         
+	LET E=3                                       
+	SEARCH #arichan,1,0;keyar1$,rec_ar,E          
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DelArTran
+
+!--------------------------------------------------------------------
+sub DelDirAr(custrec,rec_dar) ! deletes direct a/r transactions
+Try
+ ! update custage buckets
+read record #ch_dar,rec_dar,0;odar.
+If (odar.OrigAmt) <> 0                       
+  age = Int(odar.AgeTypeCount)                                    
+  If age > 5 Let age = 5                                                                
+  type = Int(Fra(odar.AgeTypeCount) * 100)                                                        
+  If P9$[19,19] = "N" And type > 5 Let age = 1                   
+  aramt = odar.origamt                                                                  
+  If P9$[19,19] = "Y" And type > 5 Let aramt = - aramt           
+  Mat Read #custchan,custrec,210;t5                   
+  t5[age] = t5[age] - aramt                                      
+  Mat Write #custchan,custrec,210;t5; 
+  let aramt=-aramt
+  ! Call UpDirArproof(aramt) ! UPDATE AR PROOF - done in 315 a/r direct load accept
+End If
+Call Dxget ("DELENT",tmp$)
+if ucase$(rtrim$(tmp$))="Y"
+	clear odar.
+else
+	let odar.origamt=0
+endif
+write record #ch_dar,rec_dar,0;odar.;
+let message$="Entry Number "+str$(rec_dar)+" Deleted "
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DelDirAr
+!--------------------------------------------------------------------
+sub UpDirArproof(ARAMT) ! updates the ar proof file for direct a/r
+ 
+  Try
+	 read record #proofchan,0,0; ARCC.
+	 arcc.TotalDirArLoad=arcc.TotalDirArLoad+aramt
+	 write record #proofchan,0,0; ARCC.;
+	 let aramt=0       
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! UpDirArproof
+!--------------------------------------------------------------------
+!--------------------------------------------------------------------
+sub GetDirARAGE(age,type,custrec,duedate,trandate)
+ 
+  Try
+	dim 1%,AGEBUCK[3],DDAY,2%,AGEDATE,AGEDAY,d3[2]
+	if type>5 and p9$[19,19]="N" ! credit / age unapplied = no
+		let age=1 
+		goto endgetdirage:
+	endif
+	MAT  READ #ctlc,20,130;AGEBUCK;
+	IF P9$[50,50]<>"M" AND P61$[67,67]="Y" ! not by month/by term code                            
+		IF Cust.Terms>0 AND Cust.Terms<=99                                      
+			READ #TERMCHAN,(Cust.Terms),30;DDAY;                                      
+			IF DDAY=0 LET DDAY=1                                              
+			IF DDAY>0                                                         
+				LET AGEBUCK[0]=DDAY                                             
+				LET AGEBUCK[1]=DDAY*2                                           
+				LET AGEBUCK[2]=DDAY*3                                           
+				LET AGEBUCK[3]=DDAY*4                                           
+			ENDIF                                                             
+		ENDIF                                                               
+	ENDIF                                                                 
+	Read #ctlc,0,108;ardate;                   
+	tmp$ = ardate Using "&&&&&&" ! yymmdd format
+	iF P9$[50,50]<>"M" ! ar aging not by month	                           
+		Call DateToJulian(1,tmp$,tmp1$,errflag)     
+		jardate = tmp1$
+	else
+		let xdate$=ardate using "&&&&&&"
+		IF XDATE$[1,2]<"70"                                    
+			LET D3[0]=XDATE$[1,2];D3[0]=(D3[0]+100)*12;D3[1]=XDATE$[3,4];D3[0]=D3[0]+D3[1] 
+		ELSE                                               
+			LET D3[0]=XDATE$[1,2];D3[0]=D3[0]*12;D3[1]=XDATE$[3,4];D3[0]=D3[0]+D3[1]       
+		ENDIF 
+		let jardate=d3[0]
+	endif
+	IF P9$[50,50]="D"   ! ar aging by day                   
+		LET agedate=TranDate                       
+		IF P9$[25,25]="Y"  ! ar aging by due date                  
+			 IF duedate>0 
+				tmp$ = duedate Using "&&&&&&" ! yymmdd format
+				Call DateToJulian(1,tmp$,tmp1$,errflag) 
+				if not(errflag) let agedate=tmp1$
+			 endif
+		endif
+		let agedays=jardate-agedate        
+		IF agedays<-15000 LET agedays=agedays+36525        
+		IF agedays<=AGEBUCK[0]                   
+			LET age=0                        
+		ELSE                                
+			IF agedays<=AGEBUCK[1]                 
+				LET age=2                      
+			ELSE                              
+				IF agedays<=AGEBUCK[2]               
+					LET age=3                    
+				ELSE                            
+					IF agedays<=AGEBUCK[3]             
+						LET age=4                  
+				                                  
+					 ELSE                                         
+						LET age=5                                 
+					 ENDIF                                        
+				 ENDIF                                          
+			 ENDIF                                            
+		 ENDIF                                              
+	ELSE  ! "age by months                               
+		IF P9$[25,25]="Y" AND duedate<>0                     
+			LET Xdate$=duedate USING "&&&&&&"                      
+		ELSE                                               
+			Call JulianToDate(1,xdate$,xdate$,errflag) ! mm/dd/yyyy
+			if errflag<>0
+				let xdate$=ardate using "&&&&&&"
+			else
+				D3[0] = xdate$[1,2];D3[1] = xdate$[4,5];D3[2] = xdate$[7,8]
+				xdate$ = D3[2] * 10 ^ 4 + D3[0] * 10 ^ 2 + D3[1] Using "&&&&&&"
+				agedate=xdate$
+			endif
+		ENDIF
+		IF XDATE$[1,2]<"70"                                    
+			LET D3[0]=XDATE$[1,2];D3[0]=(D3[0]+100)*12;D3[1]=XDATE$[3,4];D3[0]=D3[0]+D3[1] 
+		ELSE                                               
+			LET D3[0]=XDATE$[1,2];D3[0]=D3[0]*12;D3[1]=XDATE$[3,4];D3[0]=D3[0]+D3[1]       
+		ENDIF                                              
+		LET agedays=jardate-d3[0]                                      
+		IF agedays<-600 LET agedays=agedays+1200                          
+		IF agedays<=0                                                          
+			LET age=0               
+		ELSE                       
+			LET age=agedays+1            
+			IF age>5 LET age=5     
+		ENDIF  
+	Endif
+	endgetdirage: ! that's all folks
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! UpDirArproof
+!!!!!
+!=================================================================================
+Sub GETPAYDESC() ! gets the AR payment description
+Try
+	dim keyar$[50],3%
+	clear list$[]
+	list$[0]=bsdel$,"ARPayDesc",fdel$
+	webstr$=""
+	webstr$="CustId",fdel$
+	webstr$=webstr$,"TransId",fdel$
+	webstr$=webstr$,"Type",fdel$
+	Webstr$=webstr$,"PayDesc",fdel$
+	list$[1]=webstr$
+	row=2
+	Call Dxget("CustId",tmp$)
+	tmp3=tmp$
+	custid=tmp3
+	let searkey$=tmp3 using "######"
+	mode$="="
+	dirno=1
+	CustRec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+	if custrec<0
+		ReturnStatus=0 ! error not found
+		Message$="Customer ",trim$(searkey$)," not found"
+		goto endgetpaydesc:
+	Endif
+	Call dxget("docno",tmp$) \ DocNo = tmp$ ! 
+	if rtrim$(tmp$)=""
+		let message$="Invalid Doc Id Submitted "
+		returnstatus=0
+		goto endgetpaydesc:
+	endif
+	let tmp3=tmp$
+	if tmp3<1 or tmp3>99999999
+		let message$="Invalid Doc Id Submitted "
+		returnstatus=0
+		goto endgetpaydesc:
+	endif
+	let transid=tmp3
+	Call dxget("doctype",InvType$) ! invoice type (code) 
+	let invtype$=rtrim$(invtype$)
+	let type=0
+	If invtype$ = "INV" Let type = 1  
+	If invtype$ = "SVC" Let type = 2  
+	If invtype$ = "NSF" Let type = 3  
+	If invtype$ = "D/A" Let type = 4  
+	If invtype$ = "LAT" Let type = 5  
+	If invtype$ = "C/M" Let type = 6  
+	If invtype$ = "UN." Let type = 7  
+	If invtype$ = "C/A" Let type = 8  
+	If invtype$ = "PAY" Let type = 9  
+	
+	if type<1 or type>9
+		let returnstatus=0
+		let message$="Invalid Doc Type Submitted "
+		goto endgetpaydesc:
+	endif	
+	! verify if in a/r file
+	let keyar$=" ",keyar$
+	let keyar$[1,6]=Custid using "######"
+	let keyar$[7,16]=transid using "##########"
+	let keyar$[17,17]=type using "#"
+	search #arichan,2,1;keyar$,rec_ar,e
+	if e<>0
+		!!! try the ar history file
+		let e=0
+		search #arhistchan,2,1;keyar$,rec_ar,e
+		if e<>0
+			let returnstatus=0
+			let message$="Transaction "+str$(transid)+" For Customer "+str$(custid)+" Not On File"
+			goto endgetpaydesc:
+		else
+			read record#arhistchan,rec_ar;ARI.;
+		endif
+	else
+		read record#arichan,rec_ar;ARI.;
+	endif
+	
+	webstr$=(CustId using "######"),fdel$
+	webstr$=webstr$,(docNo using "#########"),fdel$
+	webstr$=webstr$,rtrim$(invtype$),fdel$
+	webstr$=webstr$,rtrim$(ari.paydesc$),fdel$
+	if returnstatus=1 ! no errors
+		List$[row]=webstr$
+		let row=row+1
+	endif
+	endgetpaydesc: ! end of payment items
+	list$[row]=esdel$ ! end of section
+	call AddToStr(e$,rstr$,List$[])
+	
+	
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)	! let send over the data
+
+else
+    include "src/callsuberr.inc"
+end try
+end sub ! GETPAYDESC
+!--------------------------------------------------------------------
+!=================================================================================
+Sub SUBMITPAYDESC() ! gets the AR payment description
+Try
+	dim keyar$[50],3%
+	Call Dxget("CustId",tmp$)
+	tmp3=tmp$
+	custid=tmp3
+	let searkey$=tmp3 using "######"
+	mode$="="
+	dirno=1
+	CustRec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+	if custrec<0
+		ReturnStatus=0 ! error not found
+		Message$="Customer ",trim$(searkey$)," not found"
+		goto endsubpaydesc:
+	Endif
+	Call dxget("docno",tmp$) \ DocNo = tmp$ ! 
+	if rtrim$(tmp$)=""
+		let message$="Invalid Doc Id Submitted "
+		returnstatus=0
+		goto endsubpaydesc:
+	endif
+	let tmp3=tmp$
+	if tmp3<1 or tmp3>99999999
+		let message$="Invalid Doc Id Submitted "
+		returnstatus=0
+		goto endsubpaydesc:
+	endif
+	let transid=tmp3
+	Call dxget("doctype",InvType$) ! invoice type (code) 
+	let invtype$=rtrim$(invtype$)
+	let type=0
+	If invtype$ = "INV" Let type = 1  
+	If invtype$ = "SVC" Let type = 2  
+	If invtype$ = "NSF" Let type = 3  
+	If invtype$ = "D/A" Let type = 4  
+	If invtype$ = "LAT" Let type = 5  
+	If invtype$ = "C/M" Let type = 6  
+	If invtype$ = "UN." Let type = 7  
+	If invtype$ = "C/A" Let type = 8  
+	If invtype$ = "PAY" Let type = 9  
+	
+	if type<1 or type>9
+		let returnstatus=0
+		let message$="Invalid Doc Type Submitted "
+		goto endsubpaydesc:
+	endif	
+	! verify if in a/r file
+	let keyar$=" ",keyar$
+	let keyar$[1,6]=Custid using "######"
+	let keyar$[7,16]=transid using "##########"
+	let keyar$[17,17]=type using "#"
+	search #arichan,2,1;keyar$,rec_ar,e
+	if e<>0
+		let returnstatus=0
+		let message$="Transaction "+str$(transid)+" For Customer "+str$(custid)+" Not On File"
+		goto endsubpaydesc:
+	endif
+	read record#arichan,rec_ar;ARI.;
+	Call dxget("PAYDESC",tmp$) ! invoice type (code)
+	let ari.paydesc$=rtrim$(tmp$)+blank$
+	write record #arichan,rec_ar;ari.;
+	endsubpaydesc: ! end of payment items
+	
+	
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)	! let send over the data
+
+else
+    include "src/callsuberr.inc"
+end try
+end sub ! SUBMITPAYDESC
+!=================================================================================
+Sub GETDATEARTRANS() ! gets the ar transaction to delete
+Try
+	dim 1%,gridflag,3%,totrec,ARList$[100,300],keyar$[50],XDATE$[10]
+	totrec=0
+	clear arlist$[]
+	Call Dxget("CustId",tmp$)
+	tmp3=tmp$
+	custid=tmp3
+	let searkey$=tmp3 using "######"
+	mode$="="
+	dirno=1
+	CustRec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+	if custrec<0
+		ReturnStatus=0 ! error not found
+		Message$="Customer ",trim$(searkey$)," not found"
+		goto endgetdateartran:
+	Endif
+	Call Dxget("TRANSID",tmp$)
+	if rtrim$(tmp$)=""
+		let message$="Invalid Transaction Id Submitted "
+		returnstatus=0
+		goto endgetdateartran:
+	endif
+	let tmp3=tmp$
+	if tmp3<1 or tmp3>99999999
+		let message$="Invalid Transaction Id Submitted "
+		returnstatus=0
+		goto endgetdateartran:
+	endif
+	let transid=tmp3
+	Call Dxget("TYPE",tmp$)
+	let type=tmp$
+	if type<0 or type>9
+		let returnstatus=0
+		let message$="Invalid Transaction Type Submitted "
+		goto endgetdateartran:
+	endif	
+	! verify if in a/r file
+	let keyar$=" ",keyar$
+	let keyar$[1,6]=Custid using "######"
+	let keyar$[7,16]=transid using "##########"
+	totrec=0
+	if type<>0
+		let gridflag=0
+		let keyar$[17,17]=type using "#"
+		search #arichan,2,1;keyar$,rec_ar,e
+		if e<>0
+			let returnstatus=0
+			let message$="Transaction "+str$(transid)+" For Customer "+str$(custid)+" Not On File"
+			goto endgetdateartran:
+		endif
+		read record#arichan,rec_ar;ARI.;
+		tmp3=ari.OrigAmt-ari.PriorCredit-ari.CurrentCredit 
+		if tmp3<=0
+			let returnstatus=0
+			let message$="Transaction "+str$(transid)+" For Customer "+str$(custid)+" Is Not Open"
+			goto endgetdateartran:
+		endif
+		webstr$=(CustId using "######"),fdel$
+		webstr$=webstr$,(TransId using  "##########"),fdel$
+		webstr$=webstr$,( Int(Fra(ari.AgeTypeCount) * 100) using "##"),fdel$
+		LET TMP$=""
+		TRY
+			tmp$=GetARTypeDesc$(ARI.AgeTypeCount,1)
+		else
+			let tmp$=""
+		END TRY
+		Webstr$=webstr$,rtrim$(tmp$),fdel$
+		if ari.date<>0
+			XDATE$ = ari.Date  Using "&&&&&&"           
+			Call JulianToDate(1,XDATE$,XDATE$,errflag)
+			if errflag let xdate$="01/01/01" 
+		else
+			let xdate$="01/01/01" ! dfault
+		endif
+		webstr$=webstr$,xdate$,fdel$
+		LET XDATE$=""
+		if ari.duedate1<>0
+			XDATE$ = pdate$(ari.DueDate1) 
+		else
+			let xdate$="01/01/01"
+		endif
+		WEBSTR$=WEBSTR$,XDATE$,FDEL$
+		webstr$=webstr$,rtrim$(ari.EntryDescription$),fdel$
+		tmp3=ari.OrigAmt-ari.PriorCredit-ari.CurrentCredit    
+		if Int(Fra(ari.AgeTypeCount) * 100)>5
+			let tmp3=tmp3*(-1)
+		endif
+		Webstr$=webstr$,(tmp3 using "----------.##"),fdel$
+		arlist$[0]=webstr$
+		
+		
+	else
+		clear arlist$[]
+		do
+			search #arichan,3,1;keyar$,rec_ar,e
+			if e<>0 exit do
+			let tmp3=keyar$[1,6]\if custid<>tmp3 exit do
+			let tmp3=keyar$[7,16]\if transid<>tmp3 exit do
+			read record#arichan,rec_ar;ARI.;
+			tmp3=ari.OrigAmt-ari.PriorCredit-ari.CurrentCredit 
+			if tmp3>0 
+				webstr$=(CustId using "######"),fdel$
+				webstr$=webstr$,(TransId using "##########"),fdel$
+				webstr$=webstr$,( Int(Fra(ari.AgeTypeCount) * 100) using "##"),fdel$
+				LET TMP$=""
+				TRY
+					tmp$=GetARTypeDesc$(ARI.AgeTypeCount,1)
+				else
+					let tmp$=""
+				END TRY
+				Webstr$=webstr$,rtrim$(tmp$),fdel$
+				if ari.date<>0
+					XDATE$ = ari.Date  Using "&&&&&&"           
+					Call JulianToDate(1,XDATE$,XDATE$,errflag)
+					if errflag let xdate$="01/01/01" 
+				else
+					let xdate$="01/01/01" ! dfault
+				endif
+				webstr$=webstr$,xdate$,fdel$
+				LET XDATE$=""
+				if ari.duedate1<>0
+					XDATE$ = pdate$(ari.DueDate1) 
+				else
+					let xdate$="01/01/01"
+				endif
+				WEBSTR$=WEBSTR$,XDATE$,FDEL$
+				webstr$=webstr$,rtrim$(ari.EntryDescription$),fdel$
+				tmp3=ari.OrigAmt-ari.PriorCredit-ari.CurrentCredit    
+				if Int(Fra(ari.AgeTypeCount) * 100)>5
+					let tmp3=tmp3*(-1)
+				endif
+				Webstr$=webstr$,(tmp3 using "----------.##"),fdel$
+				arlist$[totrec]=webstr$! load arlist variable
+				let totrec=totrec+1
+			endif
+		loop
+		if not (totrec)
+			let returnstatus=0
+			let message$="Open Transaction "+str$(transid)+" For Customer "+str$(custid)+"Not on File"
+			goto endgetdateartran:
+		endif
+		if totrec>1 let gridflag=99
+	endif
+	
+	Endgetdateartran: !
+	 Clear List$[]                                                       
+	 List$[0] = bsdel$,"GridType",fdel$                                  
+	 List$[1] = "Grid",fdel$,"EditDate",fdel$ 
+	 let tmp$="N"
+	 if gridflag<>0 let tmp$="Y"
+	 webstr$=tmp$,fdel$
+	 tmp$="Trans"
+	 IF P9$[25,25]="Y" LET tmp$="Due"
+	 let webstr$=webstr$+tmp$,fdel$
+	 List$[2] =webstr$
+	 list$[3]=esdel$
+	 Call AddToStr(e$,rstr$,List$[]) ! "add the list from subs to string                    
+	! section 2
+	clear list$[]
+	list$[0]=bsdel$,"ARTransaction",fdel$
+	webstr$=""
+	webstr$="CustId",fdel$
+	webstr$=webstr$,"TransId",fdel$
+	webstr$=webstr$,"Type",fdel$
+	Webstr$=webstr$,"TypeDesc",fdel$
+	webstr$=webstr$,"TransDate",fdel$
+	webstr$=webstr$,"DueDate",fdel$
+	webstr$=webstr$,"Description",fdel$
+	Webstr$=webstr$,"Balance Due",fdel$
+	list$[1]=webstr$
+	row=2
+	if returnstatus=1 ! no errors
+		if gridflag=0
+			let list$[2]=arlist$[0]
+			let row=row+1
+		else
+			for ctr = 0 to (totrec-1)
+				let list$[row]=arlist$[ctr]
+				let row=row+1
+			next ctr
+		endif
+	endif
+	list$[row]=esdel$ ! end of section
+	call AddToStr(e$,rstr$,List$[])
+	
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)	! let send over the data
+
+else
+    include "src/callsuberr.inc"
+end try
+end sub ! GETDateArTRANS
+
+!=====================================================================================
+Sub SubmitDateArtrans() ! updates the new due date
+Try
+	dim keyar$[50],XDATE$[10],arkey$[50]
+	dim 2%,urec,olddate,newdate,3%,rec_tmp,jinvdate
+	Call Dxget("CustId",tmp$)
+	tmp3=tmp$
+	custid=tmp3
+	let searkey$=tmp3 using "######"
+	mode$="="
+	dirno=1
+	CustRec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+	if custrec<0
+		ReturnStatus=0 ! error not found
+		Message$="Customer ",trim$(searkey$)," not found"
+		goto endsubdateartran:
+	Endif
+	Call Dxget("TRANSID",tmp$)
+	if rtrim$(tmp$)=""
+		let message$="Invalid Transaction Id Submitted "
+		returnstatus=0
+		goto endsubdateartran:
+	endif
+	let tmp3=tmp$
+	if tmp3<1 or tmp3>99999999
+		let message$="Invalid Transaction Id Submitted "
+		returnstatus=0
+		goto endsubdateartran:
+	endif
+	let transid=tmp3
+	Call Dxget("TYPE",tmp$)
+	let type=tmp$
+	if type<1 or type>9
+		let returnstatus=0
+		let message$="Invalid Transaction Type Submitted "
+		goto endsubdateartran:
+	endif	
+	! verify if in a/r file
+	let keyar$=" ",keyar$
+	let keyar$[1,6]=Custid using "######"
+	let keyar$[7,16]=transid using "##########"
+	let keyar$[17,17]=type using "#"
+	search #arichan,2,1;keyar$,rec_ar,e
+	if E<>0
+		let returnstatus=0
+		let message$="Transaction "+str$(transid)+" For Customer "+str$(custid)+" Not On File"
+		goto endsubdateartran:
+	endif
+	read record#arichan,rec_ar;ARI.;
+	tmp3=ari.OrigAmt-ari.PriorCredit-ari.CurrentCredit 
+	if tmp3<=0
+		let returnstatus=0
+		let message$="Transaction "+str$(transid)+" For Customer "+str$(custid)+" Is Not Open"
+		goto endsubdateartran:
+	endif
+	
+	Call Dxget("Date",tmp$)
+	if tmp$=""
+		let returnstatus=0
+		let message$="Invalid Date Submitted for Transaction "+str$(transid)+" For Customer "+str$(custid)
+	endif
+	xdate$ = formatdate2$(tmp$)
+	let tmp3=xdate$[3,8] ! yymmdd format
+	if not(tmp3)
+		let returnstatus=0
+		let message$="Invalid Date Submitted for Transaction "+str$(transid)+" For Customer "+str$(custid)
+	endif
+	if P9$[25,25]="Y" ! edit due date
+		if tmp3=ari.DueDate1 goto endsubdateartran:
+		olddate=ari.DueDate1 ! yymmdd format
+		newdate=tmp3         ! yymmdd format
+		call ardateaud()
+		ari.DueDate1 =  xdate$[3,8]  
+		Write record#arichan,rec_ar;ARI.;
+	else     
+          
+		xdate$ = tmp3 Using "&&&&&&"                 
+		Call DateToJulian(5,xdate$,xdate$,errFlag)   
+		If (errFlag)                                 
+			let returnstatus=0
+			let message$="Invalid Date Submitted for Transaction "+str$(transid)+" For Customer "+str$(custid)
+		endif
+		jinvdate = xdate$ ! needs to be in julian
+		if jinvdate=ARI.Date goto endsubdateartran:
+		let newdate=tmp3
+		! convert from julian to yymmdd
+		Xdate$=ari.date using "&&&&&&"
+		Call JulianToDate(1,xdate$,xdate$,errFlag) ! to mm/dd/yy
+		let tmp$=xdate$[7,8],xdate$[1,2],xdate$[4,5] ! yymmdd
+		let olddate=tmp$
+		call ardateaud()
+		! change dates in keys ! directory 5
+		let arkey$=" ",arkey$
+		let arkey$[1,6]=ari.PostingCust using "######"
+		let arkey$[7,12]=ari.date using "######"
+		let arkey$[13,22]=ari.ReferenceNo using "##########"
+		let arkey$[23,28]=ari.CustomerCode using "######"
+		let arkey$[29,29]=type using "#"
+		let arkey$[30,30]=" "
+		search #arichan,5,5;arkey$,rec_tmp,e
+		let arkey$[7,12]=jinvdate using "######"
+		search #arichan,4,5;arkey$,rec_ar,e
+		! change dates in keys ! directory 3
+		let arkey$=" ",arkey$
+		let arkey$[1,6]=ari.PostingCust using "######"
+		let arkey$[7,12]=ari.CustomerCode using "######"
+		let arkey$[13,18]=ari.date using "######"
+		let arkey$[19,28]=ari.ReferenceNo using "##########"
+		let arkey$[29,29]=type using "#"
+		let arkey$[30,30]=" "
+		search #arichan,5,3;arkey$,rec_tmp,e
+		let arkey$[13,18]=jinvdate using "######"
+		search #arichan,4,3;arkey$,rec_ar,e
+		! change dates in keys ! directory 2
+		let arkey$=" ",arkey$
+		let arkey$[1,6]=ari.CustomerCode using "######"
+		let arkey$[7,12]=ari.date using "######"
+		let arkey$[13,22]=ari.ReferenceNo using "##########"
+		let arkey$[23,23]=type using "#"
+		let arkey$[24,24]=" "
+		search #arichan,5,2;arkey$,rec_tmp,e
+		let arkey$[7,12]=jinvdate using "######"
+		search #arichan,4,2;arkey$,rec_ar,e
+		let ari.date=jinvdate
+		Write record#arichan,rec_ar;ARI.;
+	endif
+		
+	endsubdateartran: !
+
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)	! let send over the data
+
+else
+    include "src/callsuberr.inc"
+end try
+end sub ! submitdateartrans
+!=====================================================================================
+
+                                 
+Sub ardateaud() ! updates the new due date
+Try
+DIM 2%,D8
+DIM 3%,REC_AUD
+DIM 1%,CH_AUD
+DIM Uname$[20],filename$[50]
+dim 2%,urec,olddate,newdate
+
+READ #CTLC,0,112;D8; 
+UIDRec = GetUIDRec(e$,IntCo,Userid$)
+let uname$=" ",uname$
+if uidrec>0
+	USR$ = GetUIDInfo$(e$,IntCo,UIDRec)
+	let uname$=usr$[21]
+endif
+urec=uidrec
+LET Filename$="6/ARDATEAUD"+STR$(intco)
+ch_aud = FindChannel()
+Call FindF(filename$,fileflag)
+If fileflag<>0
+	open #ch_aud,filename$
+else
+	tmp$ = "<666> files/",filename$                                  
+	Build #ch_aud,tmp$                                           
+	rec_aud = 0                                                      
+	Write #ch_aud,rec_aud;uname$,urec,d8,ari.CustomerCode,ari.ReferenceNo,olddate,newdate
+	tmp$ = "files/",filename$," <666>"                               
+	Modify tmp$                                                      
+	Try                                                              
+		Close #ch_aud                                              
+	Else 
+		ReturnStatus = 0                                           
+		Message$ = "Error Creating A/R Date Audit File "
+		Goto endArDateAud:                                       
+	End Try                                                      
+                        
+	tmp$ = "chmod 664 " + filename$                              
+	System tmp$                                                  
+	open #ch_glbatch,filename$                                  	
+endif
+rec_aud=chf(ch_aud)
+Write #ch_aud,rec_aud;uname$,urec,d8,ari.CustomerCode,ari.ReferenceNo,olddate,newdate
+endArDateAud: ! 
+else
+    include "src/callsuberr.inc"
+end try
+end sub ! ardateaud
+
+
+
+
+! artranlist
+!--------------------------------------------------------------------
+Sub ARTransList()
+  !
+  ! Create A/R invoice heading for .net
+  !
+  try
+	clear list$[]
+    !
+ 	List$[0]=bsdel$,"ARLIST",fdel$
+	!
+	WebStr$="ID",fdel$,"Customer",fdel$,"Invoice Date",fdel$,"Doc #",fdel$
+	WebStr$=Webstr$,"Type",fdel$,"Due Date",fdel$
+	WebStr$=WebStr$,"Orig Amt",fdel$,"Open Amt",fdel$,"Disc Avl.",fdel$ ! has type
+	WebStr$=WebStr$,"Add. Disc",fdel$,"Pay",fdel$,"Payment Amt",fdel$
+	WebStr$=WebStr$,"Balance",fdel$,"WH",fdel$,"Div.",fdel$,"Disputed",fdel$
+	Webstr$=webstr$,"Desc",fdel$
+	List$[1]=WebStr$
+	!
+	row=2
+	if returnstatus>0
+		call dxget("u_crdepositdate",tmp$) ! deposit date, julian format
+		JDepositDate=tmp$
+		let bank.currid=0
+		if p61$[136,136]="Y"
+			call dxget("u_crbankid",tmp$) \ BankRec=tmp$ ! bank id	
+			Read Record #BankChan,BankRec;Bank.;
+		endif
+		chan=arichan
+		Mode$=">"
+		IF ARDIR<>0
+			LET DIR=ARDIR
+		ELSE
+			Dir=3 ! by bill customer
+		ENDIF
+		let custkey$=searkey$
+		tmpcnt=maxcnt
+		do
+			ARRec=FileGetSaract(e$,Chan,Mode$,Dir,SearKey$,ARI.)
+			if ARRec<0 or SearKey$[1,len(CustKey$)]<>CustKey$ exit do
+			if p61$[136,136]="Y" and bank.currid<>0
+				if ari.currid<>bank.currid goto endartransitem:
+			endif
+			ARType=int((fra(ARI.AgeTypeCount))*100) ! A/R type
+			AROpenAmt=ARI.OrigAmt-(ARI.PriorCredit+ARI.CurrentCredit)
+			ARDiscAmt=0 \ ARPayAmt=0
+			ARDiscDate$=Blank$
+			if ARType<6 ! Debit transaction
+				if custom_customer$="OMAHA" ! cct#172894
+					if cust.terms=4 ! net 30 terms - no discount
+						! let ari.discdateterms=ari.duedate1
+						let ari.termsdisc=0
+						let ardiscamt=0
+					endif
+				endif
+				tmp$=""
+				call DateToJulian(1,str$(ARI.DiscDateTerms),tmp$,errflag) ! ddddd
+				tmp3=tmp$
+				if errflag=0 if tmp3>=JDepositDate
+					ARDiscAmt=ARI.TermsDisc
+					if arOpenAmt-arDiscAmt<0 let arDiscAmt=arOpenAmt ! discount amount > open balance
+					If ari.CRDiscAmount>0 and arDiscAmt>0
+						arDiscAmt=arDiscAmt-ari.CRDiscAmount
+						if arDiscAmt<0 let arDiscAmt=0
+					endif
+					if ardiscamt<>0 and ardiscamt>=AROpenAmt and (Ari.PriorCredit +ari.CurrentCredit)<>0
+						let ardiscamt=0
+					endif
+				endif
+				!call DateToJulian(1,str$(ARI.DueDate1),tmp$,errflag)
+				!call JulianToDate(5,tmp$,ARDiscDate$,errflag)
+				ARPayAmt=AROpenAmt-ARDiscAmt
+			endif
+			if AROpenAmt<>0  ! display the open amounts only
+				if ARType>5  ! reverse sign for credits
+					AROpenAmt=AROpenAmt * (-1)
+					ARDiscAmt=ARDiscAmt * (-1)
+					ARPayAmt=ARPayAmt * (-1)
+					ARI.OrigAmt=ARI.OrigAmt *(-1)
+				endif
+				WebStr$=SearKey$,fdel$ ! id, a/r invoice key (dir=3, bill to)
+				WebStr$=WebStr$,ARI.CustomerCode using M6$,fdel$ ! customer number
+				call JulianToDate(5,str$(ARI.Date),tmp$,errflag)
+				if errflag let tmp$=""
+				WebStr$=WebStr$,tmp$,fdel$ ! a/r invoice date
+				if rtrim$(ardiscdate$)="" let ardiscdate$=tmp$
+				if ari.duedate1<101
+					let arduedate$=tmp$
+				else
+					let arduedate$=pdate$(ari.duedate1)
+				endif
+				WebStr$=WebStr$,ARI.ReferenceNo using M10$,fdel$ ! a/r invoice or ref #
+				tmp$=GetARTypeDesc$(ARI.AgeTypeCount,1) ! get a/r type code
+				
+				WebStr$=WebStr$,tmp$,fdel$ ! a/r type code
+				! WebStr$=WebStr$,ARDiscDate$,fdel$ ! discount terms date
+				WebStr$=WebStr$,ARDueDate$,fdel$ 
+				let amount=ari.origamt
+				if p61$[136,136]="Y" and bank.currid<>0	
+					call currconvup(amount,ari.currfact)
+					let amount=fnr(amount)
+				endif
+				WebStr$=WebStr$,amount using Mamt$,fdel$ ! ari.origamt orignal a/r invoice amount
+				let amount=AROpenAmt
+				if p61$[136,136]="Y" and bank.currid<>0	
+					call currconvup(amount,ari.currfact)
+					let amount=fnr(amount)
+				endif
+				WebStr$=WebStr$,amount using Mamt$,fdel$ !AROpenAmt  open a/r invoice amount
+				let amount=ARDiscAmt
+				if p61$[136,136]="Y" and bank.currid<>0	
+					call currconvup(amount,ari.currfact)
+					let amount=fnr(amount)
+				endif
+				WebStr$=WebStr$,amount using Mamt$,fdel$ ! ARDiscAmtdiscount available
+				tmp=0
+				WebStr$=WebStr$,tmp using Mamt$,fdel$ ! additional discounts
+				WebStr$=WebStr$," ",fdel$ ! pay flag
+				WebStr$=WebStr$,tmp using Mamt$,fdel$ ! payment amount
+				let amount=AROpenAmt-ARDiscAmt
+				if p61$[136,136]="Y" and bank.currid<>0	
+					call currconvup(amount,ari.currfact)
+					let amount=fnr(amount)
+				endif
+				WebStr$=WebStr$,amount using Mamt$,fdel$ ! AROpenAmt-ARDiscAmtopen invoice balance
+				WebStr$=WebStr$,ARI.Whse using M2$,fdel$ ! warehouse
+				WebStr$=WebStr$,ARI.Division using M2$,fdel$ ! division
+				if ARI.AgeFlag let tmp$="Yes" else tmp$="No"
+				WebStr$=WebStr$,tmp$,fdel$ ! disputed 
+				let tmp$=""
+				if rtrim$(ari.EntryDescription$)<>""
+					let tmp$=ari.EntryDescription$
+				else
+					if rtrim$(ari.purchaseorder$)<>"" and ari.order<>0
+						let tmp$=ari.purchaseorder$[1,10]
+						let tmp$=tmp$,(ari.order using "#######")
+					endif
+				endif
+				If custom_customer$="OMAHA"
+					if artype<6
+						if ari.customercode=3910 or ari.customercode=1919 ! 
+							if rtrim$(ari.purchaseorder$)<>""
+								let tmp$=rtrim$(ari.purchaseorder$)+" "+str$(ari.order)
+							endif
+						endif
+					endif
+				endif
+				Webstr$=webstr$,Rtrim$(tmp$),fdel$
+				List$[row]=WebStr$
+				row=row+1
+				If row > tmpcnt Let tmpcnt = expandarray(e$,List$[])
+			endif
+			endartransitem: ! end this item - get next
+		loop
+	endif
+	list$[row]=esdel$
+	Call AddToStr(e$,rstr$,List$[])
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ARTransList
+!
+! ----------------------------------------
+Sub CustHeading()
+  !
+  ! Create customer information heading for .net
+  !
+  try
+     clear list$[]
+    !
+	
+	list$[0]=bsdel$,"CustInfo",fdel$
+	webstr$=""
+	webstr$="ID"+fdel$
+	webstr$=webstr$+"CustId"+fdel$
+	webstr$=webstr$+"BillToId"+fdel$
+	webstr$=webstr$+"CustName"+fdel$
+	webstr$=webstr$+"Contact"+fdel$
+	webstr$=webstr$+"Address1"+fdel$
+	webstr$=webstr$+"Address2"+fdel$
+	webstr$=webstr$+"City"+fdel$
+	webstr$=webstr$+"State"+fdel$
+	webstr$=webstr$+"Zip"+fdel$
+	webstr$=webstr$+"Phone"+fdel$
+	webstr$=webstr$+"Whse"+fdel$
+	webstr$=webstr$+"WhseName"+fdel$
+	webstr$=webstr$+"Div"+fdel$
+	webstr$=webstr$+"DivName"+fdel$
+	webstr$=webstr$+"ArPostFlag"+fdel$
+	webstr$=webstr$+"PostToID"+fdel$
+	webstr$=webstr$+"AllowCreditScrn"+fdel$
+	list$[1]=webstr$
+	!
+	row=2
+	if returnstatus>0
+		webstr$=""
+		webstr$=trim$(searkey$)+fdel$
+		webstr$=webstr$+str$(cust.CustomerCode)+fdel$
+		webstr$=webstr$+str$(cust.CustomerBillTo)+fdel$
+		webstr$=webstr$+rtrim$(cust.Name$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Contact$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Addr1$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Addr2$)+fdel$
+		webstr$=webstr$+rtrim$(cust.City$)+fdel$
+		webstr$=webstr$+rtrim$(cust.State$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Zip4$)+fdel$
+		webstr$=webstr$+rtrim$(cust.Phone$)+fdel$
+		!let tmp3=cust.defaultwhse
+		let tmp3=prt.wh
+		if tmp3<=0
+			let tmp3=cust.defaultwhse
+		endif
+		if tmp3<=0 let tmp3=1
+		webstr$=webstr$+str$(tmp3)+fdel$
+		if tmp3>0
+			read record #ch_wh,(tmp3-1);wh.;
+		endif
+			
+		webstr$=webstr$+rtrim$(wh.whname$)+fdel$
+		tmp3=cust.division
+		if not(tmp3)
+			let tmp3=prt.div
+		endif
+		if tmp3<=0 let tmp3=1
+		let tmp$=""
+		if tmp3>0
+			                                       
+			tmp$ = getdivname$(ch_div,tmp3,intCo)
+		endif
+		webstr$=webstr$+str$(tmp3)+fdel$
+		webstr$=webstr$+rtrim$(tmp$)+fdel$
+		let tmp$="N"
+		if p61$[41,41]="Y" let tmp$="Y"
+		webstr$=webstr$,rtrim$(tmp$),fdel$
+		webstr$=webstr$+str$(cust.ARPostCust)+fdel$
+		tmp$="N" \ if a5[6]=1 let tmp$="Y"
+		webstr$=webstr$,rtrim$(tmp$),fdel$
+		LIST$[ROW]=WEBSTR$
+		let row=row+1
+
+	endif
+	list$[row]=esdel$
+	Call AddToStr(e$,rstr$,List$[])
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! CustomerInfoHeading
+
+!!! order list
+Sub OrderList()  
+!! this get a list of the open orders for the customer !!
+try
+	DIM 1%,chan[99]
+	Dim cust$[6],keyroh$[12],xdate$[10],statword$[200],ordtyped$[20]
+	dim 3%,depamt,totrec,penddepamt
+	tmpcnt=50
+	! need in read only mode to prevent record locking
+	clear List$[]
+	List$[0]=bsdel$,"OpenOrderList",fdel$
+	WebStr$="OrderID",fdel$
+	WebStr$=WebStr$,"Date",fdel$,"Status",fdel$
+	WebStr$=WebStr$,"PO#",fdel$,"Ship To Name",fdel$,"Type",fdel$
+	webstr$=webstr$,"OrderTotal",fdel$,"OpenDepositAmt",fdel$,"PendingDepositAmt",fdel$
+	List$[1]=WebStr$
+	row=2
+	If P61$[94,94]<>"Y" 
+		let returnstatus=0
+		let message$="Order Deposits are not available "
+		goto endordlist:
+	endif
+	IF P61$[136,136]="Y" ! verify currency
+		call dxget("u_crbankid",tmp$) \ BankRec=tmp$ ! bank id	
+		 Read Record #BankChan,BankRec;Bank.;
+		 IF BANK.CURRID<>0  	 
+			returnstatus=0
+			let Message$="Deposit Transactions are valid for this Bank "
+			goto endordlist:
+		endif
+	  endif	
+	Ch_Roh = openfile(-1840,intCo) \ If Ch_Roh = -1 Error 42     !"order header file
+  	Ch_Ros = openfile(-1856,intCo) \ If Ch_Ros = -1 Error 42     !"order shipto file
+	Ch_Rot = openfile(-1872,intCo) \ If Ch_Rot = -1 Error 42     !"order total file
+	ch_rod = openfile(-10106,intCo) 
+	if ch_rod<0
+		let returnstatus=0
+		let message$="Order Deposit File Not Found"
+		goto endordlist:
+		!\ if ch_Rod = -1 Error 42    !"order deposit total
+	endif
+	LET STATWORD$="ENTERED   PRINTED   REGISTEREDRDY TO INV"
+	STATWORD$=STATWORD$+"INV ENTRD INV PRNTD INV REGD            "
+	STATWORD$=STATWORD$+"C/M ENTRD C/M PRNTD C/M REGD            "
+	Call DXGet("custid",cust$) \ custid=cust$
+	cust$=custid using "######"
+	cust$ = cust$+Blank$
+	cust$[7]="" ! "cut after 6 chars
+	keyroh$=" ",keyroh$
+	keyroh$=cust$+Blank$ ! starts with customer
+	mode$=">" ! search mode 3
+	dir=2
+	clear chan[]
+	CHAN[0]=CH_ROH
+	CHAN[1]=CH_ROS
+	CHAN[2]=CH_ROT
+	totrec=0
+	Do
+		Rec_roh=filegetrohz(e$,chan[],mode$,dir,keyroh$,roh.,ros.,rot.)
+		If Rec_roh<0 or keyroh$[1,6]<>Cust$[1,6] Exit Do
+		if roh.status>4 and roh.status<>95 goto getnxtcustord:
+		If roh.OrgOrd<>0 goto getnxtcustord: ! exclude back orders
+		let totrec=totrec+1
+		WebStr$=str$(roh.ordnum),fdel$ ! order ID 
+		if roh.orddate<>0
+			let xdate$=pdate$(roh.orddate)
+		else
+			let xdate$=" ",xdate$
+		endif
+		WebStr$=WebStr$,RTrim$(xdate$),fdel$ ! order date
+		LET tmp$=" ",tmp$
+		if roh.status<=4
+			tmp$=STATWORD$[roh.status*10-9,roh.status*10]
+		else
+			if roh.status=95
+				tmp$="Order Erp Proc"
+			endif
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! status
+		WebStr$=WebStr$,RTrim$(roh.custpo$),fdel$ ! po#
+		read record #ch_ros,roh.shiprec;ros.;
+		WebStr$=WebStr$,RTrim$(ros.name$),fdel$ ! ship to name
+		let ordtyped$=getordtypd$(ctlc,roh.ordtype,intco)
+		tmp$=ordtyped$
+		Webstr$=Webstr$,rtrim$(tmp$),fdel$ ! order type
+		let tmp3=rot.MdseOrdAmt
+		let tmp3=tmp3-rot.OrdDisc+rot.MiscChrg+rot.FrgtChrg+rot.OthChrg+rot.TaxAmt
+		If p61$[136,136]="Y" and roh.currid<>0 and roh.currfact<>0 and bank.currid<>0
+			let amount=tmp3
+			call currconvup(amount,roh.currfact)
+			let amount=fnr(amount)
+		endif
+		! let tmp$=rot.OrdTot using "------------.##"
+		let tmp$=tmp3 using "------------.##"
+		webstr$=webstr$,tmp$,fdel$! order total w/o deposit
+		! deposit total
+		let depamt=0
+		let penddepamt=0
+		let keyrod$=" ",keyrod$
+		let keyrod$[1,6]=custid using "######"
+		let keyrod$[7,12]=roh.ordnum using "######"
+		do
+			search #ch_rod,3,1;keyrod$,rec_rod,e
+			if e>0 exit do
+			let tmp3=keyrod$[1,6]
+			if tmp3<>custid exit do
+			let tmp3=keyrod$[7,12]
+			if tmp3<>roh.ordnum exit do
+			read record #ch_rod,rec_rod;rod.;
+			! deposit here
+			if p61$[136,136]="Y" 
+				call dxget("u_crbankid",tmp$) \ BankRec=tmp$ ! bank id	
+				Read Record #BankChan,BankRec;Bank.;
+				IF BANK.CURRID<>0 and bank.currid=roh.currid
+					if roh.currfact>0 and roh.currid>0
+						call currconvup(rod.chkamt,roh.currfact)
+						let rod.chkamt=fnr(rod.chkamt)
+					endif
+				endif
+			endif		
+			if rod.CRPostPer<>0 ! accepted in cash receipts
+				let depamt=depamt+rod.ChkAmt
+			else
+				let penddepamt=penddepamt+rod.chkamt
+			endif
+		loop
+		tmp$=depamt using "########.##" 
+		Webstr$=Webstr$,rtrim$(tmp$),fdel$ ! deposit amount
+		tmp$=penddepamt using "########.##" 
+		Webstr$=Webstr$,rtrim$(tmp$),fdel$ ! pending deposit amount
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		getnxtcustord: ! get the next customer order
+		Loop ! of open orders for customer
+	    endordlist: ! end the order list
+	    List$[row] = esdel$            
+	    Call AddToStr(e$,rstr$,List$[])
+	    if returnstatus=1 and totrec=0
+			let returnstatus=0
+			let message$="No Open Order Available for Customer "+str$(custid)
+		endif
+	   call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	   call AddToStr(e$,rstr$,WebStr$)
+else
+	! this is a remark
+end try
+end sub ! OrderList
+
+!!! START SUBMIT DEPOSIT
+Sub PostDeposit()  
+!! this get a list of the open orders for the customer !!
+try
+	DIM 1%,chan[99],2%,entnum
+	Dim cust$[6],keyroh$[12],xdate$[10],ordtyped$[20]
+	dim 3%,rec_roh
+	If P61$[94,94]<>"Y" 
+		let returnstatus=0
+		let message$="Order Deposits are not available "
+		goto endpostdep:
+	endif
+	IF P61$[136,136]="Y" ! verify currency
+		call dxget("u_crbankid",tmp$) \ BankRec=tmp$ ! bank id	
+		 Read Record #BankChan,BankRec;Bank.;
+		 IF BANK.CURRID<>0  	 
+			returnstatus=0
+			let Message$="Deposit Transactions are valid for this Bank "
+			goto endpostdep:
+		endif
+	  endif	
+	! need in read only mode to prevent record locking
+	Ch_Roh = openfile(-1840,intCo) \ If Ch_Roh = -1 Error 42     !"order header file
+  	Ch_Ros = openfile(-1856,intCo) \ If Ch_Ros = -1 Error 42     !"order shipto file
+	Ch_Rot = openfile(-1872,intCo) \ If Ch_Rot = -1 Error 42     !"order total file
+	ch_rod = openfile(10106,intCo) 
+	if ch_rod<0
+		let returnstatus=0
+		let message$="Order Deposit File Not Found"
+		goto endpostdep:
+		!\ if ch_Rod = -1 Error 42    !"order deposit total
+	endif
+	Call DXGet("custid",cust$) \ custid=cust$
+	cust$=custid using "######"
+	searkey$ = custid Using "######"                               
+	mode$ = "="                                                  
+	dirno = 1                                                    
+	custrec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+	If custrec < 0 
+		let returnstatus=0
+		let message$="Customer "+str$(custid)+" Not on File "
+		goto endpostdep:
+	endif
+	Call DXGET ("ORDERID",tmp$)\let orderid=tmp$
+	keyroh$=" ",keyroh$
+	keyroh$[1,6]=custid using "######"
+	keyroh$[7,12]=orderid using "######"
+	row=2
+	mode$="=" ! search mode 3
+	dir=2
+	clear chan[]
+	CHAN[0]=CH_ROH
+	CHAN[1]=CH_ROS
+	CHAN[2]=CH_ROT
+	Rec_roh=filegetrohz(e$,chan[],mode$,dir,keyroh$,roh.,ros.,rot.)
+	If Rec_roh<0 
+		let returnstatus=0
+		let message$="Order "+str$(orderid)+" Not on File for "+str$(custid)
+		goto endpostdep: 
+	endif
+	if roh.status>4 and roh.status<>95
+		let returnstatus=0
+		let message$="Order "+str$(orderid)+" has an Invalid Processing Status for Customer "+str$(custid)
+		goto endpostdep:
+	endif
+	Call DXGet("bankid",bankid$)
+	let bankrec=bankid$
+	if bankrec<=0 or bankrec>99
+		let returnstatus=0
+		let message$="Invalid Bank Submitted"
+		goto endpostdep:
+	endif
+	let bankid=bankrec
+	Read record #BankChan,BankRec;Bank.;
+	if rtrim$(bank.Description$)=""
+		let returnstatus=0
+		let message$="Bank "+str$(bankrec)+" Not on File "
+		goto endpostdep:
+	endif
+	Call DXGet("depositdate",DepositDate$)! MM/DD/YYYY
+	Call VerifyDate(DepositDate$,tmp$,errflag,1) ! returns in yyyymmdd
+	if errflag<>0
+		let returnstatus=0
+		let message$="Invalid Deposit Date Submitted"
+		goto endpostdep:
+	endif
+	DepositDate=tmp$[3] !  from YYYYMMDD  to YYMMDD deposit date
+	Call DXGet("bankamt",tmp$) \ PayAmt = tmp$ ! amount
+	If payamt=0
+		let returnstatus=0
+		let message$="Deposit Amount Must Be Greater Than 0"
+		goto endpostdep:
+	endif
+	if fra(PayAmt*100)<>0
+		let returnstatus=0
+		let message$="Amount exceeds 2 decimals places"
+		goto endpostdep:
+	endif
+	!Call DXGet("bankdesc",Desc$) ! description                        
+	Call DXGet("bankcheck",tmp$) \ DocNo = tmp$ ! check / doc $       
+	Call DXGet("bankwh",tmp$) \ tmp3 = tmp$ !\ WH=tmp$ ! warehouse    
+	If tmp3 <= 0 Or tmp3 > 99                                         
+		ReturnStatus = 0                                                
+		Message$ = "Invalid Warehouse for Submitted "  
+		goto endpostdep:
+	End If                                                            
+	wh = tmp3                                                         
+	Call DXGet("bankdiv",tmp$) \ tmp3 = tmp$ ! \ Div=tmp$ ! division  
+	If tmp3 <= 0 Or tmp3 > 99                                         
+		 ReturnStatus = 0                                                
+		 Message$ = "Invalid Division for Payment Submitted " 
+		 goto endpostdep:
+	End If                                                            
+	div = tmp3 
+	!Create deposit record
+	clear rod.
+	rod.CustNum=custid 
+	rod.OrdNum=orderid                       
+	rod.DepNum=0  
+	rod.DepDate=DepositDate              
+	rod.CrBankNum=bankid
+	rod.CRPostPer=0                   
+	rod.Spare2=0                     
+	rod.ChkNum=DocNo 
+	rod.ChkAmt=PayAmt
+	rod.GLACCT=0                     
+	rod.InvNum=0  
+	rod.spare3=0
+	rod.spare1=0
+	rod.spare$=" ",rod.spare$
+	Read #ctlc,20,38;entnum                             
+	entnum = entnum + 1                                     
+	Write #ctlc,20,38;entnum;                           
+	If entnum > 99998                                       
+		returnstatus = 0 ! error                              
+		message$ = "Cash Receipts Entries Have Exceeded Limit"
+		Goto Endpostdep:                                       
+	End If                                                  
+	If p60$[6,6] = "Y" ! cash receipts by bank              
+		Write #bankchan,bankrec,44;entnum;                     
+	End If                                                                                                                                           
+	rod.CREntNum=entnum  
+	rod.whse=wh
+	rod.div=div
+	let keyrod$=" ",keyrod$
+	let keyrod$[1,6]=rod.custnum using "######"
+	let keyrod$[7,12]=rod.ordnum using "######"
+	
+	DO
+		let rod.depnum=rod.depnum+1
+		If rod.depnum>99
+			let returnstatus=0
+			let message$="Deposits for Order "+str$(rod.ordnum)+" Have Exceeded 99 "
+			goto endpostdep:
+		endif
+		let keyrod$[13,14]=rod.depnum using "##"
+		search #ch_rod,2,1;keyrod$,rec_rod,e
+		if e<>0 exit do
+		
+	loop
+	mode$ = "a" ! add                                                    
+	updstatus = fileupdatesorddep(e$,ch_rod,mode$,rec_rod,rod.)   
+        let rec_rod=updstatus                                       
+	Read Record #ch_rod,rec_rod;rod.; 
+	! CREATE CASH RECEIPTS ENTRY
+	cr.EntryType=7 ! deposit        
+	cr.Warehouse=WH    
+	cr.TypeOfActivity=0             
+	cr.CustomerCode=custid        
+	cr.CustomerFileRec=custrec       
+	cr.SaractRecTo=0               
+	cr.SaractRecFrom=0      
+	cr.PaymentDate=DepositDate ! yymmdd format       
+	cr.JournalEntryType=rod.ordnum ! for deposit type 8 uses order #         
+	cr.OthrCrAdjType=rod.depnum ! for depoist number cash receipts type                         
+	cr.OtherDiscntType =0                        
+	cr.EntryNumber=entnum
+	cr.DivisionCode=Div                               
+	cr.TransactionNumber=DocNo       
+	cr.BankAmount=PayAmt    
+	cr.DebitAmount=0                 
+	cr.CreditAmount=0
+	If payamt>0
+		let cr.creditamount=abs(payamt)
+	else
+		let cr.debitamount=abs(payamt)
+	endif
+	cr.DiscountAmount=0        
+	cr.LastPayment=0      
+	cr.FreightAllowance=0        
+	cr.CustomerName$=rtrim$(cust.name$)+blank$ !       
+	cr.Reference$=" ",cr.Reference$
+	cr.Reference$="SO "+str$(orderid)+blank$
+	cr.JeDescription$=" ",cr.JeDescription$ 
+	cr.JeDescription$="Deposit Order "+str$(orderid)+blank$
+	cr.Journal=0      
+	cr.EntryDate=depositdate       
+	cr.Bank=bankid      
+	cr.DetailNo=0 
+	keycr$=" ",keycr$
+	let keycr$[1,2]=bankid using "##"
+	let keycr$[3,7]=entnum using "#####"
+	do
+		let cr.detailno=cr.detailno+1
+		if cr.detailno>999
+			returnstatus = 0 ! error                              
+			message$ = "Cash Receipts Entry "+str$(entnum)+" Has Exceeded Detail Item Limit"
+			Goto Endpostdep:
+		endif
+		let keycr$[8,10]=cr.detailno using "###"
+		search #crchan,2,1;keycr$,crrecno,e
+		if e<>0 exit Do
+	loop
+	mode$ = "a" ! add                                                 
+	UpdStatus = fileupdatecashfle(e$,CRChan,mode$,CRRecNo,CR.)
+	CRRecNo = UpdStatus
+	if crrecno<0
+		let returnstatus=0
+		let message$="Error Adding Deposit Cash Receipts Entry "+str$(entnum)
+		goto endpostdep:
+	endif
+	Read Record #CRChan,CRRecNo;CR.;                            
+	endpostdep: ! end posting cash receipts
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+else
+	! this is a remark
+end try
+end sub ! PostDeposits
+
+!!! START SUBMIT DEPOSIT
+Sub GetDeposit()  
+!! this get a list of the open deposits for a sales orders
+try
+	DIM 1%,chan[99],2%,entnum
+	Dim cust$[6],keyroh$[12],xdate$[10],ordtyped$[20]
+	dim 3%,rec_roh
+	tmpcnt=50
+	! need in read only mode to prevent record locking
+	clear List$[]
+	List$[0]=bsdel$,"OpenDepositList",fdel$
+	WebStr$="DepID",fdel$
+	Webstr$=webstr$,"Status",fdel$
+	WebStr$=WebStr$,"Date",fdel$
+	Webstr$=Webstr$,"CheckNumber",fdel$
+	webstr$=Webstr$,"DepAmount",fdel$
+	List$[1]=WebStr$
+	row=2
+	If P61$[94,94]<>"Y" 
+		let returnstatus=0
+		let message$="Order Deposits are not available "
+		goto endgetdep:
+	endif
+	IF P61$[136,136]="Y" ! verify currency
+		call dxget("u_crbankid",tmp$) \ BankRec=tmp$ ! bank id	
+		 Read Record #BankChan,BankRec;Bank.;
+		 IF BANK.CURRID<>0  	 
+			returnstatus=0
+			let Message$="Deposit Transactions are valid for this Bank "
+			goto endgetdep:
+		endif
+	  endif	
+	
+	! need in read only mode to prevent record locking
+	
+	Ch_Roh = openfile(-1840,intCo) \ If Ch_Roh = -1 Error 42     !"order header file
+  	Ch_Ros = openfile(-1856,intCo) \ If Ch_Ros = -1 Error 42     !"order shipto file
+	Ch_Rot = openfile(-1872,intCo) \ If Ch_Rot = -1 Error 42     !"order total file
+	ch_rod = openfile(10106,intCo) 
+	if ch_rod<0
+		let returnstatus=0
+		let message$="Order Deposit File Not Found"
+		goto endgetdep:
+		!\ if ch_Rod = -1 Error 42    !"order deposit total
+	endif
+	Call DXGet("custid",cust$) \ custid=cust$
+	cust$=custid using "######"
+	searkey$ = custid Using "######"                               
+	mode$ = "="                                                  
+	dirno = 1                                                    
+	custrec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+	If custrec < 0 
+		let returnstatus=0
+		let message$="Customer "+str$(custid)+" Not on File "
+		goto endgetdep:
+	endif
+	Call DXGET ("ORDERID",tmp$)\let orderid=tmp$
+	keyroh$=" ",keyroh$
+	keyroh$[1,6]=custid using "######"
+	keyroh$[7,12]=orderid using "######"
+	row=2
+	mode$="=" ! search mode 3
+	dir=2
+	clear chan[]
+	CHAN[0]=CH_ROH
+	CHAN[1]=CH_ROS
+	CHAN[2]=CH_ROT
+	Rec_roh=filegetrohz(e$,chan[],mode$,dir,keyroh$,roh.,ros.,rot.)
+	If Rec_roh<0 
+		let returnstatus=0
+		let message$="Order "+str$(orderid)+" Not on File for "+str$(custid)
+		goto endgetdep: 
+	endif
+	if roh.status>4 and roh.status<>95
+		let returnstatus=0
+		let message$="Order "+str$(orderid)+" has an Invalid Processing Status for Customer "+str$(custid)
+		goto endgetdep:
+	endif
+	let keyrod$=" ",keyrod$
+	let keyrod$[1,6]=custid using "######"
+	let keyrod$[7,12]=orderid using "######"
+	DO
+		search #ch_rod,3,1;keyrod$,rec_rod,e
+		if e<>0 exit do
+		let tmp=keyrod$[1,6]\if tmp<>custid exit do
+		let tmp=keyrod$[7,12]\if tmp<>orderid exit do
+		read record #ch_rod,rec_rod;rod.;
+		WebStr$=str$(rod.depnum),fdel$
+		let tmp$="C/R Accepted"
+		if rod.crpostper=0 let tmp$="In Process"
+		Webstr$=webstr$,rtrim$(tmp$),fdel$
+		if rod.depdate<>0         
+			 xdate$ = pdate$(rod.depdate) 
+		Else                           
+			xdate$ = " ",xdate$          
+		End If                         
+		WebStr$=WebStr$,xdate$,fdel$
+		Webstr$=Webstr$,(rod.chknum using "########"),fdel$
+		webstr$=Webstr$,(rod.chkamt using "#########.##"),fdel$
+		totrec=totrec+1
+		List$[row]=webstr$
+		let row=row+1
+		If row > tmpcnt Let tmpcnt = expandarray(e$,List$[])              
+	loop
+	                     
+	endgetdep: ! end posting cash receipts
+	List$[row] = esdel$            
+	Call AddToStr(e$,rstr$,List$[])
+	if returnstatus=1 and totrec=0
+		let returnstatus=0
+		let message$="No Deposits Available for Order "+str$(orderid)
+	endif
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+else
+	! this is a remark
+end try
+end sub ! GetDepositList
+
+!!!! DELETE DEPOSIT type 9
+Sub DelDeposit()  
+!! Deletes Deposits From Sales Order and makes it an unapplied payment !!
+try
+	DIM 1%,chan[99],2%,entnum
+	Dim cust$[6],keyroh$[12],xdate$[10],ordtyped$[20]
+	dim 3%,rec_roh
+	If P61$[94,94]<>"Y" 
+		let returnstatus=0
+		let message$="Order Deposits are not available "
+		goto enddeldep:
+	endif
+	IF P61$[136,136]="Y" ! verify currency
+		call dxget("u_crbankid",tmp$) \ BankRec=tmp$ ! bank id	
+		 Read Record #BankChan,BankRec;Bank.;
+		 IF BANK.CURRID<>0  	 
+			returnstatus=0
+			let Message$="Deposit Transactions are valid for this Bank "
+			goto enddeldep:
+		endif
+	  endif	
+	! need in read only mode to prevent record locking
+	Ch_Roh = openfile(-1840,intCo) \ If Ch_Roh = -1 Error 42     !"order header file
+  	Ch_Ros = openfile(-1856,intCo) \ If Ch_Ros = -1 Error 42     !"order shipto file
+	Ch_Rot = openfile(-1872,intCo) \ If Ch_Rot = -1 Error 42     !"order total file
+	ch_rod = openfile(10106,intCo) 
+	if ch_rod<0
+		let returnstatus=0
+		let message$="Order Deposit File Not Found"
+		goto enddeldep:
+		!\ if ch_Rod = -1 Error 42    !"order deposit total
+	endif
+	Call DXGet("custid",cust$) \ custid=cust$
+	cust$=custid using "######"
+	searkey$ = custid Using "######"                               
+	mode$ = "="                                                  
+	dirno = 1                                                    
+	custrec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+	If custrec < 0 
+		let returnstatus=0
+		let message$="Customer "+str$(custid)+" Not on File "
+		goto enddeldep:
+	endif
+	Call DXGET ("ORDERID",tmp$)\let orderid=tmp$
+	keyroh$=" ",keyroh$
+	keyroh$[1,6]=custid using "######"
+	keyroh$[7,12]=orderid using "######"
+	row=2
+	mode$="=" ! search mode 3
+	dir=2
+	clear chan[]
+	CHAN[0]=CH_ROH
+	CHAN[1]=CH_ROS
+	CHAN[2]=CH_ROT
+	Rec_roh=filegetrohz(e$,chan[],mode$,dir,keyroh$,roh.,ros.,rot.)
+	If Rec_roh<0 
+		let returnstatus=0
+		let message$="Order "+str$(orderid)+" Not on File for "+str$(custid)
+		goto enddeldep: 
+	endif
+	if roh.status>4 and roh.status<>95
+		let returnstatus=0
+		let message$="Order "+str$(orderid)+" has an Invalid Processing Status for Customer "+str$(custid)
+		goto enddeldep:
+	endif
+	Call DXGet("bankid",bankid$)
+	let bankrec=bankid$
+	if bankrec<=0 or bankrec>99
+		let returnstatus=0
+		let message$="Invalid Bank Submitted"
+		goto enddeldep:
+	endif
+	let bankid=bankrec
+	Read record #BankChan,BankRec;Bank.;
+	if rtrim$(bank.Description$)=""
+		let returnstatus=0
+		let message$="Bank "+str$(bankrec)+" Not on File "
+		goto enddeldep:
+	endif
+	Call DXGet("depositdate",DepositDate$)! MM/DD/YYYY
+	Call VerifyDate(DepositDate$,tmp$,errflag,1) ! returns in yyyymmdd
+	if errflag<>0
+		let returnstatus=0
+		let message$="Invalid Deposit Date Submitted"
+		goto enddeldep:
+	endif
+	DepositDate=tmp$[3] !  from YYYYMMDD  to YYMMDD deposit date
+	!! find deposit
+	Call DXGet("DEPID",tmp$)! MM/DD/YYYY
+	let rod.depnum=tmp$
+	let keyrod$=" ",keyrod$
+	let keyrod$[1,6]=custid using "######"
+	keyrod$ = " ",keyrod$                     
+	keyrod$[1,6] = custid Using "######"      
+	keyrod$[7,12] = roh.ordnum Using "######" 
+	keyrod$[13,14]=rod.depnum using "##"
+	Search #ch_rod,2,1;keyrod$,rec_rod,e
+	if e<>0
+		let returnstatus=0
+		let message$="Deposit Not On File "
+		goto enddeldep:
+	endif
+	read record#ch_rod,rec_rod;rod.;
+	if rod.crpostper = 0 
+		let returnstatus=0
+		let message$="Deposit Cannot Be Deleted, in cash receipt process already "
+		goto enddeldep:
+	endif
+	Read #ctlc,20,38;entnum                             
+	entnum = entnum + 1                                     
+	Write #ctlc,20,38;entnum;                           
+	If entnum > 99998                                       
+		returnstatus = 0 ! error                              
+		message$ = "Cash Receipts Entries Have Exceeded Limit"
+		Goto Enddeldep:                                       
+	End If                                                  
+	If p60$[6,6] = "Y" ! cash receipts by bank              
+		Write #bankchan,bankrec,44;entnum;                     
+	End If                              
+	! create ar record for payment
+	docno=rod.chknum
+	! verify if ar transaction already exists
+	let ari.referenceno=docno
+	let type=9
+	if rod.chkamt<0 let type=4  ! debit adjust ment
+	LET KEYAR1$=" ",KEYAR1$
+	LET KEYAR1$[1,6]=custid using "######"
+	LET KEYAR1$[7,16]=ARi.referenceno USING "##########"
+	LET KEYAR1$[17,17]=type USING "#"
+	SEARCH #arhistchan,2,1;KEYAR1$,REC_arh,E
+	if e>1
+		let returnstatus=0
+		let message$="Error in the A/R History File, Error "+str$(e)
+		goto enddeldep:
+	endif
+	if e=1 ! not found in history check a/r
+		search #arichan,2,1;keyar1$,rec_ar,e
+		if e>1
+			let returnstatus=0
+			let message$="Error in the A/R File, Error "+str$(e)
+			goto enddeldep:
+		endif
+		if e=1 goto createdepar:
+	endif
+	! second try ! use order #
+	let docno=rod.ordnum
+	let ari.referenceno=docno
+	LET KEYAR1$=" ",KEYAR1$
+	LET KEYAR1$[1,6]=custid using "######"
+	LET KEYAR1$[7,16]=ARi.referenceno USING "##########"
+	LET KEYAR1$[17,17]=type USING "#"
+	SEARCH #arhistchan,2,1;KEYAR1$,REC_arh,E
+	if e>1
+		let returnstatus=0
+		let message$="Error in the A/R History File, Error "+str$(e)
+		goto enddeldep:
+	endif
+	if e=1 ! not found in history check a/r
+		search #arichan,2,1;keyar1$,rec_ar,e
+		if e>1
+			let returnstatus=0
+			let message$="Error in the A/R File, Error "+str$(e)
+			goto enddeldep:
+		endif
+		if e=1 goto createdepar:
+	endif
+	! third try - use ! MONTH CODE + ENTRY NUMBER
+	LET TMP$=ARDATE USING "&&&&&&"             
+	LET DOCNO=TMP$[3,4]                     
+	LET docno=DOCNO*10000+ENTNUM           
+	let ari.referenceno=docno
+	LET KEYAR1$=" ",KEYAR1$
+	LET KEYAR1$[1,6]=custid using "######"
+	LET KEYAR1$[7,16]=ARi.referenceno USING "##########"
+	LET KEYAR1$[17,17]=type USING "#"
+	SEARCH #arhistchan,2,1;KEYAR1$,REC_arh,E
+	if e>1
+		let returnstatus=0
+		let message$="Error in the A/R History File, Error "+str$(e)
+		goto enddeldep:
+	endif
+	if e=1 ! not found in history check a/r
+		search #arichan,2,1;keyar1$,rec_ar,e
+		if e>1
+			let returnstatus=0
+			let message$="Error in the A/R File, Error "+str$(e)
+			goto enddeldep:
+		endif
+		if e=1 goto createdepar:
+	endif
+	! fourth try - use ! ENTRY NUMBER                 
+	LET docno=ENTNUM           
+	let ari.referenceno=docno
+	LET KEYAR1$=" ",KEYAR1$
+	LET KEYAR1$[1,6]=custid using "######"
+	LET KEYAR1$[7,16]=ARi.referenceno USING "##########"
+	LET KEYAR1$[17,17]=type USING "#"
+	SEARCH #arhistchan,2,1;KEYAR1$,REC_arh,E
+	if e>1
+		let returnstatus=0
+		let message$="Error in the A/R History File, Error "+str$(e)
+		goto enddeldep:
+	endif
+	if e=1 ! not found in history check a/r
+		search #arichan,2,1;keyar1$,rec_ar,e
+		if e>1
+			let returnstatus=0
+			let message$="Error in the A/R File, Error "+str$(e)
+			goto enddeldep:
+		endif
+		if e=1 goto createdepar:
+	endif
+	! tried 4 times still duplicate a/r transaction
+	ReturnStatus=0
+      	let Message$="Already in Use A/R Transaction ",+str$(rod.chknum)
+	goto enddeldep:
+	createdepar: ! ok we have a valid docno
+	!!---- start here
+	! ---- begin createpayment ---- 
+	createpayment: ! L_4000: ! CREATE LCKCASHFLE - PAYMENT TRANSACTION
+	clear ari. 
+	LET ari.salesman=cust.salesmancode ! SLSM CODE
+	LET ari.lastpaydate=0
+	LET ari.CustomerCode=custid
+	let age=0
+	if chkamt>0 and p9$[19,19]="N" let age=1 ! 
+	LET ari.Agetypecount=age+.09
+	let tmp$=depositdate using "&&&&&&"
+	call datetojulian(1,tmp$,tmp$,e)
+	if e
+		!!1 date error
+	endif
+	LET ari.Date=tmp$ ! JULIAN DEPOSIT DATE 
+	LET ari.referenceno=docno ! REFERENCE #
+	LET ari.origamt=abs(rod.chkamt) ! BANK AMOUNT
+	LET ari.currentcredit=0 ! abs(rod.chkamt) ! SET APPLIED CREDIT
+	LET ari.whse=rod.whse ! cr.warehouse ! WAREHOUSE #
+	LET ari.division=rod.div ! DIVISIO
+	LET ari.purchaseorder$=" ",ari.purchaseorder$ ! purchase order number
+	let ari.EntryDescription$=" ",ari.EntryDescription$
+	if orderid<>0
+		let ari.EntryDescription$="Dep Ord# "+str$(orderid)+blank$
+	endif
+	If rtrim$(ari.EntryDescription$)="" 
+		let ari.EntryDescription$="C/R ENT #"              
+		LET ari.EntryDescription$[10]=entnum USING "######" 
+	endif
+	let ari.EntryDescription$=ari.EntryDescription$+blank$
+	!gosub createartran: !
+	! start here again
+	!--------------------------------------------------------------------
+	createartran: ! CREATEARTRAN: ! VERIFY FILE - CREATE AR TRANSACTION
+	returnstatus=1
+	message$="OK"
+	if not(ari.postingcust)
+		if cust.arpostcust
+			let ari.postingcust=cust.arpostcust
+		else
+			let ari.postingcust=ari.customercode
+		endif
+	endif
+	LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=ari.customercode using "######"
+	LET KEYAR1$[7,16]=ari.referenceno USING "##########"
+	LET type=INT(FRA(ari.agetypecount)*100) 
+	LET KEYAR1$[17,17]=type USING "#"
+	LET rec_ar=cr.saractrecfrom ! C2[3]
+	SEARCH #arhistchan,2,1;KEYAR1$,REC_arh,E
+	IF E>1 GOSUB ERR_SEARCH_LOG:
+	IF NOT(E)
+		ReturnStatus=0
+      		let Message$="Already in Use A/R Transaction ",+str$(ari.referenceno)
+	ENDIF 
+	SEARCH #arichan,2,1;KEYAR1$,REC_AR,E
+	IF E>1 GOSUB ERR_SEARCH_log:
+	if not(e)
+		ReturnStatus=0
+      		let Message$="Already in Use A/R Transaction ",+str$(ari.referenceno)
+	endif
+	let e=2\search #arichan,1,0;keyar1$,rec_ar,e
+	if e<>0
+		gosub err_search_log:
+		goto enddeldep:
+	endif
+
+	write record #arichan,rec_ar;ari.;
+	SEARCH #arichan,4,1;KEYAR1$,rec_ar,E
+	if e<>0
+		gosub err_search_log:
+		goto enddeldep:
+	endif
+	LET KEYAR2$=" ",KEYAR2$ \ LET KEYAR2$[1,6]=ari.customercode using "######"
+	LET KEYAR2$[7,12]=ari.date USING "######"
+	LET KEYAR2$[13,22]=ari.REFerenceno USING "##########"
+	LET KEYAR2$[23,23]=type USING "#"
+
+	SEARCH #arichan,4,2;KEYAR2$,rec_ar,E
+	IF E<>0 GOSUB ERR_SEARCH_log:
+	LET KEYAR3$=" ",KEYAR3$;KEYAR3$[1,6]=ari.postingcust USING "######"
+	LET KEYAR3$[7]=KEYAR2$
+
+	SEARCH #arichan,4,3;KEYAR3$,rec_ar,E 
+	IF E<>0
+		GOSUB ERR_SEARCH_log:
+	endif
+	LET KEYAR4$=" ",KEYAR4$;KEYAR4$[1,6]=KEYAR3$[1,6]
+	LET KEYAR4$[7,16]=KEYAR2$[13,22];KEYAR4$[17,22]=KEYAR1$[1,6]
+	LET KEYAR4$[23,23]=KEYAR2$[23,23]
+	SEARCH #arichan,4,4;KEYAR4$,rec_ar,E 
+	IF E<>0
+		GOSUB ERR_SEARCH_log:
+	endif
+	LET KEYAR5$=" ",KEYAR5$;KEYAR5$[1,6]=KEYAR3$[1,6]
+	LET KEYAR5$[7,12]=KEYAR2$[7,12]
+	let keyar5$[13,22]=keyar2$[13,22]
+	let  KEYAR5$[23,28]=KEYAR1$[1,6]
+	LET KEYAR5$[29,29]=KEYAR2$[23,23]
+	SEARCH #arichan,4,5;KEYAR5$,rec_ar,E
+	IF E
+		GOSUB ERR_SEARCH_log:
+	endif
+	!end update ar file
+	! update arproof
+	let arpamt=-rod.chkamt
+	READ #proofchan,0,6;arcc.netcrdaily
+	LET arcc.netcrdaily=arcc.netcrdaily+arpamt
+	WRITE #proofchan,0,6;arcc.netcrdaily;
+	LET arpamt=0
+	Let age=int(ari.AgeTypeCount)
+	if age>5 let age=5 ! LET I=INT(D3[3]) \ IF I>5 LET I=5                
+	LET TYPE=int(fra(ari.AgeTypeCount)*100) ! INT(FRA(D3[3])*100) 
+	LET ARAMT=rod.chkamt 
+	If type>5
+		IF P9$[19,19]="N" LET age=1                                          
+		IF P9$[19,19]="Y" LET ARAMT=-ARAMT ! reverse for aging credits
+	endif
+	mat read #custchan,cr.CustomerFileRec,210;t5
+	LET T5[age]=T5[age]+ARAMT
+	mat write #custchan,cr.CustomerFileRec,210;t5;
+	
+	! CREATE CASH RECEIPTS ENTRY
+	cr.EntryType=9 ! deposit delete        
+	cr.Warehouse=rod.WHse    
+	cr.TypeOfActivity=0             
+	cr.CustomerCode=custid        
+	cr.CustomerFileRec=custrec       
+	cr.SaractRecTo=0               
+	cr.SaractRecFrom=rec_ar ! mtg --- set a/r record     
+	cr.PaymentDate=DepositDate ! yymmdd format       
+	cr.JournalEntryType=rod.ordnum ! for deposit type 8 uses order #         
+	cr.OthrCrAdjType=rod.depnum ! for depoist number cash receipts type                         
+	cr.OtherDiscntType =0                        
+	cr.EntryNumber=entnum
+	cr.DivisionCode=rod.Div                               
+	cr.TransactionNumber=DocNo       
+	cr.BankAmount=0   
+	cr.DebitAmount=rod.chkamt                
+	cr.CreditAmount=0
+	cr.DiscountAmount=0        
+	cr.LastPayment=0      
+	cr.FreightAllowance=0        
+	cr.CustomerName$=rtrim$(cust.name$)+blank$ !       
+	cr.Reference$=" ",cr.Reference$    
+	cr.JeDescription$=" ",cr.JeDescription$ 
+	cr.JeDescription$="Deposit Order "+str$(orderid)+" Delete "+blank$
+	cr.Journal=0      
+	cr.EntryDate=depositdate       
+	cr.Bank=bankid      
+	cr.DetailNo=0 
+	keycr$=" ",keycr$
+	let keycr$[1,2]=bankid using "##"
+	let keycr$[3,7]=entnum using "#####"
+	do
+		let cr.detailno=cr.detailno+1
+		if cr.detailno>999
+			returnstatus = 0 ! error                              
+			message$ = "Cash Receipts Entry "+str$(entnum)+" Has Exceeded Detail Item Limit"
+			Goto Enddeldep:
+		endif
+		let keycr$[8,10]=cr.detailno using "###"
+		search #crchan,2,1;keycr$,crrecno,e
+		if e<>0 exit Do
+	loop
+	mode$ = "a" ! add                                                 
+	UpdStatus = fileupdatecashfle(e$,CRChan,mode$,CRRecNo,CR.)
+	CRRecNo = UpdStatus
+	if crrecno<0
+		let returnstatus=0
+		let message$="Error Adding Deposit Cash Receipts Entry "+str$(entnum)
+		goto enddeldep:
+	endif
+	Read Record #CRChan,CRRecNo;CR.; 
+	! second entry for the a/r update
+	! CREATE CASH RECEIPTS ENTRY - for unapplied amount
+	cr.EntryType=2 ! deposit delete        
+	cr.Warehouse=rod.WHse    
+	cr.TypeOfActivity=9            
+	cr.CustomerCode=custid        
+	cr.CustomerFileRec=custrec       
+	cr.SaractRecTo=0               
+	cr.SaractRecFrom=rec_ar    
+	cr.PaymentDate=DepositDate ! yymmdd format       
+	cr.JournalEntryType=rod.ordnum ! for deposit type 8 uses order #         
+	cr.OthrCrAdjType=rod.depnum ! for depoist number cash receipts type                         
+	cr.OtherDiscntType =0                        
+	cr.EntryNumber=entnum
+	cr.DivisionCode=rod.Div                               
+	cr.TransactionNumber=DocNo       
+	cr.BankAmount=0   
+	cr.DebitAmount=0                
+	cr.CreditAmount=rod.chkamt
+	cr.DiscountAmount=0        
+	cr.LastPayment=0      
+	cr.FreightAllowance=0        
+	cr.CustomerName$=rtrim$(cust.name$)+blank$ !       
+	cr.Reference$=" ",cr.Reference$    
+	cr.JeDescription$=" ",cr.JeDescription$ 
+	cr.JeDescription$="Delete Deposit Order "+str$(orderid)+blank$
+	cr.Journal=0      
+	cr.EntryDate=depositdate       
+	cr.Bank=bankid      
+	cr.DetailNo=0 
+	keycr$=" ",keycr$
+	let keycr$[1,2]=bankid using "##"
+	let keycr$[3,7]=entnum using "#####"
+	do
+		let cr.detailno=cr.detailno+1
+		if cr.detailno>999
+			returnstatus = 0 ! error                              
+			message$ = "Cash Receipts Entry "+str$(entnum)+" Has Exceeded Detail Item Limit"
+			Goto Enddeldep:
+		endif
+		let keycr$[8,10]=cr.detailno using "###"
+		search #crchan,2,1;keycr$,crrecno,e
+		if e<>0 exit Do
+	loop
+	mode$ = "a" ! add                                                 
+	UpdStatus = fileupdatecashfle(e$,CRChan,mode$,CRRecNo,CR.)
+	CRRecNo = UpdStatus
+	if crrecno<0
+		let returnstatus=0
+		let message$="Error Adding Deposit Cash Receipts Entry "+str$(entnum)
+		goto enddeldep:
+	endif
+	Read Record #CRChan,CRRecNo;CR.;
+	mode$ = "d" ! add                                                    
+	updstatus = fileupdatesorddep(e$,ch_rod,mode$,rec_rod,rod.) 
+	let message$="Deposit is now a unapplied payment on customer's account"
+	enddeldep: ! end posting cash receipts
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	exit sub
+	! ----------------------------------------
+	ERR_SEARCH_LOG: Rem                                                    
+	returnstatus=0
+	message$="*** SE# "+Str$(E)+" at line "+Str$(Spc(16))+" in "+Msc$(4)
+	!Gosub UPDATE_LOG                                                          
+	return
+	! ----------------------------------------
+else
+	! this is a remark
+end try
+end sub ! DeleteDeposits
+
+!=================================================================================
+Sub GETBANKTOTALS() ! gets the AR payment description
+
+Try
+	dim cashkey$[50]
+	dim 3%,totbankamt
+	Ch_cash = OpenFile(-1536,intCo) \ If Ch_cash = -1 Error 42  ! cash receipt
+	Ch_Bank = OpenFile(-1456,intCo) \ If Ch_Bank = -1 Error 42  ! bank
+	clear List$[]
+	List$[0]=bsdel$,"BankTotals",fdel$
+	WebStr$="Bank ID",fdel$
+	Webstr$=webstr$,"Bank Name",fdel$
+	WebStr$=WebStr$,"Status",fdel$
+	Webstr$=Webstr$,"Total Bank Amount",fdel$
+	List$[1]=WebStr$
+	row=2
+	tmpcnt = maxcnt
+	LET BNKPRC=0                                        
+	LET LNNUM=99                                          
+	FOR BANKrec=1 TO CHF(CH_BANK)-1                           
+		LET TOTBANKAMT=0  
+		read record #Ch_bank,BankRec;Bank.             
+		iF bank.lastEntryAccpt<>bank.NextEntry                                  
+			LET BNKPRC=99                                   
+            LET CASHKEY$=" ",CASHKEY$
+			LET CASHKEY$[1,2]=BANKrec USING "##"            
+			IF bank.lastEntryAccpt<>0 
+				LET CASHKEY$[3,7]=bank.lastEntryAccpt USING "#####"
+			endif
+			do                         
+				SEARCH #ch_cash,3,1;CASHKEY$,rec_cr,E                    
+				IF E=2
+					call prntBANKTOTALS()
+					let list$[row]=webstr$
+					let row=row+1
+					If row > tmpcnt Let tmpcnt = expandarray(e$,List$[]) 
+					exit do
+				endif
+				if e<>0 exit do
+				LET tmp3=CASHKEY$[3,7]                               
+				LET tmp=CASHKEY$[1,2]
+				if tmp<>bankrec
+					call prntBANKTOTALS()
+					let list$[row]=webstr$
+					let row=row+1
+					If row > tmpcnt Let tmpcnt = expandarray(e$,List$[]) 
+					let totbankamt=0
+					goto getnxtbanktot:
+				endif
+				if tmp3>bank.lastEntryAccpt
+					read record #ch_cash,rec_cr,0;cr.;
+					totbankamt=totbankamt+cr.BankAmount
+				endif
+			loop
+		endif
+		getnxtbanktot: ! get next bank record
+	next BANKrec 
+	let list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	!call SetOutPut(e$,rstr$)	! let send over the data
+
+else
+    include "src/callsuberr.inc"
+end try
+end sub ! getbanktotals
+
+Sub prntBANKTOTALS() ! prntbanktotal
+
+Try
+	webstr$=str$(bankrec),fdel$
+	webstr$=webstr$,rtrim$(bank.Description$),fdel$
+	let tmp$=""               
+	IF NOT(bank.InprocessFlag ) OR bank.InprocessFlag =1                        
+		tmp$="Entry in Process"               
+	ENDIF                                             
+	IF bank.InprocessFlag =2                                       
+		tmp$="Verification in Process"        
+	ENDIF                                             
+	IF bank.InprocessFlag =3                                       
+		tmp$="Journal in Process"             
+	ENDIF                                             
+	IF bank.InprocessFlag =4                                       
+		tmp$="Journal Has Been Run"           
+	eNDIF                                             
+	IF bank.InprocessFlag =5                                       
+		tmp$="Accept in Process"             
+	ENDIF                                             
+	IF bank.InprocessFlag >5                                       
+		tmp$="Status Error"                   
+	ENDIF 
+	webstr$=webstr$,rtrim$(tmp$),fdel$
+	webstr$=webstr$,str$(totbankamt),fdel$
+else
+    include "src/callsuberr.inc"
+end try
+end sub ! prntbanktotals
+
+
+
+!!!! END DELETE DEPOSIT
+!=====================================================================================
+Sub getCustCCID() ! gets the customer credit card id
+Try
+	dim 3%,rec_ccid
+	dim filename$[50]
+	clear List$[]
+	List$[0]=bsdel$,"CustCredCardID",fdel$
+	WebStr$="CustID",fdel$
+	Webstr$=webstr$,"PROFILEID",fdel$
+	List$[1]=WebStr$
+	row=2
+	LET Filename$="2/CUSTCCID"+STR$(intco)
+	ch_CCID = FindChannel()
+	Call FindF(filename$,fileflag)
+	If fileflag<>0
+		open #ch_CCID,filename$
+	else
+		let returnstatus=0
+		let message$="Credit Card Id File Not Available "
+		goto endgetccid:
+	endif
+	Call Dxget("CustId",tmp$)
+	tmp3=tmp$
+	custid=tmp3
+	let searkey$=tmp3 using "######"
+	mode$="="
+	dirno=1
+	CustRec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+	if custrec<0
+		ReturnStatus=0 ! error not found
+		Message$="Customer ",trim$(searkey$)," not found"
+		goto endgetccid:
+	Endif
+	let searkey$=tmp3 using "######"
+	mode$="="
+	dirno=1
+	rec_ccid= FileGetCustccid(e$,CH_ccid,mode$,dirno,searkey$,ccid.)
+	if rec_ccid<0
+		e$=""
+		clear ccid.
+		ccid.profid$=" ",ccid.profid$
+	Endif
+	webstr$=""
+	let webstr$=(custid using "######"),fdel$
+	let webstr$=webstr$+rtrim$(ccid.profid$),fdel$
+	let list$[row]=webstr$
+	let row=row+1	
+	endgetccid: !
+	let list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)	! let send over the data
+
+else
+    include "src/callsuberr.inc"
+end try
+end sub !  
+
+!=====================================================================================
+Sub SubmitCustCCID() ! updates the customer credit card id
+Try
+	dim 3%,rec_ccid
+	dim filename$[50]
+	LET Filename$="2/CUSTCCID"+STR$(intco)
+	ch_CCID = FindChannel()
+	Call FindF(filename$,fileflag)
+	If fileflag<>0
+		open #ch_CCID,filename$
+	else
+		let returnstatus=0
+		let message$="Credit Card Id File Not Available "
+		goto endsubmitccid:
+	endif
+	Call Dxget("CustId",tmp$)
+	tmp3=tmp$
+	custid=tmp3
+	let searkey$=tmp3 using "######"
+	mode$="="
+	dirno=1
+	CustRec = FileGetCust(e$,CustChan,mode$,dirno,searkey$,cust.)
+	if custrec<0
+		e$=""
+		ReturnStatus=0 ! error not found
+		Message$="Customer ",trim$(searkey$)," not found"
+		goto endsubmitccid:
+	Endif
+	let mode$="="
+	let dirno=1
+	rec_ccid= FileGetCustccid(e$,ch_ccid,mode$,dirno,searkey$,ccid.)
+	if rec_ccid<0
+		Call Dxget("DELETEFLAG",tmp$)
+		if rtrim$(ucase$(tmp$))="Y"
+			let returnstatus=1
+			let message$="Deleted"
+			goto endsubmitccid:
+		endif
+		clear ccid.
+		let ccid.custid=custid
+		let ccid.profid$=" ",ccid.profid$
+		let ccid.spare1$=" ",ccid.Spare1$
+		let ccid.spare2$=" ",ccid.spare2$
+		let mode$="a"
+		UpdStatus=fileupdatecustccid(e$,ch_ccid,mode$,rec_ccid,ccid.)
+		if updstatus<=0
+			let returnstatus=0
+			let message$="Error Adding Customer Credit Card Id Record "
+			goto endsubmitccid:
+		else
+			let rec_ccid=updstatus
+		endif
+		if rec_ccid<=0
+			let returnstatus=0
+			let message$="Error Adding Customer Credit Card Id Record"
+			goto endsubmitccid:
+		endif
+
+	Endif
+	Call Dxget("DELETEFLAG",tmp$)
+	if rtrim$(ucase$(tmp$))="Y"
+		let mode$="d"
+		UpdStatus=fileupdatecustccid(e$,ch_ccid,mode$,rec_ccid,ccid.)
+		let returnstatus=1
+		let message$="Deleted"
+		goto endsubmitccid:
+	endif
+	Call Dxget("PROFILEID",tmp$)
+	let ccid.profid$=rtrim$(tmp$)+blank$
+	
+	if ccid.custid<=0 let ccid.custid=custid
+	Write Record #ch_ccid,rec_ccid;ccid.;	
+	
+	endsubmitccid: !
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)	! let send over the data
+
+else
+    include "src/callsuberr.inc"
+end try
+end sub ! submitccid
+!=====================================================================================
+!--------------------------------------------------------------------------------
+Sub currconvup(amount,factor)
+! 
+  try
+	if p61$[136,136]="Y" and factor<>0 and amount<>0! going for base to costing um
+		let cnvcu[0]=1
+		let cnvcu[1]=1 ! no rounding
+		let cnvca[0]=amount
+		let cnvca[1]=factor
+		call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$
+		let amount=cnvca[0]
+	endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end Sub ! 
+
+!--------------------------------------------------------------------------------
+Sub currconvdown(amount,factor)
+! 
+  try
+	if p61$[136,136]="Y" and factor<>0 and amount<>0! going from currency to base             
+		cnvcu[1] = 1 ! no rounding 
+		let cnvcu[0]=2
+		let cnvcu[1]=1
+		let cnvca[0]=amount
+		let cnvca[1]=factor
+		call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$
+		let amount=cnvca[0]
+	endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end Sub ! 
+
+
+
+!---------------------------------------------------------------------------

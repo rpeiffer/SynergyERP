@@ -1,0 +1,2234 @@
+!"serpsn" === description  synergy erp  Serial Number Entry/Edit
+!
+! loadsave -w -n 100,10 -o prog/dxport/serpsn.dl4 src/serpsn.src 
+!
+! changes:
+!   07/2013 - kit lines use SN's! - classic handles in mx201l - cannot do for erp mxrasl5
+!      so added here & serpkitl.dl4
+!   08/2014 - any S/N item (even directs) can enter SN's
+!
+!****** includes ********
+include "src/copyright.inc"
+!
+include "src/inc/fileprod.inc" ! product
+
+include "src/inc/filepserlno.inc"  ! product serial #'s
+include "src/inc/filereprtrans.inc"  ! serial # repair file
+include "src/inc/filespoflenz.inc"  ! PO serial # file
+include "src/inc/filepoline.inc" ! PO Line file
+include "src/inc/filevendtag.inc" ! vendor tag file
+include "src/inc/filea80vm.inc" ! vendor file
+include "src/inc/fileprodwhse.inc" ! prodwhse 
+include "src/inc/filewhinfoz.inc" ! warehouse
+include "src/inc/filemiscrts.inc" ! misc rts file
+include "src/inc/filesprodlot.inc" ! product lots
+include "src/inc/filesordflenz.inc" ! Order serial # file
+Include "src/inc/fileprtdefault.inc" ! port default
+Include "src/inc/filerolz.inc" ! order line
+Include "src/inc/fileroh.inc" ! order header
+Include "src/inc/filesordflenhz.inc" ! s/n history
+include "src/inc/fileinvl.inc" ! inv hist lines
+Include "src/inc/filesordlkitl.inc" ! ord kit lines
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "libprodconv.lib"           
+Declare External Function ConvProdAmount 
+
+External Lib "ubsprconv.dl4"     
+Declare External Function XUnit$ 
+!
+External Lib "libgeneralcode.lib"
+Declare External Function ConvertDate
+!
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels,LogAccess
+Declare External Function OpenFile,PDate$,FormatDate2$
+Declare External Function getuidrec,getuidinfo$
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,ProdGroup,UMDList
+Declare External Function getpravail,getumrec,ChkPrdUM
+
+External Lib "libprodwh.lib"    
+Declare External Sub mxwhcreate
+Declare External Function getwhavail
+
+Declare Intrinsic Sub DateToJulian,FindF,JulianToDate,programdump
+Declare Intrinsic function findchannel
+!
+!
+Declare sub OpenFiles,getsndata,dosnmrts,dosndm,Delallsn
+Declare sub VerifyVendor,sbmsndata,dosnpo,dosnoe
+Declare sub GetProdDetail,SRLNOLIST,invinqsn,dosncm
+Declare Function umtofactor,chkdatefrmt$,Chk4srno,CountSN
+  
+!
+!--------------------------------------------------------------------
+!
+!
+! ** main procedure
+!
+OPTION GOSUB NESTING 16  ! Default is 8
+try
+	Option String Redim is legal ! in case subs dim/use same names
+  !
+  Dim action$[30],options$[30],userid$[8],fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+  Dim rstr$[5000]
+  Dim 2%,WHSE
+  Dim 1%,IntCo
+  Dim 3%,SPREC,rec_uac
+
+  dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! error handling variables
+  dim Section$[30],Field$[20,30]
+  dim mergedir$[60],action1$[20],action2$[30]
+  dim Company$[2],keyvend$[10],keyval$[60]
+  dim xdate$[10]
+  dim tmpkey$[50],Serno$[30]
+  dim 1%,editstatus,source,acceptrts
+  dim 1%,ua5[10],x1[9],flags[11]
+  dim 1%,tmp1,intSls,CTLC,errflag,WH,Div,portnum,chan[25]
+  dim 2%,tmp2,maxcnt \ maxcnt=100 ! max records in arrays
+  dim 3%,tmp3,JDepositDate,DocNo
+  DIM 3%,parm[25],ORGTOT[10]
+  dim 2%,vendid,vendid$[6]
+  dim 2%,currdate,x2[9]
+  dim 4%,tmp4
+  Dim 1%,CNVTU[2],ERRTYPE
+  dim 3%,qty,cost,amount,baseqty,cnvta
+  dim 3%,lineqty,lineum,linecost,lineextamt,lbsunit,lbsfact                                        
+  dim 3%,rec_tmp,x3[9],r[99]
+  dim WORK$[600],tmpField$[1,30]
+  dim whlist$[100,100]
+  dim p60$[50],p61$[256],P9$[50]
+  dim List$[maxcnt,2000],sdate$[50]
+  dim logfname$[50],SUDA$[30]
+  dim SearKey$[64],BegKey$[64],mode$[3]
+  dim Desc$[50],k1$[64]
+  dim tmp$[200],tmp1$[200],WebStr$[1000],Message$[200],MSG$[500]
+  dim blank$[200] \ blank$=" ",blank$
+  ! misc rts file
+  dim keymrts$[50]
+  dim 3%,rec_mrts,rec_rsn
+  ! product file
+  Dim Prod$[12],KeyProd$[60]
+  Dim 3%,rec_prod,rec_tmp
+  ! product warehouse
+  dim keyprwh$[30]
+  dim 3%,rec_prwh
+  Dim 3%,Whbld[2]
+  ! sprodlot
+  dim keyprlot$[50]
+  dim 3%,rec_prlot
+  ! process flags
+  dim 1%,rtsflag,ch_tmp
+  Dim 1%,cost_lev[4],2%,Q0[1]
+  dim 3%,keytmp$[50],filename$[50],USR$[40]
+  dim 3%,entnum,workqty,workcost,workcqty
+  dim QMask$[20],PMask$[20],COSTUM$[4],QTYUM$[4]
+  dim dblog$[40]
+
+  dim 3%
+  let tmp$=tim(4) using "&&&&&&"
+  let work$=tmp$[5,6],tmp$[1,2],tmp$[3,4]
+  let currdate=work$
+ 
+  !!! define structures !!! 
+  dim pr. as prod ! prod
+  dim cpr. as prod ! prod copy
+  dim wrp. as reprtrans ! repair trans
+  dim psno. as pserlno ! product serial #
+  dim savpsno. as pserlno ! product serial #
+  dim posn. as spoflenz ! po serial #
+  dim pol. as poline ! po line
+  dim vend. as a80vm ! vendor file
+  dim vtag. as vendtag ! vendor tag file
+  dim pw. as prodwhse ! prod warehouse
+  dim wh. as whinfo ! warehouse file
+  dim prlot. as sprodlot ! sprodlot file
+  dim ordsn. as sordflen ! sordflen
+  dim prt. as prtdefault ! port defaults
+  dim mrts. as miscrts ! misc rts file
+  dim rol. as rolnew ! order lines
+  dim roh. as roh ! order header
+  dim invsn. as sordflenh ! inv history s/n
+  dim invl. as invl ! invoice line
+  dim kitl. as sordlkitl ! kit line - ord/cm's
+  
+  Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H) ! rounding to nearest penny
+  !
+  call dxopen()
+  
+  call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+  call LogAccess(e$)
+  call GetPortDefault(e$,IntCO,UserID$,portnum,rec_uac,prt.) ! get port default
+  Call GetCostLevels(e$,cost_lev[],IntCo,Userid$) ! get cost security 
+  mat read #ctlc,60,50;p60$; ! system flag variable
+  mat read #ctlc,61,0;p61$;
+  mat read #ctlc,19,50;p9$;                                                 
+  Mat Read #ctlc,115,40;Q0;
+  mat read #ctlc,67,196;suda$;
+  QMask$ = "---------#.##"                                              
+  tmp$ = "#",tmp$                                                         
+  If Q0[1] <= 0 Let Q0[1] = 2                                             
+  If Q0[1] Let PMask$ = "-----------#.",tmp$[1,Q0[1]] !price mask         
+  !
+  ACTION$=UCASE$(RTRIM$(ACTION$))
+  ACTION1$=UCASE$(RTRIM$(ACTION1$)) ! both Uppercase and trimmed
+
+  !
+  ! Call DXSave(0,"tmp/mrtsn.txt!") ! \ stop
+  !
+  ReturnStatus=0
+  Message$="ACTION NOT FOUND"
+  IF P60$[25,25]<>"Y" ! NO S/N'S KEPT SYSTEM WIDE
+	ReturnStatus=0
+	Message$="NO SERIAL NUMBERS FOR SYSTEM"
+	Goto SNPDone
+  Endif
+  ! as this is OPTION SNMENU - first check for that(if we're using as menu)
+  If action$="RPRINQ" ! repair Inquiry
+	Chain "serp487.dl4"
+	End
+  Endif
+  If action$="CLAIMS" ! claim programs
+	Chain "serpwclaim.dl4"
+	End
+  Endif
+  ! after all that - now we should be doing SN's
+  call OpenFiles()
+  select case action$
+
+  case "SNLIST" !   send droplists							doc=SNList.doc
+    
+  !================================= Begin Action Droplist ================================================
+	Returnstatus=1
+	Message$="OK"
+	if action$="SNLIST" or action1$="SN"
+		Dim iField$[3,30]
+		Call DXGet("PRODID",prod$) \ prod$=UCase$(prod$)
+		Prod$=Prod$+Blank$ \ If Len(Prod$)>12 let Prod$[13]=""
+		
+		call SRLNOList()
+		call AddToStr(e$,rstr$,List$[])
+		
+	endif
+
+!----------------------------------------------------------------------------
+case "PRODSEARCH" ! product scan							doc=SNProdScan.doc
+		!
+		Let ReturnStatus=1
+		Message$="OK"
+		X2=0 ! IT'S Normal TYPE SCAN
+		Call ProdList(e$,IntCo,List$[],maxcnt,ctlc,prc,pwc,x2,debugdetail,dblog$,UserId$)
+		If E$<>""
+		  Let ReturnStatus=0
+		  Message$=E$
+		Endif
+		call AddToStr(e$,rstr$,List$[])
+		! done with ProdSearch
+
+!----------------------------------------------------------------------------
+Case "SNMDLIST"	!											doc=SNFields.doc
+	let returnstatus=1
+	let message$="OK"
+	list$[0]=bsdel$,"FLDS",fdel$
+	list$[1]="ID",fdel$,"DESC",fdel$
+	If RTrim$(SUDA$[1,14])="" let SUDA$[1,14]="SN UDA1"
+	if rtrim$(SUDA$[15,28])="" let SUDA$[15,28]="SN UDA2"
+	list$[2]="SNUDA1",fdel$,RTrim$(SUDA$[1,14]),fdel$
+	list$[3]="SNUDA2",fdel$,RTrim$(SUDA$[15,28]),fdel$
+	List$[4]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	Clear list$[]
+	tmpcnt=maxcnt
+	list$[0]=bsdel$,"STATUS",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	List$[2]="0",fdel$,"OPEN/AVAILABLE",fdel$
+	list$[3]="1",fdel$,"SOLD",fdel$
+	List$[4]="2",fdel$,"HOLD",fdel$
+	list$[5]="3",fdel$,"COMMITTED",fdel$
+	list$[6]="4",fdel$,"RTS IN PROCESS",fdel$
+	List$[7]="5",fdel$,"CM RETURN",fdel$
+	List$[8]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	! send whse droplist
+	call FileDropListWhinfoz(e$,whList$[],100,ch_wh)
+	call AddToStr(e$,rstr$,whList$[])
+	! end of sn maint droplists
+!----------------------------------------------------------------------------	 
+
+CASE "SNMAINT" !  set flags and sends warehouse list		doc=SNMaint.doc
+	let returnstatus=1
+	let message$="OK"
+	Call DXGet("RECID",tmpKey$)
+	SearKey$=tmpKey$
+	if RTrim$(tmpkey$)=""
+		call dxget("SNID",tmp$)
+		Serno$=UCase$(tmp$)+Blank$
+		call dxget("PRODID",tmp$)
+		Prod$=UCase$(RTrim$(tmp$))+Blank$
+		SNexst=Chk4srno(serno$,prod$,R)
+		if snexst let tmpkey$=Str$(R)
+	Endif
+	Recno=tmpkey$ ! CANNOT USE KEY VALUES AS SPACES REMOVED BY ??
+	if RecNo<=0
+		let returnstatus=0
+		let message$="Record Not Found"
+		goto getsndone
+	end if
+	READ RECORD #CH_PSN,recno,0;psno.;
+	Searkey$=Str$(Recno)
+	Call getsndata()
+	call AddToStr(e$,rstr$,List$[]) ! mtg
+	! Call AddToStr(e$,rstr$,esdel$)	! end of section 
+	getsndone: ! finito
+	!done with snmaint
+!----------------------------------------------------------------------------	  
+
+Case "SUBMITSNMAINT"	!									doc=SNSubmitSNData.doc
+	let returnstatus=1
+	let message$="OK"
+	Call DXGet("RECID",tmpKey$)
+	SearKey$=tmpKey$
+	if Rtrim$(tmpKey$)<>"" ! sent id - new = null
+		!Mode$="="
+		!KeyNo=2
+		!RecNo=FileGetpserlno(e$,ch_PSN,Mode$,KeyNo,SearKey$,savpsno.)
+		recno=tmpkey$
+		if RecNo<=0
+			let returnstatus=0
+			let message$="Record Not Found"
+			goto sbmsndone
+		end if
+		read record #ch_psn,recno,0;savpsno.
+	Endif
+	call sbmsndata()
+	sbmsndone: ! finito
+	
+!----------------------------------------------------------------------------	  
+! 
+Case "SNMRTS" !												doc=SNMRTS.doc
+	returnstatus=1
+	Message$="OK"
+	call dosnmrts()
+	!done with snmrts
+!----------------------------------------------------------------------------	  
+
+Case "NEWSNENT"				!								doc=SNNewSN.doc
+	returnstatus=1
+	message$="OK"
+	call getproddetail()
+	call AddToStr(e$,rstr$,List$[])
+	! done with getproddetail
+!----------------------------------------------------------------------------	  
+
+Case "SNPOENT" !											doc=SNPOEntry.doc
+	returnstatus=1
+	message$="OK"
+	call dosnpo()
+	! done with snpoent
+!----------------------------------------------------------------------------	  
+
+Case "CHKPRODSN"		!									doc=SNCheckProdID.doc
+	returnstatus=1
+	message$="OK"
+	Call DXGet("PRODID",tmp$)
+	tmp$=UCase$(RTrim$(tmp$))
+	if tmp$="" 
+		let returnstatus=0
+		Let message$="Invalid Product Code Submitted"
+		goto chkproddone:
+	endif
+	Prod$=tmp$+blank$
+	Let keyprod$=Prod$
+	Let keyprod$[13]="";e=0 ! no lock
+    rec_prod = filegetprod(e$,ch_prod,"=",1,Keyprod$,PR.,e)
+	If rec_prod<=0 ! not found
+		Let message$="PRODUCT "+rtrim$(prod$)+" NOT FOUND"
+		Let ReturnStatus=0
+		goto chkproddone:
+	Endif
+	if pr.SerNoTrack$<>"Y"
+		Let message$="PRODUCT "+rtrim$(prod$)+" Does not keep serial numbers"
+		Let ReturnStatus=0
+		goto chkproddone:
+	Endif
+	chkproddone: !
+	! done with CHKPRODSN
+!----------------------------------------------------------------------------
+
+Case "SNDELETE"		!										doc=SNDeleteSN.doc
+	returnstatus=1
+	message$="OK"
+	Call DXGet("RECID",tmpKey$)
+	SearKey$=tmpKey$
+	!Mode$="="
+	!KeyNo=2
+	!RecNo=FileGetpserlno(e$,ch_PSN,Mode$,KeyNo,SearKey$,psno.)
+	recno=tmpkey$
+	if RecNo<=0
+		let returnstatus=0
+		let message$="Record Not Found"
+		goto delsndone
+	end if
+	read record #CH_PSN,Recno,0;psno.;
+	if psno.Status>=3
+		returnstatus=0
+		message$="SERIAL NUMBER IS IN PROCESS BY "
+		IF psno.Status=3 message$=message$+"ORDER"
+		IF psno.Status=5 message$=message$+"CREDIT"
+		IF psno.Status=4 message$=message$+"R-T-S"
+		goto delsndone
+	Endif
+	! CHECK IF REPAIRS
+	k1$=" ",k1$
+	k1$=psno.ProductCode$+Blank$
+	k1$[13]=psno.SerialNumber$+Blank$
+	search #ch_wrp,2,1;k1$,R,E
+	if k1$[1,12]<>Psno.productcode$ or k1$[13,42]<>psno.SerialNumber$ let e=1
+	if not(e)
+		returnstatus=0
+		message$="SERIAL NUMBER HAS REPAIR TRANSACTIONS"
+		goto delsndone
+	Endif
+	R=fileupdatepserlno(e$,ch_psn,"d",recno,psno.)
+	If R<0 
+		returnstatus=0
+		message$="Search Error "+Str$(ABS(R))+" during delete: "+e$
+	Endif
+	delsndone: !
+	! done with sndelete
+!----------------------------------------------------------------------------
+
+Case "SNDMENT"	!											doc=SNDMEntry.doc
+	returnstatus=1
+	message$="OK"
+	call dosndm()
+	! done with sndment
+!----------------------------------------------------------------------------	  
+
+Case "SNORDENT" ! ORD,INV Entry								doc=SNOrdEntry.doc
+	returnstatus=1
+	message$="OK"
+	call dosnoe()
+	! done with snordent
+!----------------------------------------------------------------------------
+
+Case "SNINVINQ" ! 239 inv inq s/n list						doc=SNINVHist.doc
+	returnstatus=1
+	message$="OK"
+	call invinqsn()
+	! done with sninvinq
+!----------------------------------------------------------------------------
+
+Case "SNCMENT" ! Credit Memo Entry							doc=SNCMEntry.doc
+	returnstatus=1
+	message$="OK"
+	call dosncm()
+	! done with sncment
+!----------------------------------------------------------------------------
+end select
+	SNPDone: ! 
+	! status section - always send
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+	call SetOutput(e$,rstr$) ! 
+  ! call dxclose()
+else
+  include "src/callmainerrnet.inc"
+  call dxclose()
+end try
+end
+
+!--------------------------------------------------------------------
+sub OpenFiles()
+  
+  Try
+    !
+    Ch_Prod = OpenFile(1792,intCo) \ If Ch_Prod = -1 Error 42  !product file 
+	Ch_PSN = OpenFile(416,intCo) \ If Ch_PSN = -1 Error 42  !product serial #'s
+	Ch_WRP = OpenFile(2992,intCo) \ If Ch_WRP = -1 Error 42  !repair trans
+    Ch_Vend = OpenFile(2400,intCo) \ If Ch_Vend = -1 Error 42  ! vend
+    ch_vtag=OpenFile(1120,intCo) \ If Ch_vtag = -1 Error 42 ! vemdtag
+    Ch_PrWh = OpenFile(1744,intCo) \ If Ch_PrWh = -1 Error 42  !"product warehouse file
+    Ch_Wh = OpenFile(2768,intCo) \ If Ch_Wh = -1 Error 42  !" warehouse file
+    Ch_Ccode = OpenFile(-1728,intCo) \ If Ch_Ccode = -1 Error 42  !u/m codes file  
+    ch_sprodlot=OpenFile(-2528,intCo) \ If Ch_sprodlot = -1 Error 42 !sprodlot file
+    ch_pol=OpenFile(2432,intCo) \ If Ch_pol = -1 Error 42 !po line file
+    ch_mrts=OpenFile(9945,intCo) \ If Ch_mrts = -1 Error 42 !misc rts file
+    ch_spoflen=OpenFile(2976,intCo) \ If Ch_spoflen = -1 Error 42 !spoflen
+	ch_ordflen=OpenFile(2944,Intco) \ if ch_ordflen = -1 Error 42 !sordflen
+	ch_rol=OpenFile(-1888,Intco) \ if ch_rol = -1 Error 42 ! ordline
+	ch_roh=OpenFile(-1840,IntCo) \ if ch_roh = -1 Error 42 ! ordhead
+	ch_invsn=OpenFile(-2960,IntCo) \ if ch_invsn = -1 Error 42 ! sordflenh
+	ch_invl=OpenFile(-1184,IntCo) \ if ch_invl = -1 Error 42 ! sordflelh
+	ch_rolkit=OpenFile(-1312,IntCo) \ if ch_rolkit=-1 Error 42 ! sordlkitl
+	ch_invkit=OpenFile(-1328,IntCo) \ if ch_invkit=-1 Error 42 ! invkit
+	!
+   else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+
+! ------------------------------------------------------------------------
+Sub VerifyVendor() 
+
+try
+	  keyvend$=" ",keyvend$
+	  keyvend$=vendid using "######"
+	  mode$="=" ! search mode 2
+	  dir=1
+	  clear vend.
+	  Rec_vend=filegeta80vm(e$,ch_vend,mode$,dir,keyvend$,vend.)
+	  if rec_vend<0
+		clear vend.
+	  endif
+	  
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! Verify Vendor  
+
+! --------------------------------------------------------------------
+Sub getPRODDETAIL()! take pad list - send line details
+ Try
+	ReturnStatus=1
+	Message$="OK" 
+	! set list header
+	Clear List$[]
+	
+	Call DXGet("PRODID",tmp$)
+	tmp$=UCase$(RTrim$(tmp$))
+	if tmp$="" 
+		let returnstatus=0
+		Let message$="Invalid Product Code Submitted"
+		goto endproddetail:
+	endif
+	Prod$=tmp$+blank$
+	Let keyprod$=Prod$
+	Let keyprod$[13]="";e=0 ! no lock
+    rec_prod = filegetprod(e$,ch_prod,"=",1,Keyprod$,PR.,e)
+	If rec_prod<=0 ! not found
+		Let message$="PRODUCT "+rtrim$(prod$)+" NOT FOUND"
+		Let ReturnStatus=0
+		goto endproddetail:
+	Endif
+	if pr.SerNoTrack$<>"Y"
+		Let message$="PRODUCT "+rtrim$(prod$)+" Does not keep serial numbers"
+		Let ReturnStatus=0
+		goto endproddetail:
+	Endif
+	! check if in product warehouse
+	Call dxget ("WHSE",tmp$)
+	let whse=tmp$
+	if whse<=0 or whse>99
+		let message$="Invalid Warehouse Number Submitted"
+		goto endproddetail:
+	endif
+	let keyprwh$=" ",keyprwh$
+	let keyprwh$[1,12]=prod$[1,12]
+	let keyprwh$[13]=whse using "##"
+	rec_prwh=filegetprodwhse(e$,ch_prwh,"=",1,Keyprwh$,pw.,e)
+	if rec_prwh<0 ! NOT FOUND
+		clear pw.
+		If P61$[59,59]="Y" ! not allowed new prodwhse
+			Let message$="Product "+rtrim$(PROD$)+" Not Available In Warehouse "+str$(whse)
+			Let ReturnStatus=0
+			goto endproddetail:
+		Endif
+		If rec_prwh=-1 ! not found - add now? 
+			Let message$="Product "+rtrim$(PROD$)+" Not found In Warehouse "+str$(whse)
+			Let ReturnStatus=0
+			goto endproddetail:
+		Endif
+	 Endif ! of whse not found
+	vendid=pr.PrimVend
+	call verifyvendor() ! get vendor details
+	 CLEAR psno.
+	 Searkey$="" ! no id yet
+	 psno.ProductCode$=prod$+Blank$
+	 psno.LotCode$="STOCK"+Whse using "&&"+blank$
+	 psno.ModelNumber$=pr.SnModelNum$+blank$
+	 psno.ProdDesc1$=pr.Desc1$+blank$
+	 psno.ProdDesc2$=pr.Desc2$+Blank$
+	 psno.Whse=whse
+	 psno.UMRec=pr.BaseUM
+	 psno.Vendor=pr.PrimVend
+	 psno.VendBuyFromName$=vend.Name$+Blank$
+	 psno.DateReceived=currdate
+	psno.MfgWarrantyDays=pr.SnMfgWrntyDays
+	psno.WarrantyDays=pr.SnOurWrntyDays
+	PSNO.Cost=PR.CostPO
+	call getsndata() ! send as normal
+	endproddetail: ! done
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! getPRODDETAIL
+
+!--------------------------------------------------------------------------------------------------------
+Function UMtoFactor(UMRec)
+! from sent um # - get um factor for it
+! if no match - send factor back as one (base?)
+ Try
+	
+	dim 3%,factor
+	let factor=0
+	if umrec<=0 exit function 0 ! no um - no factor!
+	If umrec=Pr.BaseUM let factor=1
+	if umrec=PR.UM2 let factor=pr.UM2Fact
+	if umrec=PR.UM3 let factor=pr.UM3Fact
+	if umrec=PR.UM4 let factor=pr.UM4Fact
+	if umrec=PR.UM5 let factor=pr.UM5Fact
+	if umrec=PR.UM6 let factor=pr.UM6Fact
+	if umrec=PR.UM7 let factor=pr.UM7Fact
+	if umrec=PR.UM8 let factor=pr.UM8Fact
+	
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function Factor ! umtofactor
+!
+!--------------------------------------------------------------------------------------------------------
+Function Chk4srno(serno$,prod$,R)
+! check if serial number exists for product
+  Try
+	dim cpsno. as pserlno
+	snexst=1
+	keyval$=SERNO$
+	mode$=">"
+	do
+		R=filegetpserlno(e$,ch_psn,mode$,1,keyval$,cpsno.)
+		if r<0 let snexst=0 \ exit do
+		if keyval$[1,30]<>serno$ let snexst=0 \ exit do
+		if Prod$[1,12]<>Blank$[1,12]
+			IF cpsno.ProductCode$=prod$ exit do
+		Else ! no prod even
+			exit do ! first match is one
+		Endif
+	loop
+  else
+    include "src/callsuberr.inc"
+  end try
+end Function snexst ! Chk4srno
+! 
+!--------------------------------------------------------------------
+Sub getsndata()
+! send out the sn data - all
+  Try
+	
+	! start the output
+	tmpcnt=maxcnt
+	clear list$[] \ row=0
+	! section SNMAINT
+	List$[row]=bsdel$,"SNMAINT",fdel$ \ row=row+1 ! beg section
+	WebStr$="RECID",fdel$,"ProductID",fdel$
+	! WebStr$=WebStr$,"Product Desc",fdel$
+	WebStr$=WebStr$,"SerialNumber",fdel$,"LotNumber",fdel$
+	WebStr$=WebStr$,"Whse",fdel$
+	WebStr$=WebStr$,"Description1",fdel$,"Description2",fdel$
+	WebStr$=WebStr$,"ModelNumber",fdel$
+	WebStr$=WebStr$,"SNUDA1",fdel$,"SNUDA2",fdel$,"UM",fdel$
+	webstr$=webstr$,"STATUS",fdel$
+    List$[row]=WebStr$ \ row=row+1
+	If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	! SNMAINT Data
+	WebStr$=SearKey$,fdel$ ! 
+	WebStr$=WebStr$,rtrim$(psno.ProductCode$),fdel$ ! 
+	WebStr$=WebStr$,rtrim$(psno.SerialNumber$),fdel$ !
+	WebStr$=WebStr$,rtrim$(psno.LotCode$),fdel$ ! 
+	WebStr$=WebStr$,rtrim$(str$(psno.whse)),fdel$ ! 
+	WebStr$=WebStr$,rtrim$(psno.ProdDesc1$),fdel$ ! desc 1
+	WebStr$=WebStr$,rtrim$(psno.ProdDesc2$),fdel$ ! desc 2
+	WebStr$=WebStr$,rtrim$(psno.ModelNumber$),fdel$ !
+	WebStr$=WebStr$,rtrim$(psno.UDA$),fdel$ !
+	WebStr$=WebStr$,rtrim$(str$(psno.UDA2)),fdel$ !
+	tmp$=XUnit$(psno.UMRec,Ch_Ccode)
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,Str$(psno.Status),fdel$
+    List$[row]=WebStr$ \ row=row+1
+	If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	! section POINFO
+	List$[row]=esdel$,bsdel$,"POINFO",fdel$ \ row=row+1 ! beg section
+	WebStr$="POID",fdel$
+	WebStr$=WebStr$,"DateRecvd",fdel$
+	WebStr$=WebStr$,"VendorID",fdel$,"VendorName",fdel$
+	WebStr$=WebStr$,"MFGWrntyDays",fdel$
+	WebStr$=WebStr$,"RecvdCost",fdel$
+    List$[row]=WebStr$ \ row=row+1
+	If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	! POINFO Data
+	WebStr$=rtrim$(str$(psno.POBoughtOn)),fdel$ ! POID
+	let tmp$=""
+	if (psno.DateReceived) let tmp$=PDate$(psno.DateReceived)
+	WebStr$=WebStr$,tmp$,fdel$ ! date PO recvd
+	WebStr$=WebStr$,rtrim$(str$(psno.Vendor)),fdel$ ! 
+	WebStr$=WebStr$,rtrim$(psno.VendBuyFromName$),fdel$ ! 
+	WebStr$=WebStr$,rtrim$(str$(psno.MfgWarrantyDays)),fdel$ ! 
+	WebStr$=WebStr$,Ltrim$(psno.cost using PMask$),fdel$ ! PO cost
+    List$[row]=WebStr$ \ row=row+1
+	If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	! section REPAIRINFO
+	List$[row]=esdel$,bsdel$,"REPAIRINFO",fdel$ \ row=row+1 ! beg section
+	WebStr$="LastRepair",fdel$
+	WebStr$=WebStr$,"Reimbursed",fdel$
+	WebStr$=WebStr$,"WrntyRepairs",fdel$
+	WebStr$=WebStr$,"NonWrnty",fdel$
+    List$[row]=WebStr$ \ row=row+1
+	If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	! REPAIRINFO Data
+	let tmp$=""
+	if (psno.DateLastRepair) let tmp$=pdate$(psno.DateLastRepair)
+	WebStr$=tmp$,fdel$ ! date last repair
+	WebStr$=WebStr$,Ltrim$(psno.VendorReimbursement uSING QMask$),fdel$ ! 
+	WebStr$=WebStr$,Ltrim$(Psno.WarrantyRepairs Using QMask$),fdel$ ! 
+	WebStr$=WebStr$,Ltrim$(psno.NonWrntyRepairs using QmASK$),fdel$ ! 
+    List$[row]=WebStr$ \ row=row+1
+	If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$
+	row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	! SALES INFO
+	list$[row]=bsdel$,"SALESINFO",fdel$
+	row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	webstr$="CUSTID",fdel$,"CUSTNAME",fdel$
+	webstr$=webstr$,"INVOICE",fdel$,"INVDATE",fdel$
+	webstr$=webstr$,"SLSWRNTY",fdel$,"SELLPRICE",fdel$,"SELLCOST",fdel$
+	List$[row]=webstr$
+	row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Webstr$=Str$(psno.CustSoldTo),fdel$,RTrim$(psno.CustSoldToName$),fdel$
+	Webstr$=webstr$,Str$(psno.Invoice),fdel$
+	tmp$=""
+	if psno.DateSoldDel let tmp$=PDate$(psno.DateSoldDel)
+	webstr$=webstr$,tmp$,fdel$,Str$(psno.WarrantyDays),fdel$
+	webstr$=Webstr$,LTrim$(psno.Sell USING PMask$),fdel$,LTrim$(psno.SellCost Using PMask$),fdel$
+	List$[row]=webstr$
+	row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	list$[row]=esdel$
+   else
+    include "src/callsuberr.inc"
+ end try
+end sub ! getsndata
+!--------------------------------------------------------------------------------------------------------
+sub sbmsndata()
+ ! save out sn data
+  try
+	!call dxsave(0,"tmp/srsbm.txt!")
+	Dim Srlno$[30]
+	Call DXGet("ProdID",tmp$)
+	Prod$=UCase$(RTrim$(tmp$))+blank$
+	Let keyprod$=Prod$
+	Let keyprod$[13]="";e=0 ! no lock
+    rec_prod = filegetprod(e$,ch_prod,"=",1,Keyprod$,PR.,e)
+	if rtrim$(keyprod$)="" let rec_prod=-1
+	If rec_prod<=0 ! not found
+		Let message$="PRODUCT "+rtrim$(prod$)+" NOT FOUND"
+		Let ReturnStatus=0
+		goto SNSUBMDone:
+	Endif
+	
+	Call DXGet("SerialNumber",tmp$) \ srlno$=UCase$(tmp$)+Blank$
+	if rtrim$(srlno$)=""
+		Returnstatus=0
+		Message$="NO Serial Number received"
+		goto SNSUBMDone
+	Endif
+	! see if new or existing
+	keyval$=SRLNO$
+	mode$=">";newrec=0
+	do
+		R=filegetpserlno(e$,ch_psn,mode$,1,keyval$,psno.)
+		if r<0 let newrec=1 \ exit do
+		if keyval$[1,30]<>srlno$ let newrec=1 \ exit do
+		IF psno.ProductCode$=keyprod$ exit do
+	loop
+	psno.ProductCode$=Prod$+Blank$
+	psno.SerialNumber$=srlno$+Blank$
+	Call DXGet("LotCode",tmp$) \ psno.LotCode$=tmp$+Blank$
+	! Call DXGet("StkSeq",tmp$) \ psno.StkSeq$=tmp$+Blank$
+	psno.StkSeq$=R USING "##########"  !   SHOULD BE REC NUMBER    !  Blank$ ! not entered
+	Call DXGet("ModelNumber",tmp$) \ psno.ModelNumber$=tmp$+Blank$
+	Call DXGet("Desc1",tmp$) \ psno.ProdDesc1$=tmp$+Blank$
+	Call DXGet("Desc2",tmp$) \ psno.ProdDesc2$=tmp$+Blank$
+	Call DXGet("CustName",tmp$) \ psno.CustSoldToName$=tmp$+Blank$
+	Call DXGet("VendorName",tmp$) \ psno.VendBuyFromName$=tmp$+Blank$
+	Call DXGet("SNUDA1",tmp$) \ psno.UDA$=tmp$+Blank$
+	psno.SpareFiller$=Blank$
+	Call DXGet("Invoice",tmp$) \ psno.Invoice=tmp$
+	Call DXGet("WHSE",tmp$)
+	x2=tmp$
+	if x2<1 or x2>99 or fra(x2)
+		Returnstatus=0
+		Message$="WAREHOUSE "+Str$(X2)+" INVALID"
+		goto SNSUBMDone:
+	Endif
+	psno.Whse=x2
+	if UCASE$(psno.LotCode$[1,5])="STOCK" or RTrim$(psno.LotCode$)="" 
+		let psno.LotCode$="STOCK"+psno.Whse using "&&"+Blank$
+	Endif
+	Call DXGet("UM",tmp$)
+	UMR=getumrec(e$,CH_CCode,TMP$,IntCo,Pr.)
+	IF UMR<>0 let psno.UMRec=UMR
+	if umr=0 let umr=pr.BaseUM
+	Call DXGet("Status",tmp$)
+	if rtrim$(tmp$)<>"" let psno.Status=tmp$
+	! Call DXGet("SpareFiller",psno.SpareFiller)
+	Call DXGet("POID",tmp$) \ psno.POBoughtOn=tmp$
+	tmp$=blank$
+	Call DXGet("DateRecvd",tmp$)
+	if len(tmp$)<8 let tmp$="" ! MUST BE MM/DD/YYYY or M/D/YYYY
+	if tmp$<>"" 
+		tmp$=chkDateFrmt$(tmp$)
+		if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+		let tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+		psno.DateReceived=tmp1$[3,8] ! drop to yymmdd
+	Else
+		psno.DateReceived=0
+	Endif
+	Call DXGet("VendorID",tmp$) \ psno.Vendor=tmp$
+	! Call DXGet("Invoice",tmp$) \ psno.InvSoldDelOn=tmp$
+	! Call DXGet("OrderSoldDelOn",tmp$) \ psno.OrderSoldDelOn=tmp$
+	Call DXGet("CustID",tmp$) \ psno.CustSoldTo=tmp$
+	Call DXGet("INVDate",tmp$)
+	if len(tmp$)<8 let tmp$="" ! MUST BE MM/DD/YYYY or M/D/YYYY
+	if tmp$<>"" 
+		tmp$=chkDateFrmt$(tmp$)
+		if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+		let tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+		psno.DateSoldDel=tmp1$[3,8] ! drop to yymmdd
+		tmp$ = psno.DateSoldDel Using "&&&&&&"                                 
+		Call DateToJulian(1,tmp$,tmp1$,f)                              
+		If f Let psno.DateSoldDel=0
+	Else
+		psno.DateSoldDel=0
+	Endif
+	Call DXGet("SLSWRNTY",tmp$) \ psno.WarrantyDays=tmp$
+	Call DXGet("LASTREPAIR",tmp$)
+	if len(tmp$)<8 let tmp$="" ! MUST BE MM/DD/YYYY or M/D/YYYY or MM/DD/YY
+	if tmp$<>""
+		tmp$=chkDateFrmt$(tmp$)
+		if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+		tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+		psno.DateLastRepair=tmp1$[3,8]
+		tmp$ = psno.DateLastRepair Using "&&&&&&"                                 
+		Call DateToJulian(1,tmp$,tmp1$,f)                              
+		If f Let psno.DateLastRepair=0
+	Else
+		psno.DateLastRepair=0
+	Endif
+	Call DXGet("MFGWrntyDays",tmp$) \ psno.MfgWarrantyDays=tmp$
+	! Call DXGet("SpareFiller1",tmp$) \ psno.SpareFiller1)
+	Call DXGet("RecvdCost",tmp$) \ psno.Cost=tmp$
+	Call DXGet("SellPrice",tmp$) \ psno.Sell=tmp$
+	Call DXGet("SellCost",tmp$) \ psno.SellCost=tmp$
+	Call DXGet("NonWrnty",tmp$) \ psno.NonWrntyRepairs=tmp$
+	Call DXGet("SNUDA2",tmp$) \ psno.UDA2=tmp$
+	Call DXGet("WrntyRepairs",tmp$) \ psno.WarrantyRepairs=tmp$
+	Call DXGet("Reimbursed",tmp$) \ psno.VendorReimbursement=tmp$
+	! IF (psno.invoice or psno.CustSoldTo) and psno.status=0 let psno.status=1 ! SOLD
+	! if psno.status=0 ! open - clear sold info?
+	Mode$="c" ! change
+	if newrec let mode$="a"
+	RecNo=fileupdatepserlno(e$,ch_PSN,Mode$,RecNo,psno.)
+	if RecNo<0
+		let returnstatus=0
+		let message$="Record Not Written"
+	end if
+	SNSUBMDone: ! 
+	!call programdump("/tmp/snu481u!","")
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! sbmsndata
+!--------------------------------------------------------------------------------------------------------
+Function chkDateFrmt$(DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY
+! if not make it MM/DD/YYYY
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE" or DIn$="0"
+	  Let DOut$=UCase$(DIn$)
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function DOut$ ! chkDateFrmt$
+! 
+!--------------------------------------------------------------------
+Function CountSN(chan,tmpkey$,dir)
+! count entries for compare
+  Try
+	dim hldkey$[60]
+	Ttlsn=0
+	hldkey$=tmpkey$
+	if chan=ch_spoflen
+		Do
+			X3=filegetspoflenz(e$,Ch_spoflen,">",dir,tmpkey$,posn.)
+			if x3<=0 exit do
+			if tmpkey$[1,len(hldkey$)]<>hldkey$ exit do
+			ttlsn=ttlsn+1
+		Loop
+	Endif
+	if chan=ch_ordflen
+		if len(tmpkey$)>9 let tmpkey$[10]="";hldkey$[10]="" ! cut kitline off
+		Do
+			X3=filegetsordflenz(e$,Ch_ordflen,">",dir,tmpkey$,ordsn.)
+			if x3<=0 exit do
+			if tmpkey$[1,len(hldkey$)]<>hldkey$ exit do
+			if ordsn.ProductCode$=pr.ProdCode$ ! only count sn's for this product
+				ttlsn=ttlsn+1
+			Endif
+		Loop
+    Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end Function ttlSN ! CountSN
+! 
+!--------------------------------------------------------------------
+Sub dosnmrts()
+! misc rts - new only (if qty>0) or status=2/4 on qty<0
+  Try
+	dim oldserno$[30]
+	! call dxsave(0,"tmp/srmrts.txt!")
+	!
+	let returnstatus=1
+	let message$="OK"
+	!
+	!
+	Call DXGet("ENTRYNUM",tmp$)
+	mrts.Entrynum=tmp$
+	if mrts.EntryNum<=0 or mrts.EntryNum>99999999
+		let returnstatus=0
+		let Message$="Invalid Entry Number "+str$(EntryNum)
+		goto endsnmrent
+	endif
+	keymrts$=" ",keymrts$
+	keymrts$[1,8]=mrts.Entrynum using "########"
+	rec_mrts=filegetmiscrts(e$,ch_mrts,"=",1,KeyMrts$,mrts.) ! misc rts mode=2 dir=1
+	If rec_mrts<0 ! Entry  record not found
+		 ReturnStatus=0
+		 Message$="Entry ",+str$(mrts.EntryNum)+" not on file "
+		 goto endsnmrent
+	endif
+	rec_prod=mrts.ProdRec
+	redqty=0 \ if mrts.QTY<0 let redqty=1 ! redqty=reducing qty 0/1,N/Y
+	Read record #ch_prod,rec_prod,0;pr.;
+	if pr.SerNoTrack$<>"Y" or mrts.qty=0
+		ReturnStatus=0
+		message$="NO SERIAL NUMBERS KEPT FOR PRODUCT "+pr.ProdCode$
+		call delallsn() ! delete s/n's
+		goto endsnmrent
+	Endif
+	!
+	If action1$="SNLIST" ! sends existing entries from spoflen doc=SNMRTSList.doc
+		let returnstatus=1
+		let message$="OK"
+		Clear List$[]
+		tmpField$[0]="Serial"
+		tmp$="R",mrts.Entrynum using "########"
+		keyno=1
+		e$="321"  ! mrts flag
+		call filedroplistspoflenz(e$,List$[],100,ch_spoflen,rec_prod,"SNLIST",tmpField$[],keyno,tmp$)
+		call AddToStr(e$,rstr$,List$[])
+		goto endsnmrent
+	End if
+	
+	Call dxget("DELSNID",tmp$) ! changing s/n from this to SNID
+	oldserno$=UCase$(RTrim$(tmp$))+blank$
+	call dxget("SNID",tmp$)
+	psno.SerialNumber$=UCase$(RTrim$(tmp$))+blank$
+	IF redqty
+		psno.SerialNumber$ = oldserno$
+		! issue with negative qty misc adjustment.  spoflen not being written to
+	endif
+	if rtrim$(oldserno$)<>"" ! actually data in it
+		If oldserno$<>psno.SerialNumber$ ! changing it
+			keyval$=" ",keyval$
+			keyval$="R",mrts.Entrynum using "########",oldserno$
+			e$="321" ! from mrts
+			R=filegetspoflenz(e$,ch_spoflen,"=",1,keyval$,posn.,rec_prod)
+			if r>0 ! found it
+				if posn.TypeBy321=-1 AND posn.po>0 ! reduce/del & has snrec
+					read record #Ch_PSN,posn.po,0;savpsno.
+					if savpsno.Status=4 let savpsno.Status=0
+					write record #Ch_PSN,posn.po,0;savpsno.;
+				Endif 
+				Mode$="d" ! delete
+				e$="321"  ! mrts flag
+				RecNo2=fileupdatespoflenz(e$,ch_spoflen,Mode$,R,posn.,rec_prod)
+			Endif ! if not found - ignore it
+		Endif
+	Endif
+	! make sure not duplicate in pserlno file
+	let returnstatus=1
+	let message$="OK"
+	if rtrim$(psno.SerialNumber$)="" goto endsnmrent ! none - delete old only?
+	fndsn=chk4srno(psno.SerialNumber$,mrts.ProdCode$,r)
+	if redqty and fndsn let rec_srno=r
+	if fndsn If not(redqty) ! we're adding
+		 ReturnStatus=0
+		 Message$="Serial Number "+RTrim$(psno.serialnumber$)+" already on file."
+		 goto endsnmrent
+	Endif
+	if not(fndsn) If redqty ! reducing & not found
+		ReturnStatus=0
+		 Message$="Serial Number "+RTrim$(psno.serialnumber$)+" not on file."
+		 goto endsnmrent
+	Endif
+	R[99]=0
+	if fndsn and redqty and R>0 let R[99]=R
+	IF r[99] ! check on sn
+		read record #Ch_PSN,R[99],0;savpsno.;
+		IF savpsno.Status>0 and savpsno.Status<>2 and savpsno.Status<>4
+			RETURNstatus=0
+			Message$="Serial Number "+RTrim$(psno.serialnumber$)+" not available for Delete"
+			goto endsnmrent
+		Endif
+	Endif
+	!
+	! Now start the SPOFLEN file
+	! make sure not duplicate
+	let returnstatus=1
+	let message$="OK"
+	Clear List$[]
+
+	tmpField$="Serial"
+	tmp$=RTrim$(psno.SerialNumber$)
+	keyno=2;fndspon=0 ! dir2 = serialno
+	do
+		r=filegetspoflenz(e$,ch_spoflen,">",keyno,tmp$,posn.)
+		if r<=0 exit do ! eof etc
+		if tmp$[1,30]<>psno.SerialNumber$ exit do ! diff sn
+		if posn.ProductCode$=mrts.ProdCode$ let fndspon=1 ! and posn.Whse=mrts.Whse and posn.PoLine=mrts.EntryNum let fndspon=1
+	loop
+	
+	if fndspon ! is one on file
+		 ReturnStatus=0
+		 Message$="Serial Number "+RTrim$(psno.serialnumber$)+" already entered for Entry."
+		 goto endsnmrent
+	end if
+	tmp$="R",mrts.Entrynum using "########"
+	keyno=1
+	snent=countsn(ch_spoflen,tmp$,keyno)
+	if snent>=ABS(mrts.QTY)
+		ReturnStatus=0
+		Message$="Already "+Str$(snent)+" of "+Str$(ABS(mrts.qty))+" Serial numbers entered"
+		Goto endsnmrent
+	Endif
+	!
+	let returnstatus=1
+	let message$="OK"
+	clear posn.
+	if Rtrim$(mrts.lotnum$)="" or UCASE$(mrts.lotnum$[1,5])="STOCK"
+		mrts.lotnum$="STOCK"+mrts.Whse using "&&"+blank$
+	Endif
+	!
+	posn.ProductCode$=mrts.ProdCode$+Blank$
+	posn.LotCode$=mrts.LotNum$+Blank$
+	posn.Serial$=psno.SerialNumber$+Blank$
+	posn.Po=rec_mrts				! SN0           RTS REC# (321)
+	if redqty and rec_srno let posn.po=rec_srno ! ser # rec removing
+	if mrts.Entrynum<8000 let posn.PoLine=mrts.Entrynum	! SN1[0] ONLY 1%!!!      ENTRY # (321)
+	posn.Whse=mrts.Whse
+	posn.TypeBy321=0			! SN1[2]        0=ADD,-1=DELETE
+	if redqty let posn.TypeBy321=-1 ! DELETING!
+	!
+	Mode$="a" ! add
+	e$="321"  ! mrts flag
+	RecNo2=fileupdatespoflenz(e$,ch_spoflen,Mode$,RecNo2,posn.,rec_prod)
+	!
+	if RecNo2<0
+		let returnstatus=0
+		let message$="Write Error POSN"
+		goto endsnmrent
+	end if
+	if redqty and rec_srno>0
+		read record #Ch_PSN,rec_srno,0;savpsno.
+		let savpsno.Status=4
+		write record #Ch_PSN,rec_srno,0;savpsno.;
+	Endif 
+
+
+	! status section
+	endsnmrent: !
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! dosnmrts
+!--------------------------------------------------------------------------------------------------------
+Sub dosnpo()
+! po serial # entry - Only allow new sn's
+! NOTE: File data not updated until all lines entered & "UPDATE PO LINES" is clicked!
+  try
+	dim oldserno$[30]
+	Call DXGet("POID",tmp$)
+	Entrynum=tmp$
+	if EntryNum<=0 or EntryNum>999999
+		let returnstatus=0
+		let Message$="Invalid PO Number "+str$(EntryNum)
+		goto endsnpoent
+	endif
+	! CALL DXSAVE(0,"tmp/snpoin.txt!")
+	Keyval$=" ",keyval$
+	call dxget("POLINE",tmp$)
+	poline=tmp$
+	if poline<=0 or poline>999
+		let returnstatus=0
+		let Message$="Invalid PO Line Number "+str$(poline)
+		goto endsnpoent
+	Endif
+	keyval$=entrynum using "######"
+	keyval$[7]=poline using "###"
+	rec_pol=filegetpoline(e$,ch_pol,"=",1,KeyVal$,pol.) ! poline mode=2 dir=1
+	If rec_pol<0 ! Entry  record not found
+		 ReturnStatus=0
+		 Message$="Entry "+KeyVal$+" not on file "
+		 goto endsnpoent
+	endif
+	if pol.Status>10
+		returnstatus=0
+		Message$="Entry "+KeyVal$+" is not a PO"
+		goto endsnpoent
+	Endif
+	LET X2=pol.Flags
+	FOR K=0 TO 11                    
+		LET FLAGS[K]=SGN(FRA(X2/2)) \ LET X2=INT(X2/2)
+	NEXT K
+	if flags[0] or flags[2] ! was pol.UpdStock=0 or flags[0] or flags[2]
+		returnstatus=0
+		message$="Serial Numbers are not required for "+KeyVal$
+		call delallsn() ! delete existing
+		If action1$<>"SNCOUNT" goto endsnpoent ! for count continue on
+	endif
+	if flags[0] or flags[2] goto endsnpoent ! NO PRODUCT REC - GET OUT NOW!
+	rec_prod=pol.ProdDescRec
+	READ RECORD #CH_PROD,REC_PROD,0;PR.;
+	LOTCNT=0
+	IF P9$[1,1]="Y" LET LOTCNT=1
+	IF P9$[1,1]="B" AND PR.LotCtrl$="Y" LET LOTCNT=1
+	IF PR.SerNoTrack$<>"Y" ! NO SN'S
+		returnstatus=0
+		message$="PRODUCT "+RTrim$(pr.ProdCode$)+" does not keep serial numbers."
+		call delallsn() ! delete existing
+		if action1$<>"SNCOUNT" goto endsnpoent ! continue on for count
+	endif
+	If action1$="SNLIST" ! sends existing entries			doc=SNPOList.doc
+		let returnstatus=1
+		let message$="OK"
+		Clear List$[]
+		tmpField$[0]="Serial"
+		tmp$=RTrim$(keyval$) ! po / line
+		keyno=1
+		
+		call filedroplistspoflenz(e$,List$[],100,ch_spoflen,rec_prod,"SNLIST",tmpField$[],keyno,tmp$)
+		call AddToStr(e$,rstr$,List$[])
+		goto endsnpoent
+	End if
+	if action1$="SNCOUNT" ! send count of sn's entered		doc=SNPOCount.doc
+		tmp$=entrynum using "######",poline using "###"
+		keyno=1
+		snent=countsn(ch_spoflen,tmp$,keyno)
+		Clear list$[]
+		List$[0]=bsdel$,"SNECOUNT",fdel$
+		List$[1]="NUMENT",fdel$
+		if returnstatus=1 let List$[2]=Str$(snent),fdel$ Else let List$[2]="",fdel$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		if returnstatus=0 ! no sn's kept - delete old ones for po/line
+			keyval$=entrynum using "######",poline using "###"
+			tmp$=Keyval$
+			do
+				R=filegetspoflenz(e$,ch_spoflen,">",1,keyval$,posn.,rec_prod)
+				IF KEYVAL$[1,9]<>TMP$[1,9] exit do
+				if r>0 ! found it
+					Mode$="d" ! delete
+					RecNo2=fileupdatespoflenz(e$,ch_spoflen,Mode$,R,posn.,rec_prod)
+				Endif ! if not found - ignore it
+			loop
+		Endif
+		! if pol.UpdStock=0 let returnstatus=2 ! per anand - make status 2
+		goto endsnpoent
+	Endif
+	!
+	call dxget("DELSNID",tmp$) ! this hold orig sn changing to SNID
+	oldserno$=UCase$(RTrim$(tmp$))+Blank$
+	call dxget("SNID",tmp$)	
+	psno.SerialNumber$=UCase$(RTrim$(tmp$))+blank$
+
+	if rtrim$(oldserno$)<>"" ! actually data in it
+		If oldserno$<>psno.SerialNumber$ ! changing it
+			keyval$=" ",keyval$
+			keyval$=entrynum using "######",poline using "###",oldserno$
+			R=filegetspoflenz(e$,ch_spoflen,"=",1,keyval$,posn.,rec_prod)
+			if r>0 ! found it
+				Mode$="d" ! delete
+				RecNo2=fileupdatespoflenz(e$,ch_spoflen,Mode$,R,posn.,rec_prod)
+			Endif ! if not found - ignore it
+		Endif
+	Endif
+	! make sure not duplicate in pserlno file
+	let returnstatus=1
+	let message$="OK"
+	if rtrim$(psno.SerialNumber$)="" goto endsnpoent ! none - just deleting?
+	fndsn=chk4srno(psno.SerialNumber$,pol.ProdCode$,r)
+	if fndsn ! we're adding
+		 ReturnStatus=0
+		 Message$="Serial Number "+RTrim$(psno.serialnumber$)+" already on file."
+		 goto endsnpoent
+	Endif
+	!
+	CALL dxget("QRECV",tmp$)
+	CurrQtyRcvd=tmp$ ! in base?
+	!
+	! Now start the SPOFLEN file
+	! make sure not duplicate
+	let returnstatus=1
+	let message$="OK"
+	tmp$=RTrim$(psno.SerialNumber$)
+	keyno=2;fndspon=0 ! dir2 = serialno
+	do
+		r=filegetspoflenz(e$,ch_spoflen,">",keyno,tmp$,posn.)
+		if r<=0 exit do ! eof etc
+		if tmp$[1,30]<>psno.SerialNumber$ exit do ! diff sn
+		if posn.ProductCode$=pol.ProdCode$ let fndspon=1 ! and posn.Whse=pol.Whse and posn.Po=pol.PONum let fndspon=1
+	loop
+	
+	if fndspon ! is one on file
+		 ReturnStatus=0
+		 Message$="Serial Number "+RTrim$(psno.serialnumber$)+" already entered for PO."
+		 goto endsnpoent
+	end if
+	tmp$=entrynum using "######",poline using "###"
+	keyno=1
+	snent=countsn(ch_spoflen,tmp$,keyno)
+	if CurrQtyRcvd<>0 if snent>=ABS(CurrQtyRcvd)
+		ReturnStatus=0
+		Message$="Already "+Str$(snent)+" of "+Str$(ABS(CurrQtyRcvd))+" Serial numbers entered"
+		Goto endsnpoent
+	Endif
+	!
+	let returnstatus=1
+	let message$="OK"
+	clear posn.
+	!
+	posn.ProductCode$=pol.ProdCode$+Blank$
+	posn.LotCode$="STOCK"+POL.WHSE USING "&&"+blank$ ! mrts.LotNum$+Blank$ ! lot code?
+	posn.Serial$=psno.SerialNumber$+Blank$
+	posn.Po=pol.PONum
+	posn.PoLine=pol.ItemNo
+	posn.Whse=pol.Whse
+	posn.TypeBy321=0			! SN1[2]        0=ADD,-1=DELETE
+	!if redqty let posn.TypeBy321=-1 ! DELETING!
+	!
+	Mode$="a" ! add
+	
+	RecNo2=fileupdatespoflenz(e$,ch_spoflen,Mode$,RecNo2,posn.,rec_prod)
+	!
+	if RecNo2<0
+		let returnstatus=0
+		let message$="Write Error POSN"
+		goto endsnpoent
+	end if
+
+	endsnpoent: ! done
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! dosnpo
+!--------------------------------------------------------------------------------------------------------
+Sub SRLNOLIST()
+! send sn droplist - based on type
+  Try
+	dim cpsn. as pserlno ! copy of
+	call dxget("DLTYPE",tmp$)
+	dltype=tmp$ ! 0=any, 1=open/avl only, 2=sold only
+	! also based on prod$ - if ="" any prod, <>"" that prod
+	allprod=0 \ if rtrim$(prod$)="" let allprod=1
+	if allprod let dltype=0 ! force any?
+	if dltype=2 !task 62160 - sold only - add check for ot and customer
+		call dxget("ORDTYPE",tmp$)
+		let otp=tmp$
+		if otp=21 or otp=22 ! per task - only ord type 21 or 22
+			call dxget("CUSTID",tmp$)
+			custno=tmp$
+			if custno<1 or custno>999999 or fra(custno) ! bad or no customer = bypass new code
+				let custno=0;otp=0
+			endif
+		else
+			custno=0;otp=0
+		endif
+	else
+		custno=0;otp=0
+	Endif
+	clear list$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"SNLIST",fdel$
+	Webstr$="ID",fdel$
+	if allprod let webstr$=webstr$,"PRODID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+	webstr$=webstr$,"SerialNumber$",fdel$,"ModelNumber$",fdel$
+	if dltype=0 or dltype=1
+		webstr$=webstr$,"Vendor",fdel$,"VendBuyFromName$",fdel$
+	Endif
+	if dltype=2 ! sold only
+		webstr$=webstr$,"CUSTID",fdel$,"CUSTNAME",fdel$
+	Endif
+	list$[1]=webstr$
+	row=2
+	keyval$=" ",keyval$
+	keyval$=prod$
+	do
+		r=filegetpserlno(e$,ch_psn,">",2,keyval$,cpsn.)
+		if r<0 exit do
+		if not(allprod) and keyval$[1,12]<>Prod$[1,12] exit do
+		if dltype=2 ! sold only (c/m)
+			if cpsn.Status<>1 and cpsn.Status<>5 goto bpserln
+			if custno<>0 if cpsn.CustSoldTo<>custno goto bpserln ! task 62160
+		endif
+		if dltype=1 ! open/avl only (dm,ord,mrts-,wo)
+			if cpsn.Status<>0 goto bpserln
+		Endif
+		webstr$=str$(r),FDEL$ ! Keyval$,fdel$ ! keyval gets spaces removed by ???
+		if allprod ! send prod info
+			let webstr$=webstr$,RTrim$(cpsn.ProductCode$),fdel$
+			webstr$=webstr$,RTrim$(cpsn.ProdDesc1$),fdel$,RTrim$(cpsn.ProdDesc2$),fdel$
+		Endif
+		webstr$=webstr$,RTrim$(cpsn.SerialNumber$),fdel$,RTrim$(cpsn.ModelNumber$),fdel$
+		if dltype=0 or dltype=1
+			webstr$=webstr$,Str$(cpsn.Vendor),fdel$,Rtrim$(cpsn.VendBuyFromName$),fdel$
+		Endif
+		if dltype=2 ! send cust
+			webstr$=webstr$,Str$(cpsn.CustSoldTo),fdel$,RTrim$(cpsn.CustSoldToName$),fdel$
+		endif
+		List$[row]=webstr$
+		if row>8000 exit do  !! task 50933, can't add so much to rstr$ later
+		row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   bpserln: ! bypass this one
+	loop
+	list$[row]=esdel$
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! SRLNOLIST
+!--------------------------------------------------------------------------------------------------------
+Sub dosndm()
+! DM serial # entry - only existing s/n with status=0
+  try
+	dim oldserno$[30]
+	call dxsave(0,"tmp/snsmdme.txt!")
+	Call DXGet("POID",tmp$)
+	Entrynum=tmp$
+	if EntryNum<=0 or EntryNum>999999
+		let returnstatus=0
+		let Message$="Invalid PO Number "+str$(EntryNum)
+		goto endsndment
+	endif
+	Keyval$=" ",keyval$
+	call dxget("POLINE",tmp$)
+	poline=tmp$
+	if poline<=0 or poline>999
+		let returnstatus=0
+		let Message$="Invalid PO Line Number "+str$(poline)
+		goto endsndment
+	Endif
+	keyval$=entrynum using "######"
+	keyval$[7]=poline using "###"
+	rec_pol=filegetpoline(e$,ch_pol,"=",1,KeyVal$,pol.) ! poline mode=2 dir=1
+	If rec_pol<0 ! Entry  record not found
+		 ReturnStatus=0
+		 Message$="Entry "+KeyVal$+" not on file "
+		 goto endsndment
+	endif
+	if pol.Status<10
+		returnstatus=0
+		message$="Entry "+KeyVal$+" is not a DM"
+		goto endsndment
+	Endif
+	LET X2=pol.Flags
+	FOR K=0 TO 11                    
+		LET FLAGS[K]=SGN(FRA(X2/2)) \ LET X2=INT(X2/2)
+	NEXT K
+	if flags[0] or flags[2] ! pol.UpdStock=0 or flags[0] or flags[2]
+		call delallsn() ! delete existing
+		returnstatus=0
+		message$="Serial Numbers are not required for "+KeyVal$
+		goto endsndment
+	endif
+	rec_prod=pol.ProdDescRec
+	READ RECORD #CH_PROD,REC_PROD,0;PR.;
+	LOTCNT=0
+	IF P9$[1,1]="Y" LET LOTCNT=1
+	IF P9$[1,1]="B" AND PR.LotCtrl$="Y" LET LOTCNT=1
+	IF PR.SerNoTrack$<>"Y" ! NO SN'S
+		call delallsn() ! delete existing
+		returnstatus=0
+		message$="PRODUCT "+RTrim$(pr.ProdCode$)+" does not keep serial numbers."
+		goto endsndment
+	endif
+	If action1$="SNLIST" ! sends existing entries			doc=SNDMList.doc
+		let returnstatus=1
+		let message$="OK"
+		Clear List$[]
+		tmpField$[0]="SerialNumber"
+		tmp$=RTrim$(keyval$) ! po / line
+		keyno=1
+		
+		call filedroplistsordflenz(e$,List$[],100,ch_ordflen,"SNLIST",tmpField$[],keyno,tmp$)
+		call AddToStr(e$,rstr$,List$[])
+		goto endsndment
+	End if
+	if action1$="SNCOUNT" ! send count of sn's entered		doc=SNDMCount.doc
+		tmp$=entrynum using "######",poline using "###"
+		keyno=1
+		snent=countsn(ch_ordflen,tmp$,keyno)
+		Clear list$[]
+		List$[0]=bsdel$,"SNECOUNT",fdel$
+		List$[1]="NUMENT",fdel$
+		List$[2]=Str$(snent),fdel$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		goto endsndment
+	Endif
+	!
+	call dxget("DELSNID",tmp$) ! this hold orig sn changing to SNID
+	oldserno$=UCase$(RTrim$(tmp$))+Blank$
+	call dxget("SNID",tmp$)
+	psno.SerialNumber$=UCase$(RTrim$(tmp$))+blank$
+	if rtrim$(oldserno$)<>"" ! actually data in it
+		If oldserno$<>psno.SerialNumber$ ! changing it
+			keyval$=" ",keyval$
+			keyval$=entrynum using "######",poline using "###",oldserno$
+			R=filegetsordflenz(e$,ch_ordflen,"=",1,keyval$,ordsn.) ! ,poline,rec_prod)
+			if r>0 ! found it
+				IF ordsn.SnRec>0 ! update sn status
+					read record #Ch_PSN,ordsn.SnRec,0;savpsno.
+					if savpsno.Status=3 let savpsno.Status=0
+					write record #Ch_PSN,ordsn.SnRec,0;savpsno.;
+				Endif 
+				Mode$="d" ! delete
+				RecNo2=fileupdatesordflenz(e$,ch_ordflen,Mode$,R,ordsn.,poline,rec_prod)
+			Endif ! if not found - ignore it
+		Endif
+	Endif
+	! make sure not duplicate in pserlno file
+	let returnstatus=1
+	let message$="OK"
+	if rtrim$(psno.SerialNumber$)="" goto endsndment ! none - delete old only?
+	fndsn=chk4srno(psno.SerialNumber$,pol.ProdCode$,r)
+	if not(fndsn) ! we're using
+		 ReturnStatus=0
+		 Message$="Serial Number "+RTrim$(psno.serialnumber$)+" not on file."
+		 goto endsndment
+	Endif
+	R[99]=0
+	If FNDSN IF R>0 let R[99]=R ! retain found one
+	IF r[99] ! check on sn
+		read record #Ch_PSN,R[99],0;savpsno.;
+		IF savpsno.Status<>0 and savpsno.Status<>3
+			RETURNstatus=0
+			Message$="Serial Number "+RTrim$(psno.serialnumber$)+" not available for DM"
+			goto endsndment
+		Endif
+	Endif
+	!
+	Call dxget("QRECV",tmp$)
+	CurrQtyRcvd=tmp$
+	!
+	! Now start the SORDFLEN file
+	! make sure not duplicate
+	let returnstatus=1
+	let message$="OK"
+	tmp$=RTrim$(psno.SerialNumber$)+" " ! COULD BE partial!!
+	keyno=2;fndspon=0 ! dir2 = serialno
+	do
+		r=filegetsordflenz(e$,ch_ordflen,">",keyno,tmp$,ordsn.)
+		if r<=0 exit do ! eof etc
+		if tmp$[1,30]<>psno.SerialNumber$ exit do ! diff sn
+		if ordsn.ProductCode$=pol.ProdCode$ let fndspon=1 ! and ordsn.Order<>pol.PONum let fndspon=1
+		! if ordsn.ProductCode$=pol.ProdCode$ and ordsn.Order=pol.PONum let fndspon=1
+	loop
+	
+	if fndspon ! is one on file
+		 ReturnStatus=0
+		 Message$="Serial Number "+RTrim$(psno.serialnumber$)+" already entered for PO."
+		 goto endsndment
+	end if
+	tmp$=entrynum using "######",poline using "###"
+	keyno=1
+	snent=countsn(ch_ordflen,tmp$,keyno)
+	if CurrQtyRcvd<>0 if snent>=ABS(CurrQtyRcvd)
+		ReturnStatus=0
+		Message$="Already "+Str$(snent)+" of "+Str$(ABS(CurrQtyRcvd))+" Serial numbers entered"
+		Goto endsndment
+	Endif
+	!
+	let returnstatus=1
+	let message$="OK"
+	clear ordsn.
+	!
+	ordsn.ProductCode$=pol.ProdCode$+Blank$
+	ordsn.LotCode$="STOCK"+POL.WHSE USING "&&"+blank$ ! mrts.LotNum$+Blank$ ! lot code?
+	ordsn.SerialNumber$=psno.SerialNumber$+Blank$
+	ordsn.Order=pol.PONum
+	ordsn.SnRec=R[99]
+	ordsn.Type=1 \ if r[99]<=0 let ordsn.type=0  ! 0=new, 1=exist
+	ordsn.Invoice=pol.POnum ! 
+	!if redqty let posn.TypeBy321=-1 ! DELETING!
+	!
+	Mode$="a" ! add
+	
+	RecNo2=fileupdatesordflenz(e$,ch_ordflen,Mode$,RecNo2,ordsn.,poline,rec_prod)
+	!
+	if recno2=-9 ! already there
+		let returnstatus=0
+		let message$="SN "+Rtrim$(ordsn.SerialNumber$)+" already used"
+		goto endsndment
+	end if
+	if RecNo2<0
+		let returnstatus=0
+		let message$="Write Error ORDSN"
+		goto endsndment
+	end if
+	IF ordsn.SnRec>0 ! update sn status
+		read record #Ch_PSN,ordsn.SnRec,0;savpsno.
+		let savpsno.Status=3
+		write record #Ch_PSN,ordsn.SnRec,0;savpsno.;
+	Endif 
+
+	endsndment: ! done
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! dosndm
+
+!--------------------------------------------------------------------------------------------------------
+Sub dosnoe()
+! OE serial # entry - only existing sn with status=0
+  try
+	dim oldserno$[30]
+	! call dxsave(0,"tmp/snsmino.txt!")
+	Call DXGet("ORDERID",tmp$)
+	Entrynum=tmp$
+	if EntryNum<=0 or EntryNum>999999
+		let returnstatus=0
+		let Message$="Invalid Order Number "+str$(EntryNum)
+		goto endsnorent
+	endif
+	! need to get header info (status)
+	clear roh.
+	For X1=1 to 99
+		tmp$=" ",tmp$
+		tmp$[1,2]=x1 using "##"
+		tmp$[3]=EntryNum using "######"
+		Search #ch_roh,2,1;tmp$,R[2],E
+		if not(e) let x1=100
+	Next X1
+	if R[2]>0
+		read record #ch_roh,r[2],0;roh.;
+	Endif
+	Keyval$=" ",keyval$
+	call dxget("ORDLINE",tmp$)
+	poline=tmp$
+	if poline<=0 or poline>999
+		let returnstatus=0
+		let Message$="Invalid Line Number "+str$(poline)
+		goto endsnorent
+	Endif
+	keyval$=entrynum using "######"
+	keyval$[7]=poline using "###"
+	rec_rol=filegetrolz(e$,ch_rol,"=",1,KeyVal$,rol.) ! poline mode=2 dir=1
+	If rec_rol<0 ! Entry  record not found
+		 ReturnStatus=0
+		 Message$="Entry "+KeyVal$+" not on file "
+		 goto endsnorent
+	endif
+	call dxget("SOURCE",tmp$)
+	let source=tmp$
+	!if source<200 or source>299 ! not correct source
+		if roh.status<90 let source=207 ! inquiry no status 90+
+		if roh.status>=30 and roh.status<=31 let source=239
+	!endif
+	if source<=0 let source=208
+	if (source<>207 and source<>239) and rol.Status<>11 ! we don't allow cm credit sn's!
+		returnstatus=0
+		message$="Entry "+KeyVal$+" is not an Order/Invoice"
+		goto endsnorent
+	Endif
+	!call dxsave(0,"tmp/oesnin.txt!")
+	NonStk=rol.NStkItem
+	If rol.LineType=3 let ZLINE=1
+	if NonStk or ZLine ! was rol.UpdtStk=0 or NonStk or ZLine
+		if source<>207 and source<>239 call delallsn() ! delete existing
+		returnstatus=0
+		message$="Serial Numbers are not required for "+KeyVal$
+		goto endsnorent
+	endif
+	call dxget("KITLINE",tmp$) ! kit 
+	kitline=tmp$ \ if kitline<1 or kitline>999 or fra(kitline) let kitline=0
+	if kitline ! need new/diff product
+		keyval$=entrynum using "######"
+		keyval$[7]=poline using "###"
+		keyval$[10]=kitline using "&&&" ! ZERO FILL
+		kitrec=filegetsordlkitl(e$,ch_rolkit,"=",1,keyval$,kitl.)
+		if kitrec<=0
+			returnstatus=0
+			message$="Kit Line not found"
+			goto endsnorent
+		Endif
+		! need rec for kit product
+		KeyProd$=kitl.KitProd$
+		let prr=filegetprod(e$,ch_prod,"=",1,keyprod$,pr.)
+		if prr<=0 ! nogood
+			clear pr.
+			let rol.PDRecNum=0
+		Else ! ok - load order vars with kit data
+			let rol.pdrecnum=prr
+			let rol.Qtyship=kitl.QtyUsed
+			let rol.whse=kitl.Whse
+			let rol.UpdtStk=1;rol.NStkItem=kitl.LineType ! 1=nstk on kit
+			let nonstk=rol.nstkitem
+			if kitl.CalcType=-2 let zline=1 ! message
+			let rol.ProdCode$=keyProd$ ! kitprod
+			if NonStk or ZLine ! rol.UpdtStk=0 or NonStk or ZLine
+				if source<>207 and source<>239 call delallsn() ! delete existing
+				returnstatus=0
+				message$="Serial Numbers are not required for "+KeyProd$
+				goto endsnorent
+			endif
+		Endif
+	Endif ! of kit line
+	if rol.PDRecNum>0
+		rec_prod=rol.PDRecNum
+		READ RECORD #CH_PROD,REC_PROD,0;PR.;
+	Endif
+	LOTCNT=0
+	IF P9$[1,1]="Y" LET LOTCNT=1
+	IF P9$[1,1]="B" AND PR.LotCtrl$="Y" LET LOTCNT=1
+	IF PR.SerNoTrack$<>"Y" ! NO SN'S
+		if source<>207 and source<>239 call delallsn() ! delete existing
+		returnstatus=0
+		message$="PRODUCT "+RTrim$(pr.ProdCode$)+" does not keep serial numbers."
+		goto endsnorent
+	endif
+	If action1$="SNLIST" ! sends existing entries			doc=SNOEList.doc
+		let returnstatus=1
+		let message$="OK"
+		Clear List$[]
+		tmpField$[0]="SerialNumber"
+		tmp$=RTrim$(keyval$) ! ord / line (KIT LINE)
+		keyno=1 ! due to kit line sn's using same key as orders - NO CAN DO filedroplist
+		if len(tmp$)>9 let tmp$[10]="" ! drop kit
+		!call filedroplistsordflenz(e$,List$[],100,ch_ordflen,"SNLIST",tmpField$[],keyno,tmp$)
+		List$[0]=bsdel$,"SNLIST",fdel$
+		List$[1]="ID",fdel$,"SerialNumber",fdel$
+		row=2;tmpcnt=maxcnt
+		OSNLoop: ! loop it
+		Search #ch_ordflen,3,1;tmp$,R[6],E \ if e=2 goto ESNOL
+		if tmp$[1,9]<>keyval$[1,9] goto ESNol
+		Read Record #ch_ordflen,r[6],0;ordsn.;
+		if ordsn.ProductCode$<>pr.ProdCode$ goto OSNLoop ! diff product order/kit line
+		List$[row]=RTrim$(tmp$),fdel$,RTrim$(ordsn.SerialNumber$),fdel$
+		row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		goto OSNLoop ! next
+		ESNOL: ! end of loop
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		goto endsnorent
+	End if
+	if action1$="SNCOUNT" ! send count of sn's entered		doc=SNOECount.doc
+		tmp$=entrynum using "######",poline using "###"
+		keyno=1
+		snent=countsn(ch_ordflen,tmp$,keyno)
+		Clear list$[]
+		List$[0]=bsdel$,"SNECOUNT",fdel$
+		List$[1]="NUMENT",fdel$
+		List$[2]=Str$(snent),fdel$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		goto endsnorent
+	Endif
+	!
+	if source=207 or source=239 goto endsnorent ! no edit allowed!!
+	call dxget("DELSNID",tmp$) ! this hold orig sn changing to SNID
+	oldserno$=UCase$(RTrim$(tmp$))+Blank$
+	call dxget("SNID",tmp$)
+	psno.SerialNumber$=UCase$(RTrim$(tmp$))+blank$
+	if rtrim$(oldserno$)<>"" ! actually data in it
+		If oldserno$<>psno.SerialNumber$ ! changing it
+			keyval$=" ",keyval$
+			keyval$=entrynum using "######",poline using "###",oldserno$
+			R=filegetsordflenz(e$,ch_ordflen,"=",1,keyval$,ordsn.) ! ,poline,rec_prod)
+			if r>0 ! found it
+				IF ordsn.SnRec>0 ! update sn status
+					read record #Ch_PSN,ordsn.SnRec,0;savpsno.
+					if savpsno.Status=3 let savpsno.Status=0
+					write record #Ch_PSN,ordsn.SnRec,0;savpsno.;
+				Endif 
+				Mode$="d" ! delete
+				RecNo2=fileupdatesordflenz(e$,ch_ordflen,Mode$,R,ordsn.,poline,rec_prod)
+			Endif ! if not found - ignore it
+		Endif
+	Endif
+	! make sure not duplicate in pserlno file
+	let returnstatus=1
+	let message$="OK"
+	if rtrim$(psno.SerialNumber$)="" goto endsnorent ! none - delete old only?
+	fndsn=chk4srno(psno.SerialNumber$,rol.ProdCode$,r)
+	if not(fndsn) ! we're using
+		 ReturnStatus=0
+		 Message$="Serial Number "+RTrim$(psno.serialnumber$)+" not on file."
+		 goto endsnorent
+	Endif
+	R[99]=0
+	If fndsn if R>0 let R[99]=R ! retain found one
+	IF r[99] ! check on sn
+		read record #Ch_PSN,R[99],0;savpsno.;
+		IF savpsno.Status<>0 and savpsno.Status<>3
+			RETURNstatus=0
+			Message$="Serial Number "+RTrim$(psno.serialnumber$)+" not available for Sale"
+			goto endsnorent
+		Endif
+		if savpsno.ProductCode$<>pr.ProdCode$
+			returnstatus=0
+			message$="Serial Number "+RTrim$(psno.serialnumber$)+" not for Product "+pr.ProdCode$
+			goto endsnorent
+		Endif
+	Endif
+	!
+	!
+	! Now start the SORDFLEN file
+	! make sure not duplicate
+	let returnstatus=1
+	let message$="OK"
+	tmp$=RTrim$(psno.SerialNumber$)
+	keyno=2;fndspon=0 ! dir2 = serialno
+	do
+		r=filegetsordflenz(e$,ch_ordflen,">",keyno,tmp$,ordsn.)
+		if r<=0 exit do ! eof etc
+		if tmp$[1,30]<>psno.SerialNumber$ exit do ! diff sn
+		if ordsn.ProductCode$=rol.ProdCode$ let fndspon=1 ! and ordsn.Order=rol.OrdNum let fndspon=1
+	loop
+	
+	if fndspon ! is one on file
+		 ReturnStatus=0
+		 Message$="Serial Number "+RTrim$(psno.serialnumber$)+" already committed."
+		 goto endsnorent
+	end if
+	tmp$=entrynum using "######",poline using "###"
+	keyno=1
+	QtyShip=rol.Qtyship
+	snent=countsn(ch_ordflen,tmp$,keyno)
+	if Qtyship if snent>=ABS(QtyShip)
+		ReturnStatus=0
+		Message$="Already "+Str$(snent)+" of "+Str$(ABS(QtyShip))+" Serial numbers entered"
+		Goto endsnorent
+	Endif
+	! need to get header info (invoice #)
+	clear roh.
+	For X1=1 to 99
+		tmp$=" ",tmp$
+		tmp$[1,2]=x1 using "##"
+		tmp$[3]=rol.ordnum using "######"
+		Search #ch_roh,2,1;tmp$,R[2],E
+		if not(e) let x1=100
+	Next X1
+	if R[2]>0
+		read record #ch_roh,r[2],0;roh.;
+	Endif
+	!
+	let returnstatus=1
+	let message$="OK"
+	clear ordsn.
+	!
+	ordsn.ProductCode$=rol.ProdCode$+Blank$
+	ordsn.LotCode$="STOCK"+rOL.WHSE USING "&&"+blank$ ! mrts.LotNum$+Blank$ ! lot code?
+	ordsn.SerialNumber$=psno.SerialNumber$+Blank$
+	ordsn.Order=rol.OrdNum
+	ordsn.SnRec=R[99]
+	ordsn.Type=1 \ if r[99]<=0 let ordsn.type=0  ! 0=new, 1=exist
+	ordsn.Invoice=roh.InvNum ! 
+	!if redqty let posn.TypeBy321=-1 ! DELETING!
+	!
+	Mode$="a" ! add
+	
+	RecNo2=fileupdatesordflenz(e$,ch_ordflen,Mode$,RecNo2,ordsn.,poline,rec_prod)
+	!
+	if recno2=-9 ! already there
+		let returnstatus=0
+		let message$="SN "+Rtrim$(ordsn.SerialNumber$)+" already used"
+		goto endsnorent
+	end if
+	if RecNo2<0
+		let returnstatus=0
+		let message$="Write Error ORDSN"
+		goto endsnorent
+	end if
+	IF ordsn.SnRec>0 ! update sn status
+		read record #Ch_PSN,ordsn.SnRec,0;savpsno.
+		let savpsno.Status=3
+		write record #Ch_PSN,ordsn.SnRec,0;savpsno.;
+	Endif 
+
+	endsnorent: ! done
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! dosnoe
+!--------------------------------------------------------------------------------------------------------
+Sub invinqsn()
+! s/n invoice history
+  Try
+	dim 3%,EntryNum,rec_invl
+	Call DXGet("REFID",tmp$)
+	Entrynum=tmp$
+	if EntryNum<=0 or EntryNum>99999999
+		let returnstatus=0
+		let Message$="Invalid Invoice Number "+str$(EntryNum)
+		goto endsninvinq
+	endif
+	Keyval$=" ",keyval$
+	call dxget("REFLINE",tmp$)
+	poline=tmp$
+	if poline<=0 or poline>999
+		let returnstatus=0
+		let Message$="Invalid Line Number "+str$(poline)
+		goto endsninvinq
+	Endif
+	keyval$=entrynum using "##########"
+	keyval$[11]=poline using "###"
+	rec_invl=filegetinvl(e$,ch_invl,"=",1,KeyVal$,invl.) ! poline mode=2 dir=1
+	If rec_invl<0 ! Entry  record not found
+		 ReturnStatus=0
+		 Message$="Entry "+KeyVal$+" not on file "
+		 goto endsninvinq
+	endif
+	NonStk=invl.NStkItem
+	If invl.LineType=3 let ZLINE=1
+	if NonStk or ZLine ! invl.UpdtStk=0 or NonStk or ZLine
+		returnstatus=0
+		message$="Serial Numbers are not required for "+KeyVal$
+		goto endsninvinq
+	endif
+	call dxget("KITLINE",tmp$) ! kit 
+	kitline=tmp$ \ if kitline<1 or kitline>999 or fra(kitline) let kitline=0
+	if kitline ! need new/diff product
+		keyval$=entrynum using "##########"
+		keyval$[11]=poline using "###"
+		keyval$[14]=kitline using "&&&" ! ZERO FILL
+		kitrec=filegetsordlkitl(e$,ch_invkit,"=",1,keyval$,kitl.)
+		if kitrec<=0
+			returnstatus=0
+			message$="Kit Line not found"
+			goto endsninvinq
+		Endif
+		! need rec for kit product
+		KeyProd$=kitl.KitProd$
+		let prr=filegetprod(e$,ch_prod,"=",1,keyprod$,pr.)
+		if prr<=0 ! nogood
+			clear pr.
+			let invl.PDRecNum=0
+		Else ! ok - load order vars with kit data
+			let invl.pdrecnum=prr
+			let invl.Qtyship=kitl.QtyUsed
+			let invl.whse=kitl.Whse
+			let invl.UpdtStk=1;invl.NStkItem=kitl.LineType ! 1=nstk on kit
+			let nonstk=invl.nstkitem
+			if kitl.CalcType=-2 let zline=1 ! message
+			let invl.ProdCode$=keyProd$ ! kitprod
+			if NonStk or ZLine ! invl.UpdtStk=0 or NonStk or ZLine
+				!if source<>207 and source<>239 call delallsn() ! delete existing
+				returnstatus=0
+				message$="Serial Numbers are not required for "+KeyProd$
+				goto endsninvinq
+			endif
+		Endif
+	Endif ! of kit line
+	if invl.PDRecNum>0
+		rec_prod=invl.PDRecNum
+		READ RECORD #CH_PROD,REC_PROD,0;PR.;
+	else
+		clear pr.
+	endif
+	LOTCNT=0
+	IF P9$[1,1]="Y" LET LOTCNT=1
+	IF P9$[1,1]="B" AND PR.LotCtrl$="Y" LET LOTCNT=1
+	IF PR.SerNoTrack$<>"Y" ! NO SN'S
+		returnstatus=0
+		message$="PRODUCT "+RTrim$(pr.ProdCode$)+" does not keep serial numbers."
+		goto endsninvinq
+	endif
+	Clear List$[]
+	!tmpField$[0]="SerialNo"
+	!tmp$=rtrim$(keyval$) ! inv / line
+	!keyno=1
+	
+	!call filedroplistsordflenhz(e$,List$[],100,ch_invsn,"SNLIST",tmpField$[],keyno,tmp$)
+	tmp$=RTrim$(keyval$) ! ord / line (KIT LINE)
+		keyno=1 ! due to kit line sn's using same key as orders - NO CAN DO filedroplist
+		if len(tmp$)>13 let tmp$[14]="" ! drop kit
+		List$[0]=bsdel$,"SNLIST",fdel$
+		List$[1]="ID",fdel$,"SerialNumber",fdel$
+		row=2;tmpcnt=maxcnt
+		ISNLoop: ! loop it
+		Search #ch_invsn,3,1;tmp$,R[6],E \ if e=2 goto ESNOLI
+		if tmp$[1,13]<>keyval$[1,13] goto ESNolI
+		Read Record #ch_invsn,r[6],0;ordsn.;
+		if ordsn.ProductCode$<>pr.ProdCode$ goto ISNLoop ! diff product order/kit line
+		List$[row]=RTrim$(tmp$),fdel$,RTrim$(ordsn.SerialNumber$),fdel$
+		row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		goto ISNLoop ! next
+		ESNOLI: ! end of loop
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	endsninvinq: ! done
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! invinqsn
+!--------------------------------------------------------------------------------------------------------
+Sub dosncm()
+! CM serial # entry - only allow existing sn with status=1(SOLD)
+  try
+	dim oldserno$[30]
+	! call dxsave(0,"tmp/snsminc.txt!")
+	Call DXGet("ORDERID",tmp$)
+	Entrynum=tmp$
+	if EntryNum<=0 or EntryNum>999999
+		let returnstatus=0
+		let Message$="Invalid Order Number "+str$(EntryNum)
+		goto endsncment
+	endif
+	! need to get header info (status)
+	clear roh.
+	For X1=1 to 99
+		tmp$=" ",tmp$
+		tmp$[1,2]=x1 using "##"
+		tmp$[3]=EntryNum using "######"
+		Search #ch_roh,2,1;tmp$,R[2],E
+		if not(e) let x1=100
+	Next X1
+	if R[2]>0
+		read record #ch_roh,r[2],0;roh.;
+	Endif
+	Keyval$=" ",keyval$
+	call dxget("ORDLINE",tmp$)
+	poline=tmp$
+	if poline<=0 or poline>999
+		let returnstatus=0
+		let Message$="Invalid Line Number "+str$(poline)
+		goto endsncment
+	Endif
+	call dxget("SOURCE",tmp$)
+	let source=tmp$
+	!if source<200 or source>299 ! not correct source
+		if roh.status<90 let source=207 ! inquiry no status 90+
+		if roh.status>=30 and roh.status<=31 let source=239
+	!endif
+	if source<=0 let source=243
+	keyval$=entrynum using "######"
+	keyval$[7]=poline using "###"
+	rec_rol=filegetrolz(e$,ch_rol,"=",1,KeyVal$,rol.) ! poline mode=2 dir=1
+	If rec_rol<0 ! Entry  record not found
+		 ReturnStatus=0
+		 Message$="Entry "+KeyVal$+" not on file "
+		 goto endsncment
+	endif
+	if (source<>207 and source<>239) and rol.Status<>12
+		returnstatus=0
+		message$="Entry "+KeyVal$+" is not a C/M"
+		goto endsncment
+	Endif
+	NonStk=rol.NStkItem
+	If rol.LineType=3 let ZLINE=1
+	if NonStk or ZLine ! rol.UpdtStk=0 or NonStk or ZLine
+		if source<>207 and source<>239 call delallsn() ! delete existing
+		returnstatus=0
+		message$="Serial Numbers are not required for "+KeyVal$
+		goto endsncment
+	endif
+	call dxget("KITLINE",tmp$) ! if a kit line - still need sn's
+	kitline=tmp$ \ if kitline<1 or kitline>999 or fra(kitline) let kitline=0
+	if kitline ! need new/diff product
+		keyval$=entrynum using "######"
+		keyval$[7]=poline using "###"
+		keyval$[10]=kitline using "&&&" ! ZERO FILL
+		kitrec=filegetsordlkitl(e$,ch_rolkit,"=",1,keyval$,kitl.)
+		if kitrec<=0
+			returnstatus=0
+			message$="Kit Line not found"
+			goto endsncment
+		Endif
+		! need rec for kit product
+		KeyProd$=kitl.KitProd$
+		let prr=filegetprod(e$,ch_prod,"=",1,keyprod$,pr.)
+		if prr<=0 ! nogood
+			clear pr.
+			let rol.PDRecNum=0
+		Else ! ok - load order vars with kit data
+			let rol.pdrecnum=prr
+			let rol.Qtyship=kitl.QtyUsed
+			let rol.whse=kitl.Whse
+			let rol.UpdtStk=1;rol.NStkItem=kitl.LineType ! 1=nstk on kit
+			let nonstk=rol.nstkitem
+			if kitl.CalcType=-2 let zline=1 ! message
+			let rol.ProdCode$=keyProd$ ! kitprod
+			if NonStk or ZLine ! rol.UpdtStk=0 or NonStk or ZLine
+				if source<>207 and source<>239 call delallsn() ! delete existing
+				returnstatus=0
+				message$="Serial Numbers are not required for "+KeyProd$
+				goto endsncment
+			endif
+		Endif
+	Endif ! of kit line
+	if rol.PDRecNum>0
+		rec_prod=rol.PDRecNum
+		READ RECORD #CH_PROD,REC_PROD,0;PR.;
+	endif
+	LOTCNT=0
+	IF P9$[1,1]="Y" LET LOTCNT=1
+	IF P9$[1,1]="B" AND PR.LotCtrl$="Y" LET LOTCNT=1
+	IF PR.SerNoTrack$<>"Y" ! NO SN'S
+		if source<>207 and source<>239 call delallsn() ! delete existing
+		returnstatus=0
+		message$="PRODUCT "+RTrim$(pr.ProdCode$)+" does not keep serial numbers."
+		goto endsncment
+	endif
+	If action1$="SNLIST" ! sends existing entries			doc=SNCMList.doc
+		let returnstatus=1
+		let message$="OK"
+		Clear List$[]
+		tmpField$[0]="SerialNumber"
+		tmp$=RTrim$(keyval$) ! ord / line (KIT LINE)
+		keyno=1 ! due to kit line sn's using same key as orders - NO CAN DO filedroplist
+		if len(tmp$)>9 let tmp$[10]="" ! drop kit
+		!call filedroplistsordflenz(e$,List$[],100,ch_ordflen,"SNLIST",tmpField$[],keyno,tmp$)
+		List$[0]=bsdel$,"SNLIST",fdel$
+		List$[1]="ID",fdel$,"SerialNumber",fdel$
+		row=2;tmpcnt=maxcnt
+		CSNLoop: ! loop it
+		Search #ch_ordflen,3,1;tmp$,R[6],E \ if e=2 goto ESNCL
+		if tmp$[1,9]<>keyval$[1,9] goto ESNCL
+		Read Record #ch_ordflen,r[6],0;ordsn.;
+		if ordsn.ProductCode$<>pr.ProdCode$ goto CSNLoop ! diff product order/kit line
+		List$[row]=RTrim$(tmp$),fdel$,RTrim$(ordsn.SerialNumber$),fdel$
+		row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		goto CSNLoop ! next
+		ESNCL: ! end of loop
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		goto endsncment
+	End if
+	if action1$="SNCOUNT" ! send count of sn's entered		doc=SNCMCount.doc
+		tmp$=entrynum using "######",poline using "###"
+		keyno=1
+		snent=countsn(ch_ordflen,tmp$,keyno)
+		Clear list$[]
+		List$[0]=bsdel$,"SNECOUNT",fdel$
+		List$[1]="NUMENT",fdel$
+		List$[2]=Str$(snent),fdel$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		goto endsncment
+	Endif
+	if source=207 OR source=239 goto endsncment ! no edit on inquiry!
+	call dxget("DELSNID",tmp$) ! this hold orig sn changing to SNID
+	oldserno$=UCase$(RTrim$(tmp$))+Blank$
+	call dxget("SNID",tmp$)
+	psno.SerialNumber$=UCase$(RTrim$(tmp$))+blank$
+	if rtrim$(oldserno$)<>"" ! actually data in it
+		If oldserno$<>psno.SerialNumber$ ! changing it
+			keyval$=" ",keyval$
+			keyval$=entrynum using "######",poline using "###",oldserno$
+			R=filegetsordflenz(e$,ch_ordflen,"=",1,keyval$,ordsn.) ! ,poline,rec_prod)
+			if r>0 ! found it
+				IF ordsn.SnRec>0 ! update sn status
+					read record #Ch_PSN,ordsn.SnRec,0;savpsno.
+					if savpsno.Status=5 let savpsno.Status=1
+					write record #Ch_PSN,ordsn.SnRec,0;savpsno.;
+				Endif 
+				Mode$="d" ! delete
+				RecNo2=fileupdatesordflenz(e$,ch_ordflen,Mode$,R,ordsn.,poline,rec_prod)
+			Endif ! if not found - ignore it
+		Endif
+	Endif
+	! make sure not duplicate in pserlno file
+	let returnstatus=1
+	let message$="OK"
+	if rtrim$(psno.SerialNumber$)="" goto endsncment ! none - delete old only?
+	fndsn=chk4srno(psno.SerialNumber$,rol.ProdCode$,r)
+	if not(fndsn) ! we're using
+		 ReturnStatus=0
+		 Message$="Serial Number "+RTrim$(psno.serialnumber$)+" not on file."
+		 goto endsncment
+	Endif
+	R[99]=0
+	If fndsn if R>0 let R[99]=R ! retain found one
+	IF r[99] ! check on sn
+		read record #Ch_PSN,R[99],0;savpsno.;
+		IF savpsno.Status<>1 and savpsno.status<>5
+			RETURNstatus=0
+			Message$="Serial Number "+RTrim$(psno.serialnumber$)+" has not been sold."
+			goto endsncment
+		Endif
+	Endif
+	!
+	!
+	! Now start the SORDFLEN file
+	! make sure not duplicate
+	let returnstatus=1
+	let message$="OK"
+	tmp$=RTrim$(psno.SerialNumber$)
+	keyno=2;fndspon=0 ! dir2 = serialno
+	do
+		r=filegetsordflenz(e$,ch_ordflen,">",keyno,tmp$,ordsn.)
+		if r<=0 exit do ! eof etc
+		if tmp$[1,30]<>psno.SerialNumber$ exit do ! diff sn
+		if ordsn.ProductCode$=rol.ProdCode$ let fndspon=1 !  and ordsn.Order=rol.OrdNum let fndspon=1
+	loop
+	!if ordsn.Order=rol.OrdNum let fndspon=0 ! ok (can;t in case dupe)
+	if fndspon ! is one on file
+		 ReturnStatus=0
+		 Message$="Serial Number "+RTrim$(psno.serialnumber$)+" already committed."
+		 goto endsncment
+	end if
+	tmp$=entrynum using "######",poline using "###"
+	keyno=1;qtyship=rol.qtyship
+	snent=countsn(ch_ordflen,tmp$,keyno)
+	if qtyship if snent>=ABS(QtyShip)
+		ReturnStatus=0
+		Message$="Already "+Str$(snent)+" of "+Str$(ABS(QtyShip))+" Serial numbers entered"
+		Goto endsncment
+	Endif
+	! need to get header info (invoice #)
+	clear roh.
+	For X1=1 to 99
+		tmp$=" ",tmp$
+		tmp$[1,2]=x1 using "##"
+		tmp$[3]=rol.ordnum using "######"
+		Search #ch_roh,2,1;tmp$,R[2],E
+		if not(e) let x1=100
+	Next X1
+	if R[2]>0
+		read record #ch_roh,r[2],0;roh.;
+	Endif
+	!
+	let returnstatus=1
+	let message$="OK"
+	clear ordsn.
+	!
+	ordsn.ProductCode$=rol.ProdCode$+Blank$
+	ordsn.LotCode$="STOCK"+rOL.WHSE USING "&&"+blank$ ! mrts.LotNum$+Blank$ ! lot code?
+	ordsn.SerialNumber$=psno.SerialNumber$+Blank$
+	ordsn.Order=rol.OrdNum
+	ordsn.SnRec=R[99]
+	ordsn.Type=1 \ if r[99]<=0 let ordsn.type=0  ! 0=new, 1=exist
+	ordsn.Invoice=roh.InvNum ! 
+	!if redqty let posn.TypeBy321=-1 ! DELETING!
+	!
+	Mode$="a" ! add
+	
+	RecNo2=fileupdatesordflenz(e$,ch_ordflen,Mode$,RecNo2,ordsn.,poline,rec_prod)
+	!
+	if recno2=-9 ! already there
+		let returnstatus=0
+		let message$="SN "+Rtrim$(ordsn.SerialNumber$)+" already used"
+		goto endsncment
+	end if
+	if RecNo2<0
+		let returnstatus=0
+		let message$="Write Error ORDSN"
+		goto endsncment
+	end if
+	IF ordsn.SnRec>0 ! update sn status
+		read record #Ch_PSN,ordsn.SnRec,0;savpsno.
+		let savpsno.Status=5
+		write record #Ch_PSN,ordsn.SnRec,0;savpsno.;
+	Endif 
+
+	endsncment: ! done
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! dosncm
+!--------------------------------------------------------------------------------------------------------
+Sub Delallsn()
+! delete all entered sn's
+  Try
+	SNT=0 ! no file default
+	if action$="SNMRTS" let SNT=1;sts=-1
+	if action$="SNPOENT" let snt=1;STS=0
+	if action$="SNDMENT" let snt=2;sts=3
+	if action$="SNORDENT" let snt=2;sts=3
+	if action$="SNCMENT" let snt=2;sts=5
+	if snt ! has a file
+		keyval$=entrynum using "######",poline using "###"
+		if sts=-1 let keyval$="R",mrts.Entrynum using "########"
+		tmp$=Keyval$
+		If snt=1 ! spoflen
+			do
+				if sts=-1 let e$="321"
+				R=filegetspoflenz(e$,ch_spoflen,">",1,keyval$,posn.,rec_prod)
+				IF KEYVAL$[1,9]<>TMP$[1,9] exit do
+				if r>0 ! found it
+					if sts=-1 and posn.TypeBy321=-1 ! mrts and delete qty
+						IF posn.po>0 ! update sn status
+							read record #Ch_PSN,ordsn.SnRec,0;savpsno.
+							if savpsno.Status=4 let savpsno.Status=0
+							write record #Ch_PSN,ordsn.SnRec,0;savpsno.;
+						Endif 
+					Endif ! was reducing qty
+					! reset status - now delete
+					Mode$="d" ! delete
+					if sts=-1 let e$="321"
+					RecNo2=fileupdatespoflenz(e$,ch_spoflen,Mode$,R,posn.,rec_prod)
+				Endif ! if not found - ignore it
+			loop
+		Endif
+		If Snt=2 ! sordflen
+			do
+				R=filegetsordflenz(e$,ch_ordflen,">",1,keyval$,ordsn.) ! ,poline,rec_prod)
+				IF KEYVAL$[1,9]<>TMP$[1,9] exit do
+				if r>0 ! found it
+					IF ordsn.SnRec>0 ! update sn status
+						read record #Ch_PSN,ordsn.SnRec,0;savpsno.
+						if savpsno.Status=sts let savpsno.Status=0
+						if sts=5 and savpsno.Status=0 let savpsno.Status=1 ! reset to SOLD
+						write record #Ch_PSN,ordsn.SnRec,0;savpsno.;
+					Endif 
+					! reset status - now delete
+					Mode$="d" ! delete
+					RecNo2=fileupdatesordflenz(e$,ch_ordflen,Mode$,R,ordsn.,poline,rec_prod)
+				Endif ! if not found - ignore it
+			loop
+		Endif
+	Endif
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! Delallsn
+!--------------------------------------------------------------------------------------------------------

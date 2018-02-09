@@ -1,0 +1,649 @@
+!Program Name: ubsprodu - product usage (similar to 377)
+!
+! loadsave -w -n 100,10 -o prog/dxport/ubsprodu.dl4 src/ubsprodu.src
+!
+!Last Updated:                                     
+! 11/21/05rce output in sellingUM
+
+Include "src/prvars.inc"
+
+Declare External sub ubsProdU
+Declare Sub updatelog,errTrap
+
+Dim uh. as uhInfo
+Dim uls.[100] as ulInfo
+Dim 2%,ii,ss
+dim 3%
+Call ubsProdU(1,35,1,"files/6/dx.log","103.6020","",uh.,uls.[],ii,ss,600)
+
+
+External Sub ubsProdU(intCo,intSalesMan,debug,dlog$,Prod$,keycust$,uh. as uhInfo,uls.[] as ulInfo,ii,ss,iLimit,cost_lev[])
+
+Try
+
+Declare Intrinsic Function FindChannel,Trim$
+Declare Intrinsic Sub FormatDate,DXSet
+Declare External Function FDate$,PDate$,BaseName$,FMTPhone$,Xunit$,OpenFile
+Declare External Function XAmount,WareHouse,ReplaceChar$
+
+External Lib "ubsfunc.dl4","ubsprconv.dl4"
+Declare Function RegionOK
+
+Include "src/ubsprod.inc"
+Include "src/ubswhse.inc"
+
+DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01)
+
+Dim WHK$[20],PRK$[20],CMK$[20],VNK$[20],PLK$[50]
+
+Dim PR. As Prod
+Dim CM. As CommCode
+Dim WH. As WHSE
+Dim PL. As SPRODLOT
+Dim PS. As ProdSLS
+
+
+Dim 1%,debugDetail
+! Variables for Channel#'s
+Dim 2%,WHC,PRC,VNC,CMC,CTC,CCC,PLC,PSC
+! Variables for Search Record#
+Dim 3%,WHR,PRR,VNR,CMR,CTR,PLR
+! Variables for Search Error
+Dim 2%,WHE,PRE,VNE,CME,CTE,PLE
+
+Dim Msg$[256],pgmName$[20]
+Dim P9$[50],P61$[256],VEND$[30],CATD$[24]
+Dim Temp$[100],Space$[100],SLS$[3],Sales$[30],CO$[2]
+Dim QMASK$[20],PMASK$[20],EMASK$[20],DEC$[5]
+Dim WHSE$[2],SUPER$[12],VENDITEM$[20]
+Dim region$[4],regionDesc$[20]
+
+Dim 1%,baseunit,stockunit,sellunit,purchunit,costunit,priceunit,whatunit
+Dim 1%,ARMONTH,BOYMONTH,MTHDAYSi,MaxWhse,MaxVar,ARYear
+Dim 1%,region, eccos_region
+
+Let MaxWhse=2;MaxVar=18
+
+Dim Misc$[iLimit,50],RowDesc$[iLimit,30] 
+Dim 2%,BDAYS[24],AR_DATE
+Dim 2%,Q0[1]
+Dim 2%,ErrStat,X1,X2
+
+Dim 3%,ARS[5],UnitsMTD,UnitsYTD,GPMTD,GPYTD
+Dim 3%,wh[maxwhse,6],whtotal[6],pocost,netcost,ontr,qbo
+Dim 3%,usage[4,12]
+Dim 3%,qtr[4]
+
+
+debugDetail=0
+pgmName$="ubsprodu"
+msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+Space$=" ",Space$
+ErrStat = 0
+ii=0
+
+SLS$=intSalesMan Using "###" ! Passed Salesman
+CO$=Str$(intCo) ! Company
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42    !control
+WHC= OpenFile(-1744,intCo)  \ If WHC=-1  Error 42    !prodwhse
+PRC=OpenFile(-1792,intCo)   \ If PRC=-1  Error 42    !prod
+VNC= OpenFile(-2400,intCo)  \ If VNC=-1  Error 42    !vendor
+CMC= OpenFile(-2288,intCo)  \ If CMC=-1  Error 42    !commodity
+CTC= OpenFile(-1984,intCo)  \ If CTC=-1  Error 42    !category
+CCC= OpenFile(-1728,intCo)  \ If CCC=-1  Error 42    !ccodes
+PLC= OpenFile(-2528,intCo)  \ If PLC=-1  Error 42    !prodlot
+PSC= OpenFile(-2080,intCo)  \ If PSC=-1  Error 42    !prodsls
+if region REG= OpenFile(-9985,intCo)  \ If REG=-1  Error 42    !eccosregion
+
+WHSE$=WareHouse(intSalesMan,intCo) Using "##" !get warehouse salesman tied to.
+if whse$=" 0" let whse$=" 1"  ! default whse
+wh = whse$
+eccos_region=wh
+
+
+! Start Prog.
+Read #CTLC,19,50;P9$; 
+Read #CTLC,61,0;P61$;
+Read #CTLC,0,120;ARMONTH; 
+Read #CTLC,0,108;AR_DATE;
+Mat Read #CTLC,51,74;BOYMONTH;
+Mat Read #CTLC,11,0;BDAYS;     
+Mat Read #CTLC,115,40;Q0; 
+
+let MTHDAYS=BDAYS[ARMONTH]   
+If MTHDAYS<=0 LET MTHDAYS=21
+
+If not(Q0[1]) let Q0[1]=2                                                       
+Let Dec$="#",Dec$;Qmask$="---,---,--#"                                         
+If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask      
+If Q0[1] Let Pmask$="-$$,$$$,$$$,$$$.",Dec$[1,Q0[1]]     !price mask        
+Let Emask$="-$$$,$$$,$$$,$$$.##"                         !ext. price mask  
+
+
+For xx=0 to MaxWhse 
+	For yy=0 to 5 
+	    Let wh[xx,yy]=0
+    Next yy 
+	Let whtotal[xx]=0
+Next xx 
+For xx=0 to MaxVar-1 
+    Let rowdesc$[xx]=" ";misc$[xx]=" "
+Next xx
+
+
+rowDesc$[1]="ON PO"                                          
+rowDesc$[2]="ON TRANSFER"                                    
+rowDesc$[3]="ON HAND"                                        
+rowDesc$[4]="COMMITTED"                                      
+rowDesc$[5]="AVAILABLE"                                      
+rowDesc$[6]="ON B/O"                                         
+rowDesc$[7]="SIX MONTH USAGE";misc$[7]="12 MONTH USAGE WH 1" 
+! rowDesc$[14]="QUARTERS"
+! rowDesc$[15]=" 1 - 3"
+! rowDesc$[16]=" 4 - 6"
+! rowDesc$[17]=" 7 - 9"
+! rowDesc$[18]="10 - 12"
+if region rowDesc$[14]=""
+
+
+Let Temp$=" ",Temp$
+Let Temp$=AR_DATE USING "&&&&&&&";arYear=Temp$[2,3];arMonth=Temp$[4,5]      
+Let xx=0;mm=arMonth;yy=arYear
+For xx=1 to 6
+  If mm<1 then let mm=12;yy=yy-1
+  If yy<0 then let yy=99             
+  rowDesc$[7+xx]=mm using "&&"+"/"+yy using "&&"
+  mm=mm-1
+next xx 
+
+
+Let WHK$=" ",WHK$;WHK$[1,12]=Trim$(Prod$)
+
+Main: !===================================prodwhse
+
+WHTOP: ! 
+Search #WHC,3,1;WHK$,WHR,WHE
+If Trim$(WHK$[1,12])<>Trim$(Prod$) then let WHE=22 
+If WHE Goto getProd:
+
+If debugDetail                                                      
+   msg$="doing...Search #WHC: WHK$="+WHK$+" WHR="+WHR \ Call updatelog(debug) 
+   If WHE msg$="error...Search error "+WHE  \ Call updatelog(debug) 
+Endif 
+Read Record #WHC,WHR; WH.;
+
+if region
+	if WH.W1[0]=val(whse$) goto WHOK  ! home whse
+	if not(RegionOK(WH.W1[0] using "##")) goto WHTOP
+endif
+
+WHOK: ! 
+Let whichwhse=WH.W1[0] 
+! If whichwhse<=0 or whichwhse>4 goto Main:
+
+
+getSprodlot: !===================
+Let QBO=0;ONTR=0
+Let PLK$=" ",PLK$;PLK$[1,12]=Trim$(Prod$);PLK$[13,14]=whichwhse using "##"
+Let Temp$=" ",Temp$;Temp$=PLK$
+nextSprodlot: ! ====
+Search #PLC,3,4;PLK$,PLR,PLE
+If PLK$[1,14]<>Temp$[1,14] then let PLE=22
+
+If debugDetail                                                                
+   msg$="doing...Search #PLC: PLK$="+PLK$+" PLR="+PLR \ Call updatelog(debug) 
+   If PLE msg$="error...Search error "+PLE  \ Call updatelog(debug)           
+Endif                                                                         
+
+If PLE
+   Clear PR.
+Else
+   Read Record #PLC,PLR; PL.;
+   Let ONTR=ONTR+PL.PLTR
+   Let QBO=QBO+PL.P3[4]
+   Goto nextSprodlot:
+Endif
+
+! now set whichwhse; local(home)=1 / region(all) = 2 
+if whichwhse = val(whse$) let whichwhse=1 else whichwhse=2
+
+!on po
+if whichwhse = 1  ! home whse
+	Let wh[whichwhse,1]=WH.W3[1]	! on po
+	Let wh[whichwhse,2]=ONTR 		! on transfer
+	Let wh[whichwhse,3]=WH.W3[0]	! on hand
+	Let wh[whichwhse,4]=WH.W3[2]	! committed
+	Let wh[whichwhse,5]=WH.W3[0]-WH.W3[2] 	! avail
+	If P9$[28,28]="Y" then wh[whichwhse,5]=WH[whichwhse,5]+WH.W3[1]
+	Let wh[whichwhse,6]=QBO			! on bo
+else  ! region or all rest whses
+	Let wh[whichwhse,1]=wh[whichwhse,1]+WH.W3[1]
+	Let wh[whichwhse,2]=wh[whichwhse,2]+ONTR
+	Let wh[whichwhse,3]=wh[whichwhse,3]+WH.W3[0]
+	Let wh[whichwhse,4]=wh[whichwhse,4]+WH.W3[2]
+	Let wh[whichwhse,5]=WH[whichwhse,5]+WH.W3[0]-WH.W3[2]
+	If P9$[28,28]="Y" then wh[whichwhse,5]=WH[whichwhse,5]+WH.W3[1]
+	Let wh[whichwhse,6]=wh[whichwhse,6]+ONBO
+endif
+Let whtotal[1]=whtotal[1]+wh[whichwhse,1]
+Let whtotal[2]=whtotal[2]+wh[whichwhse,2]
+Let whtotal[3]=whtotal[3]+wh[whichwhse,3]
+Let whtotal[4]=whtotal[4]+wh[whichwhse,4]
+Let whtotal[5]=whtotal[5]+wh[whichwhse,5]
+Let whtotal[6]=whtotal[6]+wh[whichwhse,6]
+
+
+! For yy=1 to MaxWhse     
+	! Let wh[whichwhse,0]=wh[whichwhse,0]+wh[whichwhse,yy]
+! Next yy    
+! Let whtotal[0]=wh[whichwhse,0]
+
+
+!usage
+mm=arMonth+1
+For xx=1 to 12 
+   mm=mm-1 \ If mm<1 let mm=12
+   If WH.WH9[mm] then                      
+      if whichwhse = 1 let usage[whichwhse,mm]=WH.WH9[mm]  
+      if whichwhse = 2 let usage[whichwhse,mm]=usage[whichwhse,mm]+WH.WH9[mm]  
+   Else                                    
+      ! let usage[whichwhse,mm]=WH.W5[mm]   
+      if whichwhse = 1 let usage[whichwhse,mm]=WH.W5[mm]  
+      if whichwhse = 2 let usage[whichwhse,mm]=usage[whichwhse,mm]+WH.W5[mm]  
+   Endif   
+   !mm=mm-1 \ If mm<1 let mm=12
+Next xx
+
+
+Goto Main:
+
+
+getProd: !============================================================
+Temp$=" ",Temp$;PRK$=" ",PRK$
+Temp$[1,12]=Trim$(Prod$);PRK$=Temp$
+!===================================product
+Search #PRC,2,1;PRK$,PRR,PRE
+If Trim$(PRK$[1,12])<>Trim$(Temp$[1,12]) Let PRE=22
+If PRE Goto OutEnd:
+
+If debugDetail
+   msg$="doing...Search #PRC: PRK$="+PRK$+" PRR="+PRR \ Call updatelog(debug)
+   If PRE msg$="error...Search error "+PRE  \ Call updatelog(debug)
+Endif
+Read Record #PRC,PRR;PR.;
+
+!If intSalesMan<>999 If intSalesMan<>CU.C1[2] Clear PR. ! Security.
+
+
+!set                    
+baseunit =PR.PFU1[0]
+stockunit=PR.PFU1[8]    
+sellunit =PR.PFU1[9]    
+purchunit=PR.PFU1[10]   
+costunit =PR.PFU1[11]   
+priceunit=PR.PFU1[12] 
+
+
+
+!wh
+For xx=0 to MaxWhse 
+  For yy=0 to 5
+    Let CNVTA=wh[xx,yy]           !cost/price/qty                           
+    Let CNVTU[0]=0                !current unit                             
+    Let CNVTU[1]=sellunit        !desired unit                             
+    Let CNVTU[2]=1                !mode 1=qty 2=cost/price                  
+    Let wh[xx,yy]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)   
+  Next yy 
+
+  Let CNVTA=whtotal[xx]         !cost/price/qty                            
+  Let CNVTU[0]=0                !current unit                              
+  Let CNVTU[1]=sellunit        !desired unit                              
+  Let CNVTU[2]=1                !mode 1=qty 2=cost/price                   
+  Let whtotal[xx]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+Next xx
+
+
+!pocost 
+If P9$[32,32]="Y" and WH.W3[16] then  !whse pricing
+   let CNVTA=WH.W3[16]        !cost/price/qty  
+Else
+   Let CNVTA=PR.B[10]         !cost/price/qty                        
+Endif
+Let CNVTU[0]=0                !current unit                          
+! Let CNVTU[1]=purchunit        !desired unit                          
+Let CNVTU[1]=sellunit        !desired unit                          
+Let CNVTU[2]=2                !mode 1=qty 2=cost/price               
+if cost_lev[2]  ! po cost security
+	Let pocost=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+else
+	pocost=0
+endif
+
+!netcost                                   
+Let CNVTA=PR.PRPARC[2]        !cost/price/qty                            
+Let CNVTU[0]=0                !current unit                              
+! Let CNVTU[1]=costunit         !desired unit                              
+Let CNVTU[1]=sellunit         !desired unit                              
+Let CNVTU[2]=2                !mode 1=qty 2=cost/price                   
+if cost_lev[2]  ! po cost security
+	Let netcost=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)   
+else
+	netcost=0
+endif
+
+If pocost then
+   Let xx=1  
+   misc$[xx]="PO COST " 
+   misc$[xx]=misc$[xx]+pocost using Emask$ + "/" 
+   misc$[xx]=misc$[xx]+XUNIT$(sellunit,CCC)
+Endif
+
+If netcost then
+   Let xx=2 
+   misc$[xx]="NET COST " 
+   misc$[xx]=misc$[xx]+netcost using Emask$ + "/" 
+   misc$[xx]=misc$[xx]+XUNIT$(sellunit,CCC)
+Endif
+
+!cube
+If PR.B[23] then
+   Let xx=12
+   misc$[xx]="CB  "+PR.B[23] using Qmask$ + " "
+   whatunit=sellunit
+   If PR.A1[3]=1 then 
+	  let nunit=sellunit 
+   Else
+     For yy=0 TO 6                                                             
+	  If PR.A1[3]=PR.PFU2[yy] then
+		Let whatunit=PR.PFU1[yy+1]                    
+      Endif
+     Next yy                                                           
+   Endif
+   misc$[xx]=misc$[xx]+XUNIT$(whatunit,CCC)
+Endif
+
+!weight
+If PR.A[6] then
+   Let xx=13                               
+   misc$[xx]="WT  "+PR.A[6] using Qmask$ + " "
+   whatunit=sellunit                         
+   If PR.A[5]=1 then                        
+     let nunit=sellunit                     
+   Else                                      
+     For yy=0 TO 6                           
+  	   If PR.A[5]=PR.PFU2[yy] then           
+		 Let whatunit=PR.PFU1[yy+1]           
+	   Endif                                  
+	 Next yy                                 
+   Endif                                     
+   misc$[xx]=misc$[xx]+XUNIT$(whatunit,CCC)  
+Endif
+
+
+!usage
+For xx=1 to MaxWhse                                                            
+  For mm=1 to 12
+    Let CNVTA=usage[xx,mm]        !cost/price/qty                         
+    Let CNVTU[0]=0                !current unit                           
+    Let CNVTU[1]=sellunit        !desired unit                             
+    Let CNVTU[2]=1                !mode 1=qty 2=cost/price                 
+    Let usage[xx,mm]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+    Let usage[xx+2,mm]=usage[xx,mm]*(PR.A[6]/PR.A[5])  ! weight
+  Next mm
+Next xx                                                                         
+
+!qty
+Let CNVTA=PR.A[9]             !cost/price/qty                               
+Let CNVTU[0]=0                !current unit                                 
+Let CNVTU[1]=sellunit        !desired unit                                 
+Let CNVTU[2]=1                !mode 1=qty 2=cost/price                      
+Let PR.A[9]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+Let CNVTA=PR.A[10]            !cost/price/qty                          
+Let CNVTU[0]=0                !current unit                            
+Let CNVTU[1]=sellunit        !desired unit                            
+Let CNVTU[2]=1                !mode 1=qty 2=cost/price                 
+Let PR.A[10]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+
+!=================prodsls
+For xx=0 to 4    
+	Let qtr[xx]=0
+Next xx          
+
+Read Record #PSC,PRR;PS.; 
+
+
+!1st
+Let SMTH=BOYMONTH;EMTH=BOYMONTH+2                     
+If SMTH>12 Let SMTH=SMTH-12                       
+If EMTH>12 Let EMTH=EMTH-12                       
+For XX=SMTH TO EMTH                                
+  Let QTR[1]=QTR[1]+PS.S1[XX,0]                           
+Next XX 
+
+!2nd
+Let SMTH=BOYMONTH+3;EMTH=BOYMONTH+5                   
+If SMTH>12 Let SMTH=SMTH-12                       
+If EMTH>12 Let EMTH=EMTH-12                       
+For XX=SMTH TO EMTH                                
+  Let QTR[2]=QTR[2]+PS.S1[XX,0]                           
+Next XX                                            
+
+!3rd
+Let SMTH=BOYMONTH+6;EMTH=BOYMONTH+8                   
+If SMTH>12 Let SMTH=SMTH-12                       
+If EMTH>12 Let EMTH=EMTH-12                       
+For XX=SMTH TO EMTH                                
+  Let QTR[3]=QTR[3]+PS.S1[XX,0]                           
+Next XX             
+
+!4th
+Let SMTH=BOYMONTH+9;EMTH=BOYMONTH+11                  
+If SMTH>12 Let SMTH=SMTH-12                       
+If EMTH>12 Let EMTH=EMTH-12                       
+For XX=SMTH TO EMTH                                
+  Let QTR[4]=QTR[4]+PS.S1[XX,0]                              
+Next XX                                                                    
+
+For xx=0 to 4                                                             
+  Let CNVTA=QTR[xx]             !cost/price/qty                 
+  Let CNVTU[0]=0                !current unit           
+  Let CNVTU[1]=sellunit        !desired unit            
+  Let CNVTU[2]=1                !mode 1=qty 2=cost/price
+  Let QTR[xx]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+Next xx                                                                         
+
+
+!=================category                                    
+CatD$=" ",CatD$
+
+CTR=PR.B[11]
+If CTR Then                                 
+   Mat Read #CTC,CTR;CatD$;                     
+Else
+   CatD$="-NOF-"
+End If                                        
+
+
+!=================commodity 
+CMK$=PR.A$[152,155]
+Search #CMC,2,1;CMK$,CMR,CME
+If CMK$<>PR.A$[152,155] Then Let CME=22
+
+If debugDetail                                                      
+   msg$="doing...Search #CMC: CMK$="+CMK$+" CMR="+CMR \ Call updatelog(debug) 
+   If CME msg$="error...Search error "+CME  \ Call updatelog(debug)     
+Endif                                                               
+If CME=0 Then
+   Mat Read #CMC,CMR;CM.;
+Else
+   Clear CM.
+   CM.D$[1,16]=PR.A$[152,155]+"            "
+End If
+
+
+!====================vendor
+Temp$=" ",Temp$;Vend$=" ",Vend$
+VNK$=PR.B[24] Using "######"
+Temp$=VNK$
+
+Search #VNC,2,1;VNK$,VNR,VNE
+If VNK$[1,6]<>Temp$[1,6] Let VNE=22
+
+If debugDetail                                                      
+   msg$="doing...Search #VNC: VNK$="+VNK$+" VNR="+VNR \ Call updatelog(debug) 
+  If VNE msg$="error...Search error "+VNE  \ Call updatelog(debug)     
+Endif                                                               
+If VNE=0 Then
+   Mat Read #VNC,VNR;Vend$;
+Else
+   Vend$="-NOF-"
+End If
+
+
+uh.Product$      = PR.A$[140,151]  
+uh.Description1$ = ReplaceChar$(PR.A$[9,38]) 
+uh.Description2$ = ReplaceChar$(PR.A$[63,92]) 
+uh.Vendor$       = PR.B[24] using "######"           
+uh.VendorName$   = Vend$
+
+mm=arMonth+1
+For ii=0 to maxvar-1
+  If ii<iLimit and len(rowdesc$[ii+1])>1 then
+   uls.[ii].rowdesc$  = rowdesc$[ii+1]
+   uls.[ii].misc$     = misc$[ii+1]
+
+   If ii<6 then
+     uls.[ii].wh1$  = wh[1,ii+1] using Qmask$
+     uls.[ii].wh2$  = wh[2,ii+1] using Qmask$
+     uls.[ii].wh3$  = "0"  ! wh[3,ii+1] using Qmask$
+     uls.[ii].wh4$  = "0"  ! wh[4,ii+1] using Qmask$
+     uls.[ii].wh5$  = "0"  !not used
+     uls.[ii].whtotal$  = whtotal[ii+1] using Qmask$
+     uls.[ii].um$       = XUNIT$(sellunit,CCC)
+   End if
+
+   If ii=6 then
+        uls.[ii].wh1$  = "0"      
+        uls.[ii].wh2$  = "0"      
+        uls.[ii].wh3$  = "0"      
+        uls.[ii].wh4$  = "0"      
+        uls.[ii].wh5$  = "0"  !not used                
+        uls.[ii].whtotal$  = "0"
+        uls.[ii].um$       = "-N/A-"     
+   Endif
+
+   If ii>6 and ii<13 then
+	   mm=mm-1 \ If mm<1 let mm=12
+	   uls.[ii].wh1$  = usage[1,mm] using Qmask$ 
+	   uls.[ii].wh2$  = usage[2,mm] using Qmask$ 
+	   if usage[3,mm]
+	   	uls.[ii].wh3$  = usage[3,mm] using Qmask$+" /LBS"  ! weight
+	   else
+	   	uls.[ii].wh3$  = " "
+	   endif
+	   if usage[4,mm]
+	   	uls.[ii].wh4$  = usage[4,mm] using Qmask$+" /LBS"  ! weight
+	   else
+	   	uls.[ii].wh4$  = " "
+	   endif
+	   uls.[ii].wh5$  = "0"  !not used 
+	   !uls.[ii].whtotal$  = usage[0,mm-6] using Qmask$ 
+	   uls.[ii].um$       = XUNIT$(sellunit,CCC) 
+   Endif
+ 
+   If ii=13 then    
+       uls.[ii].wh1$  = " "             
+	   uls.[ii].wh2$  = " "             
+	   uls.[ii].wh3$  = " "             
+	   uls.[ii].wh4$  = "MONTH"             
+	   uls.[ii].wh5$  = "0"  !not used  
+	   uls.[ii].whtotal$  = "YEAR"         
+	   uls.[ii].um$       = " "     
+   Endif                                
+
+   If ii>=14 and ii<=17 then
+       uls.[ii].wh1$  = QTR[ii-13] using Qmask$ 
+	   uls.[ii].wh2$  = " "            
+	   If ii=14 
+		  uls.[ii].wh3$  = "QTY"            
+		  uls.[ii].wh4$  = PR.A[9] using Qmask$ 
+		  uls.[ii].wh5$  = " "  !not used           
+		  uls.[ii].whtotal$  =  PR.A[10] using Qmask$                  
+		  uls.[ii].um$       = XUNIT$(sellunit,CCC)
+       Endif
+	   If ii=15 
+		  uls.[ii].wh3$  = "SALES"
+		  uls.[ii].wh4$  = PR.A[7] using Emask$
+		  uls.[ii].wh5$  = " "  !not used           
+		  uls.[ii].whtotal$  = PR.A[8] using Emask$ 
+		  uls.[ii].um$       = " "
+       Endif
+	   If ii=16 
+		  uls.[ii].wh3$  = "COST"
+		  uls.[ii].wh4$  = PR.A[11] using Emask$
+		  uls.[ii].wh5$  = " "  !not used           
+		  uls.[ii].whtotal$  = PR.A[12] using Emask$                  
+		  uls.[ii].um$       = " "
+       Endif
+	   If ii=17 
+		  uls.[ii].wh3$  = " "
+		  uls.[ii].wh4$  = " "                      
+		  uls.[ii].wh5$  = " "  !not used           
+		  uls.[ii].whtotal$  = " "                  
+		  uls.[ii].um$       = " " 
+       Endif
+   Endif
+
+  Else
+	ii=maxvar
+  Endif
+
+Next ii
+
+For ii=7 to 12
+  If ii>maxwhse and ii<>6 then
+	 mm=mm-1 \ If mm<1 let mm=12
+     uls.[ii].whtotal$  = usage[1,mm] using Qmask$
+  Endif
+Next ii
+
+Let ii=maxvar
+
+
+OutEnd: !===============================================================
+Close #CTLC,#WHC,#PRC,#VNC,#CMC,#CTC,#CCC,#PSC
+if region Close #REG
+msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+ss=ErrStat
+Exit Sub
+Else
+    ss=SpC(10)
+    Call errTrap(pgmName$)
+End Try
+
+Function RegionOK(wh$)
+	region$[1,2] = eccos_region using "##"
+	region$[3,4] = wh$
+	Search #REG,2,1;region$,rgr,rge
+	if not(RGE) scr = 1 else scr=0
+End Function scr
+
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub       
+
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+
+ss=ErrStat
+End Sub

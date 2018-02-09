@@ -1,0 +1,204 @@
+! >>> Program mx117pmcdel
+!
+! description: Last Price - Delete Price Master Children Records - calculate freight/misc charges per line
+!
+! loadsave -w -n 100,10 -o prog/dxport/mx117pmcdel.dl4 src/mx117pmcdel.src
+!
+! 1.0 11/11/11 change??
+!
+include "src/copyright.inc" ! dx
+
+
+
+Rem BEDIT Version: 2.3 OBJECT CODE     Created: NOV 10, 2011  16:06:27
+Rem /w2/papermaster/r2005//usr/acct/mary/work/custom/xrev9/mx117pmcdel.src (univ2) [mary] {54137}
+Rem  Copyright (c) 2011 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+Declare Intrinsic Sub DateToJulian,FindF,InpBuf,Logic,String,Time,VerifyDate
+! Option Default Dialect IRIS1
+Declare Intrinsic Sub getglobals
+Declare Intrinsic sub programdump,env
+Declare Intrinsic function findchannel
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub suberr,mainerr,GetSession,AddToStr,SetOutput,CreateNetStatus
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile
+Declare External Sub getportdefault
+Declare External Function OpenFile,PDate$,FormatDate2$
+External Lib "libprod.lib"
+Declare External Sub ProdList,ProdGroup,UMDList,CompIList
+Declare External Function getpravail,getumrec,getMSDS,ComplFlag,ChkPrdUM
+Try
+Rem MX117MCDEL - DELETE LAST PRICE FILE FOR ALL SC
+Rem MASS DELETE RECORDS for ANY Customer Using Passed cust# as Master
+Rem Auth Buy List Customer FOR A PROD
+Enter CUST,DEPT,PROD$,FCHL[],PARM[],RSTR$
+If CUST <= 0 Goto OUTEND
+If PROD$[1,1] = "" Or PROD$[1,6] = "      " Goto OUTEND
+if rtrim$(prod$)="" goto outend: ! no product sent
+Rem {begin src/inc/dim.getchan.i}
+Dim 1%,CHNL
+Dim 3%,CHNLSCR,CHNLFREE
+Rem {end dim.getchan.i}
+Dim F$[20],X$[30],P9$[50],P60$[50],P61$[256]
+Dim P$[12],P2$[84],LPMT$[2],J3$[60],CSLK$[14],LPROD$[13]
+Dim KSHIP$[40],K1$[60],K2$[60],K3$[60],H3$[60]
+Dim 1%,AI,C3[4],LPEUN[2],LPWH,LPCPT,PPPUSERID
+Dim 2%,DF,LPSL,C1[2],LPR1[3],LPC5[3],LPPCDATE,LPCSDT,LPDEPT
+Dim 3%,C2[2],C4[3],LPR[4],LPUNF[6],PERM[1],LPLPERM,LPCURR[1]
+Dim 2%,PPPCID[1],3%,LPFPERM[1],LPUNIT[1]
+Dim 2%,LPPPCUST
+Dim 1%,INTCO,X1[9],CH_LSTP,CH_CUST,USRID
+Dim 2%,X2[9],SCCUST
+Dim PPLOG$[60],3%,PASSINFO[20],PERMLOG[35]
+Dim 3%,X3[9],R[99],R1
+dim action$[30],options$[30],userid$[8],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+dim e$[500]!,message$[600]
+Dim U5$[50],groupid$[2],msg$[100],glpmsg$[100]
+Dim buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp$[800],tmp1$[200],nextblockid$[8],WebStr$[600],blockid$[100]
+dim dlog$[60],3%,REC_UAC
+dim dblog$[60] \ dblog$="files/6/lp.log"
+let intco=parm[0] ! company number
+let rec_uac=parm[1] ! user record number
+! open files if needed
+if not(fchl[0]) ! contrl file
+	ctlc = Findchannel()
+	X$ = "cntrl/CNTRL" + Str$(intco)
+	Open #ctlc,X$
+else
+	let ctlc=fchl[0]
+endif
+Mat Read #ctlc,19,50;P9$;
+Mat Read #ctlc,60,50;P60$;
+Mat Read #ctlc,61,0;P61$;
+
+TRACKPERM = 0
+F$ = "2/permpricelog" + Str$(intco)
+Call FindF(F$,TRACKPERM)
+If FCHL[1] <= 0 ! "no last price channel
+  ch_lstp = Findchannel()
+  Read #ctlc,88,1376;F$[1,16];
+  Open #CH_LSTP,F$
+Else 
+  CH_LSTP = FCHL[1]
+End If 
+Search #CH_LSTP,1,5;J3$,LPDIR5,E
+If Not(E) Let LPDIR5 = 1
+If E Let LPDIR5 = 0
+If FCHL[2] <= 0 ! "no Customer file channel
+  ch_cust=ctlc = Findchannel()
+  Read #ctlc,88,1808;F$[1,16];
+  Ropen #CH_CUST,F$
+Else 
+  CH_CUST = FCHL[2]
+End If 
+If P9$[44,44] <> "Y" Let DEPT = 0
+!Print @0,23;'CL';"Searching for Sub-Customers";
+!Signal 3,0
+K1$ = " ",K1$;NOREC = 0
+CF_LOOP: Rem "
+Search #CH_CUST,3,1;K1$,R[2],E \ If E = 2 Goto DELDONE
+if e error 11000
+NOREC = NOREC + 1
+! If Not(Fra(NOREC / 200)) Print @40,23;NOREC;K1$;
+Mat Read #CH_CUST,R[2],724;LPPPCUST;
+SCCUST = K1$
+if cust=sccust goto cf_loop: ! deletes in main screen
+If LPPPCUST = CUST Gosub DELLPREC
+Goto CF_LOOP
+DELLPREC: Rem "delete this one (or at least try)
+J3$ = " ",J3$
+J3$ = SCCUST Using "######"
+J3$[7,10] = DEPT Using "####"
+J3$[11] = PROD$ + "         "
+J3$[31] = ""
+Search #CH_LSTP,2,1;J3$,R[1],E \ If E > 1 error 11000
+If E Goto NXTCUST
+Gosub LOG_PERMPRICE_AFTER
+Mat Read #CH_LSTP,R[1];P$;
+Read #CH_LSTP,R[1],12;DF;
+Mat Read #CH_LSTP,R[1],16;C1;
+Mat Read #CH_LSTP,R[1],28;C2;
+Mat Read #CH_LSTP,R[1],46;C3;
+Mat Read #CH_LSTP,R[1],56;P2$;
+Mat Read #CH_LSTP,R[1],140;C4;
+Mat Read #CH_LSTP,R[1],164;LPMT$;
+Read #CH_LSTP,R[1],166;AI;
+Mat Read #CH_LSTP,R[1],168;LPR;
+Mat Read #CH_LSTP,R[1],198;LPR1;
+Mat Read #CH_LSTP,R[1],214;LPEUN;
+Mat Read #CH_LSTP,R[1],220;LPUNF;
+Mat Read #CH_LSTP,R[1],262;PERM;
+Mat Read #CH_LSTP,R[1],274;LPWH;
+Mat Read #CH_LSTP,R[1],276;LPC5;
+Read #CH_LSTP,R[1],292;LPPCDATE;
+Read #CH_LSTP,R[1],296;LPLPERM;
+Mat Read #CH_LSTP,R[1],302;LPCURR;
+Read #CH_LSTP,R[1],314;LPCPT;
+Read #CH_LSTP,R[1],316;LPCSDT;
+Read #CH_LSTP,R[1],320;LPDEPT;
+Mat Read #CH_LSTP,R[1],340;LPUNIT;
+Search #CH_LSTP,5,1;J3$,R1,E \ if e error 11000
+H3$ = " ",H3$;H3$ = J3$[1,10] + J3$[37,40] + J3$[11,36]
+Search #CH_LSTP,5,2;H3$,R1,E \ if e error 11000
+H3$ = " ",H3$;H3$ = J3$[1,10];H3$[11,16] = 999999 - LPR1[2] Using "######"
+H3$[17,46] = J3$[11,40]
+Search #CH_LSTP,5,3;H3$,R1,E \ if e error 11000
+H3$ = " ",H3$
+H3$ = " ",H3$
+H3$[1,10] = J3$[31,40];H3$[11,30] = J3$[11,30]
+H3$[31] = J3$[1,10]
+Search #CH_LSTP,5,4;H3$,R1,E \ if e error 11000
+If LPDIR5 !if the 5th dir exsists
+  H3 = " ",H3$;H3$[1,20] = J3$[11,30]
+  H3$[21,30] = J3$[1,10];H3$[31] = J3$[31]
+  Search #CH_LSTP,5,5;H3$,R1,E \ if e error 11000
+End If 
+R1 = R[1]
+E = 3 \ Search #CH_LSTP,1,0;J3$,R1,E \ if e error 11000
+If P61$[64,64] = "Y" ! "delete also the Ship List last price info
+  E = 2
+  LPROD$ = J3$[10,29] \ If C4[3] Let LPROD$[13] = ""
+  X2[1] = CH_LSTP;X2[2] = 0;X2[3] = 0;X2 = 0
+  !!!!!
+  ! Call "MX117SLDEL",SCCUST,DEPT,X2,X2,LPROD$,X2[],X2,E
+  CALL "MX117SLDEL.DL4",SCCUST,DEPT,X2,X2,lprod$,X2[],X2,E,e$,IntCo
+
+
+End If 
+NXTCUST: Rem "done - get next customer
+Return 
+LOG_PERMPRICE_AFTER: Rem update after fields
+If Not(TRACKPERM) Return 
+	passinfo[0] = CH_LSTP
+	PASSINFO[1] = R[1]
+	PASSINFO[2] = 3
+	PASSINFO[3] = 12
+	PASSINFO[4] = rec_uac
+	Call "logpermprice",intco,PPLOG$,PERMLOG[],PASSINFO[],dlog$
+Return 
+DELDONE: Rem "done Deleting
+!Print @0,23;'CL';"Customer Check Done";
+!Signal 3,10
+Goto OUTEND
+              
+
+OUTEND: Rem "outta here
+if fchl[0]<0 and ctlc<>0
+	try close #ctlc else rem
+endif
+If FCHL[1] <= 0 And CH_LSTP
+  try Close #CH_LSTP else rem
+End If 
+If FCHL[2] <= 0 And CH_CUST
+  try Close #CH_CUST else rem
+End If 
+Else
+ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+!
+include "src/callmainerrnet.inc"
+end try
+End ! the whole program

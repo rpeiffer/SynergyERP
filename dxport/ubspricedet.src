@@ -1,0 +1,626 @@
+!Program Name: ubspricedet                                    
+! loadsave -w -s -n 100,10 -o prog/dxport/ubspricedet.dl4 src/ubspricedet.src
+!                                                  
+!Last Updated:                                     
+!lpppcust  10/11/05
+!rce 10/10/05  salesgroup
+!rce 11/18/05 add future cost/date
+!jliu 8/4/06 keyqunit$ already assign to the number
+!            keyqty$ u/m base on the keyqunit$ - not in base u/m
+!            keypunit$ also already assign to the number
+External Lib "libprice.lib"
+Declare External Sub SysPriceCalc
+
+!
+Declare External Sub PriceDet
+Declare Sub updatelog,errTrap
+
+Include "src/invars.inc"
+!
+Dim ps. as priceInfo                                                    
+Dim 2%,ii,ss                                                            
+Dim arrSales[999]
+
+Call PriceDet(1,35,1,"files/6/dx.log","1041","103.6001","1","2000","4","3",ps.,ii,ss,600,arrSales[])
+Call PriceDet(1,35,1,"files/6/dx.log","1041","103.6001","1","500","4","3",ps.,ii,ss,600,arrSales[])
+Call PriceDet(1,35,1,"files/6/dx.log","1041","109.3002","1","0","4","3",ps.,ii,ss,600,arrSales[])
+stop                                                                    
+
+
+External Sub PriceDet(intCo,intSalesMan,debug,dlog$,keycust$,keyprod$,keywhse$,keyqty$,keyqunit$,keypunit$,ps. as priceInfo,ii, ss,iLimit,arrSales[],...)
+Try enter chans[],... else chans=-1
+Try enter eps. as extPriceInfo else dim eps. as extPriceInfo
+Try
+
+Declare Intrinsic Function FindChannel,Trim$
+Declare Intrinsic Sub JulianToDate,DateToJulian
+External Lib "ubsfunc.dl4","ubsprconv.dl4"
+Declare External Function FDate$,PDate$,BaseName$,FMTPhone$,Xunit$,OpenFile  
+Declare External Function XAmount,WareHouse,ReplaceChar$                     
+
+                                   
+
+Include "src/ubsorder.inc"
+Include "src/ubsprod.inc"
+Include "src/ubswhse.inc"
+Include "src/ubscustomer.inc"
+
+DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01)
+
+Dim PRK$[20],CHK$[50],LPK$[50],CMK$[12],CUK$[12],SPK$[50],PWK$[50],WHK$[14]
+Dim CSK$[20],SIK$[50],SMK$[20]
+Dim P9$[50],P60$[50],P61$[256]
+
+Dim PR. As Prod
+Dim CM. As CommCode
+Dim CU. As Customer
+Dim LP. As Lastprice 
+Dim WH. As WHSE 
+
+Dim 1%,debugDetail
+! Variables for Channel#'s
+Dim 2%,CTLC,PRC,CHC,CMC,PTC,CCC,CUC,SPPC,LPC,WHC,BTC,WIC,CSC,SIC,SMC
+! Variables for Search Record#
+Dim 2%,PRR,CMR,PTR,CUR,SPPR,LPR,WHR,BTR,WIR,CSR,SIR,SMR
+! Variables for Search Error
+Dim 2%,PRE,CME,PTE,CUE,SPPE,LPE,WHE,BTE,WIE,CSE,SIE,SME
+
+Dim Sales$[35], Temp$[100], DT1$[10],DT2$[10]
+Dim SLS$[3],CO$[2],E$[500]
+Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5]
+Dim Msg$[256],pgmName$[20]
+Dim Today$[10],whse$[2],msgdesc$[150]
+
+Dim 1%,baseunit,stockunit,sellunit,purchunit,costunit,priceunit,whatunit
+Dim 1%,bunit,sunit,punit,cunit
+Dim 1%,factor,dft_cost,maxwhse
+Dim 2%,jtoday,curdat 
+Dim 2%,t2,LastInvDate, X1,X2
+Dim 2%,Q0[1],D9[5]
+Dim 2%,jsdate,jedate,jinvdate
+Dim 3%,fleptr[20,1],specs[50],gpp,mup,exSpecs[50]
+dim 3%,unitcost,netcost
+Dim futuredate$[10],rstr$[500]
+
+debugDetail=1
+pgmName$="ubspricedet"
+msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+ii=0
+SLS$=intSalesMan Using "###" ! Passed Salesman
+CO$=Str$(intCo)              ! Company
+
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+If debugDetail
+   msg$="doing...keycust-"+keycust$ \ Call updatelog(debug) 
+   msg$="doing...keyprod-"+keyprod$ \ Call updatelog(debug) 
+   msg$="doing...keywhse-"+keywhse$ \ Call updatelog(debug)
+   msg$="doing...keyqty-"+keyqty$ \ Call updatelog(debug)
+   msg$="doing...keyqunit-"+keyqunit$ \ Call updatelog(debug)
+   msg$="doing...keypunit-"+keypunit$ \ Call updatelog(debug)
+Endif
+
+
+if chans=-1
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42    !cntrl
+PRC= OpenFile(-1792,intCo)  \ If PRC=-1  Error 42    !product
+CHC= OpenFile(-2880,intCo)  \ If CHC=-1  Error 42    !contracth
+CMC= OpenFile(-2288,intCo)  \ If CMC=-1  Error 42    !commcode 
+PTC= OpenFile(-752,intCo)   \ If PTC=-1  Error 42    !prtypefle
+CCC= OpenFile(-1728,intCo)  \ If CCC=-1  Error 42    !ccodes
+CUC= OpenFile(-1808,intCo)  \ If CUC=-1  Error 42    !cust
+SPPC= OpenFile(-1936,intCo) \ If SPPC=-1 Error 42    !spcprice
+LPC= OpenFile(-1376,intCo)  \ If LPC=-1  Error 42    !lastprice
+WHC= OpenFile(-1744,intCo)  \ If WHC=-1  Error 42    !prodwhse
+BTC= OpenFile(-1952,intCo)  \ If BTC=-1  Error 42    !brktbl
+WIC= OpenFile(-2768,intCo)  \ If WIC=-1  Error 42    !whinfo
+CSC= OpenFile(-1680,intCo)  \ If CSC=-1  Error 42    !custspec
+SIC= OpenFile(-2352,intCo)  \ If SIC=-1  Error 42    !stagitem
+SMC= OpenFile(-1824,intCo)  \ If SMC=-1  Error 42    !salesman
+else
+ ctlc=chans[0]\prc=chans[2]\chc=chans[7]\cmc=chans[3]\ptc=chans[8]
+ ccc=chans[6]\cuc=chans[4]\sppc=chans[9]\lpc=chans[1]\whc=chans[10]
+ btc=chans[11]\wic=chans[12]\csc=chans[13]\sic=chans[14]\smc=chans[5]
+end if
+
+
+Mat Read #CTLC,19,50;P9$; 
+Mat Read #CTLC,60,50;P60$;
+Mat Read #CTLC,115;D9;
+Mat Read #CTLC,115,40;Q0; 
+
+
+If not(Q0[1]) let Q0[1]=2                                                 
+Let Dec$="#",Dec$;Qmask$="---,---,--#"                                    
+If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask        
+If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask      
+Let Emask$="-$$$$$$$$$$$$.##"                         !ext. price mask
+
+
+
+Let maxwhse=D9[5] 
+If len(keycust$)<=0 then goto Outend:      !cust, required
+If len(keyprod$)<=0 then goto Outend:      !prod, required
+If len(keywhse$)<=0 or keywhse$ = " 0" then let keywhse$="1"
+If len(keyqty$)<=0  then let keyqty$="0"
+!If len(keyqunit$)<=0 then let keyqunit$="1"
+!If len(keypunit$)<=0 then let keypunit$="1"
+
+
+GetCust: !=============================================================
+Let CUK$=" ",CUK$;CUK$=Val(keycust$) USING "######"
+Let Temp$=" ",Temp$;Temp$=CUK$
+Search #CUC,2,1;CUK$,CUR,CUE
+If CUK$[1,6]<>Temp$[1,6] Let CUE=22
+If CUE then
+   Let ss=10000
+   Goto Outend:
+Endif
+
+If CUE=0 Then
+   Read Record #CUC,CUR;CU.;
+	If P60$[33,33]<>"Y" Let CU.LPPPCust=0                                   
+		If CU.LPPPCust<1 Or CU.LPPPCust>999999 or Fra(CU.LPPPCust)          
+		Let CU.LPPPCust=0                                                       
+	Endif                                                                   
+	If CU.a1$[138,138]="Y" Let CU.LPPPCust=0                                
+	If CU.LPPPCust=CU.C1[1] Let CU.LPPPCust=0 ! only for diff ppgrp customer
+	If CU.LPPPCUST                                   
+	  ps.permpricegroup$ = CU.LPPPCUST using "######"
+    Else                                             
+	  ps.permpricegroup$ = " "                       
+	End If                                           
+Else
+   Clear CU.
+   CU.A1$[31,60]="-NOF-"
+End If
+
+goto slspassed ! disable check dur to shipto price list (check if we really need here anyway)
+If intSalesMan=999 goto SLSPassed ! all reps      
+If arrSales                                       
+	for counter=0 to 999                          
+		if arrSales[counter]=CU.C1[2] goto SLSPassed:
+		if not(arrSales[counter]) counter=999 ! skip to end 
+	next counter
+Endif                                             
+If intSalesMan=CU.C1[2] goto SLSPassed:          
+
+goto Outend:  !Security.                    
+
+SLSPassed: !
+Mat Read #PTC,CU.C1[7],28;DFT_COST;                             
+If not(DFT_COST) then let DFT_COST=P60$[29,29]   !"default   
+
+
+GetSlsm: !=============================================================
+Let SMK$=" ",SMK$;SMK$=CU.C1[2] Using "### "                  
+Let Temp$=" ",Temp$;Temp$=SMK$                                    
+Search #SMC,2,1;SMK$,SMR,SME                                                    
+If SMK$[1,4]<>Temp$[1,4] Let SME=22                                  
+
+If SME=0 Then                                                                   
+	Mat Read #SMC,SMR;Sales$[1,30];                                             
+Else                                                                            
+	Sales$="-NF-"                                                               
+End If              
+
+
+
+GetWhse: !==============================================================
+whse$=WareHouse(intSalesMan,intCo) Using "##"    !get warehouse   
+! If val(keywhse$)<>val(whse$) then 
+   ! Let ss=10001 
+   ! Goto Outend:
+! Endif
+whk$ = " ",whk$                           
+whk$[1,Len(Trim$(keyprod$))] = Trim$(keyprod$)        
+whk$[13,14] = Val(keywhse$) Using "##"          
+Temp$ = " ",Temp$                         
+Temp$[1,14] = whk$[1,14]                  
+Search #WHC,2,1;WHK$,WHR,WHE                                      
+If WHK$[1,14]<>Temp$[1,14] then let WHE=22     
+If WHE then 
+   Let ss=10002 
+   Goto Outend:                                               
+Endif
+
+If debugDetail                                                                
+   msg$="doing...Search #WHC: WHK$="+WHK$+" WHR="+WHR \ Call updatelog(debug) 
+  If WHE msg$="error...Search error "+WHE  \ Call updatelog(debug)          
+Endif                                                                         
+Read Record #WHC,WHR; WH.;                                                    
+Let whichwhse=WH.W1[0]                                                        
+If whichwhse<=0 or whichwhse>maxwhse then
+   Let ss=10001
+   Goto OutEnd:                             
+Endif
+
+
+GetProd: !============================================================  
+Let PRK$=" ",PRK$;PRK$[1,12]=Trim$(keyprod$)                                   
+Let Temp$=" ",Temp$;Temp$=PRK$,"            "  ! sledghammer
+Search #PRC,2,1;PRK$,PRR,PRE                                            
+If PRK$[1,12]<>Temp$[1,12] Let PRE=22                           
+If PRE then
+   Let ss=10003
+   Goto OutEnd:                                                    
+Endif
+
+If debugDetail                                                                
+   msg$="doing...Search #PRC: PRK$="+PRK$+" PRR="+PRR \ Call updatelog(debug) 
+   If PRE msg$="error...Search error "+PRE  \ Call updatelog(debug)           
+Endif                                                                         
+
+If PRE                      
+   Clear PR.                
+Else                        
+   Read Record #PRC,PRR;PR.;
+Endif                       
+
+
+!set                   
+baseunit =PR.PFU1[0]   
+stockunit=PR.PFU1[8]   
+sellunit =PR.PFU1[9]   
+purchunit=PR.PFU1[10]  
+costunit =PR.PFU1[11]  
+priceunit=PR.PFU1[12]  
+!           
+Let qunit=sellunit                                 !default
+try  ! blanks cause val error
+	if val(keyqunit$)>0 then let qunit=val(keyqunit$)
+else
+	rem
+end try
+!If val(keyqunit$)=1 then let qunit=sellunit        !sell      
+!If val(keyqunit$)=2 then let qunit=stockunit       !stock     
+!If val(keyqunit$)=3 then let qunit=purchunit       !purchase  
+!If val(keyqunit$)=4 then let qunit=costunit        !cost      
+!If val(keyqunit$)=5 then let qunit=priceunit       !price     
+!If val(keyqunit$)=6 then let qunit=baseunit        !base      
+!if val(keyqunit$)<0 then let qunit=abs(val(keyqunit$)) !if neg, already set to correct unit #
+!
+Let sunit=qunit
+!                                                    
+Let punit=priceunit                                !default
+try  ! blanks cause val error
+	if val(keypunit$)<>0 then let punit=val(keypunit$) 
+else
+	rem
+end try
+!If val(keypunit$)=1 then let punit=priceunit       !price     
+!If val(keypunit$)=2 then let punit=stockunit       !stock     
+!If val(keypunit$)=3 then let punit=sellunit        !sell      
+!If val(keypunit$)=4 then let punit=purchunit       !purchase  
+!If val(keypunit$)=5 then let punit=costunit        !cost      
+!If val(keypunit$)=6 then let punit=baseunit        !base      
+!if val(keypunit$)<0 then let punit=abs(val(keypunit$)) !if neg, already set to
+
+Let cunit=costunit                                !default
+if pr.pr_a2$[28,28] = "Y"  ! force priceum to match sellum default
+	keyqunit$=str$(pr.pfu1[9])  ! Sellum
+	keypunit$=str$(pr.pfu1[9])  ! sellum
+	punit=sunit
+	cunit=sunit
+end if
+
+
+!qtyonhand
+ps.qtyonhand = wh.w3[0]         
+Let CNVTA=WH.W3[0]            !cost/price/qty                           
+Let CNVTU[0]=0                !current unit                             
+Let CNVTU[1]=qunit            !desired unit                             
+Let CNVTU[2]=1                !mode 1=qty 2=cost/price                  
+Let WH.W3[0]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG) 
+
+
+GetComm: !============================================================
+Let CMK$=" ",CMK$;CMK$=PR.A$[152,155]                    
+Let Temp$=" ",Temp$;Temp$=CMK$
+Search #CMC,2,1;CMK$,CMR,CME           
+If CMK$[1,4]<>Temp$[1,4] then let CME=22
+
+If debugDetail                                                                
+   msg$="doing...Search #CMC: CMK$="+CMK$+" CMR="+CMR \ Call updatelog(debug) 
+   If CME msg$="error...Search error "+CME  \ Call updatelog(debug)           
+Endif                                                                         
+If CME=0 Then                                                                 
+   Mat Read #CMC,CMR;CM.;                                                     
+Else                                                                          
+   Clear CM.                                                                  
+   CM.D$[1,16]="-NOF-"                                  
+End If                                                                        
+
+
+GetPrice: !=============================================================
+!
+let fleptr[0,0]=CTLC
+let fleptr[1,0]=PRC    
+let fleptr[2,0]=WHC
+let fleptr[3,0]=CMC 
+let fleptr[4,0]=LPC
+let fleptr[5,0]=SPPC 
+let fleptr[6,0]=CHC 
+let fleptr[7,0]=CCC 
+let fleptr[8,0]=BTC
+!
+let fleptr[0,1]=CU.LPPPCUST ! perm price group
+let fleptr[1,1]=PRR    !prod rec 
+let fleptr[2,1]=WHR    
+let fleptr[3,1]=CMR     
+let fleptr[4,1]=0        
+let fleptr[5,1]=0        
+let fleptr[6,1]=0        
+let fleptr[7,1]=0        
+let fleptr[8,1]=0        
+
+mat specs=zer  
+let specs[0]=0 
+
+!specs[1]                                                                      
+Let CNVTA=Val(keyqty$)          !cost/price/qty                           
+Let CNVTU[0]=qunit              !current unit                             
+Let CNVTU[1]=0                  !desired unit                             
+Let CNVTU[2]=1                  !mode 1=qty 2=cost/price                  
+Let specs[1]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+If not(PR.A[5]) let PR.A[5]=1               
+let extweight=((PR.A[6]*specs[1])/PR.A[5])   
+let specs[2]=extweight               
+
+Today$=" ",Today$
+Today$[1,2]=Tim(8) Using "&&"             
+Today$[3,4]=Tim(9) Using "&&"
+Today$[5,6]=Tim(10) Using "&&"
+Let curdat=Today$
+
+let specs[3]=CU.C1[1]    
+let specs[4]=val(keywhse$)       
+let specs[5]=curdat   
+let specs[6]=dept     
+let specs[7]=CU.C1[7]   
+let specs[8]=1        
+let specs[9]=dft_cost 
+let specs[10]=0       
+let specs[11]=0       
+let specs[12]=0       
+
+let specs[13]=sunit 
+let specs[14]=punit 
+let specs[15]=punit 
+
+let specs[16]=0 
+let specs[17]=0 
+let specs[18]=0 
+let specs[19]=0 
+
+
+!Call "price.dl4",fleptr[],specs[],msgdesc$,intco,debug,dlog$
+Call SysPriceCalc(e$,FLEPTR[],SPECS[],MSGDESC$,debug,dlog$,rstr$,exSpecs[])
+If specs[0] goto LoadMe:                     
+
+let ps.l7=specs[16]             !"prior calc. up charge
+let ps.rol0=specs[40]
+! ps.l7 is for upcharge price   - if <0 is $. >=0 is %
+! ps.rol0 is for upcharge cost 
+!ppu                                                                    
+Let CNVTA=specs[20]             !cost/price/qty                           
+Let CNVTU[0]=0                  !current unit                             
+Let CNVTU[1]=sunit              !desired unit                             
+Let CNVTU[2]=2                  !mode 1=qty 2=cost/price                  
+Let ppu=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+!"specs[20] = price in base - convert to price u/m
+let ps.price=specs[20]
+Let CNVTA=specs[20]             !cost/price/qty                         
+Let CNVTU[0]=0                  !current unit                          
+Let CNVTU[1]=punit              !desired unit                          
+Let CNVTU[2]=2                  !mode 1=qty 2=cost/price               
+Let price=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+!netprice                                                               
+let ps.cprice=specs[23]
+Let CNVTA=specs[23]             !cost/price/qty                    
+Let CNVTU[0]=0                  !current unit                      
+Let CNVTU[1]=punit              !desired unit                      
+Let CNVTU[2]=2                  !mode 1=qty 2=cost/price           
+Let netprice=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+! unitcost 
+ps.ucost=specs[17]
+Let CNVTA=specs[17]             !cost/price/qty                    
+Let CNVTU[0]=0                  !current unit                      
+Let CNVTU[1]=punit              !desired unit                      
+Let CNVTU[2]=2                  !mode 1=qty 2=cost/price  
+Let UNITCOST=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+                   
+!cost 
+If specs[40] ! add upcharge to cost
+		if specs[40]<0
+			let specs[17]=specs[17]+abs(specs[40])
+		else
+			let specs[17]=specs[17]+(specs[17]*(specs[40]/100))
+		endif
+endif
+let ps.cost=specs[17]
+Let CNVTA=specs[17]             !cost/price/qty                    
+Let CNVTU[0]=0                  !current unit                      
+Let CNVTU[1]=punit              !desired unit                      
+Let CNVTU[2]=2                  !mode 1=qty 2=cost/price           
+Let cost=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+let netcost=cost
+!futurecost                                                               
+let ps.futurecost=PR.PFCO[0]
+Let CNVTA=PR.PFCO[0]            !pending basecost/price/qty                    
+Let CNVTU[0]=0                  !current unit                      
+Let CNVTU[1]=cunit              !desired unit                      
+Let CNVTU[2]=2                  !mode 1=qty 2=cost/price           
+Let futurecost=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+If PR.PFCO[1] futuredate$ = PDate$(PR.PFCO[1]) else futuredate$ = " "
+
+!  check for last price record                                    
+If fleptr[4,1]                                                    
+	Let LPR=fleptr[4,1]
+	Read Record #LPC,LPR;LP.;                             
+	SPRICE=0 
+	ps.sprice=0
+	
+	IF LP.LPC2[2]<>0 
+		let sprice=unitcost*(1+((LP.lpc2[1]-LP.lpc2[2])/LP.lpc2[2])) 
+		let ps.sprice=unitcost*(1+((LP.lpc2[1]-LP.lpc2[2])/LP.lpc2[2]))
+		if specs[16]
+			if specs[16]<0
+				cnvtu[0]=0;cnvtu[1]=punit;cnvtu[2]=2
+				cnvta=abs(specs[16])
+				Let amount=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+				let sprice=sprice+amount
+				let ps.sprice=ps.sprice+amount
+			else
+				let sprice=sprice+(sprice*(specs[40]/100))
+				let ps.sprice=ps.sprice+(ps.sprice*(specs[40]/100))
+			endif
+		endif
+	endif
+endif                                                             
+
+rem  find out if special price               
+let spcl=0                                   
+if specs[25]>=2 and specs[25]<=4 let spcl=1  
+if specs[25]>=6 and specs[25]<=8 let spcl=1  
+if specs[25]>=11 and specs[25]<=13 let spcl=1
+! from perm price
+if specs[25]>=102 and specs[25]<=104 let spcl=1  
+if specs[25]>=106 and specs[25]<=108 let spcl=1  
+if specs[25]>=111 and specs[25]<=113 let spcl=1
+
+
+Let GPP=0;MUP=0
+If SPRICE 
+   IF P9$[13,13]="M" and LP.LPC2[2]                                        
+      Let MUP=FNR(((LP.LPC2[1]-LP.LPC2[2])/LP.LPC2[2])*100) 
+   Endif                                                               
+   IF P9$[13,13]="G" and LP.LPC2[1]                                        
+      Let GPP=FNR(((LP.LPC2[1]-LP.LPC2[2])/LP.LPC2[1])*100)
+   Endif                                                               
+Endif        
+
+If debugDetail    
+   msg$="doing...price--"+str$(price) \ Call updatelog(debug)   
+   msg$="doing...netprice--"+str$(netprice) \ Call updatelog(debug)   
+   msg$="doing...sprice--"+str$(sprice) \ Call updatelog(debug)   
+   msg$="doing...cost--"+str$(cost) \ Call updatelog(debug)
+   msg$="doing...punit u/m -- "+XUNIT$(punit,CCC) \ Call updatelog(debug)
+   msg$="doing...msgdesc--"+msgdesc$ \ Call updatelog(debug)
+Endif                                                         
+
+
+
+LoadMe: !==============================================================
+If ii<iLimit then
+  !init
+  ps.slsid$      = ""
+  ps.slsname$    = ""
+  ps.custid$     = ""
+  ps.custname$   = ""
+  ps.pricetype$  = ""
+  ps.whse$       = ""
+  ps.prodid$     = ""
+  ps.desc1$      = ""
+  ps.desc2$      = ""
+  ps.vendoritem$ = ""
+  ps.comm$       = ""
+  ps.qtyonhand$  = ""
+  ps.cprice$     = ""
+  ps.sprice$     = ""
+  ps.gpp$        = ""
+  ps.gpp$        = ""
+  ps.cost$       = ""
+  ps.ucost$      = ""
+  ps.futurecost$ = ""
+  ps.futuredate$ = ""
+  ps.msgdesc$    = ""
+
+  !set
+  ps.slsid$      = CU.C1[2] using "####"
+  ps.slsname$    = SALES$
+  ps.custid$     = val(keycust$) using "######"
+  ps.custname$   = CU.A1$[31,60]
+  ps.pricetype$  = CU.C1[7] using "####" 
+  ps.whse$       = val(keywhse$) using "##"
+  ps.prodid$     = PR.A$[140,151]
+  ps.desc1$      = PR.A$[9,38]
+  ps.desc2$      = PR.A$[63,92]
+  ps.vendoritem$ = PR.A$[93,112]
+  ps.comm$       = CMK$[1,4]+" "+CM.D$[1,16]
+  ps.qtyonhand$  = WH.W3[0] using Qmask$+" "+XUNIT$(qunit,CCC)
+  ps.price$     = price using Pmask$+"/"+XUNIT$(punit,CCC)
+  ps.cprice$     = netprice using Pmask$+"/"+XUNIT$(punit,CCC)
+  ps.punit=punit
+  ps.qunit=qunit
+  If sprice then ps.sprice$ = sprice using Pmask$+"/"+XUNIT$(punit,CCC)
+  If mup then    ps.gpp$    = mup using "---#.##% MUP"
+  If gpp then    ps.gpp$    = gpp using "---#.##% G/P"
+  ps.cost$       = cost using Pmask$+"/"+XUNIT$(punit,CCC)
+  ps.ucost$      = unitcost using Pmask$+"/"+XUNIT$(punit,CCC)
+  
+  if specs[24] ps.cost$ = ps.cost$ + " *"  ! means rebatecontract
+  if specs[27] ps.cprice$ = ps.cprice$ + " *" ! means special price contract
+  ps.msgdesc$    = msgdesc$ 
+  If futurecost 
+	ps.futurecost$ = futurecost using Pmask$+"/"+XUNIT$(punit,CCC)
+    ps.futuredate$ = futuredate$
+  else
+	ps.futurecost$ = " "
+	ps.futurecost = 0
+    ps.futuredate$ = " "
+  endif
+  ps.PPU$ = "PERM PRICE FLAG " + CU.PPU$
+  If specs[24]
+	ps.rebatecontract$ = "Rebate contract " + Str$(specs[24])+ " exp. "+pdate$(specs[50])                                                                   
+  Else
+	ps.rebatecontract$ = " "
+  End If                                                                    
+  ! load extended price information
+  if specs[24]
+	eps.rebateContractNo$ = str$(specs[24])
+	eps.rebateContractExpiration$ = pdate$(exSpecs[0])
+  else
+    eps.rebateContractNo$ = " "
+	eps.rebateContractExpiration$ = " "
+  end if
+  if specs[27]
+    eps.priceContractNo$ = str$(specs[27])
+	! eps.priceContractExpiration$ = pdate$(exSpecs[1])
+	eps.priceContractExpiration$ = " "
+  else
+    eps.priceContractNo$ = " "
+	eps.priceContractExpiration$ = " "
+  end if
+  ii=ii+1
+Endif
+ss=0
+
+
+OutEnd: !=============================================================
+if chans=-1 Close #CTLC,#PRC,#CHC,#CMC,#PTC,#CCC,#CUC,#SPPC,#LPC,#WHC
+if chans=-1 Close #BTC,#WIC,#CSC,#SIC,#SMC
+msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+Exit Sub
+Else
+  Temp$=""
+  Call errTrap(pgmName$)
+End Try
+
+Sub updatelog(debug)                                        
+  If not(debug) Exit Sub                                    
+  System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub       
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+
+ss=0
+!ss=spc(10)
+End Sub
+

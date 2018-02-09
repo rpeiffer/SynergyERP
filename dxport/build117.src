@@ -1,0 +1,999 @@
+! build117  - build last price records from QUOTES
+!
+! loadsave -w -n 100,10 -o prog/dxport/build117 src/build117.src
+!
+Rem build117LP  CAPTURES LAST PRICE HISTORY AND WRITES TO LASTPRICEx
+Rem USED TO BE MX201H
+Rem called by quote117 - used to update last price for quotes
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: MAY 13, 2009  15:12:22
+Rem /w2/papermaster/r2005//usr/acct/txc/work/r2005/misc/build117.src (univ2) [txc] {00086}
+Rem  Copyright (c) 2009 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+! rek 9/8/92  add second directory + comm code to first
+! rek 01/21/93  break tables/clean up
+! rek 01/24/94  new directory/fields/move to accept
+! nate 12/9/94  add cost origin and rebate contract #
+! rek 04/20/95  go by line instead of by order
+! kmm 12/10/96  mkbedit and change credit,linerec to chan[],parm[]
+!        now called by mxline if laptop
+! jcs 04/03/1997 - date compare julian
+! zyc 11/30/00  cct142171 remmed out signal in outend: routine
+! 12/08/05rce multi-cust quotes
+! dek 11/29/06 cct210543 add Dir 5 in lastprice.
+! ----------------  notes for rev10 upgrade for Walter E Nelson ---------------
+! used xrev9 program and added in custom code for:
+! 01/12/07 jliu cct211775 - show price in u/m on the quote instead of base
+!                CUSTOM ROUTINES:  "print_cust", "print_old", "Print_new"
+! ----------------------------------------------------------------------------
+
+! h0 - from order header
+! h5 - from order header
+! chan - array of channel numbers (NOT USED IN 227/247!)
+!  0 - ch_roh
+!  1 - ch_rol
+!  2 - ch_lastpr
+!  3 = ch_prod
+!  4 - ch_sproddesc
+!  5 - ch_cont
+!  6-  ch_shiplastpr
+!  7 - ch_ros
+!  8 - ccodes
+!  9 = qoh record #
+! parm - parameters:
+!  0 - credit
+!  1 - linerec
+!
+! 04/2011 - customers using Vendor Item Code as the Product code and issues
+!    with Last Price and NonStocks - as Vendor Item is Nonstk Key
+!    we will convert NonStks to Stock Item but not Stk Item to Nonstk!
+include "src/copyright.inc"
+Declare Intrinsic Sub DateToJulian,FindF,InpBuf,String,Time,VerifyDate
+Declare Intrinsic Function findchannel
+!Option Default Dialect IRIS1
+
+Enter H0[],H5[],REC_LASTPR,LINEREC,CHAN[],dblog$,intco
+If Err 0 Gosub ERR_TRAP
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+dim 1%,lpcurrid,rolcurrid,3%,lpcurrfact,rolcurrfact
+Dim 1%,CH_ROH,CH_ROL,CH_LASTPR,CH_PROD,CH_SPRODDESC
+Dim 1%,L3[3],S2[1],LPC3[4],UN[2],AI,LPEUN[2],EUN[2],HOLD_LPEUN2
+Dim 1%,LPWH,NEW,LPCPT,PPPUSERID,2%,LPCSDT,LPDATE,LPDEPT,PPPCID[1],LPSL
+Dim 1%,LP_SOURCE,pfu1[20]
+Dim 2%,N0,L4[3],X2,L9[1],LPDF,L1,L6[5],LPC1[2],LPR1[3],HA3[2]
+Dim 2%,LCO[1],LPC5[3],LPPCDATE,SYSDATE,JSYSDATE,DT3[1],JODATE,JDATE[1]
+Dim 2%,q0[1],x1[9],prvod[2]
+Dim 2%,LPPPCust,Cust[1]
+Dim 3%,L5[3],LPC4[3],L7[9],S3[17],LPC2[2],OLM[6],LPR[4],PERM[1],LPCURR[1]
+Dim 3%,LPUNIT[1],NETCOST,ROL0,LPFPERM[1],SRN[5],R[99],LPDIR5,a[33]
+Dim 3%,LPUNF[6],UNF[6],V2,V2TMP,VEND,LPLPERM,HLDLPERM,pfu2[6],SLPDIR5
+DIM 3%,LP_PRICE,LP_COST,LP_REBATECOST,LP_CONTRACT,LP_TIME,prvoq[3],InvNum
+Dim 3%,to_master[10] 
+Dim A$[30],A1$[50],S3$[20],LP$[12],P9$[50],COMKEY$[50],P60$[50],P61$[256]
+Dim F$[16],L0$[60],L1$[20],LP2$[84],K13$[60],LPMT$[2],MT$[2],K14$[20]
+Dim X$[20],SYSDATE$[26],K5$[60],CSLK$[14],KEYD5$[40],Msg$[200],dlog$[60]
+Dim Unit$[4],n$[30],pmask$[12],j4$[50],B4Key$[8],Cust$[142]
+Dim PPLOG$[60],3%,PASSINFO[20],PERMLOG[35],Blank$[80]
+Dim 3%,custom_customer$[30]
+Blank$=" ",Blank$
+CH_ROH = CHAN[0]
+CH_ROL = CHAN[1]
+CH_LASTPR = CHAN[2]
+CH_PROD = CHAN[3]
+CH_SPRODDESC = CHAN[4]
+CH_SLLP=chan[6]
+ch_ros=chan[7]
+ch_ccodes = chan[8]
+COID = IntCo ! Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64)
+TRACKPERM = 0
+F$ = "2/permpricelog" + Str$(COID)
+Call FindF(F$,TRACKPERM)
+dlog$=dblog$
+if RTrim$(dlog$)="" let dlog$="/tmp/b117err"
+debug=0 \ if rtrim$(dlog$)<>"" let debug=1
+Call Time(SYSDATE$)
+SYSDATE$[13] = "" \ Call VerifyDate(SYSDATE$,X$,E)
+If Not(E) Let SYSDATE = X$
+SYSDATE$ = SYSDATE Using "&&&&&&"
+Call DateToJulian(1,SYSDATE$,X$,E) \ If E Let X$ = "00000"
+JSYSDATE = X$
+X2 = H0[9] \ Gosub YMD2JUL \ X2 = 0
+JODATE = X2
+!call dxget("u_custom_customer", custom_customer$)
+L1 = LINEREC
+Mat Read #1,19,50;P9$;
+Mat Read #1,60,50;P60$;
+Mat Read #1,61,0;P61$;
+! let p61$[136,136]="N" ! set multicurrency to N
+MAT  READ #1,3;N$;
+MAT  READ #1,115,40;Q0; \ IF Q0[1]<=0 LET Q0[1]=2
+Gosub GET_CUST 
+LET PMASK$="##########" ! "set std size mask 
+LET X=LEN(PMASK$)-Q0[1] \ IF X<0 LET X=Q0[1]
+LET PMASK$[X,X]="."
+
+! DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01) ! "round to 2 decimals
+DEF FNP(X)=SGN(X)*(INT(ABS(X)*10^Q0[1]+.5)/10^Q0[1]) ! price rounding
+Mat read #1,115,60;custom_customer$;
+Custom_customer$=UCase$(Trim$(custom_customer$)) ! from control file
+Search #CH_LASTPR,1,5;KEYD5$,LPDIR5,E
+If Not(E) Let LPDIR5 = 1
+If E Let LPDIR5 = 0
+If P61$[64,64] = "Y" ! "ship list last price (NEED?USING?)
+  ! CH_SLLP = 89;CH_ROS = 9
+  Mat Read #CH_ROS,H0[2],154;SRN;
+  SHLLP = 0 ! don't need - not shiplist
+  If (SRN[3] = 1 Or SRN[3] = 2) And SRN[2] = H0[4] Let SHLLP = 1
+  LPSL = SRN[1]
+  If SHLLP ! "okay - still using Ship List last price
+    v2tmp=findchannel() ! needs a shiplist check!!
+    Read #1,88,2112;K5$[1,16];
+    Ropen #v2tmp,K5$
+    K5$ = H0[4] Using "######";K5$[7,7] = "."
+    K5$[8] = LPSL Using "&&&&&&"
+    Search #v2tmp,2,1;K5$,R[36],E \ If E > 1 Gosub ERR_SEARCH
+    If E Let SHLLP = 0 ! shiplist ng - don't use it
+    Close #v2tmp
+    If SHLLP Let CSLK$ = K5$
+  End If 
+  If SHLLP ! "need the Ship List Last Price file opened for use
+    F$ = "3/SLLSTPRC" + Str$(COID)
+    Call FindF(F$,E)
+    If Not(E)
+      SHLLP = 0
+    Else 
+      If CH_SLLP=0
+		ch_sllp=findchannel()
+		Open #CH_SLLP,F$
+	  Else ! check if actually there (getting be 49)
+		Try
+			x3=chf(ch_sllp)
+		Else ! not really open
+			chan[6]=0
+			Open #ch_sllp,f$
+			Search #ch_sllp,1,5;KEYD5$,SLPDIR5,E
+			If Not(E) Let SLPDIR5 = 1
+			If E Let SLPDIR5 = 0
+		End try
+	  Endif
+    End If 
+  End If ! "of open (or not)
+End If 
+MAIN: Rem "========================== write to LASTPRICEx
+NEW = 0;PASSNO = 0
+SHL_PASS: Rem "if a second pass for ShipList Last Price file is needed
+NEW = 0 
+Gosub GET_ROL
+! If L3[2] > 900 Goto DONE
+If S2[0] = 3 Goto DONE
+If L7[2] = 0 Goto DONE
+!! ABC REPAIR LINE
+IF (H5[7]=21 OR H5[7]=22) AND L3[2]=0 GOTO DONE
+If P61$[25,25] = "N" And Int(S3[16]) = 1 Goto DONE
+If P61$[25,25] = "P" And Fra(S3[16]) Goto DONE
+Rem set up so it thinks doing a perm price rol
+Cust[0] = H0[4] ! "start w/ordering customer  
+If PASSNO <> 2 And LPPPCust And Cust$[138,138] <> "Y"
+  Cust[0] = LPPPCust ! "ALWAYS Group 1st
+End If 
+Bld2Loop: ! " second possible loop
+If PASSNO = 2 Let Cust[0] = H0[4] ! "ONLY ORDERING CUSTOMER ON SHIPLIST
+NEW = 0 
+EUN[2] = 1
+Gosub INIT_VARS
+Gosub CALCNETCOST
+Gosub BUILD_KEY
+If SHLLP And PASSNO = 2 ! "ship list last price
+  Search #CH_SLLP,2,1;A1$,V2,E
+  If Not(E)
+	Mat Read #CH_SLLP,V2,140;LPC4; ! need chk of type
+	IF LPC4[3]=0 AND L3[0]=1 GOTO passDone ! was prod & now nonstk? (DO NOT CHG!)
+	NEW = 0 
+    If A1$[37,40] <> L1$[17,20] Gosub L_8000
+    Goto UPDATE_LASTPRICE
+  End If 
+  If E > 1 Gosub ERR_SEARCH
+Else ! "customer last price
+  Search #CH_LASTPR,2,1;A1$,V2,E
+  If PASSNO <> 2 And E And Cust[0] = LPPPCust Let to_master[0] = -1 !! task66428
+  If Not(E) ! "key found
+    VEND = A1$[31,36];NEW = 0 
+	Mat Read #CH_LASTPR,V2,140;LPC4; ! need chk of type
+	IF LPC4[3]=0 AND L3[0]=1 GOTO passDone ! was prod & now nonstk? (DO NOT CHG!)
+    If A1$[37,40] <> L1$[17,20] Or VEND <> S3[14] Gosub L_8000
+    If Not(LPC4[3]) Gosub LOG_PERMPRICE_BEFORE
+    Goto UPDATE_LASTPRICE
+  End If 
+  If E > 1 Gosub ERR_SEARCH
+End If 
+If CREDIT Or L7[2] < 0 Goto passDONE
+If SHLLP And PASSNO = 2 ! "ship list last price
+  E = 2 \ Search #CH_SLLP,1,0;A1$,V2,E \ If E Gosub ERR_SEARCH
+Else ! "customer last price
+  E = 2 \ Search #CH_LASTPR,1,0;A1$,V2,E \ If E Gosub ERR_SEARCH
+  If PASSNO <> 2 And to_master[0] = -1 And Cust[0] = LPPPCust Let to_master[0] = V2 !! task66428
+End If 
+NEW = 1
+Goto ADDTO_LASTPRICE
+UPDATE_LASTPRICE: Rem READ RECORD
+LPR1[2] = 999999
+If SHLLP And PASSNO = 2 ! "ship list last price
+  Mat Read #CH_SLLP,V2,0;LP$
+  Mat Read #CH_SLLP,V2,16;LPC1
+  Mat Read #CH_SLLP,V2,28;LPC2
+  Mat Read #CH_SLLP,V2,46;LPC3
+  Mat Read #CH_SLLP,V2,56;LP2$
+  Mat Read #CH_SLLP,V2,140;LPC4
+  Mat Read #CH_SLLP,V2,164;LPMT$
+  Read #CH_SLLP,V2,166;AI
+  Mat Read #CH_SLLP,V2,274;LPWH
+  Mat Read #CH_SLLP,V2,168;LPR
+  Mat Read #CH_SLLP,V2,198;LPR1
+  Mat Read #CH_SLLP,V2,214;LPEUN
+  Mat Read #CH_SLLP,V2,220;LPUNF
+  Mat Read #CH_SLLP,V2,262;PERM
+  Mat Read #CH_SLLP,V2,276;LPC5
+  Read #CH_SLLP,V2,292;LPPCDATE
+  Read #CH_SLLP,V2,296;LPLPERM
+  Mat Read #CH_SLLP,V2,302;LPCURR
+  Read #CH_SLLP,V2,314;LPCPT
+  Read #CH_SLLP,V2,316;LPCSDT
+  Mat Read #CH_SLLP,V2,320;LPDEPT
+  Mat Read #CH_SLLP,V2,324;LPFPERM
+  Mat Read #CH_SLLP,V2,336;PPPUSERID
+  Mat Read #CH_SLLP,V2,340;LPUNIT
+  Mat Read #CH_SLLP,V2,352;PPPCID
+  Mat Read #CH_SLLP,V2,424;PRVOD
+  Mat Read #CH_SLLP,V2,436;PRVOQ
+  Mat Read #CH_SLLP,V2,468;InvNum
+  Mat Read #ch_sllp,v2,474;lpcurrid;
+  Mat Read #ch_sllp,v2,476;lpcurrfact;
+  IF LPC4[3]<>0 AND L3[0]=0 ! WAS NONSTK & NOW ISN'T (it happens! hathaway)
+	LET LP$[1,12]=L1$[1,12]+Blank$ ! SWITCH TO PRODCODE
+  ENDIF
+  IF LPC4[3]=0 AND L3[0]=1 GOTO DONE ! was prod & now nonstk? (DO NOT CHG!)
+Else 
+  Mat Read #CH_LASTPR,V2,0;LP$
+  Mat Read #CH_LASTPR,V2,16;LPC1
+  Mat Read #CH_LASTPR,V2,28;LPC2
+  Mat Read #CH_LASTPR,V2,46;LPC3
+  Mat Read #CH_LASTPR,V2,56;LP2$
+  Mat Read #CH_LASTPR,V2,140;LPC4
+  Mat Read #CH_LASTPR,V2,164;LPMT$
+  Read #CH_LASTPR,V2,166;AI
+  Mat Read #CH_LASTPR,V2,274;LPWH
+  Mat Read #CH_LASTPR,V2,168;LPR
+  Mat Read #CH_LASTPR,V2,198;LPR1
+  Mat Read #CH_LASTPR,V2,214;LPEUN
+  Mat Read #CH_LASTPR,V2,220;LPUNF
+  Mat Read #CH_LASTPR,V2,262;PERM
+  Mat Read #CH_LASTPR,V2,276;LPC5
+  Read #CH_LASTPR,V2,292;LPPCDATE
+  Read #CH_LASTPR,V2,296;LPLPERM
+  Mat Read #CH_LASTPR,V2,302;LPCURR
+  Read #CH_LASTPR,V2,314;LPCPT
+  Read #CH_LASTPR,V2,316;LPCSDT
+  Read #CH_LASTPR,V2,320;LPDEPT
+  Mat Read #CH_LASTPR,V2,324;LPFPERM
+  Mat Read #CH_LASTPR,V2,336;PPPUSERID
+  Mat Read #CH_LASTPR,V2,340;LPUNIT
+  Mat Read #CH_LASTPR,V2,352;PPPCID
+  Mat Read #CH_LASTPR,V2,424;PRVOD
+  Mat Read #CH_LASTPR,V2,436;PRVOQ
+  Mat Read #CH_LASTPR,V2,468;InvNum
+  Mat Read #ch_lastpr,v2,474;lpcurrid;
+  Mat Read #ch_lastpr,v2,476;lpcurrfact;
+  IF LPC4[3]<>0 AND L3[0]=0 ! WAS NONSTK & NOW ISN'T
+	LET LP$[1,12]=L1$[1,12]+Blank$ ! SWITCH TO PRODCODE
+  ENDIF
+  IF LPC4[3]=0 AND L3[0]=1 GOTO DONE ! was stk & now nonstk? (DO NOT CHG!)
+End If 
+REC_LASTPR = V2
+if custom_customer$="WENELSON"
+	gosub Print_cust: !
+	IF NOT(L3[0]) ! "stock item       
+		LET R[6]=L4[0] \ GOSUB read_prod: 
+	else
+		gosub L_30000:
+	endif
+	gosub print_old:  ! this prints the existing records info
+Endif
+If P60$[33,33] = "Y" And EUN[2] Let HLDLPERM = PERM[0]
+!if custom_customer$ = "CHUDY" ! all customers need the retain GTM% code
+	HOLD_LPEUN2 = LPEUN[2]
+!else
+!	HOLD_LPEUN2 = 0
+!end if
+If (CREDIT Or L7[2] < 0) Gosub L_6300 \ Goto DONE ! sls only
+If SHLLP And PASSNO = 2 ! "ship list last price
+  K13$ = " ",K13$
+  K13$ = A1$[1,16]
+  K13$[17,22] = 999999 - LPR1[2] Using "######"
+  K13$[23,46] = A1$[17,40]
+  Search #CH_SLLP,5,3;K13$,V2,E \ If E Gosub ERR_SEARCH
+Else 
+  K13$ = " ",K13$
+  K13$ = A1$[1,10]
+  K13$[11,16] = 999999 - LPR1[2] Using "######"
+  K13$[17,46] = A1$[11,40]
+  K13$[47] = ""
+  Search #CH_LASTPR,5,3;K13$,V2,E \ If E Gosub ERR_SEARCH
+End If 
+ADDTO_LASTPRICE: Rem - Starts here for new lp recs
+X2 = LPC1[2] \ Gosub YMD2JUL \ X2 = 0
+JDATE[0] = X2
+If PASSNO <> 2 And LPPPCust And LPPPCust = Cust[0] ! "not sl and doing MASTER  task66428 section
+  If JODate <= JDate[0] ! "cct 191735 Date check ONLY (Order Date<=LPF Date)
+    If P60$[32,32] = "Y" Let LPR[3] = LPR[3] + L7[4];LPR[4] = LPR[4] + L7[4] ! "mtd/ytd sales units
+    Goto PPassDone ! "only update sales BYPASS REST!!
+  End If 
+End If 
+If custom_customer$<>"WENELSON" ! std
+	If JODATE <= JDATE[0] And H0[7] <= LPC1[1] Goto L_2405
+Endif
+LPC1[1] = H0[7]
+invnum=0
+if custom_customer$="WENELSON" ! custom - no order# chk
+	IF JODate<=JDate[0] GOTO L_2405:
+Endif
+! prev ord dates & qtys
+let prvod[2]=prvod[1]
+let prvod[1]=prvod[0]
+let prvod[0]=lpr[2]
+LPR[2] = LPC1[2]
+LPC1[2] = H0[9]
+let prvoq[3]=prvoq[2]
+let prvoq[2]=prvoq[1]
+let prvoq[1]=prvoq[0]
+let prvoq[0]=lpc2[0]
+LPC2[0] = L7[2]
+L_2405: Rem ! makes sense on quote to last price to not update last ord/date
+LPDF = 0
+If LPC2[1] If LPC2[1] <> OLM[3] Let LPDF = 1
+LPC2[1] = OLM[3]
+LPC2[2] = NETCOST
+LPUNIT[0] = L5[2]
+LPUNIT[1] = L5[1]
+LPC5[0] = LCO[0]
+LPC5[1] = LCO[1]
+If P60$[42,42] = "N" And NEW Let LPC5[3] = L6[5] ! existing? leave it
+IF P60$[42,42]<>"N" AND NEW LET LPC5[3]=-2 ! system calc next time
+LPC3[0] = L9[0] \ If Not(LPC3[0]) Let LPC3[0] = -7
+IF L9[0]>82 AND L9[0]<115 LET LPC3[0]=L9[0]-100           
+IF NOT(LPC3[0]) LET LPC3[0]=-7 ! "price type "IF" temporary      
+If P9$[44,44] = "Y" Let LPDEPT = L9[1] Else Let LPDEPT = 0
+LPC3[2] = UN[0];LPC3[3] = UN[1];LPC3[4] = UN[2]
+LP2$[1,20] = S3$[1,20];LP2$[21,50] = L0$[1,30]
+LPC4 = L3[2] \ LPC4[1] = S3[14]
+LPC4[2] = L3[3] \ LPC4[3] = L3[0]
+LP2$[51,80] = L0$[31,60];LP2$[81,84] = L1$[17,20]
+LPMT$ = MT$
+AI = Int(S3[16])
+LPR[0] = L7[9]
+LPR[1] = OLM[2] \ Gosub L_6100
+LPC1[1] = H0[7]
+LPR1[2] = 999999
+if p61$[136,136]="Y"
+	let lpcurrid=rolcurrid
+	let lpcurrfact=rolcurrfact
+else
+	let lpcurrid=0
+	let lpcurrfact=0
+endif
+! LPEUN[2] = -7 ! price type  do it in _6100:    
+! PERM[0] = LPC2[1] ! price      
+! PERM[1] = LPC2[2] ! cost 
+PPassDone: ! "need write & rebuild dir 3!!  task66428 section
+If PASSNO <> 2
+  !! writing child record
+  to_master[1] = perm[0]
+  to_master[2] = perm[1]
+  to_master[3] = LPEUN[2]
+  to_master[4] = LPC5[2]
+End If 
+If SHLLP And PASSNO = 2 ! "ship list last price
+  Mat Write #CH_SLLP,V2,0;LP$
+  Mat Write #CH_SLLP,V2,12;LPSL
+  Mat Write #CH_SLLP,V2,16;LPC1
+  Mat Write #CH_SLLP,V2,28;LPC2
+  Mat Write #CH_SLLP,V2,46;LPC3
+  Mat Write #CH_SLLP,V2,56;LP2$
+  Mat Write #CH_SLLP,V2,140;LPC4
+  Mat Write #CH_SLLP,V2,164;LPMT$
+  Write #CH_SLLP,V2,166;AI
+  Mat Write #CH_SLLP,V2,168;LPR
+  Mat Write #CH_SLLP,V2,198;LPR1
+  Mat Write #CH_SLLP,V2,214;LPEUN
+  Mat Write #CH_SLLP,V2,220;LPUNF
+  Mat Write #CH_SLLP,V2,262;PERM
+  Mat Write #CH_SLLP,V2,274;LPWH
+  Mat Write #CH_SLLP,V2,276;LPC5
+  Write #CH_SLLP,V2,292;LPPCDATE
+  Write #CH_SLLP,V2,296;LPLPERM
+  Mat Write #CH_SLLP,V2,302;LPCURR
+  Write #CH_SLLP,V2,314;LPCPT
+  Write #CH_SLLP,V2,316;LPCSDT
+  Mat Write #CH_SLLP,V2,320;LPDEPT
+  Mat Write #CH_SLLP,V2,324;LPFPERM
+  Mat Write #CH_SLLP,V2,336;PPPUSERID
+  Mat Write #CH_SLLP,V2,340;LPUNIT
+  Mat Write #CH_SLLP,V2,352;PPPCID;
+  Mat Write #CH_SLLP,V2,360;CSLK$;
+  Mat Write #CH_SLLP,V2,424;PRVOD;
+  Mat Write #CH_SLLP,V2,436;PRVOQ;
+  Mat Write #CH_SLLP,V2,460;B4Key$;
+  Mat Write #CH_SLLP,V2,468;InvNum;
+  Mat Write #ch_sllp,v2,474;lpcurrid;
+  Mat Write #ch_sllp,v2,476;lpcurrfact;
+Else ! "customer last price
+  Mat Write #CH_LASTPR,V2,0;LP$
+  Mat Write #CH_LASTPR,V2,12;LPDF
+  Mat Write #CH_LASTPR,V2,16;LPC1
+  Mat Write #CH_LASTPR,V2,28;LPC2
+  Mat Write #CH_LASTPR,V2,46;LPC3
+  Mat Write #CH_LASTPR,V2,56;LP2$
+  Mat Write #CH_LASTPR,V2,140;LPC4
+  Mat Write #CH_LASTPR,V2,164;LPMT$
+  Write #CH_LASTPR,V2,166;AI
+  Mat Write #CH_LASTPR,V2,168;LPR
+  Mat Write #CH_LASTPR,V2,198;LPR1
+  Mat Write #CH_LASTPR,V2,214;LPEUN
+  Mat Write #CH_LASTPR,V2,220;LPUNF
+  Mat Write #CH_LASTPR,V2,262;PERM
+  Mat Write #CH_LASTPR,V2,274;LPWH
+  Mat Write #CH_LASTPR,V2,276;LPC5
+  Write #CH_LASTPR,V2,292;LPPCDATE
+  Write #CH_LASTPR,V2,296;LPLPERM
+  Mat Write #CH_LASTPR,V2,302;LPCURR
+  Write #CH_LASTPR,V2,314;LPCPT;
+  Write #CH_LASTPR,V2,316;LPCSDT;
+  Write #CH_LASTPR,V2,320;LPDEPT;
+  Mat Write #CH_LASTPR,V2,324;LPFPERM
+  Mat Write #CH_LASTPR,V2,336;PPPUSERID
+  Mat Write #CH_LASTPR,V2,340;LPUNIT
+  Mat Write #CH_LASTPR,V2,352;PPPCID;
+	! because of the fact this updates last price from quote
+	! reps may be updating pricing they immediately want in
+	! place so init LP_ stuff
+	! if new ! only to clear out the vars do not write for recs on file
+	  mat write #ch_lastpr,v2,378;LP_PRICE
+	  mat write #ch_lastpr,v2,384;LP_COST 
+	  mat write #ch_lastpr,v2,390;LP_REBATECOST 
+	  mat write #ch_lastpr,v2,402;LP_TIME 
+	  mat write #ch_lastpr,v2,416;LP_SOURCE;
+	  mat write #ch_lastpr,v2,418;LP_CONTRACT;
+    ! endif
+  Mat Write #CH_LASTPR,V2,424;PRVOD;
+  Mat Write #CH_LASTPR,V2,436;PRVOQ;
+  Mat Write #CH_LASTPR,V2,460;B4Key$;
+  Mat Write #CH_LASTPR,V2,468;InvNum;
+  Mat Write #ch_lastpr,v2,474;lpcurrid;
+  Mat Write #ch_lastpr,v2,476;lpcurrfact;
+  If P60$[33,33] = "Y" If Not(LPC4[3]) !if perm price flag not non stock
+    Gosub LOG_PERMPRICE_AFTER
+  End If 
+End If 
+REC_LASTPR = V2
+if custom_customer$="WENELSON"
+	if new gosub print_cust:
+	IF NOT(L3[0]) ! "stock item       
+		LET R[6]=L4[0] \ GOSUB read_prod: 
+	else
+		gosub L_30000:
+	endif
+	gosub print_new:  ! print new lastprice info
+Endif
+If NEW Gosub L_6400
+If SHLLP And PASSNO = 2 ! "ship list last price
+  K13$ = " ",K13$;K13$ = A1$[1,16];K13$[17,22] = 999999 - LPR1[2] Using "######"
+  K13$[23,46] = A1$[17,40]
+  Search #CH_SLLP,4,3;K13$,V2,E \ If E Gosub ERR_SEARCH
+Else ! "customer last price
+  K13$ = " ",K13$;K13$ = A1$[1,10];K13$[11,16] = 999999 - LPR1[2] Using "######"
+  K13$[17,46] = A1$[11,40];K13$[47] = ""
+  Search #CH_LASTPR,4,3;K13$,V2,E \ If E Gosub ERR_SEARCH
+End If 
+REC_LASTPR = V2
+PassDone: ! "done with pass
+If PASSNO <> 2
+  If LPPPCust <> 0
+    If Cust$[138,138] <> "Y" ! "needs second cust pass
+      If Cust[0] = LPPPCust ! "same customer as group, so do ordering cust now
+        If LPEUN[2] And perm[0] ! "has a perm price
+          HLPEUN[2] = LPEUN[2];HldPerm[0] = perm[0];HldPerm[1] = perm[1] ! "retain grp
+        Else 
+          HLPEUN[2] = 0;HldPerm[0] = 0;HldPerm[1] = 0 ! "NO Perm Info?
+        End If 
+        Cust[0] = H0[4] ! "now ordering cust #
+        Goto Bld2Loop ! "2nd cust update 
+      End If 
+    End If 
+  End If 
+End If 
+If PASSNO <> 2 And to_master[0] > 0 And to_master[3] And to_master[1] And Cust[0] <> LPPPCust And LPPPCust <> 0
+  !! need to write perm price to master
+  Mat Read #CH_LASTPR,to_master[0],214;LPEUN
+  Mat Read #CH_LASTPR,to_master[0],262;perm
+  Mat Read #CH_LASTPR,to_master[0],276;LPC5
+  perm[0] = to_master[1]
+  perm[1] = to_master[2]
+  LPEUN[2] = to_master[3]
+  LPC5[2] = to_master[4]
+  Mat Write #CH_LASTPR,to_master[0],214;LPEUN
+  Mat Write #CH_LASTPR,to_master[0],262;perm
+  Mat Write #CH_LASTPR,to_master[0],276;LPC5;
+End If 
+Goto DONE
+BUILD_KEY: Rem BUILD KEY FOR DIR 1
+A1$ = " ",A1$;A1$[1,6] = Cust[0] Using "######" 
+If P9$[44,44] = "Y" Let A1$[7,10] = L9[1] Using "####" Else Let A1$[7,10] = "   0"
+A1$[11,22] = L1$[1,12]
+A1$[23,30] = "        "
+If L3[0] And S3$[1,3] <> "   " ! "non stock
+  K14$ = " ",K14$;K14$[1,20] = S3$[1,20]
+  Search #CH_PROD,2,1;K14$,V2,E \ If E > 2 Gosub ERR_SEARCH
+  If E ! no prod with venditem
+    A1$[11,30] = S3$[1,20]
+	mat pfu1=zer \ pfu1[0]=0
+		mat pfu2=zer \ pfu2[0]=0
+		mat a=zer \ a[0]=0
+  else
+		mat read #ch_prod,v2,256;a
+		mat read #ch_prod,v2,512;pfu1
+		mat read #ch_prod,v2,554;pfu2;
+  End If ! if there is - use Nstk prod
+End If 
+A1$[31] = ""
+If SHLLP And PASSNO = 2 ! "on the Ship List pass (Use A1$, then rebuild)
+  K5$ = " ",K5$;K5$[1,6] = A1$[1,6]
+  K5$[7,12] = LPSL Using "&&&&&&"
+  If P9$[44,44] = "Y" Let K5$[13,16] = L9[1] Using "####" Else Let K5$[13,16] = "   0"
+  K5$[17] = A1$[11]
+  A1$ = " ",A1$;A1$ = K5$
+End If 
+Return 
+INIT_VARS: Rem "=============================== clear variables
+LP$ = " ",LP$;LP2$ = " ",LP2$;LPMT$ = " ",LPMT$
+For X = 0 To 3 \ LPC4[X] = 0 \ Next X
+For I = 0 To 6
+  If I < 3 Let LPC1[I] = 0;LPC2[I] = 0;LPEUN[I] = 0;prvod[i]=0
+  If I < 4 Let LPR1[I] = 0;prvoq[i]=0
+  If I < 5 Let LPR[I] = 0;LPC3[I] = 0
+  If I < 7 Let LPUNF[I] = 0
+  If I < 2 Let LPFPERM[I] = 0;PPPCID[I] = 0;LPUNIT[I] = 0
+Next I
+AI = 0;LPDF = 0;PERM[0] = 0;PERM[1] = 0;LPC5[0] = 0;LPC5[1] = 0;LPC5[2] = 0;LPC5[3] = 0
+lpc1[0] = Cust[0] \ lp$[1,12] = L1$[1,12] 
+LPCURR[0] = 0;LPCURR[1] = 0;LPCPT = 0;LPCSDT = 0;PPPUSERID = 0
+LPUNIT[0] = 0;LPUNIT[1] = 0;InvNum=0
+B4key$=blank$
+Return 
+L_6100: Rem more variable assignments
+LPR1[0] = L6[4];LPR1[1] = L6[2]
+LPR1[2] = 999999
+If L3[0] And HA3[1] Let LPR1[3] = HA3[1]
+For I = 0 To 5
+  If I < 2 Let LPEUN[I] = EUN[I]
+  LPUNF[I] = UNF[I]
+Next I
+LPWH = L4[3]
+If PASSNO <> 2 And LPPPCust And Cust[0] <> LPPPCust ! "move in Group LP PP data
+  If HLPEUN[2] And HldPerm[0] ! "group has Perm Info
+    perm[0] = HldPerm[0];perm[1] = HldPerm[1];LPEUN[2] = HLPEUN[2] !"saved from grp
+  End If ! "if no grp perm info - just leave ordering as is
+End If 
+If P60$[33,33] = "Y" And EUN[2] ! "new permanent price
+  PERM[0] = 0;PERM[1] = 0;LPEUN[2] = 0
+  If L9[0] = -7 Let LPEUN[2] = L9[0];PERM[0] = LPC2[1] ! L5[2] ! net or unit price?
+  If L9[0] = 10 Let LPEUN[2] = L9[0];PERM[0] = L6[0]
+  If L9[0] = 14 And LPC2[1] Let LPEUN[2] = L9[0];PERM[0] = FNR(((LPC2[1] - LPC2[2]) / LPC2[1]) * 100) ! gtm
+  If L9[0] = 9 Let LPEUN[2] = L9[0];PERM[0] = Int(Fra(L7[9]) * 100)
+  If L9[0] <= -1 And L9[0] >= -6 Let LPEUN[2] = L9[0];PERM[0] = Abs(LPEUN[2])
+  If L9[0] <= -8 And L9[0] >= -17 Let LPEUN[2] = L9[0];PERM[0] = Abs(LPEUN[2] + 7)
+  if HOLD_LPEUN2 = 14 and LPC2[1]
+	! OK - we held the prior permanent price type and it's a gtm%
+	! if this is the case, this customer wants to retain permanent
+	! price as a gtm no matter what quote has?!
+	LPEUN[2] = HOLD_LPEUN2
+	PERM[0] = FNR(((LPC2[1] - LPC2[2]) / LPC2[1]) * 100) ! "gtm %
+  else
+	if custom_customer$ = "CHUDY" AND LPC2[1] ! chudy - ALL ARE GTM%
+		! chudy always wants gtm % pricing
+		LPEUN[2] = 14
+		PERM[0] = FNR(((LPC2[1] - LPC2[2]) / LPC2[1]) * 100) ! "gtm %
+	!else ! use what is calc'd above!
+	!	LPEUN[2] = -7 ! price type      
+	!	PERM[0] = LPC2[1] ! price  ! USE THE CODE ABOVE!!    
+	end if
+  end if
+  If Not(LPEUN[2]) Or Not(PERM[0]) Let PERM[0] = 0;LPEUN[2] = 0
+  If PERM[0] And PERM[0] <> HLDLPERM ! "PERM PRICE CHANGED (ALL TYPES)
+    If Not(CREDIT) And L7[2] > 0 Let LPLPERM = HLDLPERM;LPPCDATE = JSYSDATE
+  End If 
+  If LPEUN[2] Let PERM[1] = L5[1];LPC5[2] = LCO[0]
+End If 
+Return 
+L_6300: Rem ADJUST SALES FOR CREDIT
+If P60$[32,32] <> "Y" Goto L_6340
+If SHLLP And PASSNO = 2 ! "ship list last price
+  Mat Write #CH_SLLP,V2,168;LPR;
+Else ! "customer last price
+  Mat Write #CH_LASTPR,V2,168;LPR;
+End If 
+L_6340: Return 
+L_6400: Rem BUILD DIRS 1,2,4 FOR NEW RECORD
+If SHLLP And PASSNO = 2 ! "ship list last price
+  A1$[37,40] = LP2$[81,84]
+  Search #CH_SLLP,4,1;A1$,V2,E \ If E Gosub ERR_SEARCH
+  K13$ = " ",K13$;K13$ = A1$[1,16] + A1$[37,40] + A1$[17,36]
+  Search #CH_SLLP,4,2;K13$,V2,E \ If E Gosub ERR_SEARCH
+  COMKEY$ = " ",COMKEY$;COMKEY$[1,6] = A1$[1,6]
+  COMKEY$[7,30] = A1$[13,36]
+  COMKEY$[31,36] = A1$[7,12]
+  COMKEY$[37,40] = A1$[37,40]
+  Rem "so ends up same as cust lpr dir 1!
+  K13$ = COMKEY$
+  Search #CH_SLLP,4,4;K13$,V2,E \ If E Gosub ERR_SEARCH
+  If SLPDIR5 !if the 5th dir exists
+    K13$ = " ",K13$;K13$[1,20] = A1$[17,36] ! prod
+    K13$[21,36] = A1$[1,16];K13$[37] = A1$[37] ! cust/sl;commod 
+    Search #CH_SLLP,4,5;K13$,V2,E \ If E Gosub ERR_SEARCH
+  End If 
+Else ! "customer Last Price
+  A1$[31,36] = LPC4[1] Using "######"
+  A1$[37,40] = LP2$[81,84]
+  Search #CH_LASTPR,4,1;A1$,V2,E \ If E Gosub ERR_SEARCH
+  K13$ = " ",K13$;K13$ = A1$[1,10] + A1$[37,40] + A1$[11,36]
+  Search #CH_LASTPR,4,2;K13$,V2,E \ If E Gosub ERR_SEARCH
+  K13$ = " ",K13$;K13$[1,10] = A1$[31,40]
+  K13$[11,30] = A1$[11,30];K13$[31] = A1$[1,10]
+  Search #CH_LASTPR,4,4;K13$,V2,E \ If E Gosub ERR_SEARCH
+  If LPDIR5 ! New for rev9, directory 5!
+    KEYD5$ = " ",KEYD5$
+    KEYD5$[1,30] = K13$[11,40]
+    KEYD5$[31,40] = K13$[1,10]
+    Search #CH_LASTPR,4,5;KEYD5$,V2,E \ If E Gosub ERR_SEARCH
+  End If 
+End If 
+Return 
+GET_ROL: Rem "===================================== order line
+Mat Read #CH_ROL,L1,8;L3;
+Mat Read #CH_ROL,L1,16;L4;
+Mat Read #CH_ROL,L1,32;L5
+Mat Read #CH_ROL,L1,56;L6
+Mat Read #CH_ROL,L1,80;L0$;
+Mat Read #CH_ROL,L1,140;L1$;
+Mat Read #CH_ROL,L1,160;L9;
+Mat Read #CH_ROL,L1,250;UN;
+Mat Read #CH_ROL,L1,256;S2;
+Mat Read #CH_ROL,L1,168;L7;
+Mat Read #CH_ROL,L1,260;S3;
+Mat Read #CH_ROL,L1,368;MT$;
+Mat Read #CH_ROL,L1,370;S3$;
+Mat Read #CH_ROL,L1,404;OLM;
+Mat Read #CH_ROL,L1,446;EUN;
+Mat Read #CH_ROL,L1,452;UNF;
+Mat Read #CH_ROL,L1,494;LCO;
+Mat Read #CH_ROL,L1,564;ROL0;
+Mat Read #ch_rol,l1,624;rolcurrid;
+Mat Read #ch_rol,l1,626;rolcurrfact;
+!! ABC REPAIR LINE - DO NOT TRY TO READ N/S FILE
+IF (H5[7]=21 OR H5[7]=22) AND L3[2]=0 RETURN    
+If L3[0] And S2[0] <> 3 Mat Read #CH_SPRODDESC,L4[0],120;HA3;
+Return 
+L_8000: Rem COMMODITY CHANGE
+If CREDIT Or L7[2] < 0 Return 
+If SHLLP And PASSNO = 2 ! "ship List Last Price
+  Mat Read #CH_SLLP,V2,56;LP2$
+  Mat Read #CH_SLLP,V2,140;LPC4
+  Mat Read #CH_SLLP,V2,198;LPR1
+  V2TMP = V2
+  COMKEY$ = " ",COMKEY$
+  COMKEY$[1,40] = A1$[1,40]
+  Search #CH_SLLP,5,1;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  COMKEY$[1,16] = A1$[1,16];COMKEY$[17,20] = A1$[37,40]
+  COMKEY$[21,40] = A1$[17,36]
+  Search #CH_SLLP,5,2;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  COMKEY$[1,16] = A1$[1,16];COMKEY$[17,22] = 999999 - LPR1[2] Using "######"
+  COMKEY$[23,46] = A1$[17,40]
+  Search #CH_SLLP,5,3;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  COMKEY$ = " ",COMKEY$;COMKEY$[1,6] = A1$[1,6]
+  COMKEY$[7,30] = A1$[13,36]
+  COMKEY$[31,36] = A1$[7,12]
+  COMKEY$[37,40] = A1$[37,40]
+  Rem "so ends up same as cust lpr dir 1!
+  Search #CH_SLLP,5,4;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  If SLPDIR5 !if the 5th dir exsists
+    COMKEY$ = " ",COMKEY$;COMKEY$[1,20] = A1$[17,36]
+    COMKEY$[21,36] = A1$[1,16];COMKEY$[37] = A1$[37]
+    Search #CH_SLLP,5,5;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  End If 
+  LP2$[81,84] = L1$[17,20];LPC4[1] = S3[14]
+  Mat Write #CH_SLLP,V2,56;LP2$
+  Mat Write #CH_SLLP,V2,140;LPC4
+Else ! "customer Last Price
+  Mat Read #CH_LASTPR,V2,56;LP2$
+  Mat Read #CH_LASTPR,V2,140;LPC4
+  Mat Read #CH_LASTPR,V2,198;LPR1
+  V2TMP = V2
+  COMKEY$ = " ",COMKEY$
+  COMKEY$[1,40] = A1$[1,40]
+  Search #CH_LASTPR,5,1;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  COMKEY$[1,10] = A1$[1,10];COMKEY$[11,14] = A1$[37,40]
+  COMKEY$[15,40] = A1$[11,36]
+  Search #CH_LASTPR,5,2;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  COMKEY$[1,10] = A1$[1,10];COMKEY$[11,16] = 999999 - LPR1[2] Using "######"
+  COMKEY$[17,46] = A1$[11,40]
+  Search #CH_LASTPR,5,3;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  COMKEY$ = " ",COMKEY$;COMKEY$[1,10] = A1$[31,40]
+  COMKEY$[11,30] = A1$[11,30];COMKEY$[31] = A1$[1,10]
+  Search #CH_LASTPR,5,4;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  If LPDIR5 ! New for rev9, directory 5!
+    KEYD5$ = " ",KEYD5$
+    KEYD5$[1,30] = COMKEY$[11,40]
+    KEYD5$[31,40] = COMKEY$[1,10]
+    Search #CH_LASTPR,5,5;KEYD5$,V2,E \ If E Gosub ERR_SEARCH
+  End If 
+  LP2$[81,84] = L1$[17,20];LPC4[1] = S3[14]
+  Mat Write #CH_LASTPR,V2,56;LP2$
+  Mat Write #CH_LASTPR,V2,140;LPC4
+End If 
+COMKEY$ = " ",COMKEY$
+If SHLLP And PASSNO = 2 ! "ship list last price
+  A1$[37,40] = L1$[17,20]
+  COMKEY$[1,40] = A1$[1,40]
+  Search #CH_SLLP,4,1;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  COMKEY$[1,16] = A1$[1,16];COMKEY$[17,20] = A1$[37,40]
+  COMKEY$[21,40] = A1$[17,36]
+  Search #CH_SLLP,4,2;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  COMKEY$[1,16] = A1$[1,16];COMKEY$[17,22] = 999999 - LPR1[2] Using "######"
+  COMKEY$[23,46] = A1$[17,40]
+  Search #CH_SLLP,4,3;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  COMKEY$ = " ",COMKEY$;COMKEY$[1,6] = A1$[1,6]
+  COMKEY$[7,30] = A1$[13,36]
+  COMKEY$[31,36] = A1$[7,12]
+  COMKEY$[37,40] = A1$[37,40]
+  Rem "so ends up same as cust lpr dir 1!
+  Search #CH_SLLP,4,4;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  If SLPDIR5 ! if the 5th dir exsists
+    COMKEY$ = " ",COMKEY$;COMKEY$[1,20] = A1$[17,36]
+    COMKEY$[21,36] = A1$[1,16];COMKEY$[37] = A1$[37]
+    Search #CH_SLLP,4,5;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  End If 
+Else ! "customer Last Price
+  A1$[31,36] = LPC4[1] Using "######";A1$[37,40] = L1$[17,20];A1$[41] = ""
+  COMKEY$[1,40] = A1$[1,40]
+  Search #CH_LASTPR,4,1;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  COMKEY$[1,10] = A1$[1,10];COMKEY$[11,14] = A1$[37,40]
+  COMKEY$[15,40] = A1$[11,36]
+  Search #CH_LASTPR,4,2;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  COMKEY$[1,10] = A1$[1,10];COMKEY$[11,16] = 999999 - LPR1[2] Using "######"
+  COMKEY$[17,46] = A1$[11,40]
+  Search #CH_LASTPR,4,3;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  COMKEY$ = " ",COMKEY$;COMKEY$[1,10] = A1$[31,40]
+  COMKEY$[11,30] = A1$[11,30];COMKEY$[31] = A1$[1,10]
+  Search #CH_LASTPR,4,4;COMKEY$,V2,E \ If E Or V2 <> V2TMP Gosub ERR_SEARCH
+  If LPDIR5 ! New for rev9, directory 5!
+    KEYD5$ = " ",KEYD5$
+    KEYD5$[1,30] = COMKEY$[11,40]
+    KEYD5$[31,40] = COMKEY$[1,10]
+    Search #CH_LASTPR,4,5;KEYD5$,V2,E \ If E Gosub ERR_SEARCH
+  End If 
+End If 
+Return 
+NUM2DATE: Rem *UNPACK DATE  X2 TO X$      V1.0  4/04/84  G.DOSCHER
+X$ = " ",X$ \ X$[10] = ""
+X$[1,3] = Int(X2 / 10 ^ 2 - Int(X2 / 10 ^ 4) * 10 ^ 2) + 10 ^ 2 Using "###"
+X$[4,6] = Fra(X2 / 10 ^ 2) * 10 ^ 2 + 10 ^ 2 Using "###"
+X$[7,9] = Int(X2 / 10 ^ 4) + 10 ^ 2 Using "###"
+X$[4,4] = "/" \ X$[7,7] = "/" \ X$ = X$[2]
+If Not(X2) Let X$ = "        "
+Return 
+DATE2NUM: Rem *PACK DATE    X$ TO X2      V1.0  4/04/84  G.DOSCHER
+X2 = X$[4,5] \ X1 = X$[1,2] \ X2 = X2 + X1 * 10 ^ 2
+X1 = X$[7,8] \ X2 = X2 + X1 * 10 ^ 4
+Return 
+JUL2DATE: Rem REM DATE JULIAN X2 TO X$
+DT3[0] = X2;FLAG = 1;X$ = " "
+Call "JULIANUTIL",DT3[],X$,FLAG
+Return 
+YMD2JUL: Rem  REM  CONVERT YYMMDD TO JULIAN (RETURN=NOGOOD, +1=OKAY)
+If X2 <= 0 Return 
+X$ = X2 Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Return 
+X2 = X$[1,5]
+Return 1
+JUL2YMD: Rem  REM CONVERT JULIAN TO YYMMDD
+DT3[0] = X2;DT3[1] = X2;FLAG = 0
+Call "JULIANUTIL",DT3[],X$,FLAG
+Return 
+YM2LONGYEAR: Rem Rem Convert YYMM to YYYYMM
+X$ = X2 Using "&&&&"
+DT3[0] = X$[1,2];DT3[1] = X$[3,4]
+If DT3[0] > 67 Let DT3[0] = 1900 + DT3[0]
+If DT3[0] < 68 Let DT3[0] = 2000 + DT3[0]
+X$[1,4] = DT3[0] Using "&&&&"
+X$[5,6] = DT3[1] Using "&&"
+X2 = X$[1,6]
+Return 
+CALCNETCOST: Rem add upcharges and cutting cost
+Rem net cost includes cutting cost and upcharges
+NETCOST = L5[1]
+If S3[1] ! cutting cost
+  If S3[11] = -3 And L7[2]
+    NETCOST = NETCOST + (S3[1] / L7[2])
+  Else 
+    NETCOST = NETCOST + S3[1]
+  End If 
+End If 
+If ROL0
+  If ROL0 < 0
+    NETCOST = NETCOST + Abs(ROL0)
+  Else 
+    NETCOST = NETCOST + (NETCOST * (ROL0 / 100))
+  End If 
+End If 
+Return 
+LOG_PERMPRICE_BEFORE: Rem load before data in and hold
+If Not(TRACKPERM) Return 
+For LOOP_ = 0 To 10 \ PASSINFO[LOOP_] = 0 \ Next LOOP_
+PASSINFO[0] = CH_LASTPR
+PASSINFO[1] = V2
+PASSINFO[2] = 1
+Call "logpermprice",IntCo,PPLOG$,PERMLOG[],PASSINFO[],dlog$
+Return 
+LOG_PERMPRICE_AFTER: Rem update after fields
+If Not(TRACKPERM) Return 
+PASSINFO[0] = CH_LASTPR
+PASSINFO[1] = V2
+PASSINFO[2] = 2
+PASSINFO[3] = 11
+PASSINFO[4] = H5[0]
+PASSINFO[5] = H0[7]
+If NEW
+  PASSINFO[2] = 0
+  PASSINFO[3] = 10
+End If 
+Call "logpermprice",IntCo,PPLOG$,PERMLOG[],PASSINFO[],dlog$
+Return 
+Err_Search: ! !
+If Not(debug) Return
+msg$ = "search error...",Str$(E)," at ",Str$(Spc(16))," ",Msc$(4)                                                 
+System "echo ''" + Msc$(0) + " " + msg$ + "'' >> " + dlog$            
+Return
+!---------W. E. NELSON ROUTINES--------------------------------------------
+print_cust: !
+	!  gosub print_header: ! header printed in quote117
+	print #0; tab 0; lpc1[0] using "######";
+	print #0; tab 8; lp$;
+	return
+
+print_old: !
+	! old price
+	LET CNVTU[0]=0 \ LET CNVTU[1]=LPC3[3]
+	LET CNVTU[2]=2 \ LET CNVTA=perm[0]
+	GOSUB convert: \ oldprice=FNP(AMOUNT)
+
+	! old qty
+	LET CNVTU[0]=0 \ LET CNVTU[1]=LPC3[2]
+	LET CNVTU[2]=1 \ LET CNVTA=lpc2[0]
+	GOSUB convert: \ sellqty = amount
+
+	If LPC3[3]>0 MAT  READ #ch_ccodes,LPC3[3],10;unit$;
+	If LPC3[3]=-1 Let unit$="CWT"
+	If LPC3[3]=-2 Let unit$="LOT"
+	If LPC3[3]=-3 let unit$="CWGT"
+
+	print #0; using pmask$; tab 20; OldPrice; " "; unit$;
+		
+	If LPC3[2]>0 MAT  READ #ch_ccodes,LPC3[2],10;unit$;
+	If LPC3[2]=-1 Let unit$="CWT"
+	If LPC3[2]=-2 Let unit$="LOT"
+	If LPC3[2]=-3 let unit$="CWGT"
+	print #0; using "######"; tab 38; SellQTY;" "; unit$;
+
+	x2 = lpc1[2] \ gosub num2date: ! returns x$
+	print #0; tab 48; x$;   ! "Last Date";
+return
+
+print_new: !
+	! new price
+	LET CNVTU[0]=0 \ LET CNVTU[1]=LPC3[3]
+	LET CNVTU[2]=2 \ LET CNVTA=perm[0]
+	GOSUB convert: \ newprice=FNP(AMOUNT)
+			
+	If LPC3[3]>0 MAT  READ #ch_ccodes,LPC3[3],10;unit$;
+	If LPC3[3]=-1 Let unit$="CWT"
+	If LPC3[3]=-2 Let unit$="LOT"
+	If LPC3[3]=-3 let unit$="CWGT"
+
+	print #0; using "######"; tab 58; lpc1[1];  ! "Quote#";
+	print #0; using pmask$; tab 65; NewPrice; " "; unit$ \ L=L+1
+return
+
+!---------------------------------------
+read_prod: !                            
+ MAT  READ #CH_PROD,r[6],256;A          
+ MAT  READ #CH_PROD,r[6],512;PFU1       
+ MAT  READ #CH_PROD,r[6],554;PFU2;      
+return
+!------------------------------------------------------------------------------
+!#include rtn.convert.s
+Convert: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)   ! 20040 REM
+If CNVTU[2] = 3 Goto L_20050
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[2] = 0 Goto L_20050
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+L_20050: Goto L_20120 !!!If Spc(4) > 1280 Goto L_20120
+L_20120: Rem "====== unibasic 5+ logic
+Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+If CNVTU[2] = 0 Goto L_20160
+If FLAG Let E = FLAG !!\ Gosub ERR_SEARCH
+AMOUNT = CNVTA
+L_20160: Return 
+!-----------------------------------------------------------------------------
+
+L_30000: REM ===== set n/s units for conversions                  
+LET A[6]=L6[4];A[5]=UNF[5] \ IF NOT(A[5]) LET A[5]=1;UNF[5]=1      
+LET PFU1[0]=EUN[0];PFU1[1]=UN[0]                                  
+LET PFU1[2]=UN[1];PFU1[3]=UN[2]                                   
+LET PFU1[4]=EUN[1]                                                
+LET PFU1[5]=0;PFU1[6]=0;PFU1[7]=0                                 
+LET PFU1[8]=UN[0];PFU1[9]=UN[0];PFU1[10]=EUN[1]                   
+LET PFU1[11]=UN[2];PFU1[12]=UN[1];PFU1[13]=UN[0]                  
+LET PFU1[16]=EUN[0];PFU1[17]=EUN[0];PFU1[18]=UN[0]                
+LET PFU1[19]=UN[0]                                                
+LET PFU2[0]=UNF[0];PFU2[1]=UNF[1]                                 
+LET PFU2[2]=UNF[2];PFU2[3]=UNF[3]                                 
+LET PFU2[4]=0;PFU2[5]=0;PFU2[6]=0                                 
+FOR X1=1 TO 4                                                     
+  FOR X2=0 TO X1-1                                                
+	   IF PFU1[X1]=PFU1[X2] LET PFU1[X1]=0;PFU2[X1-1]=0              
+  NEXT X2                                                         
+NEXT X1 
+return
+
+DONE: Rem NO MORE LINE ITEMS
+If SHLLP And PASSNO = 0 Let PASSNO = 2 \ Goto SHL_PASS
+If SHLLP and chan[6]=0 ! we opened it
+	Try Close #CH_SLLP Else REM
+Endif
+OUTEND: Rem
+End 
+
+GET_CUST: Rem "need some customer info    task66428  whole section
+Cust$ = " ",Cust$;LPPPCust = 0
+Chan2 = FindChannel()
+Mat Read #1,88,1808;F$;
+Ropen #Chan2,F$
+CTAXCODE = 0
+CTAXTYPE = 0
+A1$ = " ",A1$;A1$ = H0[4] Using "######"
+Search #Chan2,2,1;A1$,R0,E \ If E > 1 Error 11000
+If Not(E)
+  Mat Read #Chan2,R0,0;Cust$;
+  Read #Chan2,R0,196;CTAXCODE;
+  Read #Chan2,R0,498;CTAXTYPE;
+  Mat Read #Chan2,R0,724;LPPPCust;
+End If 
+If p61$[100,100] <> "Y"
+  LPPPCust = 0
+End If 
+If LPPPCust < 1 Or LPPPCust > 999999 Or Fra(LPPPCust) Let LPPPCust = 0
+If Cust$[138,138] = "Y" Let LPPPCust = 0 ! "not on ABL Customers!
+If LPPPCust = H0[4] Let LPPPCust = 0 ! "same cust - DON'T UPDATE TWICE!
+! "Double check customer exists!
+If LPPPCust ! "still valid (or is it?)
+  A1$ = " ",A1$;A1$ = LPPPCust Using "######"
+  Search #Chan2,2,1;A1$,R0,E \ If E > 1 Error 11000
+  If E Let LPPPCust = 0 ! "not on file - ignore it!
+End If 
+Try Close #Chan2 Else Rem
+Return 
+
+Err_Trap: !
+msg$ = "error...",Str$(Spc(8))," ",Msc$(2)," at ",Str$(Spc(10))," ",Msc$(4)
+If Not(debug) End
+System "echo ''" + Msc$(0) + " " + msg$ + "'' >> " + dlog$
+End

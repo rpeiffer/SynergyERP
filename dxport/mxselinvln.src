@@ -1,0 +1,671 @@
+! >>> Program mxselinvln
+!
+! description Check/Display inv lines to copy
+!
+! loadsave -w -n 100,10 -o prog/dxport/mxselinvln.dl4 src/mxselinvln.src
+!
+! 1.0 mm/dd/yyyy change??
+!
+include "src/copyright.inc" ! dx
+Rem  mxselinvln  - select invoice line to copy into credit memo
+! ONLY IF P61$[80,80]="Y" - force selection of a line
+! send back to web 2 section list in List$[]
+!	1: the main data (cust/prod)
+!	2: the line data found (determine qty left to credit before sending line
+!		like mxcpline does)
+! originally - only shows lines on the passed invoice # - changed 02/09/11 show all lines
+!     like it does if no invoice passed or inv=cm # (native doesn't write inv# to hdr)
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: JUL  5, 2005  15:11:01
+Rem /w2/papermaster/r2005//usr/acct/txc/work/r2005/mx2/mxselinvln.src (univ2) [txc] {18261}
+Rem  Copyright (c) 2005 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+! fleptr[15,1]
+!	[1,0]=prodfile   [1,1]=ProdRec (MUST HAVE!)
+!	[7,0]=Ccodes
+!	[9,0]=CustFile
+!	[11,0]=OrdLine
+!	[12,0]=N/Stk (sproddesc)
+!	[13,0]=InvHead
+!	[14,0]=InvLine
+!	[15,0]=OrdHead
+Declare Intrinsic Sub DateToJulian,FindF,InpBuf,String
+Declare Intrinsic sub programdump,env
+Declare Intrinsic function findchannel
+! Option Default Dialect IRIS1
+External Lib "libgeneral.lib" !general routines
+  Declare External Sub suberr,mainerr,getsession,setoutput,addtostr,CreateNetStatus,GetDelimiters
+  Declare External Function getmsg$,expandarray
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile
+Try
+
+Enter CMNUM,CUSTNUM,PRODUCT$,FLEPTR[],ERRFLAG,INVNUM,maxcnt,List$[],J7$
+!If Err 0 Stop 
+Dim 1%,PFU1[20],CNVTU[2],UN[2],Z9[9],COST_LEV[3],COMM_LEV
+Dim 3%,PFU2[6],CNVTA,A[33],UWORK[15]
+Dim J4$[60]
+!If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTIN.hsf\177\";
+Rem {begin src/inc/dim.getchan.i}
+Dim 1%,CHNL
+Dim 3%,CHNLSCR,CHNLFREE
+Rem {end dim.getchan.i}
+Dim 1%,L1[5],L3[3],H3[1],2%,C1[12],D1
+Dim 1%,UN[2],S2[1],SMODE,EUN[2],DMODE
+Dim 1%,EXACT,FOUND,WORDS2MATCH,H4[2],V9
+Dim 2%,L4[3],L6[4],R[30],3%,R1,R3,I1,CUSTSEC[1]
+Dim 2%,H0[9],L2[2],V1,B[24],DT3[1],JSDATE,JODATE,H5[16]
+Dim 2%,CH0[12],1%,CH3[1],3%,CL7[9]
+Dim 3%,R0[20],L5[3],L7[9],S3[17],OLM[6],UNF[6],SRN[3],R2
+Dim 3%,SCR,OLDFLEPTR[20,1],OREF[5],HINVNO
+Dim 3%,REC_SORT,REC_INVH,REC_INVL,REC_CUST,REC_PROD
+Dim 4%,CUNIT$[4],AMOUNT
+Dim 2%,Q0[1],UNIT,SUNIT$[4],PUNIT$[4],UNIT$[4]
+Dim ORDNUM$[6],CMD$[80],A$[156]
+Dim J0$[20],J1$[60],J2$[20],J5$[60],J9$[80] ! J7$[80],
+Dim KEYSORT$[50],KeySort1$[50],KEYINVH$[30],KEYINVL$[30],X$[50]
+Dim KEYINVH2$[30],3%,REC_INV
+Dim K2$[30],K3$[30],T2$[60],CNAME$[30],SRCH_METHOD$[1],J$[50]
+Dim T1$[20],A3$[10],STRG$[80],PMASK$[12],custom_customer$[30]
+Dim C1$[16],C2$[112],S1$[6],U5$[50],U6$[30],SORTFILE$[50]
+Dim W1$[20],W2$[20],W3$[20],K1$[20],P9$[50],2%
+Dim CMTYPE$[16],DSP_CMTYPE
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],e$[500],Blank$[100]
+Dim WebStr$[400],rstr$[500],tmp$[100],msg$[100],Message$[100]
+Dim 3%
+Blank$=" ",Blank$
+If CMNUM = INVNUM Let INVNUM = 0
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+Def FNN(H) = Int((Abs(H) * 20 + .5) * Sgn(H)) / 20
+call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+call dxget("S_USER.APPID",tmp$) ! or is it "S_ORG.APPID",tmp$)
+IntCo=tmp$
+tmpcnt=maxcnt
+	clear List$[]
+OPENFILES: Rem open files needed
+For I = 0 To 1
+  For X = 0 To 15 \ OLDFLEPTR[X,I] = FLEPTR[X,I] \ Next X
+Next I
+CHNL = 99
+If Not(FLEPTR[1,0]) ! product
+  ! Gosub GETCHAN
+  CH_PROD = findchannel() ! CHNL
+  Read #1,88,1792;J$[1,16]; \ Ropen #CH_PROD,J$
+  FLEPTR[1,0] = CH_PROD
+Else 
+  CH_PROD = FLEPTR[1,0]
+End If 
+If Not(FLEPTR[9,0]) ! customer
+  ! Gosub GETCHAN
+  CH_CUST = findchannel() ! CHNL
+  Read #1,88,1808;J$[1,16]; \ Ropen #CH_CUST,J$
+  FLEPTR[9,0] = CH_CUST
+Else 
+  CH_CUST = FLEPTR[9,0]
+End If 
+If Not(FLEPTR[13,0]) ! invoice history header
+  ! Gosub GETCHAN
+  CH_INVH = findchannel() ! CHNL
+  Read #1,88,1136;J$[1,16]; \ Ropen #CH_INVH,J$
+  FLEPTR[13,0] = CH_INVH
+Else 
+  CH_INVH = FLEPTR[13,0]
+End If 
+If Not(FLEPTR[14,0]) ! invoice history line
+  ! Gosub GETCHAN
+  CH_INVL = findchannel() ! CHNL
+  Read #1,88,1184;J$[1,16]; \ Ropen #CH_INVL,J$
+  FLEPTR[14,0] = CH_INVL
+Else 
+  CH_INVL = FLEPTR[14,0]
+End If 
+If Not(FLEPTR[7,0]) ! units codes
+  ! Gosub GETCHAN \ CH_CCODE = CHNL
+  CH_CCODE = findchannel() ! CHNL
+  Read #1,88,1728;J$[1,16]; \ Ropen #CH_CCODE,J$
+  FLEPTR[7,0] = CH_CCODE
+Else 
+  CH_CCODE = FLEPTR[7,0]
+End If 
+If Not(FLEPTR[15,0]) ! roh file
+  ! Gosub GETCHAN \ CH_ROH = CHNL
+  CH_ROH = findchannel() ! CHNL
+  Read #1,88,1840;J$[1,16]; \ Open #CH_ROH,J$
+  FLEPTR[15,0] = CH_ROH
+Else 
+  CH_ROH = FLEPTR[15,0]
+End If 
+Rem get shipto history
+!Gosub GETCHAN \ CH_INVS = CHNL
+CH_INVS = findchannel() ! CHNL
+Read #1,88,1152;J$[1,16]; \ Ropen #CH_INVS,J$
+CREATESORTFILE: Rem*
+! Gosub GETCHAN \ CH_SORT = CHNL
+CH_SORT = findchannel() ! CHNL
+SORTFILE$ = " ",SORTFILE$
+SORTFILE$ = Spc(6) Using "6/SORTWORK&&&&!"
+If Msc(42) Let SORTFILE$[15,18] = Msc(42) / 100 Using ".&&!"
+CMD$ = "[1:1] ",SORTFILE$
+Build #CH_SORT,CMD$
+X1 = 25 \ Search #CH_SORT,0,1;KEYSORT$,X1,E \ If E Gosub ERR_SEARCH
+X1 = 1 \ Search #CH_SORT,0,0;KEYSORT$,X1,E \ If E Gosub ERR_SEARCH
+X1 = 0 \ Search #CH_SORT,1,0;KEYSORT$,X1,E \ If E Gosub ERR_SEARCH
+Close #CH_SORT
+Open #CH_SORT,SORTFILE$
+Mat Read #1,19,50;P9$;
+mat read #1,115,60;custom_customer$; ! ALT
+custom_customer$=RTrim$(UCase$(custom_customer$))
+if custom_customer$="SOUTHJERSEY" let invnum=0 ! show all lines!
+Mat Read #1,115,40;Q0; \ If Q0[1] <= 0 Let Q0[1] = 2
+PMASK$ = "##########"
+X = Len(PMASK$) - Q0[1] \ If X < 0 Let X = Q0[1]
+PMASK$[X,X] = "."
+Def FNP(X) = Sgn(X) * (Int(Abs(X) * 10 ^ Q0[1] + .5) / 10 ^ Q0[1])
+! Window Open @0,0; Size 80,24; Using "Customer/Product History"
+Rem rem get customer info
+J$ = CUSTNUM Using "######"
+Search #CH_CUST,2,1;J$,REC_CUST,E
+If E > 1 Gosub ERR_SEARCH
+If E
+  J7$ = "CUSTOMER NOT FOUND" ! \ Gosub ISERRMSG
+  ERRFLAG = 99
+  Goto OUTEND
+End If 
+Mat Read #CH_CUST,REC_CUST,30;C2$;
+Read #CH_CUST,REC_CUST,146;C1;
+Rem rem get product info
+If Not(FLEPTR[1,1])
+	tmp$=Product$+Blank$
+	tmp$[13]=""
+	Search #CH_Prod,2,1;tmp$,R,E
+	if not(e)
+		let fleptr[1,1]=R
+	Else
+	  J7$ = "Invalid Product " ! \ Gosub ISERRMSG
+	  ERRFLAG = 99
+	  Goto OUTEND
+	Endif
+End If 
+If FLEPTR[1,1]<=0 or fleptr[1,1]>=CHF(CH_PROD)
+	  J7$ = "Invalid Product " ! \ Gosub ISERRMSG
+	  ERRFLAG = 99
+	  Goto OUTEND
+End If 
+REC_PROD = FLEPTR[1,1]
+Mat Read #CH_PROD,REC_PROD,0;A$;
+STARTSORT: Rem sort thru 2nd directory by customer number
+tmpcnt=maxcnt
+clear List$[]
+Gosub PRNT_HEAD
+! Print @0,23;'CL';"Sorting...Please Wait...";
+KEYINVH$[1,6] = CUSTNUM Using "######"
+SRCHINVH: Search #CH_INVH,3,2;KEYINVH$,REC_INVH,E \ If E = 2 Goto ENDSORT
+If E Gosub ERR_SEARCH
+X = KEYINVH$[1,6] \ If X <> CUSTNUM Goto ENDSORT
+Mat Read #CH_INVH,REC_INVH,0;H0;
+Mat Read #CH_INVH,REC_INVH,512;OREF;
+If H0 <> 30 And H0 <> 31 Goto SRCHINVH
+! q: does this only show inv's for same inv as header or all?
+! I would think all inv's is the way to go! (as once mxcpline writes it moves in inv#)
+If INVNUM <> 0 And OREF[1] <> INVNUM Goto SRCHINVH ! not for same invoice
+Mat Read #CH_INVH,REC_INVH,78;H4;
+Mat Read #CH_INVH,REC_INVH,104;H5;
+X2 = H0[8] \ Gosub YMD2JUL \ X2 = 0
+JODATE = X2
+X2=Tim(6)
+let x3=x2-jodate ! today - invdate
+if invnum<>0 let x3=0 ! show the lines!! no matter how old!
+If ABS(X3)>1095 goto SRCHINVH ! limit to 1 year? (3 for demo/test)
+KEYINVL$ = " ",KEYINVL$
+KEYINVL$[1,6] = REC_PROD Using "######"
+KEYINVL$[7,16] = KEYINVH$[7,16]
+SRCHROL2: Search #CH_INVL,3,2;KEYINVL$,REC_INVL,E \ If E = 2 Goto SRCHINVH
+If E Gosub ERR_SEARCH
+X = KEYINVL$[1,6] \ If X <> REC_PROD Goto SRCHINVH
+If KEYINVL$[7,16] <> KEYINVH$[7,16] Goto SRCHINVH
+
+If H0 = 31 And H0[7] <> OREF[1] ! " h0[6] ! So we can show/determine previous credits against line
+  KEYINVH2$ = " ",KEYINVH2$;KEYINVH2$[1,6] = CUSTNUM Using "######"
+  KEYINVH2$[7,16] = OREF[1] Using "##########"
+  Search #CH_INVH,2,2;KEYINVH2$,REC_INV,E
+  If Not(E)
+    Mat Read #CH_INVH,REC_INV,0;H0;
+    Mat Read #CH_INVH,REC_INV,512;OREF;
+    X2 = H0[8] \ Gosub YMD2JUL \ X2 = 0
+    JODATE = X2
+    KEYSORT$ = " ",KEYSORT$;KEYSORT$[1,6] = JODATE Using "######"
+    KEYSORT$[7,16] = OREF[1] Using "##########"
+    KEYSORT$[18,18] = " "
+    KEYSORT$[19,21] = KEYINVL$[17,19]
+    KEYSORT$[22,33] = REC_INVH Using "############"
+    Search #CH_SORT,4,1;KEYSORT$,REC_INVL,E \ If E Gosub ERR_SEARCH
+    Goto SRCHROL2
+  End If 
+End If 
+X2 = H0[8] \ Gosub YMD2JUL \ X2 = 0
+JODATE = X2
+KEYSORT$ = " ",KEYSORT$
+KEYSORT$[1,6] = JODATE Using "######"
+KEYSORT$[7,16] = KEYINVH$[7,16]
+KEYSORT$[18,18] = "I"
+KEYSORT$[19,21] = KEYINVL$[17,19]
+KEYSORT$[22,33] = REC_INVH Using "############"
+Search #CH_SORT,4,1;KEYSORT$,REC_INVL,E \ If E Gosub ERR_SEARCH
+Goto SRCHROL2
+ENDSORT: Rem end of sort ready to print
+START_HERE: Rem REM ================================  get ranges
+!For X = 1 To 16 \ R0[X] = 0 \ Next X
+! Print @0,5; \ L1 = 7 \ L1[1] = 1 \ X1 = 0
+V9 = 0
+KEYSORT$ = "z",KEYSORT$
+NEXT_INVOICE: Rem
+Search #CH_SORT,6,1;KEYSORT$,REC_SORT,E \ If E > 2 Gosub ERR_SEARCH
+If E Goto SCREEN_FULL
+R1 = KEYSORT$[22,33]
+READ_HDR: Mat Read #CH_INVH,R1;H0;
+If H0 <> 30 And H0 <> 31 Goto NEXT_INVOICE
+Mat Read #CH_INVH,R1,512;OREF;
+Mat Read #CH_INVH,R1,52;H3;
+Mat Read #CH_INVS,OREF[4],154;SRN;
+R2 = REC_SORT; v9=1
+Gosub READ_INVL
+If S2 = 3 Goto NEXT_INVOICE ! Or L3[2] > 990 
+Gosub READ_PRODUCT
+If H0 = 30 ! inv - see if credits for it
+	chkinv=keysort$[7,16];invln=keysort$[19,21]
+	chkodate=keysort$[1,6];chkirec=r1
+  gosub getremainqty ! R0[L1[1]] = REC_SORT
+  R1 = KEYSORT$[22,33] ! re-read orig inv header
+  Mat Read #CH_INVH,R1;H0;
+	Mat Read #CH_INVH,R1,512;OREF;
+	Mat Read #CH_INVH,R1,52;H3;
+	Mat Read #CH_INVS,OREF[4],154;SRN;
+  R2 = REC_SORT
+	Gosub READ_INVL ! RESET ORIG INV LINE
+End If 
+!Goto READY_TO_PRINT_LINES
+!Goto NEXT_INVOICE
+READY_TO_PRINT_LINES: Rem
+Gosub PRINT_DETAIL_LINE ! \ L1 = L1 + 2
+!If (ALLCUST Or SHIPTO >= 0) If (L1 + 3) > 21 Goto L_2650
+!If H0 = 30 Let L1[1] = L1[1] + 1
+!If (L1 + 2) < 22 Goto NEXT_INVOICE
+Goto NEXT_INVOICE
+L_2650: ! Print 'CE';@0,22;"     -MORE-";'CL';
+SCREEN_FULL: Rem SCREEN DONE
+List$[row]=esdel$ ! end of line section
+row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+if not(V9) ! NO LINES?
+	if invnum let invnum=0 \ goto startsort
+	j7$="NO LINES TO COPY!"
+	Errflag=99
+Endif
+
+Goto OutEnd ! send back list
+!Print 'CE';@0,23;"ENTER #:item to copy  E: exit  ";
+!If V9 Print "R: relist  ";
+!If Not(E) Print "<CR>: continue search  ";
+!Input Len 16384 + 1;""J4$ \ Call String(1,J4$)
+!If J4$ = "E"
+!  ERRFLAG = 99
+!  Goto OUTEND
+!End If 
+!If Not(E)
+!  If J4$ = "" Or J4$ = "C" Gosub CONTINUE \ Goto NEXT_INVOICE
+!End If 
+! SEL = J4$ ! how to do on web (select)?
+!If SEL > 0 And SEL <= 16
+!  If R0[SEL]
+!    Goto COPYLINE
+!  End If 
+!End If 
+!If V9 And J4$ = "R"
+!  Print @0,7;'CE'
+!  Goto START_HERE
+!End If 
+!Print 'RB'; \ Goto SCREEN_FULL
+!CONTINUE: Rem
+!For X = 1 To 16 \ R0[X] = 0 \ Next X
+!Print @0,7;'CE'; \ L1 = 7 \ L1[1] = 1 \ V9 = V9 + 1
+!Return 
+PRNT_HEAD: Rem print page heading
+!Print 'CS';@0,0;"-mxselinvln-";
+!Print @4,1;'BD BR';"CUST #";
+!Print @0,3;"PRODUCT CODE";
+!Print @79,6;'ED ER';@0,6;'BD BR';
+!Print @0,6;" #";
+!Print @7,6;"Inv#";
+!Print @14,6;"Ln#";
+!Print @22,6;"Date";
+!Print @28,6;"Wh";
+!Print @32,6;"Div";
+!Print @36,6;"OT";
+!Print @43,6;"Quantity";
+!Print @62,6;"Price";
+!Print @79,6;'ED ER';
+List$[0]=bsdel$,"SELINVLN",fdel$
+WebStr$="CUSTID",fdel$,"CUSTNAME",fdel$
+WebStr$=WebStr$,"PRODID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+List$[1]=WebStr$
+Row=2
+if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+WebStr$=Str$(CUSTNUM),fdel$,RTrim$(C2$[1,30]),fdel$
+WebStr$=WebStr$,RTrim$(A$[140,151]),fdel$,RTrim$(A$[9,38]),fdel$
+WebStr$=WebStr$,RTrim$(A$[63,92]),fdel$
+List$[row]=WebStr$
+row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+List$[row]=esdel$ ! end of section
+row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+List$[row]=bsdel$,"LINEDTL",fdel$
+row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+WebStr$="CREDIT",fdel$,"SHIPINFO",fdel$,"INVOICE",fdel$
+WebStr$=WebStr$,"LINE",fdel$,"INVDATE",fdel$,"WHSE",fdel$,"DIV",fdel$
+WebStr$=WebStr$,"OTYPE",fdel$,"QTY",fdel$,"QTYUM",fdel$,"PRICE",fdel$,"PRCUM",fdel$
+WebStr$=WebStr$,"CUTINFO",fdel$,"QTYLEFT",fdel$,"QLBASE",fdel$,"CMHNO",fdel$,"CMHTYPE",fdel$
+List$[row]=WebStr$
+row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+Return 
+PRINT_DETAIL_LINE: Rem
+!WebStr$=KeySort$,fdel$ ! sort file key (Hidden - to pass to mxcpline) NO PASS
+!WebStr$=WebStr$,Str$(Rec_sort),fdel$ ! inv line rec (hidden - to pass to mxcpline) NO PASS
+tmp$="N" \ if h0[0]=31 let tmp$="Y"
+!WebStr$=WebStr$,tmp$,fdel$ ! credit y/n ! credits are not selectable!
+WebStr$=tmp$,fdel$ ! credit y/n ! credits are not selectable!
+Gosub SET_UWORK
+Gosub CALC_NET_PRICE
+Gosub DISPLAY_SHIPTO_INFO
+WebStr$=WebStr$,tmp$,fdel$ ! shipto detail
+
+! If H0 = 30 Print Using "##>";@0,L1;L1[1];
+If H0 = 31 Let UWORK[0] = UWORK[0] * (-1)
+WebStr$=WebStr$,Str$(OREF[1]),fdel$ ! invoice #
+WebStr$=WebStr$,Str$(L3[2]),fdel$ ! line #
+X2 = H0[8] \ Gosub ISDUNPACK
+WebStr$=WebStr$,X$[1,8],fdel$ ! date
+WebStr$=WebStr$,Str$(H4[2]),fdel$ ! whse
+WebStr$=WebStr$,Str$(H5[8]),fdel$ ! div
+WebStr$=WebStr$,Str$(H5[7]),fdel$ ! ordtype
+WebStr$=WebStr$,LTrim$(UWork[0]*S2[1] Using "-------#.##"),fdel$,SUNIT$,fdel$ ! qty & u/m
+WebStr$=WebStr$,LTrim$(UWork[15] Using PMASK$),fdel$,PUNIT$,fdel$ ! price & u/m
+! Print 'ED'
+If S2[0] = 1 Or S2[0] = 2
+  tmp$=S2[1] Using "CUT ########",UWORK[0] Using " OUT  FROM  ########## ",SUNIT$ ! ;'ER' \ L1 = L1 + 1
+Else ! no cut
+	tmp$=" "
+End If 
+WebStr$=WebStr$,tmp$,fdel$ ! cut or not
+If H0 = 30
+  WebStr$=WebStr$,LTrim$(UWork[1] Using "-------#.##"),fdel$ ! remaining
+  WebStr$=WebStr$,Str$(UWork[2]),fdel$ ! remain - base (to send back if selected)
+  WebStr$=WebStr$,"0",fdel$," ",fdel$ ! no cm# or type
+Else 
+  DSP_CMTYPE = H3[1] ! ((H3[1] * 16) - 16) ! is a record # now
+  If DSP_CMTYPE < 1 Let DSP_CMTYPE = 1
+  clear cmtype$
+  ! Read #1,48,DSP_CMTYPE;CMTYPE$[1,16];  !now in separate file
+  CMTC=openfile(-9914,Intco)
+  if cmtc>0
+	read #CMTC,dsp_cmtype,0;CMTYPE$[1,16];
+	try close #cmtc Else REM
+  Endif
+  ! L1 = L1 + 1
+  WebStr$=WebStr$,"0",fdel$,"0",fdel$,H0[7] Using "#######",fdel$ ! no remain - cm num
+  WebStr$=WebStr$,RTrim$(CMTYPE$),fdel$
+End If 
+List$[row]=WebStr$
+row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+Return 
+DISPLAY_SHIPTO_INFO: Rem   SHIPTO: -1=no display, 0=all, >0=shiplist #
+!If INVOICE = PRTNUM Goto END_DISPLAY_SHIPTO_INFO
+!Print 'BR BD';
+!If Not(ALLCUST) Print @1,L1;
+If SRN[3] = 0 tmp$="SHIPTO: SAME"
+If SRN[3] = 1 tmp$="SHIPTO: DEFAULT SHIPLIST"
+If SRN[3] = 2 tmp$="SHIPTO: SHIPLIST # "+Str$(SRN[1])
+If SRN[3] = 4 tmp$="SHIPTO: CUSTOMER "+Str$(SRN[2])
+If SRN[3] = 5 tmp$="SHIPTO: MANUAL ENTRY"
+!Print 'ED ER';
+!If Not(ALLCUST) Print "" \ L1 = L1 + 1
+END_DISPLAY_SHIPTO_INFO: Rem
+INVOICE = PRTNUM
+Return 
+READ_INVL: Rem read inv line
+COSTCHG = 0
+Mat Read #CH_INVL,R2,80;T2$;
+Mat Read #CH_INVL,R2,140;T1$;
+Mat Read #CH_INVL,R2,0;L2;
+Mat Read #CH_INVL,R2,8;L3;
+Mat Read #CH_INVL,R2,16;L4;
+Mat Read #CH_INVL,R2,32;L5;
+Mat Read #CH_INVL,R2,56;L6;
+Mat Read #CH_INVL,R2,168;L7;
+Mat Read #CH_INVL,R2,250;UN;
+Mat Read #CH_INVL,R2,256;S2; \ If Not(S2[1]) Or S2[0] = 0 Let S2[1] = 1
+Mat Read #CH_INVL,R2,260;S3;
+Mat Read #CH_INVL,R2,404;OLM;
+Mat Read #CH_INVL,R2,446;EUN;
+Mat Read #CH_INVL,R2,452;UNF;
+Read #CH_INVL,R2,518;HINVNO;
+Return 
+READ_PRODUCT: Rem read product
+If T1$[1,12] = "Z           " Let S2 = 3
+If L3[0] = 1 Goto L_6097
+Mat Read #CH_PROD,L4,256;A;
+Mat Read #CH_PROD,L4,156;B;
+Mat Read #CH_PROD,L4,512;PFU1;
+Mat Read #CH_PROD,L4,554;PFU2;
+If B[8] <> L5[1] Let COSTCHG = 1
+L_6097: Gosub L_30000
+Return 
+GET_UNIT_ABBR: Rem FIND UNIT ABBR
+If S2[0] = 3 Return ! Or L3[2] > 990 
+If UNIT = 0 Let UNIT$ = "Err "
+If UNIT = -1 Let UNIT$ = "CWT "
+If UNIT = -2 Let UNIT$ = "LOT "
+If UNIT = -3 Let UNIT$ = "LB  "
+If UNIT <= 0 Goto L_10790
+Mat Read #CH_CCODE,UNIT,10;UNIT$;
+L_10790: Return 
+UN[1] = UN[0]
+PUNIT$ = SUNIT$
+UN[2] = UN[0]
+CUNIT$ = SUNIT$
+UWORK[0] = L7[4]
+UWORK[3] = L5[2]
+UWORK[4] = L5[1]
+CALC_NET_PRICE: Rem
+CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2
+If UN[1] > 0 And S2[1] Let CNVTA = ((L5[2] - L6[1]) / S2[1]) Else Let CNVTA = L5[2] - L6[1]
+If S3[8] = -3 Let CHBASE = (S3[0] / L7[2]) Else Let CHBASE = S3[0]
+If UN[1] > 0 And S2[1] Let CNVTA = CNVTA + (CHBASE / S2[1]) Else Let CNVTA = CNVTA + CHBASE
+CNVTA = CNVTA - (CNVTA * (L6[0] / 100))
+CNVTA = CNVTA + (CNVTA * (L7[8] / 100))
+Gosub L_20000 \ UWORK[15] = AMOUNT
+Return 
+SET_UWORK: Rem L_11700: ! LOAD SELLING QTY, PRICE,COST IN THEIR UNITS INTO UWORK
+UNIT = UN[1] \ Gosub GET_UNIT_ABBR \ PUNIT$ = UNIT$
+UNIT = UN[2] \ Gosub GET_UNIT_ABBR \ CUNIT$ = UNIT$
+UNIT = UN[0] \ Gosub GET_UNIT_ABBR \ SUNIT$ = UNIT$
+CNVTU[0] = 0
+CNVTU[1] = UN[0]
+CNVTU[2] = 1
+CNVTA = L7[4]
+Gosub L_20000
+UWORK[0] = AMOUNT
+CNVTA=L7[4]-CMQty ! amount left
+UWork[2]=CNVTA ! retain base for sendback
+gosub L_20000
+Let UWork[1]=Amount
+CNVTU[1] = UN[1]
+CNVTU[2] = 2
+CNVTA = L5[2]
+Gosub L_20000
+UWORK[3] = AMOUNT
+CNVTU[1] = UN[2]
+CNVTA = L5[1]
+Gosub L_20000
+UWORK[4] = AMOUNT
+CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2;CNVTA = L6[1]
+Gosub L_20000 \ UWORK[11] = AMOUNT
+
+Return 
+L_20000: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)
+If CNVTU[2] = 3 Goto L_20050
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[2] = 0 Goto L_20050
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+L_20050: !
+L_20120: Rem "====== unibasic 5+ logic
+Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+If CNVTU[2] = 0 Goto L_20160
+If FLAG Let E = FLAG \ Gosub ERR_SEARCH
+AMOUNT = CNVTA
+L_20160: Return 
+L_30000: Rem ===== set units for conversions (stock/nonstock version)
+If S2[0] = 3 Goto L_30099
+A[6] = L6[4];A[5] = UNF[5] \ If Not(A[5]) Let A[5] = 1;UNF[5] = 1
+PFU1[0] = EUN[0];PFU1[1] = UN[0]
+PFU1[2] = UN[1];PFU1[3] = UN[2]
+PFU1[4] = EUN[1]
+PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+PFU1[8] = UN[0];PFU1[9] = UN[0];PFU1[10] = EUN[1]
+PFU1[11] = UN[2];PFU1[12] = UN[1]
+If Not(L3[0]) Goto L_30060
+PFU1[13] = UN[0];PFU1[16] = EUN[0];PFU1[17] = EUN[0]
+PFU1[18] = UN[0];PFU1[19] = UN[0]
+L_30060: PFU2[0] = UNF[0];PFU2[1] = UNF[1]
+PFU2[2] = UNF[2];PFU2[3] = UNF[3]
+PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+For X1 = 1 To 4
+  For X2 = 0 To X1 - 1
+    If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+  Next X2
+Next X1
+L_30099: Return 
+getremainqty: ! when listing invoice - determine qty left to credit!
+CMQty=0
+KEYSORT1$ = " ",KEYSORT1$
+  KEYSORT1$[1,6] = ChkODATE Using "######"
+  KEYSORT1$[7,16] = ChkINV Using "##########"
+  KEYSORT1$[18,18] = "I"
+  KEYSORT1$[19,21] = INVLN Using "###"
+  KEYSORT1$[22,33] = ChkIREC Using "############"
+SRCHSORT: Rem find cmqty
+  Search #CH_SORT,6,1;KEYSORT1$,REC_INVLC,E \ If E = 2 Goto ENDCMQTY
+  If E > 1 Gosub ERR_SEARCH
+  X = KEYSORT1$[7,16] \ If X <> ChkINV Goto ENDCMQTY
+  If KEYSORT1$[18,18] = "I" Goto SRCHSORT
+  R0 = KEYSORT1$[22,33]
+  Mat Read #CH_INVH,R0,52;CH3; \ If CH3[1] = 3 Goto SRCHSORT
+  Mat Read #CH_INVH,R0,0;CH0; \ If CH0 <> 31 Goto SRCHSORT
+  Mat Read #CH_INVL,REC_INVLC,168;CL7;
+  CMQTY = CMQTY + CL7[4]
+  Goto SRCHSORT
+ENDCMQTY: Rem end of getting credit memo qty
+Return
+NUM2DATE: Rem *UNPACK DATE  X2 TO X$      V1.0  4/04/84  G.DOSCHER
+X$ = " ",X$ \ X$[10] = ""
+X$[1,3] = Int(X2 / 10 ^ 2 - Int(X2 / 10 ^ 4) * 10 ^ 2) + 10 ^ 2 Using "###"
+X$[4,6] = Fra(X2 / 10 ^ 2) * 10 ^ 2 + 10 ^ 2 Using "###"
+X$[7,9] = Int(X2 / 10 ^ 4) + 10 ^ 2 Using "###"
+X$[4,4] = "/" \ X$[7,7] = "/" \ X$ = X$[2]
+If Not(X2) Let X$ = "        "
+Return 
+DATE2NUM: Rem *PACK DATE    X$ TO X2      V1.0  4/04/84  G.DOSCHER
+X2 = X$[4,5] \ X1 = X$[1,2] \ X2 = X2 + X1 * 10 ^ 2
+X1 = X$[7,8] \ X2 = X2 + X1 * 10 ^ 4
+Return 
+JUL2DATE: Rem REM DATE JULIAN X2 TO X$
+DT3[0] = X2;FLAG = 1;X$ = " "
+Call "JULIANUTIL",DT3[],X$,FLAG
+Return 
+YMD2JUL: Rem  REM  CONVERT YYMMDD TO JULIAN (RETURN=NOGOOD, +1=OKAY)
+if x2<=0 Return
+X$ = X2 Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Return 
+X2 = X$[1,5]
+Return 1
+JUL2YMD: Rem  REM CONVERT JULIAN TO YYMMDD
+DT3[0] = X2;DT3[1] = X2;FLAG = 0
+Call "JULIANUTIL",DT3[],X$,FLAG
+Return 
+YM2LONGYEAR: Rem Rem Convert YYMM to YYYYMM
+X$ = X2 Using "&&&&"
+DT3[0] = X$[1,2];DT3[1] = X$[3,4]
+If DT3[0] > 67 Let DT3[0] = 1900 + DT3[0]
+If DT3[0] < 68 Let DT3[0] = 2000 + DT3[0]
+X$[1,4] = DT3[0] Using "&&&&"
+X$[5,6] = DT3[1] Using "&&"
+X2 = X$[1,6]
+Return 
+COPYLINE: Rem copy credit memo line HAS TO DO IN SEPARATE RUN - WEB!
+If ERRFLAG Goto OUTEND
+!R2 = R0[SEL]
+!Gosub READ_INVL
+!FLEPTR[0,0] = CH_SORT
+! Call "mxcpline",HINVNO,L3[2],CMNUM,CMLN,CMTYPE,CMWHSE,CMORDTYPE,FLEPTR[],ERRFLAG,CUSTNUM
+Goto OutEnd
+
+ISDUNPACK: Rem  *UNPACK DATE  X2 TO X$      V1.0  4/04/84  G.DOSCHER
+X$ = " ",X$ \ X$[10] = ""
+X$[1,3] = Int(X2 / 10 ^ 2 - Int(X2 / 10 ^ 4) * 10 ^ 2) + 10 ^ 2 Using "###"
+X$[4,6] = Fra(X2 / 10 ^ 2) * 10 ^ 2 + 10 ^ 2 Using "###"
+X$[7,9] = Int(X2 / 10 ^ 4) + 10 ^ 2 Using "###"
+X$[4,4] = "/" \ X$[7,7] = "/" \ X$ = X$[2]
+If Not(X2) Let X$ = "        "
+Return 
+ISDPACK: Rem  *PACK DATE    X$ TO X2      V1.0  4/04/84  G.DOSCHER
+X2 = X$[4,5] \ X1 = X$[1,2] \ X2 = X2 + X1 * 10 ^ 2
+X1 = X$[7,8] \ X2 = X2 + X1 * 10 ^ 4
+Return 
+Rem {end rtn.input.s}
+ERR_SEARCH: Rem
+ENUM = E ;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+Msc$(4)
+E$=msg$
+Call programdump("tmp/mxselinvlnse!","")
+goto err_msg ! Error 10000
+Return ! End
+ERR_MSG: ! send message
+ReturnStatus=0 ! no good
+Message$=E$
+	  call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  call SetOutPut(e$,rstr$)
+End
+OUTEND: Rem end of program
+For I = 0 To 1
+  For X = 0 To 15 \ FLEPTR[X,I] = OLDFLEPTR[X,I] \ Next X
+Next I
+! If Err 0 Rem
+If CH_INVS Try Close #CH_INVS Else Rem
+If CH_SORT
+  Try Close #CH_SORT Else Rem
+  SORTFILE$ = " ",SORTFILE$
+  SORTFILE$ = Spc(6) Using "6/SORTWORK&&&&"
+  If Msc(42) Let SORTFILE$[15,17] = Msc(42) / 100 Using ".&&"
+  Call FindF(SORTFILE$,X)
+  If X Try Kill SORTFILE$ Else Rem
+End If 
+If Not(FLEPTR[1,0]) Try Close #CH_PROD Else Rem
+If Not(FLEPTR[7,0]) Try Close #CH_CCODE Else Rem
+If Not(FLEPTR[9,0]) Try Close #CH_CUST Else Rem
+If Not(FLEPTR[11,0]) Try Close #CH_ROL Else Rem
+If Not(FLEPTR[12,0]) Try Close #CH_PRODDESC Else Rem
+If Not(FLEPTR[13,0]) Try Close #CH_INVH Else Rem
+If Not(FLEPTR[14,0]) Try Close #CH_INVL Else Rem
+If Not(FLEPTR[15,0]) Try Close #CH_ROH Else Rem
+!Window Close 
+!If Err 0 Gosub ERR_TRAP
+
+Rem {begin rtn.error.s}
+Else
+ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+!
+include "src/callsuberr.inc"
+end try
+End ! the whole program
+Rem {end rtn.error.s}

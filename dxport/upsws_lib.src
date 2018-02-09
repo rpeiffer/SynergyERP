@@ -1,0 +1,305 @@
+! loadsave -w -n 100,10 -o prog/dxport/upsws_lib.lib src/upsws_lib.src
+
+include "src/copyright.inc"
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,OpenMySQLChan
+
+include "src/inc/mysql_lib.inc"
+include "src/inc/sql_upswsheader.inc"
+include "src/inc/sql_upswsline.inc"
+include "src/inc/fileordhead.inc"
+include "src/inc/filerolz.inc"
+include "src/inc/filecust.inc"
+include "src/inc/filecustnotes.inc"
+include "src/inc/fileshiplist.inc"
+include "src/inc/fileprod.inc"
+
+External Lib "libprodconv.lib"
+Declare External Sub ProdConvert
+External Lib "ubsprconv.dl4"
+Declare External Function xunit$
+
+!-------------------------------------------------
+! AddUpdateUPSWS
+! Add / Update a UPS worldship entry (header and lines)
+!
+! fchan[0] = roh channel (0 = not open)
+! fchan[1] = ros channel (0 = not open)
+! fchan[2] = rot channel (0 = not open)
+! fchan[3] = rolnew channel (0 = not open)
+! fchan[4] = MySQL channnel (0 = not open)
+! fchan[5] = cust channel (0 = not open)
+! fchan[6] = cust shiplist channel (0 = not open)
+! fchan[7] = customer notes (0 = not open)
+! fchan[8] = product (0 = not open)
+! fchan[9] = ccode (0 = not open)
+!-------------------------------------------------
+External Sub AddUpdateUPSWS(e$,OrderNum,fchan[],...)
+try
+	dim roh. as roh
+	dim ros. as ros
+	dim rot. as rot
+	dim rol. as rolnew
+	dim prod. as prod
+	dim cust. as cust
+	dim custn. as custnotes
+	dim shiplist. as shiplist
+	dim upswsh. as SQL_upswsheader
+	dim upswsl. as SQL_upswsline
+
+	dim company$[112]
+	dim tmpKey$[40],cust$[12],SQLStmt$[500]
+	dim 1%,lchan[99],i,cnvtu[2]
+	dim 3%,rec,shipRec,cnvta
+	
+	for i = 0 to 9 \ let lchan[i] = fchan[i] \ next i
+	if not(lchan[4])
+		lchan[4] = OpenMySQLChan(e$)
+		if lchan[4] = -1 exit sub ! MySQL database not defined or flag not turned on
+	end if
+	if not(lchan[0]) let lchan[0] = OpenFile(-1840) \ if lchan[0] = -1 error 42
+	if not(lchan[1]) let lchan[1] = OpenFile(-1856) \ if lchan[1] = -1 error 42
+	if not(lchan[2]) let lchan[2] = OpenFile(-1872) \ if lchan[2] = -1 error 42
+	if not(lchan[3]) let lchan[3] = OpenFile(-1888) \ if lchan[3] = -1 error 42
+	if not(lchan[5]) let lchan[5] = OpenFile(-1808) \ if lchan[5] = -1 error 42
+	if not(lchan[6]) let lchan[6] = OpenFile(-2112) \ if lchan[6] = -1 error 42
+	if not(lchan[7]) let lchan[7] = OpenFile(-720) \ if lchan[7] = -1 error 42
+	if not(lchan[8]) let lchan[8] = OpenFile(-1792) \ if lchan[8] = -1 error 42
+	if not(lchan[9]) let lchan[9] = OpenFile(-1728) \ if lchan[9] = -1 error 42
+	ctlc = OpenFile(-9999) ! will force open on 1 if not open already
+	Mat READ #ctlc,3,0;Company$;
+
+	! Find the order / credit
+	rec = -1
+	for i = 1 to 10
+		tmpKey$ = " ",tmpKey$
+		tmpKey$[1,2] =  i using "##"
+		tmpKey$[3] = OrderNum using "######"
+		rec = filegetrohz(e$,lchan[],"=",1,tmpKey$,roh.,ros.,rot.)
+		if rec>=0
+			let i = 10
+		else
+			if i = 4 let i = 8 ! look for credit memos
+		end if
+	next i
+	if rec<0 exit sub ! couldn't find the order
+	!
+	! delete any previous upsws information for this order
+	! lines auto-delete because of "CASCADE" in definition
+	upswsh.OrderNumber = roh.OrdNum
+	returnRec = upswsheader_SQLDelete(e$,lchan[4],upswsh.)
+	if returnRec<0 or returnRec>1
+		e$ = "Error deleting upsws header record!"
+		error 10000
+	end if
+	! ok - let's build the information
+	call upswsheader_SQLNULL(e$, upswsh.)
+	upswsh.OrderNumber = roh.OrdNum
+	upswsh.ReturnOption$ = "N"
+	upswsh.QVNOption$ = "N"
+	upswsh.Residential$ = "N"
+	upswsh.BillOption$ = "Shipper"
+	! OK - these should probably be in a control file somewhere
+	upswsh.MapName$ = "Mid-Atlantic Packaging"
+	upswsh.MapEmail$ = "sales@midatlanticpackaging.com"
+	upswsh.MapSubject$ = "Tracking Number"
+	! let's get the default customer
+	tmpKey$ = roh.CustNum using "######"
+	let upswsh.ShipCustomer$ = str$(roh.CustNum)
+	if ros.ShipCust
+		let tmpKey$ = ros.ShipCust using "######"
+		let upswsh.ShipCustomer$ = str$(ros.ShipCust)
+	end if
+	rec = filegetcust(e$,lchan[5],"=",1,tmpKey$,cust.)
+	if rec<0
+		e$ = "Couldn't find customer for order "+str$(roh.OrdNum)+"!"
+		error 10000
+	end if
+	rec = filegetcustnotes(e$,lchan[7],"=",1,tmpKey$,custn.)
+	if rec<0
+		clear custn.
+		custn.sendemail=0
+		custn.email$=""
+		custn.Residential=0
+	end if
+	shipRec = -1 ! no ship record involved
+	if ros.ShipEdit and ros.ShipEdit<>5 ! ship flags: 0=none, 5=manual
+		upswsh.ShipCustomer$ = upswsh.ShipCustomer$+"."+ros.ShipCode using "&&&&&"
+		let tmpKey$[1,6] = cust.CustomerCode using "######"
+		let tmpKey$[7] = "."
+		let tmpKey$[8] = ros.ShipCode using "&&&&&"
+		shipRec = filegetshiplist(e$,lchan[6],"=",1,tmpKey$,shiplist.)
+		if rec<0
+			e$ = "Couldn't find shiplist for order "+str$(roh.OrdNum)+"!"
+			error 10000
+		end if
+	end if
+	upswsh.FromName$ = rtrim$(Company$[1,30])
+	upswsh.FromAddress1$ = rtrim$(Company$[31,60])
+	upswsh.FromAddress2$ = rtrim$(Company$[61,90])
+	upswsh.FromCity$ = rtrim$(Company$[91,105])
+	upswsh.FromState$ = rtrim$(Company$[106,107])
+	upswsh.FromZip$ = rtrim$(Company$[108,112])
+	upswsh.FromCountry$ = "UNITED STATES"
+	upswsh.ShipCustomer$ = str$(roh.CustNum)
+	if ros.ShipCust let upswsh.ShipCustomer$ = str$(ros.ShipCust)
+	if ros.ShipEdit and ros.ShipEdit<>5 ! ship flags: 0=none, 5=manual
+		upswsh.ShipCustomer$ = upswsh.ShipCustomer$+"."+ros.ShipCode using "&&&&&"
+	end if
+	upswsh.ShipName$ = rtrim$(ros.Name$)
+	upswsh.ShipAddress1$ = rtrim$(ros.Address$)
+	upswsh.ShipAddress2$ = rtrim$(ros.Address2$)
+	upswsh.ShipCity$ = rtrim$(ros.City$)
+	upswsh.ShipState$ = rtrim$(ros.State$)
+	upswsh.ShipZip$ = rtrim$(ros.ZipCode$+ros.Zip4$)
+	if ros.Country$="" or ros.Country$[1,3] = "   " let ros.Country$ = "UNITED STATES"
+	upswsh.ShipCountry$ = ros.Country$
+	if custn.sendemail = 1 and rtrim$(custn.Email$) <> ""
+		upswsh.QVNOption$ = "Y"
+		upswsh.ShipEmail$ = rtrim$(custn.Email$)
+	end if
+	if custn.Residential=1 let upswsh.Residential$ = "Y"
+	upswsh.ShipPhone$ = rtrim$(cust.Phone$)
+	upswsh.ShipContact$ = rtrim$(cust.Contact$)
+	upswsh.CustomerPO$ = rtrim$(roh.CustPO$)
+	! shiplist override
+	if shipRec>=0 
+		if rtrim$(shiplist.PhoneNumber$) <> "" upswsh.ShipPhone$ = rtrim$(shiplist.PhoneNumber$)
+		if rtrim$(shiplist.Contact$) <> "" upswsh.ShipContact$ = rtrim$(shiplist.Contact$)
+		if shiplist.sendemail = 1
+			if rtrim$(shiplist.Email$) <> ""
+				upswsh.QVNOption$ = "Y"
+				upswsh.ShipEmail$ = rtrim$(shiplist.Email$)
+			else
+				upswsh.QVNOption$ = "N" ! set to shiplist level, but no email
+				upswsh.ShipEmail$ = SQLNULL$()
+			end if
+		end if
+		upswsh.Residential$ = "N"
+		if shiplist.Residential = 1 let upswsh.Residential$ = "Y"
+	end if 
+	
+	! map various options based on ship via
+	
+	roh.ShipVia$ = ucase$(rtrim$(roh.ShipVia$))
+	upswsh.ShipVia$ = "UPSGRND"
+	select case roh.ShipVia$
+		case "UPS GROUND","UPSGRNC","UPSGRNR"
+			! UPS Ground (commercial and residential)
+		case "UPS NDA","UPSNXTM"
+			! UPS Next Day Air
+			upswsh.ShipVia$ = "UPSNXTM"
+		case "UPS 2 DAY","UPS2NDS"
+			! UPS 2nd Day Air - Package
+			upswsh.ShipVia$ = "UPS2NDS"
+		case "UPS 3DY SLCT","UPSTHRD"
+			! UPS 3 Day Select
+			upswsh.ShipVia$ = "UPSTHRD"
+		case "UPS NDA SAVR","UPSNXTS"
+			! UPS Next Day Air Saver - Package
+			upswsh.ShipVia$ = "UPSNXTS"
+		case "UPS NDA ERLY","UPSNXTA"
+			! UPS Next Day Air Early A.M. SM
+			upswsh.ShipVia$ = "UPSNXTA"
+		case "UPS 2DY AIR","UPS2NDA"
+			! UPS 2nd Day Air AM - Package
+			upswsh.ShipVia$ = "UPS2NDA"
+		case "UPS SAVER","UPSSAVR"
+			! UPS Saver
+			upswsh.ShipVia$ = "UPSSAVR"
+		case "UPSCDAN","UPS WSHP EX"
+			! Worldwide Express - Package
+			upswsh.ShipVia$ = "UPSCDAN"
+		case "UPSCDA2","UPS WSHP EPD"
+			! Worldwide Expedited - Package
+			upswsh.ShipVia$ = "UPSCDA2"
+		case "UPSCDAG","UPS STANDARD"
+			! UPS Standard
+			upswsh.ShipVia$ = "UPSCDAG"
+		case "UPSCDEP","UPS WSHP EXP"
+			! UPS Worldwide Express Plus SM
+			upswsh.ShipVia$ = "UPSCDEP"
+		case "UPS CALLTAG","UPSCALLTAG"
+			! Request UPS Call Tag Pickup
+			upswsh.ReturnOption$ = "Y"
+			upswsh.ShipVia$ = "UPSCALLTAG"
+			upswsh.QVNOption$ = "N"
+		case else
+			! Not Shipping UPS (shouldn't happen): Maintain current SHIPVIA coding
+			lc_UPSShip = lc_shipvia
+			upswsh.ShipVia$ = roh.ShipVia$
+	end select
+	
+	rec = upswsheader_SQLInsert(e$,lchan[4],upswsh.)
+	if rec<> 1
+		e$ = "Error adding world ship header for order "+str$(roh.OrdNum)+"!"
+		error 10000
+	end if
+	! Line (manifest) information
+	tmpKey$ = roh.OrdNum using "######"
+	do
+		rec = filegetrolz(e$,lchan[3],">",1,tmpKey$,rol.)
+		if rec<-2 e=abs(rec) \ error 11000
+		if rec<0 exit do ! no more
+		if rol.OrdNum <> roh.OrdNum exit do
+		if rol.LineType = 2 goto skipLine ! message line 
+		if rol.QtyShip = 0 goto skipLine ! nothing shipped
+		call upswsline_SQLNULL(e$, upswsl.)
+		upswsl.OrderNumber = roh.OrdNum
+		upswsl.LineNumber = rol.LineNum
+		upswsl.ProductCode$ = rtrim$(rol.ProdCode$)
+		upswsl.Description$ = rtrim$(rol.Desc1$)
+		upswsl.Origin$ = "UNITED STATES"
+		! do setup to do unit of measure conversions
+		clear prod.
+		clear cnvtu[]
+		if rol.NStkItem
+			prod.LbsUnit = rol.LbsUnit
+			prod.LbsFact = rol.WgtFactor
+			if not(prod.LbsFact) let prod.LbsFact = 1
+			prod.BaseUM = rol.UMBase
+			prod.UM2 = rol.UMSell
+			prod.UM3 = rol.UMPrice
+			prod.UM4 = rol.UMCost
+			prod.UM5 = rol.UMPurch
+			prod.UMStkDefault = rol.UMSell
+			prod.UMSellDefault = rol.UMSell
+			prod.UMPurchDefault = rol.UMPurch
+			prod.UMCostDefault = rol.UMCost
+			prod.UMPriceDefault = rol.UMPrice
+			prod.UMPrdtnDefault = rol.UMSell
+			prod.UMUpChrg = rol.UMSell
+			prod.UMBrknQty = rol.UMSell
+			prod.UMPack = rol.UMSell
+			prod.UMSize = rol.UMSell
+			prod.UM2Fact = rol.SellFactor
+			prod.UM3Fact = rol.PriceFactor
+			prod.UM4Fact = rol.CostFactor
+			prod.UM5Fact = rol.PurchFactor
+		else
+			read record #lchan[8],rol.PDRecNum;prod.;
+		end if
+		cnvtu[1] = prod.UMPriceDefault
+		cnvtu[2] = 2 ! price / cost conversion
+		cnvta = rol.UnitPrice
+		call ProdConvert(e$,cnvtu[],cnvta,ctlc,pcFlag,prod.)
+		upswsl.PricePerUnit = cnvta
+		cnvtu[2] = 1 ! quantity
+		cnvta = rol.QtyShip
+		call ProdConvert(e$,cnvtu[],cnvta,ctlc,pcFlag,prod.)
+		upswsl.ShipQuantity = cnvta
+		upswsl.UnitOfMeasure$ = rtrim$(xunit$(prod.UMPriceDefault,lchan[9]))
+		rec = upswsline_SQLInsert(e$,lchan[4],upswsl.)
+		if rec<> 1
+			e$ = "Error adding world ship line for order "+str$(roh.OrdNum)+"!"
+			error 10000
+		end if
+		skipLine: !
+	loop
+	! all done
+	End_AddUpdateUPSWS: !
+	for i = 0 to 9 \ if not(fchan[i]) close #lchan[i] \  next i
+else ! main try
+    include "src/callsuberr.inc"
+end try
+End Sub

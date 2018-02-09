@@ -1,0 +1,297 @@
+! >>> Program cch.abandon.out
+!
+! description  send cch an abandon trans # (order deleted)
+!
+! loadsave -w -n 100,10 -o prog/dxport/cch.abandon.out.dl4 src/cch.abandon.out.src
+!
+! 1.0 mm/dd/yyyy change?
+!
+include "src/copyright.inc" ! dx
+!
+Rem CCH.ABANDON.OUT - CANCEL A TRANSACTION FROM CCH
+Rem 220549 / 221505
+Rem Called program
+Rem  IF txt file changed/added CHECK/CHANGE THIS PROGRAM
+Rem text file for template: txt/cch.abandon.xmlo
+Rem file for storing order & cch transid: 7/CCHORDTRANS#
+Rem file sent: YYYYMMDDHHMMSSOOOOOO.txt
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: JAN 22, 2008  10:52:18
+Rem /w2/papermaster/r2005//usr/acct/jcs/work/custom/htberry.r9/cch.abandon.out.src (univ2) [jcs] {10102}
+Rem  Copyright (c) 2008 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare Intrinsic Sub FindF,InpBuf,String,Time,VerifyDate,programdump
+declare intrinsic function FindChannel
+! Option Default Dialect IRIS1
+
+If Err 0 Gosub ERR_TRAP
+Enter ORDERNO,TRANSID$,Intco,rstr$
+Rem {begin src/inc/dim.getchan.i}
+Dim 1%,CHNL
+Dim 3%,CHNLSCR,CHNLFREE
+Rem {end dim.getchan.i}
+Dim WRKLINE$[500],TMPLINE$[500],VAR$[10],WORK$[500],TEMP$[500]
+Dim FLE$[30],RETVAL$[512],CCHSERNO$[20],CCHDPC$[10],DIRTO$[64]
+Dim CCHOID$[20],INXMLFLE$[64],msg$[100],message$[200]
+Dim K1$[64],K2$[64],K3$[64],K4$[64],XMLFLE$[30],TMPFLE$[30]
+Dim X$[20],VARNM$[40],CCHPC$[10],LOGFNM$[40],SPACES$[200]
+Dim 1%,X,X1[9],COID,CH_CNTRL,CH_TMPL,FLESENTO
+Dim 1%,L3[3],S2[1],H4[2],TCB,POS0,POS1,POS2,POS3,CH_DTL
+Dim 1%,CH_CCHTRNS,SCR
+Dim 2%,X2[9],H0[12]
+Dim 3%,X3[9]
+Dim 3%,R[99],PMOHC,E,H
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim WebStr$[256]
+SPACES$ = " ",SPACES$
+TRANSID$ = ""
+FLESENTO = 0;returnstatus=1
+Message$="OK"
+If ORDERNO <= 0 Goto OUTEND
+H0[7] = ORDERNO
+COID = IntCo ! Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64)
+CH_CNTRL = 1
+X2 = 0
+try
+	X3 = Chf(CH_CNTRL)
+Else
+	x2=49
+End try
+If X2 ! cntrl not open
+  Open #1,"cntrl/cntrl" + Str$(COID)
+End If 
+CHNL = 97 \ Gosub GETCHAN
+If Err 0 Gosub ERR_TRAP
+If CHNL > 1 ! valid channel
+  Call "progdflt","CCH","",CHNL,RETVAL$
+  If RETVAL$[1,5] = "@@@@@" Let RETVAL$ = " ",RETVAL$
+  CCHSERNO$ = RETVAL$[1,20]
+  CCHDPC$ = RETVAL$[21,26]
+  DIRTO$ = RETVAL$[31,95]
+  LOGFNM$ = RETVAL$[100,139]
+Else ! "NO DEFAULTS!?
+  Message$="NO DEFAULTS DEFINED!"
+  Returnstatus=0
+  Goto OUTERR
+End If 
+CCHSERNO$=Trim$(CCHSERNO$)
+CCHDPC$=Trim$(CCHDPC$)
+DIRTO$=Trim$(DIRTO$)
+If CCHSERNO$ = "" Or DIRTO$ = "" ! "NEED THESE!! Or CCHDPC$="" OR
+  Message$="MISSING DEFAULT VALUES!"
+  Returnstatus=0
+  Goto OUTERR
+End If 
+LOGFNM$=trim$(LOGFNM$)
+If LOGFNM$ = "" ! no name defined - hardcode default name
+  LOGFNM$ = "1/cchcalcdsout.log"
+End If 
+If DIRTO$ = "" Or DIRTO$[1,10] = SPACES$[1,10] Let DIRTO$ = "/tmp/"
+FLE$ = "txt/cch.abandon.xmlo"
+Call FindF(FLE$,H)
+If Not(H)
+  Message$="TEMPLATE FILE NOT FOUND"
+  Returnstatus=0
+  Goto OUTERR
+End If 
+CHNL = 97 \ Gosub GETCHAN
+If CHNL > 1 ! valid
+  CH_TMPL = CHNL
+  Open #CH_TMPL,FLE$
+Else 
+  Message$="TEMPLATE FILE NOT OPENED"
+  Returnstatus=0
+  Goto OUTERR
+End If 
+FLE$ = "7/CCHORDTRANS" + Str$(COID)
+CHNL = 97 \ Gosub GETCHAN
+If Err 0 Gosub ERR_TRAP
+Call FindF(FLE$,H)
+If Not(H) ! not found - get out now!
+  Message$="TRANSACTION FILE MISSING"
+  Returnstatus=0
+  Goto OUTERR
+End If 
+If CHNL > 1 ! valid
+  CH_CCHTRNS = CHNL
+  Open #CH_CCHTRNS,FLE$
+Else 
+  Message$="TRANSACTION FILE NOT OPENED"
+  Returnstatus=0
+  Goto OUTERR
+End If 
+CCHOID$ = " ",CCHOID$
+K2$ = " ",K2$;K2$ = H0[7] Using "######"
+Search #CH_CCHTRNS,2,1;K2$,R,E \ If E > 1 Gosub ERR_SEARCH
+If Not(E) ! found it - get trans
+  CCHOID$ = K2$[7]
+End If 
+CCHOID$=trim$(CCHOID$)
+If CCHOID$ = "" Goto OUTDONE
+TRANSID$ = CCHOID$
+TEMP$ = "" \ Call Time(TEMP$)
+WORK$ = TEMP$[1,13]
+X1 = 5
+Call VerifyDate(WORK$,X$,E,X1)
+WORK$ = X$[1,8]
+WORK$[9] = Tim(11) Using "&&"
+WORK$[11] = Tim(12) Using "&&"
+WORK$[13] = Tim(13) Using "&&"
+WORK$[15] = H0[7] Using "&&&&&&"
+XMLFLE$ = WORK$ + ".pl"
+INXMLFLE$ = WORK$ + "in.txt"
+TMPFLE$ = "/tmp/" + WORK$[1,14] + Spc(6) Using "&&&&"
+CHNL = 90 \ Gosub GETCHAN
+If Err 0 Gosub ERR_TRAP
+CH_DTL = CHNL
+Build #CH_DTL, + TMPFLE$ + "!"
+TEMPLT_LOOP: Rem read until detail done
+WRKLINE$ = ""
+Gosub READ_TEMPLATE
+If WRKLINE$ = "" Goto ORDDONE
+If WRKLINE$[1,6] = "DOHEAD" Goto ORDDONE
+Gosub PARS_LINE
+If Not(POS1) ! no variable
+  Print #CH_DTL;WRKLINE$
+Else ! need to insert a variable
+  Print #CH_DTL;WRKLINE$[1,POS1 - 1];
+  If VARNM$ = "CCHOID" ! trans id
+    Print #CH_DTL;CCHOID$;
+  End If 
+  If VARNM$ = "CCHSERNO" ! cch cust id
+    Print #CH_DTL;CCHSERNO$;
+  End If 
+  Rem also possibly a "referred id" which is a bill by division field (NOT USED)
+  Print #CH_DTL;WRKLINE$[POS2 + 1]
+End If 
+Goto TEMPLT_LOOP
+READ_TEMPLATE: Rem read (needs any processing?)
+Read #CH_TMPL;WRKLINE$;
+STRPCCHAR: Rem "remove cr/lf etc
+If Len(WRKLINE$) > 1 If WRKLINE$[Len(WRKLINE$)] < " "
+  WRKLINE$[Len(WRKLINE$)] = ""
+  Goto STRPCCHAR
+End If 
+Return 
+PARS_LINE: Rem See if line holds variables
+VARNM$ = " ",VARNM$
+POS0 = 1;POS1 = 0;POS2 = 0
+Search WRKLINE$[POS0],"~",POS1
+If Not(POS1) Return 
+Let VARNM$ = WRKLINE$[POS1 + 1] To "~" : POS2
+VARNM$ = WRKLINE$[POS1 + 1,POS2 - 1]
+Call String(1,VARNM$)
+Return 
+ORDDONE: Rem detail done, now header
+Close #CH_DTL
+WORK$ = TMPFLE$ + "H!"
+Build #CH_DTL, + WORK$
+HDR_LOOP: Rem rest is header
+WRKLINE$ = ""
+Gosub READ_TEMPLATE
+If WRKLINE$ = "" Goto FINFILE
+If WRKLINE$[1,6] = "DOHEAD" Goto HDR_LOOP
+Gosub PARS_LINE
+If POS1 ! yes data needed
+  Print #CH_DTL;WRKLINE$[1,POS1 - 1];
+  If VARNM$ = "LENGTH" ! "get byte count of detail file
+    WORK$ = "wc -c " + TMPFLE$ + " > /tmp/WC" + Str$(H0[7]) + Str$(Spc(6))
+    System WORK$,X2
+    If Not(X2) ! no errors
+      WORK$ = "/tmp/WC" + Str$(H0[7]) + Str$(Spc(6))
+      If Err 0 Rem
+      Close #76
+      If Err 0 Gosub ERR_TRAP
+      Open #76,WORK$
+      TEMP$ = "";X3 = 0
+WCR_LOOP: Rem if loop needed
+      Read #76;TEMP$;
+      If TEMP$ <> "" ! hopefully one line w/no blank start/end
+        X3 = TEMP$
+      End If 
+      Close #76
+      Print #CH_DTL;Str$(X3);
+    End If 
+  End If 
+  Print #CH_DTL;WRKLINE$[POS2 + 1]
+Else 
+  Print #CH_DTL;WRKLINE$
+End If 
+Goto HDR_LOOP
+FINFILE: Rem now add the xml detail
+Print #CH_DTL;""
+Close #CH_DTL
+X2 = 0;X3 = 0
+X$ = "\\"
+WORK$ = "tr -d '" + X$ + "000' < " + TMPFLE$ + "H > " + DIRTO$ + XMLFLE$
+System WORK$,X2
+WORK$ = "tr -d '" + X$ + "000' < " + TMPFLE$ + " >> " + DIRTO$ + XMLFLE$
+System WORK$,X3
+If X2 Or X3 ! unix reported errors
+  Message$="ERROR REPORTED ON FILE COMPILATION"
+  returnstatus=0
+End If 
+DELTRANS: Rem as it's committed - remove from trans
+K1$ = " ",K1$;K1$ = H0[7] Using "######"
+Search #CH_CCHTRNS,2,1;K1$,R,E \ If E > 1 Gosub ERR_SEARCH
+If Not(E) ! found previous DELETE IT!
+  Search #CH_CCHTRNS,5,1;K1$,R,E \ If E Gosub ERR_SEARCH
+  Goto DELTRANS
+End If 
+ORDFINISH: Rem finish
+!Print @0,23;'CL';"ORDER ABANDON CREATED. ";
+If X2 Or X3 Message$="UNIX FILE ERROR" ! ; Else Print "NO PROBLEMS";
+If X2 Or X3 let returnstatus=0
+TEMP$ = "ORDER: " + H0[7] Using "######"
+TEMP$ = TEMP$ + "  " + Msc$(3)
+TEMP$ = TEMP$ + " CCHTID: " + CCHOID$
+If Not(X2) And Not(X3) Let TEMP$ = TEMP$ + " CANCELLED: " + DIRTO$ + XMLFLE$
+If X2 Or X3 Let TEMP$ = TEMP$ + " UNIX ERROR: " + Str$(X2) + " :Headfile  " + Str$(X3) + " :Detlfile "
+WORK$ = "echo " + TEMP$ + " >> " + LOGFNM$
+System WORK$
+If Not(X2) And Not(X3) ! "no errors on file create
+  WORK$ = "chmod +x " + DIRTO$ + XMLFLE$
+  System WORK$,X1
+  ! Print @0,22;'CL';"SENDING FILE NOW";
+  WORK$ = DIRTO$ + XMLFLE$ + " " + DIRTO$ + INXMLFLE$
+  System WORK$
+  FLESENTO = 1
+End If 
+OUTDONE: Rem finished
+If Err 0 Rem
+Close #CH_TMPL
+Close #CH_CCHTRNS
+If Err 0 Gosub ERR_TRAP
+OUTEND: Rem outta here
+If FLESENTO And H0[7] ! we sent a file so call read program?
+  WORK$ = DIRTO$ + INXMLFLE$
+  Call "cch.xmlfle.in.dl4",H0[7],WORK$,intco,rstr$
+End If 
+End 
+Rem {begin src/inc/rtn.getchan.i}
+GETCHAN: Rem search for open channel (counts down from supplied chnl #)
+CHNL=FindChannel()
+Return 
+OutErr: ! something amiss
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call AddToStr(e$,rstr$,WebStr$)
+call SetOutPut(e$,rstr$)
+End
+Rem {end rtn.getchan.i}
+ERR_SEARCH: Rem
+ENUM = E + 1000;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+MSC$(4)
+Call programdump("tmp/cch.abandonse!","")
+returnstatus=0
+message$=msg$
+goto OutErr ! alt - send user info
+Rem {begin rtn.error.s}
+ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+!
+include "src/callmainerrnet.inc"
+End 
+Rem {end rtn.error.s}

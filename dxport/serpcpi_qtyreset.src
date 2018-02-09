@@ -1,0 +1,483 @@
+!
+! CPI reset allocated quantity
+!
+! loadsave -w -n 100,10 -o prog/dxport/serpcpi_qtyreset.dl4 src/serpcpi_qtyreset.src
+!
+! ERP Assistant Enabled
+!
+!
+! To find and correct any discrepancies between the amounts allocated to a 
+! contract vs. what is actually out in open order file. 
+! 
+! 1. Total up, by contract/product what is currently being shipped for the contract in the open order file 
+!     where the stock flag is "Y" (most CPI orders this will be true). 
+! 2. Using this list, sweep through contract lines (products) and find any contracts that have
+!    nothing allocated to them.  If this is found, the adjustment is straightforward:
+!    adjust the quantity allocated to match what is in the open orders. 
+! 3. Sweep through all contracts and compare qty allocated against what is allocated on open orders.
+!    If there is a discrepancy do the following (this type of discrepancy is a little more complex): 
+!       A. Adjust the order allocated qty to match open orders. 
+!       B. Sweep through order line history for both invoices and credits for the product in question.
+!          If found AND the contract number matches AND the stock flag is set to "Y", add to total.
+!          Once done, adjust the qty sold to date on the contract to match. 
+!
+! NOTE: For min/max type contracts(non-reserve stock), allocated quantities are not tracked
+!       so the only adjustment possible for min/max contracts are: If an allocation is
+!       found, zero it out.
+! 
+! This procedure should bring all contracts in sync with historical and open order amounts. 
+
+
+!include copyright, common libs, common intrinsics
+
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+Declare External Sub ERPCronSuccess
+Declare External Function GetParameter$
+
+External Lib "ubsprconv.dl4"
+declare external function Xunit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+include "src/inc/filecpihead.inc"
+include "src/inc/filecpidet.inc"
+include "src/inc/filecpicust.inc"
+Include "src/inc/filecontracth.inc" ! Special Price Header
+Include "src/inc/filespecprice.inc" ! Special Price Lines (MANUAL KEY ADD/UPDATE ONLY!)
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+include "src/inc/filesslsm.inc"
+include "src/inc/filea80vm.inc"
+include "src/inc/filerolz.inc"
+Include "src/inc/fileinvl.inc" ! order lines
+!
+Declare Intrinsic Sub InpBuf,String,Findf,programdump,DateToJulian,JulianToDate
+Declare Intrinsic Sub Time,FormatDate
+!Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,getuidrec,buildsort
+
+! Internal Subroutines and Functions
+Declare Sub OpenFiles,GetParameters,SortOpenOrders,CheckContractsAgainstOrders
+Declare Sub CheckOrdersForNoContractAllocation
+Declare Sub AdjustContract,GetContractPrevSold
+Declare Sub PrintHeader,PrintLine
+
+dim 1%,user
+dim 1%,cnvtu[2]
+dim 3%,cnvta,contractAvail
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200],List$[50,200],3%
+b$=" ",b$
+dim message$[150],webstr$[200]
+
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+! call dxsave(0,"cpicbr.in!")
+USER=GetUIDRec(e$,IntCo,Userid$)
+
+! record structures
+dim rol. as rolnew
+dim cpih. as cpihead
+dim cpic. as cpicust
+Dim SCH. as contracth ! sp contract (MANUAL DIR 2 & 3!)
+dim cpid. as cpidet
+dim sd. as specprice
+dim sr. as sslsm
+Dim PR. as prod ! product file
+Dim PW. as prodwhse ! prodwhse file
+Dim PW2. as prodwhse ! prodwhse file
+dim vend. as a80vm
+dim invl. as invl
+
+! keys
+dim K_cpid$[50],K_sd$[50],K_rol$[50],K_sort$[50],K_invl$[50]
+dim K_pr$[50],K_pw$[50],K_pw2$[50],K_ordl$[50],K_ordh$[50]
+dim K_vend$[50],K_cpih$[50],K_sch$[50],K_sr$[50]
+dim 3%,R_cpid,R_sd,R_pr,R_pw,R_pw2,R_ordl,R_ordh
+dim 3%,R_vend,R_cpih,R_sch,R_sr,R_cnc,R_rol,R_invl
+
+dim qmask$[20],currProdWh$[14]
+dim 1%,L3[3],H4[2],OWHT[1]
+dim 2%,L4[3],H5[16],firstConsWH
+dim 3%,L7[12],onTransfer
+
+! everything else
+dim P9$[50],pageHeading$[132]
+dim p61$[256]
+dim 2%,pageNo,lineNo,maxLines
+dim 3%,allocAdjust,soldAdjust
+
+!
+! M A I N   L O G I C
+!
+Mat Read #1,19,50;P9$;
+mat read #1,60,16;firstConsWH;
+mat read #1,61,0;p61$;
+if p61$[111,111]<>"Y"
+	e$ = "CPI is not active."
+	error 10000
+	end
+Endif
+READ #1,3,172;D5 ! system date YYMMDD
+qmask$ = "--,---,--#.##"
+call OpenFiles() ! open after the check
+call GetParameters()
+if toBrowser
+	!<section>
+	tmp$ = bsdel$,"CPIQTYRS",fdel$,rdel$
+	Call addtostr(e$,rstr$,tmp$)
+	tmp$ = ""
+	tmp$ = tmp$,"CONTRACT",fdel$
+	tmp$ = tmp$,"PRODUCT CODE",fdel$
+	tmp$ = tmp$,"PRODUCT DESCRIPTION",fdel$
+	tmp$ = tmp$,"UOM",fdel$,"PREV SOLD",fdel$,"COMMITTED",fdel$
+	tmp$ = tmp$,"ON SALES ORDER",fdel$
+	tmp$ = tmp$,"COMMITTED ADJUSTMENT",fdel$
+	tmp$ = tmp$,"SOLD ADJUSTMENT",fdel$
+	call addtostr(e$,rstr$,tmp$+rdel$)
+else
+	maxLines = 60
+	if not(erpCron) call setoutput(e$,rstr$, 2)
+end if
+pageHeading$ = "CPI Quantity Reset"
+if auditOnly pageHeading$ = pageHeading$ + " - AUDIT VERSION"
+lineNo = maxLines + 1 ! make sure next line we print prints header
+call SortOpenOrders()
+call CheckOrdersForNoContractAllocation()
+call CheckContractsAgainstOrders()
+
+OutEnd: !
+If toBrowser Call addtostr(e$,rstr$,esdel$) !end section
+if toBrowser or erpCron call setoutput(e$,rstr$,1)
+call ERPCronSuccess()
+try Close else rem
+! 
+! 
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end
+
+
+! ***********************************************************************
+! Nobody but us subroutines down here
+! ***********************************************************************
+
+Sub OpenFiles()
+Try
+	CH_SR=OpenFile(-1824,IntCo) \ if ch_sr=-1 Error 42 ! salesrep
+	CH_CC=OpenFile(-1728,IntCo) \ if ch_cc=-1 Error 42 ! u/m codes
+	CH_ORDH=OpenFile(-1840,IntCo) \ if ch_ordh=-1 Error 42 ! order header
+	CH_ORDL=OpenFile(-1888,IntCo) \ if ch_ordl=-1 Error 42 ! order line
+	CH_PR=OpenFile(-1792,IntCo) \ if ch_pr=-1 Error 42 ! product
+	CH_PW=OpenFile(-1744,IntCo) \ if ch_pw=-1 Error 42 ! product wh
+	CH_CPIH=OpenFile(-9929,IntCo) \ if ch_cpih=-1 Error 42 ! cpi header
+	CH_CPID=OpenFile(9928,IntCo) \ if ch_cpid=-1 Error 42 ! cpi detail
+	CH_CPIC=OpenFile(-9927,IntCo) \ if ch_cpic=-1 Error 42 ! cpi customer
+	CH_SCH=OpenFile(-2880,IntCo) \ If ch_sch=-1 Error 42 ! Contract header
+	CH_CNC=OpenFile(-9957,IntCo) \ if ch_cnc=-1 Error 42 ! customer / contract
+	CH_SD=OpenFile(1936,IntCo) \ If ch_sd=-1 Error 42 ! Contract Lines
+	CH_VEND=OpenFile(-2400,IntCo) \ If ch_vend=-1 Error 42 ! vendor
+	CH_INVL=OpenFile(-1184,IntCo) \ If ch_invl=-1 Error 42 ! invoice line
+	CH_SORT = buildsort(e$,25,0) \ if ch_sort=-1 error 42
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! openfiles
+
+Sub GetParameters()
+try
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	tmp$ = ucase$(GetParameter$("AUDITONLY"))
+	if tmp$ = "Y" auditOnly = 1
+	toBrowser = 0
+	try
+		i = Chf(0)
+	else
+		toBrowser = spc(8)
+	end try
+	if toBrowser and toBrowser <> 49 error toBrowser
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! openfiles
+
+sub SortOpenOrders()
+try
+	K_rol$ = " ",k_rol$
+	do
+		R_rol = filegetrolz(e$,CH_ORDL,">",1,K_rol$,rol.)
+		if R_Rol<=0 exit do
+		if rol.Status <> 11 goto SkipOrderLine ! skip credit memos
+		if not(rol.Contract) goto SkipOrderLine ! not on pricing contract
+		if not(rol.QtyShip) goto SkipOrderLine ! nothing shipping
+		if not(rol.UpdtStk) goto SkipOrderLine ! not updating stock
+		! on pricing contract, make sure it's cpi
+		K_cpid$ = " ",K_cpid$
+		K_cpid$[1,6] = rol.Contract using "C#####"
+		K_cpid$[7,18] = rol.ProdCode$
+		R_cpid = filegetcpidet(e$,CH_CPID,"=",1,K_cpid$,cpid.)
+		if R_cpid<=0 goto SkipOrderLine ! not a cpi contract
+		if not(cpid.ResStock) goto SkipOrderLine ! not a reserve stock contract
+		! OK - got one for sure
+		! SORT KEY:
+		! 1-6 = contract number
+		! 7,18 = product code
+		! 19 = total shipped for this contract / product
+		K_sort$ = " ",K_sort$
+		K_sort$ = K_cpid$
+		search #ch_sort,3,1;K_sort$,R_sort,e \ if e>2 error 11000
+		if not(e) and K_sort$[1,18] = K_cpid$[1,18]
+			! already exists, re-add it
+			search #ch_sort,5,1;K_sort$,R_sort,e \ if e error 11000
+			K_sort$[19] = str$(val(K_sort$[19]) + rol.QtyShip)
+		else
+			K_sort$=" ",K_sort$
+			K_sort$[1,18] = K_cpid$[1,18]
+			K_sort$[19] = str$(rol.QtyShip)
+		end if
+		search #ch_sort,4,1;K_sort$,1,e \ if e error 11000
+		SkipOrderLine: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! SortOpenOrders
+
+sub CheckOrdersForNoContractAllocation()
+try
+	K_sort$ = " ",K_sort$
+	do
+		search #ch_sort,3,1;k_sort$,R_sort,e \ if e>2 error 11000
+		if e exit do
+		k_cpid$ = " ",k_cpid$
+		k_cpid$[1,18] = k_sort$[1,18]
+		R_cpid = filegetcpidet(e$,CH_CPID,"=",1,K_cpid$,cpid.)
+		if R_cpid<=0 error 11000 ! shouldn't happen
+		if cpid.ResStock and not(cpid.QuantityAllocated)
+			! OK - have an order line shipping
+			! using the contract, but nothing
+			! allocated - shouldn't be!
+			k_sd$ = k_cpid$
+			R_sd = filegetspecprice(e$,CH_SD,"=",1,K_sd$,sd.)
+			if R_sd<=0 error 11000 ! shouldn't happen
+			! get the product record (conversions)
+			k_pr$ = " ",k_pr$ \ k_pr$[1,12] = cpid.ProductID$
+			R_pr = filegetprod(e$,CH_PR,"=",1,K_pr$,pr.)
+			if R_pr <= 0 error 11000 ! shouldn't happen
+			onSO = val(K_sort$[19])
+			soldAdjust = 0 \ allocAdjust = onSO
+			! convert amounts to reserve stock U/M
+			let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=cpid.QuantityAllocated !convertqty
+			printAllocated=ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+			! convert amounts to reserve stock U/M
+			let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=onSO !convertqty
+			printOnSO=ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+			! convert amounts to reserve stock U/M
+			let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=sd.QtySinceStart !convertqty
+			printPrevSold=ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+			! convert amounts to reserve stock U/M
+			let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=allocAdjust !convertqty
+			printAllocAdjust=ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+			! convert amounts to reserve stock U/M
+			let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=soldAdjust !convertqty
+			printSoldAdjust=ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+			Call PrintLine()
+			if not(auditOnly) call AdjustContract()
+		end if
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CheckOrdersForNoContractAllocation
+
+sub CheckContractsAgainstOrders()
+try
+	k_cpid$ = " ",k_cpid$
+	do
+		R_cpid = filegetcpidet(e$,CH_CPID,">",1,K_cpid$,cpid.)
+		if R_cpid<=0 exit do
+		! if not(cpid.ResStock) goto SkipContractLine
+		fixMinMax = 0
+		if not(cpid.QuantityAllocated) goto SkipContractLine
+		if not(cpid.ResStock)
+			! not a reserve stock contract
+			! nothing should be allocated!
+			fixMinMax = 1
+			K_sort$[19] = "0"
+		else
+			K_sort$ = " ",K_sort$
+			K_sort$[1,18] = K_cpid$[1,18]
+			search #ch_sort,3,1;K_sort$,R_sort,e
+			if e or K_sort$[1,18] <> K_cpid$[1,18]
+				! allocation with NO outstanding orders
+				K_sort$[19] = "0"
+			end if
+		end if
+		onSO = val(K_sort$[19])
+		if onSO <> cpid.QuantityAllocated or fixMinMax
+			! OK - contract allocated amount
+			! does not much what's on sales orders
+			K_sd$ = K_cpid$
+			R_sd = filegetspecprice(e$,CH_SD,"=",1,K_sd$,sd.)
+			if R_sd<=0 error 11000 ! shouldn't happen
+			! get the product record (conversions)
+			k_pr$ = " ",k_pr$ \ k_pr$[1,12] = cpid.ProductID$
+			R_pr = filegetprod(e$,CH_PR,"=",1,K_pr$,pr.)
+			if R_pr <= 0 error 11000 ! shouldn't happen
+			allocAdjust = onSO - cpid.QuantityAllocated
+			if fixMinMax
+				soldAdjust = 0
+			else
+				call GetContractPrevSold()
+				soldAdjust = prevSold - sd.QtySinceStart
+			end if
+			! convert amounts to reserve stock U/M
+			let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=cpid.QuantityAllocated !convertqty
+			printAllocated=ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+			! convert amounts to reserve stock U/M
+			let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=onSO !convertqty
+			printOnSO=ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+			! convert amounts to reserve stock U/M
+			let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=sd.QtySinceStart !convertqty
+			printPrevSold=ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+			! convert amounts to reserve stock U/M
+			let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=allocAdjust !convertqty
+			printAllocAdjust=ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+			! convert amounts to reserve stock U/M
+			let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=soldAdjust !convertqty
+			printSoldAdjust=ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+			Call PrintLine()
+			if not(auditOnly) call AdjustContract()
+		end if
+		SkipContractLine: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CheckContractsAgainstOrders
+
+
+Sub PrintHeader()
+Try
+	if lineNo < maxLines exit sub ! no need to print a header
+	! need to print one
+	if pageNo > 0 print #0;"\14\" ! form feed
+	pageNo = pageNo + 1
+	Print #0;" - CPIPURGE -"; Tab (Int(66 - (Len(pageHeading$) / 2)));pageHeading$
+	tmp$ = "" \ Call Time(tmp$)
+	Print #0; Tab 1;"DATE ";tmp$;
+! 	tmp$ = "FOR SALESREP: "+ltrim$(sr.SlsmNum$)+" - "+rtrim$(sr.Name$)
+! 	Print #0;Tab (Int(66 - (Len(tmp$) / 2)));tmp$;
+	Print #0; Using "PAGE ###"; Tab 119;pageNo
+	Print #0;" "
+	Print #0; "CTRCT";tab 7;"PRODUCT CODE";tab 20;
+	PRINT #0; "PRODUCT DESCRIPTION"; tab 51;
+	Print #0; "UOM";Tab 56;"PREV SOLD"; tab 70;
+	Print #0; "COMMITTED";tab 84;
+	Print #0; "ON SALE ORD";Tab 100;
+	print #0; "ALLOC ADJUST";Tab 114;"SOLD ADJUST";
+	print #0;""
+	print #0;""
+	lineNo = 7
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintHeader
+
+Sub PrintLine()
+Try
+	! contract remain: contract avail - (wh avail + on po + on transfer)
+	if toBrowser
+		tmp$ = ""
+		tmp$ = tmp$,cpid.ContractNumber,fdel$
+		tmp$ = tmp$,rtrim$(cpid.ProductID$),fdel$
+		tmp$ = tmp$,rtrim$(pr.Desc1$),fdel$
+		tmp$ = tmp$,xunit$(sd.UMQty,CH_CC),fdel$
+		tmp$ = tmp$,rtrim$(printPrevSold using qmask$),fdel$
+		tmp$ = tmp$,rtrim$(printAllocated using qmask$),fdel$
+		tmp$ = tmp$,rtrim$(printOnSO using qmask$),fdel$
+		tmp$ = tmp$,rtrim$(printAllocAdjust using qmask$),fdel$
+		tmp$ = tmp$,rtrim$(printSoldAdjust using qmask$),fdel$
+		call addtostr(e$,rstr$,tmp$+rdel$)
+	else
+		call PrintHeader()
+		print #0; cpid.ContractNumber using "#####";tab 7;
+		print #0; cpid.ProductID$;tab 19;pr.Desc1$;tab 51;
+		print #0; xunit$(sd.UMQty, CH_CC); tab 56;
+		print #0; printPrevSold using qmask$; tab 70;
+		print #0; printAllocated using qmask$; tab 84;
+		print #0; printOnSO using qmask$; tab 100;
+		print #0; printAllocAdjust using qmask$; tab 114;
+		print #0; printSoldAdjust using qmask$;
+		print #0;""
+		lineNo = lineNo + 1
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintLine
+
+sub GetContractPrevSold()
+try
+	prevSold = 0
+	! OK - now check for invoice history on this contract
+	K_invl$ = " ",K_invl$
+	K_invl$[1,6] = R_pr Using "######"
+	do
+		R_invl=filegetinvl(e$,ch_invl,">",2,K_invl$,invl.)
+		if R_invl<=0 exit do
+		if R_pr <> val(K_invl$[1,6]) exit do
+		if invl.Contract <> cpid.ContractNumber goto SkipInvoiceLine
+		if not(invl.UpdtStk) goto SkipInvoiceLine
+		! got one - contract matches - updating stock
+		if invl.Status = 12 ! credit memo
+			prevSold = prevSold - invl.QtyShip
+		else
+			prevSold = prevSold + invl.QtyShip
+		end if
+		SkipInvoiceLine: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintLine
+
+
+sub AdjustContract()
+try
+	! get with lock
+	if allocAdjust
+		R_cpid = filegetcpidet(e$,CH_CPID,"=",1,K_cpid$,cpid.,1)
+		if R_cpid<=0 error 11000 ! shouldn't happen
+		cpid.QuantityAllocated = cpid.QuantityAllocated + allocAdjust
+		e = fileupdatecpidet(e$,CH_CPID,"c",R_cpid,cpid.)
+		if e error 11000
+	end if
+	if soldAdjust
+		R_sd = filegetspecprice(e$,CH_SD,"=",1,K_sd$,sd.,1)
+		if R_sd<=0 error 11000 ! shouldn't happen
+		sd.QtySinceStart = sd.QtySinceStart + soldAdjust
+		e = fileupdatespecprice(e$,CH_SD,"c",R_sd,sd.)
+		if e error 11000
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! AdjustContract
+
+end

@@ -1,0 +1,310 @@
+!! --- SERP487
+! description Repair Trans Inquiry
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp487.dl4 src/serp487.src
+!
+! 1.0 mm/dd/yyyy change??
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+include "src/inc/fileprod.inc" ! product
+include "src/inc/filepserlno.inc"  ! product serial #'s
+include "src/inc/filereprtrans.inc"  ! serial # repair file
+include "src/inc/filea80vm.inc" ! vendor file
+include "src/inc/filecust.inc" ! customer
+
+! *declare additional dl4 intrinsic subs & functions
+Declare Intrinsic Function FindChannel
+Declare Intrinsic Sub Logic, programdump, datetojulian
+!
+! *declare additional external libs & subs & functions
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+!
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,formatdate2$,PDate$
+Declare External Function formatdate$,FMTphone2$,getuidrec
+Declare External Sub ArBuck
+Declare External Sub UserCntrl 
+Declare External Sub GetCostLevels
+!
+External Lib "ubsprconv.dl4"     
+Declare External Function XUnit$ 
+!
+! internal subs
+Declare Sub OpenFiles,SndWRPR
+!--------------------------------------------------------------------
+!
+!
+! ** main procedure
+!
+OPTION GOSUB NESTING 16  ! Default is 8
+try
+	Option String Redim is legal ! in case subs dim/use same names
+  !
+  Dim action$[30],options$[30],userid$[8],fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+  Dim rstr$[5000]
+  Dim 2%,WHSE,Q0[1]
+  Dim 1%,IntCo
+  Dim 3%,SPREC,rec_uac
+
+  dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! error handling variables
+  dim Section$[30],X$[10]
+  dim mergedir$[60],action1$[20],action2$[30]
+  dim Company$[2],keyvend$[10],keyval$[60]
+  dim tmpkey$[50],Serno$[30]
+  dim 1%,editstatus,source
+  dim 1%,ua5[10],x1[9],flags[11]
+  dim 1%,tmp1,intSls,CTLC,errflag,WH,Div,portnum,chan[25]
+  dim 2%,tmp2,maxcnt \ maxcnt=100 ! max records in arrays
+  dim 3%,tmp3
+  DIM 3%,parm[25],ORGTOT[10]
+  dim 2%,vendid,vendid$[6],Prod$[12]
+  dim 2%,currdate,x2[9]
+  dim 4%,tmp4
+  Dim 1%,CNVTU[2],ERRTYPE
+  dim 3%,qty,cost,amount,baseqty,cnvta
+  dim 3%,lineqty,lineum,linecost,lineextamt,lbsunit,lbsfact                                        
+  dim 3%,rec_tmp,x3[9],r[99]
+  dim WORK$[600],tmpField$[1,30]
+  dim p60$[50],p61$[256],P9$[50]
+  dim List$[maxcnt,1000],sdate$[50]
+  dim logfname$[50],QMask$[20],PMask$[20]
+  dim SearKey$[64],BegKey$[64],mode$[3]
+  dim Desc$[50],k1$[64]
+  dim tmp$[200],tmp1$[200],WebStr$[1000],Message$[200],MSG$[500]
+  dim blank$[200] \ blank$=" ",blank$
+  !!! define structures !!! 
+  dim pr. as prod ! prod
+  dim wrp. as reprtrans ! repair trans
+  dim psn. as pserlno ! product serial #
+  dim vend. as a80vm ! vendor file
+  dim cust. as cust ! customer
+    
+  Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H) ! rounding to nearest penny
+  !
+  ! call dxopen() ! done in serpsn
+  
+  call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+  mat read #ctlc,60,50;p60$; ! system flag variable
+  mat read #ctlc,61,0;p61$;
+  mat read #ctlc,19,50;p9$;                                                 
+  Mat Read #ctlc,115,40;Q0;
+   QMask$ = "---------#.##"                                              
+  tmp$ = "#",tmp$                                                         
+  If Q0[1] <= 0 Let Q0[1] = 2                                             
+  If Q0[1] Let PMask$ = "-----------#.",tmp$[1,Q0[1]] !price mask         
+  !
+  ACTION2$=UCASE$(RTRIM$(ACTION2$))
+  ACTION1$=UCASE$(RTRIM$(ACTION1$)) ! both Uppercase and trimmed
+  ! ACTION IS USED IN SNMENU (serpsn)
+  !
+  ! Call DXSave(0,"tmp/wrpr487.txt!") ! \ stop ! data as received
+  !call programdump("tmp/wrp487u!","") ! dump vars
+  !
+  ReturnStatus=0
+  Message$="ACTION1 NOT FOUND"
+  IF P60$[25,25]<>"Y" ! NO S/N'S KEPT SYSTEM WIDE
+	ReturnStatus=0
+	Message$="NO SERIAL NUMBERS FOR SYSTEM"
+	Goto WRPDone
+  Endif
+  call OpenFiles()
+  ! we'll use as many other calls as we can
+  ! Prodsearch - in prodm, SNList in serpsn
+  select case action1$
+
+	Case "GETDATA" ! get and send data						doc=RTInq-GetData.doc
+		returnstatus=1
+		Message$="OK"
+		Call SndWRPR()
+		! end of getdata
+  end select
+	WRPDone: ! 
+	! status section - always send
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+	call SetOutput(e$,rstr$) ! 
+  ! call dxclose()
+else
+  include "src/callmainerrnet.inc"
+  !call dxclose()
+end try
+end
+
+!--------------------------------------------------------------------
+sub OpenFiles()
+  
+  Try
+    !
+    Ch_Prod = OpenFile(-1792,intCo) \ If Ch_Prod = -1 Error 42  !product file 
+	Ch_PSN = OpenFile(-416,intCo) \ If Ch_PSN = -1 Error 42  !product serial #'s
+	Ch_WRP = OpenFile(-2992,intCo) \ If Ch_WRP = -1 Error 42  !repair trans
+    Ch_Vend = OpenFile(-2400,intCo) \ If Ch_Vend = -1 Error 42  ! vend
+	Ch_Cust=OpenFile(-1808,Intco) \ if ch_cust=-1 error 42 ! customer
+  	!
+   else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+
+! ------------------------------------------------------------------------
+Sub SndWRPR()
+! get prod/sn and send data
+  Try
+	dim UDA$[30]
+	MAT READ #CTLC,67,196;UDA$;
+	call dxget("PRODID",tmp$)
+	Prod$=UCase$(RTrim$(tmp$))+Blank$
+	PRR=filegetprod(e$,CH_Prod,"=",1,Prod$,pr.)
+	If PRR<=0
+		returnstatus=0
+		Message$="Product Not Found"
+		goto SWRPRDone
+	Endif
+	if pr.SerNoTrack$<>"Y"
+		returnstatus=0
+		Message$="Product does not keep Serial Numbers"
+		goto SWRPRDone
+	Endif
+	Call dxget("SNID",tmp$)
+	Serno$=UCase$(tmp$)+Blank$
+	! see if exists
+	Searkey$=Serno$[1,30]
+	SNR=filegetpserlno(e$,Ch_PSN,">",1,Searkey$,psn.) ! IS ALWAYS > - Cannot match it!
+	if searkey$[1,30]<>Serno$[1,30] let snr=-2
+	If SNR<=0 
+		returnstatus=0
+		Message$="Serial Number not found"
+		goto SWRPRDone
+	Endif
+	! now need to see if for same product
+	if psn.ProductCode$<>Prod$ ! diff?
+	  do
+		SNR=filegetpserlno(e$,CH_PSN,">",1,Searkey$,psn.)
+		if searkey$[1,30]<>Serno$[1,30] let snr=-2
+		if snr<=0
+			Clear psn.
+			exit do
+		Endif
+		If psn.ProductCode$=Prod$ exit do
+	  Loop
+	Endif
+	if psn.ProductCode$<>Prod$
+		returnstatus=0
+		message$="Serial Number is for a different product"
+		Goto SWRPRDone
+	Endif
+	! now generate it
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"UDANAMES",fdel$
+	List$[1]="UDA1",fdel$,"UDA2",fdel$
+	tmp$=uda$[1,14];tmp1$=uda$[15,28]
+	if rtrim$(tmp$)="" let tmp$="UDA 1"
+	if rtrim$(tmp1$)="" let tmp1$="UDA 2"
+	List$[2]=RTrim$(tmp$),fdel$,RTrim$(tmp1$),fdel$
+	List$[3]=esdel$
+	call addtostr(e$,rstr$,List$[])
+	! now prod/serial
+	Clear List$[]
+	List$[0]=bsdel$,"PRODSN",fdel$
+	webstr$="PRODID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+	webstr$=webstr$,"SNID",fdel$,"MODELNO",fdel$
+	webstr$=webstr$,"UDA1",fdel$,"UDA2",fdel$
+	webstr$=webstr$,"MFRWARR",fdel$,"OURWARR",fdel$
+	webstr$=webstr$,"LASTRPR",fdel$,"WARRRPR",fdel$
+	webstr$=webstr$,"NONWRPR",fdel$,"REIMBUR",fdel$
+	webstr$=webstr$,"SNSTATUS",fdel$
+	List$[1]=webstr$
+	webstr$=prod$,fdel$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.Desc2$),fdel$
+	webstr$=webstr$,RTrim$(SERNO$),fdel$,RTrim$(psn.ModelNumber$),fdel$
+	webstr$=webstr$,RTrim$(psn.UDA$),fdel$,Str$(psn.UDA2),fdel$
+	if psn.DateReceived and psn.MfgWarrantyDays
+		x$=psn.DateReceived using "&&&&&&"
+		Call DateToJulian(1,X$,X$,E)
+		x3=x$[1,5];x3=x3+psn.MfgWarrantyDays
+		if x3
+			tmp$=JDate$(x3)
+		Else
+			tmp$=""
+		Endif
+	Else
+		tmp$=""
+	Endif
+	webstr$=webstr$,tmp$,fdel$ ! mfr expire date
+	if psn.DateSoldDel and psn.WarrantyDays
+		x$=psn.DateSoldDel using "&&&&&&"
+		Call DateToJulian(1,X$,X$,E)
+		x3=x$[1,5];x3=x3+psn.WarrantyDays
+		if x3
+			tmp$=JDate$(x3)
+		Else
+			tmp$=""
+		Endif
+	Else
+		tmp$=""
+	Endif
+	webstr$=webstr$,tmp$,fdel$ ! our expire date
+	tmp$=""
+	if psn.DateLastRepair let tmp$=PDate$(psn.DateLastRepair)
+	webstr$=webstr$,tmp$,fdel$ ! last repair
+	webstr$=webstr$,LTrim$(psn.WarrantyRepairs using QMask$),fdel$
+	webstr$=webstr$,LTrim$(psn.NonWrntyRepairs using QMask$),fdel$
+	webstr$=webstr$,LTrim$(psn.VendorReimbursement using QMask$),fdel$
+	tmp$=""
+	IF psn.Status=0 let tmp$="OPEN"
+	IF psn.Status=1 let tmp$="SOLD"
+	IF psn.Status=2 let tmp$="ON HOLD"
+	IF psn.Status=3 let tmp$="COMMITTED"
+	IF psn.Status=4 let tmp$="IN PROCESS"
+	webstr$=webstr$,tmp$,fdel$ ! status
+	List$[2]=webstr$
+	List$[3]=esdel$
+	call addtostr(e$,rstr$,List$[])
+	! finally all repairs on file for sn
+	Clear List$[]
+	List$[0]=bsdel$,"REPAIRS",fdel$
+	Webstr$="DATE",fdel$,"PDESC1",fdel$,"PDESC2",fdel$
+	webstr$=webstr$,"ORDER",fdel$,"INVOICE",fdel$,"WH",fdel$
+	webstr$=webstr$,"WTYRPR",fdel$,"REPAIR",fdel$,"COST",fdel$
+	webstr$=webstr$,"CLAIM",fdel$
+	List$[1]=webstr$
+	Row=2
+	K1$=" ",k1$
+	K1$[1,12]=prod$;K1$[13]=psn.SerialNumber$
+	do
+		WRR=filegetreprtrans(e$,ch_wrp,">",1,k1$,wrp.)
+		if WRR<=0 exit do
+		if k1$[1,12]<>Prod$ exit do
+		if k1$[13,42]<>psn.SerialNumber$ exit do
+		tmp$="" \ if wrp.Date let tmp$=PDAte$(wrp.Date)
+		webstr$=tmp$,fdel$
+		webstr$=webstr$,RTrim$(wrp.ProblemDesc1$),fdel$
+		webstr$=webstr$,RTrim$(wrp.ProblemDesc2$),fdel$
+		webstr$=webstr$,Str$(wrp.Order),fdel$,Str$(wrp.Invoice1),fdel$
+		webstr$=webstr$,Str$(wrp.Whse),fdel$
+		tmp$="NO" \ if wrp.WarrantyCover let tmp$="YES"
+		webstr$=webstr$,tmp$,fdel$
+		webstr$=webstr$,LTrim$(wrp.Invoice using QMask$),fdel$
+		webstr$=webstr$,LTrim$(wrp.InvoiceCost using QMask$),fdel$
+		tmp$="NO" \ if wrp.ClaimFiled=1 let tmp$="YES"
+		if wrp.ClaimFiled=2 let tmp$="PAID"
+		webstr$=webstr$,tmp$,fdel$
+		List$[row]=webstr$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Loop
+	List$[row]=esdel$
+	call addtostr(e$,rstr$,List$[])
+	SWRPRDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndWRPR
+
+! ------------------------------------------------------------------------

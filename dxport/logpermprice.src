@@ -1,0 +1,415 @@
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: MAR 10, 2008  13:42:00
+Rem /w2/papermaster/r2005//usr/acct/becky/work/r10devl/misc/logpermprice.src (univ2) [becky] {43125}
+Rem  Copyright (c) 2008 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+! loadsave -w -n 100,10 -o prog/dxport/logpermprice src/logpermprice.src
+include "src/copyright.inc"
+Declare Intrinsic Sub InpBuf,String,programdump
+! Option Default Dialect IRIS1
+Rem logpermprice  track changes to perm price/ cost
+Rem rjs 08/23/06
+Rem
+! passinfo[0] - channel # of last price file from calling prog
+!
+! passinfo[1] - record number of last price record from calling prog
+!
+! passinfo[2] - recording before change or after change of last price
+!               0- new last price record
+!               1- last price data before the changes
+!               2- last price data after the changes if there are changes will 
+!                  record out to the log file
+!               3- deleted last price record
+!
+! passinfo[3] - where did it come from is using the update types from perm price!               log permlog[3]
+!               more inportant on update part passinfo[2]
+!               will need to pass
+!               1 - 70 update to perm price
+!               2 - 70 update to pending perm price
+!               3 - perm price set in O/E updated in 227
+!               4 - Manual edit to perm price done in 117
+!             **5 - Manual edit to pending perm price done in 117
+!                   this one doesn't need to be passed will check with 4
+!               6 - Manual  edit to perm price  via Sales Pro. 
+!               7 - Manual  edit to pend perm price  via Sales Pro
+!               8 - New LP perm record from 117
+!               9 - New LP perm record from 227lp
+!              10 - New LP perm record from 281
+!              11 - Manual edit  LP perm record from 281
+!              12 - Manual delete LP record from 117	 
+!              13 - Manual delete LP record from 284
+!              14 - New LP perm record from salespro
+!              15 - Manual delete LP record from salespro
+!              16 - Roll back perm price records from sequence
+!			   17 - Purged in 119
+!passinfo[4] - user id that user is making these changes for
+!              salespro it's the salesrep
+!
+!passinfo[5] - order number if type=3
+!
+!passinfo[6] - invoice number if type=3
+!
+!passinfo[7] - prog 70 sequence # (if coming from 70)
+!
+!passinfo[8] - if update skipped in 70(for type 1)
+!              1 - no cost change
+!              2 - no change in price 
+!              3 - new calc'd price lower and  price setting=2 (don't allow)
+!
+!passinfo[9] - calc'd price if passinfo[8]=3
+!
+!passinfo[10] - if not 0, assume it is the channel of the log file
+!               opened read/write.  if 0, open and close the channel
+!               in this routine.
+!
+!** could have set the permlog[22]&permlog[23] directly with order/invoice just
+!trying to keep all ther permlog assignments in the called program
+!
+! ** when updating make sure passinfo[2] & passinfo[3] are set
+!
+! calling program should dim pplog$[60],3%,passinfo[20],permlog[35]
+!
+If Err 0 Gosub ERR_TRAP
+Enter intco,PPLOG$,PERMLOG[],PASSINFO[],dlog$
+Rem {begin srcdevl/inc/dim.getchan.i}
+Dim msg$[256],pgmName$[20]
+Dim 1%,CHNL
+Dim 3%,CHNLSCR,CHNLFREE
+Rem {end dim.getchan.i}
+Rem {begin srcdevl/inc/dim.lastpr.i}
+Dim LP$[12],LP2$[84],LPMT$[2]
+Dim 1%,LPC3[4],AI,LPEUN[2],LPWH,LPCPT,PPPUSERID
+Dim 2%,LPDF,LPC1[2],LPR1[3],LPC5[3],LPPCDATE,LPCSDT,LPDEPT,PPPCID[1]
+Dim 3%,LPC2[2],LPC4[3],LPR[4],LPUNF[6],PERM[1],LPLPERM,LPCURR[1]
+Dim 3%,LPFPERM[1],LPUNIT[1],PPERMCST
+Rem {end dim.lastpr.i}
+Dim KEY1$[50],KEY2$[50],KEY3$[50],KEY4$[50],CH_PERM_LOG,FILE$[16],U5$[50]
+Dim PMASK$[12]
+Dim 1%,USRID
+Dim 2%,Q0[1]
+Dim 3%,LPREC,LPCHAN,TYPE,FLAG,FLAG1
+Dim 1%,PFU1[20],CNVTU[2],UN[2],Z9[9],COST_LEV[3],COMM_LEV,LOGALL
+Dim 3%,PFU2[6],CNVTA,A[33],UWORK[15],REC_LASTPR,WASCALLED,LOG_REC
+Dim P61$[256]
+
+Mat Read #1,115,40;Q0; \ If Q0[1] <= 0 Let Q0[1] = 2
+Mat Read #1,61,0;P61$;
+if RTrim$(dlog$)="" let dlog$="files/6/lp.log"
+PMASK$ = "###########"
+X = Len(PMASK$) - Q0[1] \ If X < 0 Let X = Q0[1]
+PMASK$[X,X] = "."
+Def FNP(X) = Sgn(X) * (Int(Abs(X) * 10 ^ Q0[1] + .5) / 10 ^ Q0[1])
+if not(passinfo[10])
+	CHNL = 99 \ Gosub GETCHAN
+	If CHNL > 1 Let CH_PERM_LOG = CHNL
+	FILE$ = "2/permpricelog" + Str$(intco)
+	Open #CH_PERM_LOG,FILE$
+else
+	CH_PERM_LOG = passinfo[10]
+end if
+CH_LASTPR = PASSINFO[0]
+REC_LASTPR = PASSINFO[1]
+FLAG = PASSINFO[2]
+TYPE = PASSINFO[3]
+USRID = PASSINFO[4]
+LOGALL = 1 \ If P61$[89,89] = "N" Let LOGALL = 0
+If Not(CH_LASTPR) Or Not(REC_LASTPR) Goto OUTEND
+unlock #ch_lastpr ! make sure it can read it!
+Gosub GET_LASTPRICE ! will leave locked
+If LPC4[3] Goto OUTEND
+if lp$[1,1]="" or lp$[1,5]="     " goto outend ! no product
+if lpc1[0]<=0 OR LPC1[0]>999999 GOTO OUTEND ! BAD RECORD
+! ADDED 2 LINES ABOVE AS THERE ARE MANY RECORDS IN LOGFILE WITH NO DATA!
+Gosub L_30000
+For X = 3 To 4
+  CNVTU[0] = 0;CNVTU[1] = LPC3[X]
+  CNVTU[2] = 2;CNVTA = PERM[X - 3]
+  If X = 3 And LPEUN[2] <> -7 Goto L_8775
+  Gosub L_20000 \ PERM[X - 3] = FNP(AMOUNT)
+L_8775: Next X
+For X = 3 To 4
+  CNVTU[0] = LPC3[X];CNVTU[1] = 0
+  CNVTU[2] = 2;CNVTA = PERM[X - 3]
+  If X = 3 And LPEUN[2] <> -7 Goto L_8865
+  Gosub L_20000 \ PERM[X - 3] = AMOUNT
+L_8865: Next X
+If FLAG = 0
+  If Not(LPEUN[2]) Goto OUTEND
+  If PERM[0] + PERM[1] = 0 Goto OUTEND
+End If 
+If FLAG = 0 Or FLAG = 3 ! new record
+  Gosub CLEAR_VARS
+  PPLOG$[1,12] = LP$[1,12]
+  PERMLOG[0] = LPC1[0]
+  PERMLOG[1] = Tim(6)
+  PERMLOG[3] = TYPE
+  PERMLOG[4] = PERM[0]
+  PERMLOG[6] = LPEUN[2]
+  PERMLOG[7] = LPC3[3]
+  PERMLOG[8] = LPUNF[1]
+  PERMLOG[9] = PERM[1]
+  PERMLOG[10] = LPC5[2]
+  If LPR[1] ! if from a contact
+    PERMLOG[11] = LPR[1]
+    PERMLOG[12] = 1
+  End If 
+  If LPC5[1] ! if from a rebate
+    PERMLOG[11] = LPC5[1]
+    PERMLOG[12] = 2
+  End If 
+  PERMLOG[14] = LPC3[4]
+  PERMLOG[15] = LPUNF[2]
+  PERMLOG[19] = LPFPERM[0]
+  PERMLOG[20] = LPFPERM[1]
+  PERMLOG[30] = PPERMCST
+  PERMLOG[24] = LPEUN[2]
+  PERMLOG[5] = PERM[0]
+  PERMLOG[13] = PERM[1]
+  PERMLOG[16] = LPC5[2]
+  If LPR[1] ! if from a contact
+    PERMLOG[17] = LPR[1]
+    PERMLOG[18] = 1
+  End If 
+  If LPC5[1] ! if from a rebate
+    PERMLOG[17] = LPC5[1]
+    PERMLOG[18] = 2
+  End If 
+  PERMLOG[21] = PASSINFO[7]
+  PERMLOG[25] = LPFPERM[0]
+  PERMLOG[26] = LPFPERM[1]
+  PERMLOG[27] = USRID
+  If TYPE = 9 ! change from accept
+    PERMLOG[22] = PASSINFO[5]
+    PERMLOG[23] = PASSINFO[6]
+  End If 
+  If TYPE = 10
+    PERMLOG[22] = PASSINFO[5]
+  End If 
+  Gosub UPDATE_LOG
+End If 
+If FLAG = 1 ! before snapshot log all stuff doesn't matter where came from
+  Gosub CLEAR_VARS
+  PPLOG$[1,12] = LP$[1,12]
+  PERMLOG[0] = LPC1[0]
+  PERMLOG[4] = PERM[0]
+  PERMLOG[6] = LPEUN[2]
+  PERMLOG[7] = LPC3[3]
+  PERMLOG[8] = LPUNF[1]
+  PERMLOG[9] = PERM[1]
+  PERMLOG[10] = LPC5[2]
+  If LPR[1] ! if from a contact
+    PERMLOG[11] = LPR[1]
+    PERMLOG[12] = 1
+  End If 
+  If LPC5[1] ! if from a rebate
+    PERMLOG[11] = LPC5[1]
+    PERMLOG[12] = 2
+  End If 
+  PERMLOG[14] = LPC3[4]
+  PERMLOG[15] = LPUNF[2]
+  PERMLOG[19] = LPFPERM[0]
+  PERMLOG[20] = LPFPERM[1]
+  PERMLOG[30] = PPERMCST
+  Goto OUTEND
+End If 
+If FLAG = 2 ! update after
+  PERMLOG[1] = Tim(6)
+  PERMLOG[3] = TYPE
+  PERMLOG[24] = LPEUN[2]
+  PERMLOG[5] = PERM[0]
+  PERMLOG[13] = PERM[1]
+  PERMLOG[16] = LPC5[2]
+  If LPR[1] ! if from a contact
+    PERMLOG[17] = LPR[1]
+    PERMLOG[18] = 1
+  End If 
+  If LPC5[1] ! if from a rebate
+    PERMLOG[17] = LPC5[1]
+    PERMLOG[18] = 2
+  End If 
+  PERMLOG[21] = PASSINFO[7]
+  PERMLOG[25] = LPFPERM[0]
+  PERMLOG[26] = LPFPERM[1]
+  PERMLOG[31] = PPERMCST
+  PERMLOG[27] = USRID
+  If TYPE = 3 ! change from accept
+    PERMLOG[22] = PASSINFO[5]
+    PERMLOG[23] = PASSINFO[6]
+  End If 
+  If TYPE = 1 Or TYPE = 2 ! from prog 70
+    PERMLOG[28] = PASSINFO[8]
+    PERMLOG[29] = PASSINFO[9]
+    If LOGALL Gosub UPDATE_LOG
+    If Not(LOGALL)
+	  upflag=0
+      If PERMLOG[4] <> PERMLOG[5] Or PERMLOG[9] <> PERMLOG[13] upflag=1 ! chge prc/cst
+      If PERMLOG[19] <> PERMLOG[25] Or PERMLOG[20] <> PERMLOG[26] upflag=1   !future pending
+      if upflag
+        Gosub UPDATE_LOG
+      End If 
+    End If 
+  End If 
+  If TYPE = 3 Or TYPE = 4 Or TYPE = 6 Or TYPE = 11 or type=16
+    If PERMLOG[4] <> PERMLOG[5] ! change in price
+      Gosub UPDATE_LOG
+      Goto OTHER_CHECK
+    End If 
+    If PERMLOG[9] <> PERMLOG[13]
+      Gosub UPDATE_LOG
+      Goto OTHER_CHECK
+    End If 
+OTHER_CHECK: Rem mostly for 117
+    If TYPE = 4 ! if from 117 check manual change of pending
+      If PERMLOG[19] <> PERMLOG[25] Or PERMLOG[20] <> PERMLOG[26]
+        PERMLOG[3] = 5
+        Gosub UPDATE_LOG
+      End If 
+    End If 
+    if type = 6 !if from slspro check manual change of pending
+	If PERMLOG[19] <> PERMLOG[25] Or PERMLOG[20] <> PERMLOG[26]
+	   PERMLOG[3] = 7
+	   Gosub UPDATE_LOG
+	end if
+    end if
+  End If 
+End If 
+Goto OUTEND
+UPDATE_LOG: Rem****************update file *********************
+CHECK_KEY: Rem look if entry there
+U5$ = " ",U5$
+U5$ = Tim(11) Using "&&",Tim(12) Using "&&",Tim(13) Using "&&"
+PERMLOG[2] = U5$
+KEY1$ = " ",KEY1$
+KEY1$[1,6] = PERMLOG[0] Using "######"
+KEY1$[7,18] = PPLOG$[1,12]
+KEY1$[19,24] = PERMLOG[1] Using "######"
+KEY1$[25,30] = PERMLOG[2] Using "&&&&&&"
+KEY1$[31] = PERMLOG[21] Using "######"
+Search #CH_PERM_LOG,2,1;KEY1$,LOG_REC,E \ If E > 1 Gosub ERR_SEARCH
+If Not(E) Goto CHECK_KEY
+E = 2
+Search #CH_PERM_LOG,1,0;KEY1$,LOG_REC,E \ If E Gosub ERR_SEARCH
+Mat Write #CH_PERM_LOG,LOG_REC,0;PPLOG$
+Mat Write #CH_PERM_LOG,LOG_REC,60;PERMLOG;
+Search #CH_PERM_LOG,4,1;KEY1$,LOG_REC,E \ If E Gosub ERR_SEARCH
+KEY2$ = " ",KEY2$
+KEY2$[1,12] = PPLOG$[1,12]
+KEY2$[13,18] = PERMLOG[0] Using "######"
+KEY2$[19] = KEY1$[19]
+Search #CH_PERM_LOG,4,2;KEY2$,LOG_REC,E \ If E Gosub ERR_SEARCH
+KEY3$ = " ",KEY3$
+KEY3$[1,6] = PERMLOG[1] Using "######"
+KEY3$[7,12] = PERMLOG[2] Using "&&&&&&"
+KEY3$[13,30] = KEY1$[1,18]
+KEY3$[31] = PERMLOG[21] Using "######"
+Search #CH_PERM_LOG,4,3;KEY3$,LOG_REC,E \ If E Gosub ERR_SEARCH
+KEY4$ = " ",KEY4$
+KEY4$ = KEY1$[31,36] + KEY1$[1,30]
+Search #CH_PERM_LOG,4,4;KEY4$,LOG_REC,E \ If E Gosub ERR_SEARCH
+Return 
+GET_LASTPRICE: Rem let's get the perm price record
+Rem {begin srcdevl/inc/read.lastpr.i}
+Mat Read #CH_LASTPR,REC_LASTPR,0;LP$
+Read #CH_LASTPR,REC_LASTPR,12;LPDF
+Mat Read #CH_LASTPR,REC_LASTPR,16;LPC1
+Mat Read #CH_LASTPR,REC_LASTPR,28;LPC2
+Mat Read #CH_LASTPR,REC_LASTPR,46;LPC3
+Mat Read #CH_LASTPR,REC_LASTPR,56;LP2$
+Mat Read #CH_LASTPR,REC_LASTPR,140;LPC4
+Mat Read #CH_LASTPR,REC_LASTPR,164;LPMT$
+Read #CH_LASTPR,REC_LASTPR,166;AI
+Mat Read #CH_LASTPR,REC_LASTPR,168;LPR
+Mat Read #CH_LASTPR,REC_LASTPR,198;LPR1
+Mat Read #CH_LASTPR,REC_LASTPR,214;LPEUN
+Mat Read #CH_LASTPR,REC_LASTPR,220;LPUNF
+Mat Read #CH_LASTPR,REC_LASTPR,262;PERM
+Read #CH_LASTPR,REC_LASTPR,274;LPWH
+Mat Read #CH_LASTPR,REC_LASTPR,276;LPC5
+Read #CH_LASTPR,REC_LASTPR,292;LPPCDATE
+Read #CH_LASTPR,REC_LASTPR,296;LPLPERM
+Mat Read #CH_LASTPR,REC_LASTPR,302;LPCURR
+Read #CH_LASTPR,REC_LASTPR,314;LPCPT
+Read #CH_LASTPR,REC_LASTPR,316;LPCSDT
+Read #CH_LASTPR,REC_LASTPR,320;LPDEPT
+Mat Read #CH_LASTPR,REC_LASTPR,324;LPFPERM
+Mat Read #CH_LASTPR,REC_LASTPR,336;PPPUSERID
+Mat Read #CH_LASTPR,REC_LASTPR,340;LPUNIT
+Mat Read #CH_LASTPR,REC_LASTPR,352;PPPCID
+Mat Read #CH_LASTPR,REC_LASTPR,372;PPERMCST
+Rem {end read.lastpr.i}
+Return 
+CLEAR_VARS: Rem
+PPLOG$ = " ",PPLOG$
+For LOOP_ = 0 To 35 \ PERMLOG[LOOP_] = 0 \ Next LOOP_
+Return 
+OUTEND: Rem
+if not(passinfo[10]) Close #CH_PERM_LOG
+End 
+L_20000: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)
+If CNVTU[2] = 3 Goto L_20050
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[2] = 0 Goto L_20050
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+L_20050: !
+L_20120: Rem "====== unibasic 5+ logic
+Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG1
+If CNVTU[2] = 0 Goto L_20160
+If FLAG1 Let E = FLAG1 \ Gosub ERR_SEARCH
+AMOUNT = CNVTA
+L_20160: Return 
+L_30000: Rem ===== set units for conversions (stock/nonstock version)
+A[6] = LPR1[0];A[5] = LPUNF[5] \ If Not(A[5]) Let A[5] = 1;LPUNF[5] = 1
+PFU1[0] = LPEUN[0];PFU1[1] = LPC3[2]
+PFU1[2] = LPC3[3];PFU1[3] = LPC3[4]
+PFU1[4] = LPEUN[1]
+PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+PFU1[8] = LPC3[2];PFU1[9] = LPC3[2];PFU1[10] = LPEUN[1]
+PFU1[11] = LPC3[4];PFU1[12] = LPC3[3]
+If Not(C5[3]) Goto L_30060
+PFU1[13] = LPC3[2];PFU1[16] = LPEUN[0];PFU1[17] = LPEUN[0]
+PFU1[18] = LPC3[2];PFU1[19] = LPC3[2]
+L_30060: PFU2[0] = LPUNF[0];PFU2[1] = LPUNF[1]
+PFU2[2] = LPUNF[2];PFU2[3] = LPUNF[3]
+PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+For X1 = 1 To 4
+  For X2 = 0 To X1 - 1
+    If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+  Next X2
+Next X1
+Return 
+Rem {begin srcdevl/inc/rtn.getchan.i}
+GETCHAN: Rem search for open channel (counts down from supplied chnl #)
+For SCR = CHNL To 1 Step -1
+  CHNL = SCR
+  Gosub CHNLFREE
+  If CHNLFREE
+    SCR = 1
+  Else 
+    CHNL = 0
+  End If 
+Next SCR
+Return 
+CHNLFREE: Rem check to see if a channel is being used
+If Err 0 Let CHNLFREE = Spc(8)
+CHNLFREE = 0
+CHNLSCR = Chf(CHNL)
+If Err 0 Gosub ERR_TRAP
+If CHNLFREE And CHNLFREE <> 49 Gosub ERR_TRAP
+END_CHNLFREE: Rem
+Return 
+Rem {end rtn.getchan.i}
+Rem {begin rtn.error.s}
+Err_Search: !
+ENUM = E;ELINE = Spc(16);CTERR = 0                         
+If E = 5 Let CTERR = Err(8)                                
+msg$ = "RETURN STATUS",(E + (CTERR * .001))                  
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM " + Msc$(4) 
+goto dolog
+Err_Trap: !                                                            
+    pgmname$=MSC$(4)                                                      
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$ 
+Dolog: ! 
+  System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$           
+! Return             
+Goto OutEnd ! get out now!

@@ -1,0 +1,933 @@
+!"serpbhr" === description  synergy erp  Bill & Hold (OT15) Release
+! 
+! loadsave -w -n 100,10 -o prog/dxport/serpbhr.dl4 src/serpbhr.src
+!  06/25/2009 started
+!
+include "src/copyright.inc"
+!
+include "src/inc/filecust.inc"
+include "src/inc/fileprod.inc"
+include "src/inc/fileordhead.inc" ! combined ros,rot,roh
+include "src/inc/filerolz.inc" ! lines
+include "src/inc/filesproddesc.inc" ! nstk lines
+include "src/inc/fileprodwhse.inc" ! prodwhse
+include "src/inc/fileccodes.inc" ! u/m file
+include "src/inc/filesordlotz.inc" ! sordlot (fixed dir's)
+include "src/inc/filesprodlot.inc" ! sprodlot
+include "src/inc/fileshiplist.inc" ! shiplist
+include "src/inc/filezonefle.inc" ! zone
+! addon files for line types
+include "src/inc/filesordlkitl.inc" ! kit lines
+! serial numbers
+! catch weight weights
+! PO'S for non-stocks
+include "src/inc/fileedittrack.inc" ! edit tracking
+
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,taxflag,GetCostLevels
+Declare External Function OpenFile,PDate$,taxable,JDate$,FormatDate2$
+Declare External Function ChkAltItem$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "librasl.lib"
+Declare External Sub allocordlot,chkwhrasl
+
+External Lib "libprodwh.lib"
+Declare External Sub mxwhcreate
+Declare External Function getwhavail
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,ProdGroup,UMDList,CompIList
+Declare External Function getpravail,getumrec,getMSDS,ComplFlag,ChkPrdUM
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libcustlist.lib"
+Declare External Sub CustList
+
+External Lib "libedittrack.lib"
+Declare External Sub MakeEdittrack
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian, JulianToDate
+
+! internal subs/function
+Declare Sub OpenFiles,GetCust,setprtorol
+Declare Sub CustDtls,updatelog,sbmrelq
+Declare sub EdtTrkDo,sbmrelh
+Declare Function GetOrdRec,chkDateFrmt$
+
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	! NOTE ALWAYS PRR for Product Rec, PWR for Prodwhse Record!
+	! and OHR as header Record
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],X$[20]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],UA2$[50],TPWKey$[60]
+	dim Cust$[60]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,PRC,PWC,CCC,OHC,OTC,OSC,OLC,CMC
+	dim 1%,cost_lev[4],Whse,debug,cnvtu[2],2%,Q0[1],cust
+	Dim 2%,X2[9],NumProd,OrderNo,LD,UA2[2],RASL[2]
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,PRR,OHR,PWR,FChan[30]
+	Dim 3%,SUM,SQty,R[99],O1,UB0[16],Amount,CNVTA
+	dim 3%,FlePtr[20,1],Specs[50] ! for price
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim slist$[maxcnt,1000] ! second list
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/ol.log" ! fields for DEBUG
+
+	Dim PR. as prod
+	Dim pw. as prodwhse
+	dim roh. as roh ! order header
+	dim ros. as ros ! order ship to file
+	dim rot. as rot ! order total file
+	dim rol. as rolnew ! order lines
+	Dim cust. as cust ! customer master
+	dim shl. as shiplist ! customer shiplist
+	dim umc. as ccodes ! um codes file
+	Dim Nstk. as sproddesc ! non-stock file
+	Dim ETR. as edittrack ! EDITTRACKING
+	Dim ZN. as zonefle ! zone
+
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! call dxopen() ! done in oemenu - for standalone run
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serpbhr"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	Action2$=UCase$(action2$)
+	Action2$=RTrim$(action2$) ! UC and trimmed
+	if debugdetail
+		dmsg$="SERPBHR ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$ 
+		if Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	call OpenFiles() ! open all needed files
+	call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	! P61$[34,34]="N" ! a test only
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Let Key1$=UserID$+"          " ! space fill it
+	UCC = OpenFile(-9988, intCo) \ if UCC=-1 Error 42
+	Key1$[11]="" ! cut to length
+	Search #UCC,2,1;Key1$,Rec,E
+	If Not(E)
+	  Let SCR=Rec
+	  Mat Read #ucc,scr,200;UA2;
+	  Mat read #ucc,scr,336;Ua2$;
+	Else
+	  Let SCR=0 ! 
+	  UA2[0]=0;UA2$=" ",UA2$
+	Endif
+	Close #UCC
+	! GET additional user data flags
+	REM UNPACK A2[0] TO B0[]                         
+	FOR X1=0 TO 15                                          
+		LET O1=2^X1 \ LET M1=1
+		! CALL $LOGIC,M1,O1,A2[0],B0[X1] ! ub
+		Call Logic(m1,O1,UA2[0],UB0[X1])
+		LET UB0[X1]=SGN(UB0[X1])
+	NEXT X1           
+	ReturnStatus=0
+	Message$="Action 1 not found"
+  select case action1$
+
+  Case "CUSTSEARCH" ! customer scan							doc=BHR-CustScan.doc
+	!
+	Let ReturnStatus=1
+	Message$="OK"
+	
+	Call CustList(e$,IntCo,List$[],maxcnt,ctlc,cuc,debugdetail,dblog$,UserId$)
+	If E$<>""
+	  Let ReturnStatus=0
+	  Message$=E$
+	Endif
+	call AddToStr(e$,rstr$,List$[])
+	
+	if debugdetail
+		dmsg$="Customer Search sent "+Message$ \ Call updatelog(debug)
+	Endif
+		
+	! end of custsearch
+  Case "GETCUST" ! get cust data,shiplist,ot15h&ln			doc=BHR-CustDetails.doc
+	!
+	Returnstatus=1
+	Message$="OK"
+	Call Custdtls() ! does lists & addtostr
+	if debugdetail
+		dmsg$="Customer Data sent "+Message$ \ Call updatelog(debug)
+	Endif
+		
+	! end of getcust
+  Case "SUBMITRELH" ! changed head							doc=BHR-SubmitOrdHdr.doc
+	! in pm just changes shipto,routing,zone,truck,stop,shipdate
+	returnstatus=1
+	message$="OK"
+	call sbmrelh()
+	if debugdetail
+		dmsg$="Modified "+Str$(OrderNo)+" "+Message$ \ Call updatelog(debug)
+	Endif
+	! end of submitrelh
+  Case "SUBMITRELQ" ! changed line							doc=BHR-SubmitRelQty.doc
+	! in pm just changes qty ship/rel - plus edittrack,wgts/cubes,totals
+	returnstatus=1
+	message$="OK"
+	call sbmrelq()
+	if debugdetail
+		dmsg$="Released "+Str$(OrderNo)+"-"+Str$(Lineno)+" "+Message$ \ Call updatelog(debug)
+	Endif
+	! end of submitrelq
+  End Select
+  ! status section                                                       
+  Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)                 
+  Call AddToStr(e$,rstr$,WebStr$)                                        
+  Call SetOutPut(e$,rstr$)       
+  if debugdetail
+		dmsg$="End of Program SERPBHR" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	PRC = OpenFile(1792,intCo) \ If PRC = -1 Error 42 ! prod
+	PWC = OpenFile(1744,intCo) \ If PWC = -1 Error 42 ! prodwhse
+	CCC = OpenFile(-1728,intCo) \ If CCC = -1 Error 42 ! u/m codes file
+	OHC = OpenFile(1840,IntCo) \ if ohc = -1 Error 42 ! order header
+	OSC = OpenFile(1856,IntCo) \ if osc = -1 Error 42 ! order shipto
+	OTC = OpenFile(1872,IntCo) \ if otc = -1 Error 42 ! order totals
+	OLC = OpenFile(1888,IntCo) \ if olc = -1 Error 42 ! order lines
+	NSC = OpenFile(2128,IntCo) \ if nsc = -1 Error 42 ! non-stock lines
+	CUC = OpenFile(-1808,IntCo) \ if cuc = -1 Error 42 ! customer
+	SLC = openfile(-2112,IntCo) \ if slc = -1 Error 42 ! shiplist
+	WHI = OpenFile(-2768,IntCo) \ if whi = -1 Error 42 ! whinfo
+	PLTC=OpenFile(2528,IntCo) \ if PLTC = -1 Error 42 ! PRODLOT
+	SLTC=OpenFile(2320,IntCo) \ if SLTC = -1 Error 42 ! SORDLOT
+	ZNC =OpenFile(-1920,IntCo) \ if ZNC = -1 Error 42 ! zonefile
+
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!
+!------------------------------------------------------------------------------------------
+Sub GetCust()
+! get customer data (from passed Cust$!)
+ Try
+	Dim KCust$[60]
+	Dim 3%,CUR
+	KCust$=" ",KCust$
+	KCust$=Cust$ ! roh.CustNum Using "######"
+	CUR=filegetcust(e$,CUC,"=",1,KCust$,Cust.) ! need customer fields
+	If CUR<0 clear cust.
+	if debugdetail
+		dmsg$="Get Customer "+kcust$+" REC="+Str$(CUR) \ Call updatelog(debug)
+	Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetCust
+! 
+!--------------------------------------------------------------------
+Function GetOrdRec(e$,OHC,OSC,OTC,OrderNo,roh. as roh, ros. as ros, rot. as rot)
+! search thru all status for Order
+! ohc,osc,otc = channels for roh, ros, rot
+! orderNo = Order # to find
+! roh.,ros.,rot. = structs for roh,ros,rot
+! returns 
+! X3 = order header rec #
+	Try
+		Dim KOHC$[20]
+		Dim 1%,X[9],SCHN[2]
+		Dim 2%,X2[9]
+		Dim 3%,X3[9],OHR
+		SCHN[0]=OHC;SCHN[1]=OSC;SCHN[2]=OTC
+		Let X2=OrderNo
+		let OHR=-1 ! not found as default
+		if debugdetail
+			dmsg$="Look for Order "+Str$(X2) \ Call updatelog(debug)
+		Endif
+		For X=1 to 99
+			If X<20 or x>24 ! skip deleted
+				Let KOHC$=" ",KOHC$
+				KOHC$[1,2]=X Using "##"
+				KOHC$[3]=OrderNo Using "######"
+				X3=filegetrohz(e$,SCHN[],"=",1,kohc$,roh.,ros., rot.)
+				If X3>0 ! found it
+				  Exit function X3
+				Endif
+			Endif
+		Next X
+		if debugdetail
+			dmsg$="Order NOT FOUND "+Str$(X2) \ Call updatelog(debug)
+		Endif
+	else
+    include "src/callsuberr.inc"
+  end try
+end Function OHR ! getordrec
+! 
+!--------------------------------------------------------------------
+Sub SetPRtoRol()
+! set up prod (PR.) with line values (stock & NonStock)
+ Try
+	Dim 1%,PFU1[20]
+	Dim 3%,PFU2[6]
+	IF ZLINE GOTO L30099:                                          
+	LET pr.LbsUnit=rol.LbsUnit;pr.LbsFact=rol.WgtFactor
+	IF NOT(pr.LbsUnit) LET pr.LbsUnit=1;rol.WgtFactor=1    
+	LET pr.CubicFeet=rol.CubeUnit;pr.CubicFtFactor=rol.CubeFactor
+	IF NOT(pr.CubicFtFactor) LET pr.CubicFtFactor=1;rol.CubeFactor=1
+	LET pr.BaseUM=rol.UMBase;pr.UM2=rol.UMSell                     
+	LET pr.UM3=rol.UMPrice;pr.UM4=rol.UMCost                               
+	LET pr.UM5=rol.UMPurch                                          
+	LET pr.UM6=0;pr.UM7=0;pr.UM8=0                               
+	LET pr.UMStkDefault=rol.UMSell;Pr.UMSellDefault=rol.UMSell;pr.UMPurchDefault=rol.UMPurch             
+	LET pr.UMCostDefault=rol.UMCost;pr.UMPriceDefault=rol.UMPrice                              
+	IF NOT(NonSTK) GOTO L30060:                                   
+	LET pr.UMPrdtnDefault=rol.UMSell;pr.UMUpChrg=rol.UMBase;pr.UMBrknQty=rol.UMBase              
+	IF pr.UMCostDefault=-3 OR pr.UMPriceDefault=-3 ! "Catch Wgt Itm N/S              
+		LET pr.CatchWgtItm=-3;rol.CatchWgtItem=pr.CatchWgtItm                                 
+	ELSE                                                            
+		LET pr.CatchWgtItm=0;rol.CatchWgtItem=0                                         
+	ENDIF                                                           
+	LET pr.UMPack=rol.UMSell;pr.UMSize=rol.UMSell                               
+	L30060: LET pr.UM2Fact=rol.SellFactor;pr.UM3Fact=rol.PriceFactor                     
+	LET pr.UM4Fact=rol.CostFactor;pr.UM5Fact=rol.PurchFactor                              
+	LET pr.UM6Fact=0;pr.UM7Fact=0;pr.UM8Fact=0 
+	! below gets rid of dupes - not easy with names - so load into pfu1,pfu2
+	PFU1[0]=pr.BaseUM
+	pfu1[1]=pr.UM2;PFU2[0]=pr.UM2Fact
+	Pfu1[2]=pr.UM3;pfu2[1]=pr.UM3Fact
+	pfu1[3]=pr.UM4;pfu2[2]=pr.UM4Fact
+	pfu1[4]=pr.UM5;pfu2[3]=pr.UM5Fact
+	FOR X1=1 TO 4                                                   
+		FOR X2=0 TO X1-1                                              
+			IF PFU1[X1]=PFU1[X2] LET PFU1[X1]=0;PFU2[X1-1]=0            
+		NEXT X2                                                       
+	NEXT X1 
+	! now reload checked um's to names
+	pr.BaseUM=PFU1[0]
+	pr.UM2=pfu1[1];pr.UM2Fact=PFU2[0]
+	pr.UM3=Pfu1[2];pr.UM3Fact=pfu2[1]
+	pr.UM4=pfu1[3];pr.UM4Fact=pfu2[2]
+	pr.UM5=pfu1[4];pr.UM5Fact=pfu2[3]
+L30099: ! finito
+	if debugdetail
+		dmsg$="Put rol. into pr. "+Str$(rol.OrdNum)+"-"+Str$(rol.LineNum)+" "+rol.prodcode$ \ Call updatelog(debug)
+	Endif
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! SetPRtoRol
+! 
+!--------------------------------------------------------------------
+Sub CustDtls()
+! send customer,shiplist,ot15 details
+ Try
+	Dim SLKey$[60]
+	Dim OKey$[60],OLKey$[60]
+	Dim 1%,SCHN[2]
+	Dim 2%,CustNo
+	Dim 3%,X3[9]
+	SCHN[0]=OHC;SCHN[1]=OSC;SCHN[2]=OTC
+	Call DXGet("CUSTID",tmp$)
+	X2=tmp$
+	if x2<=0 or x2>999999 or fra(x2) or tmp$=""
+	  ReturnStatus=0
+	  Message$="CUSTOMER NOT PASSED"
+	  Goto CustInv
+	Endif
+		Cust$=X2 Using "######"
+		Call GetCust()
+		If cur<0
+			ReturnStatus=0
+			Message$="CUSTOMER "+Cust$+" NOT FOUND"
+			Goto CustInv
+		Endif
+		CustNo=Cust$
+		Clear List$[]
+		List$[0]=bsdel$,"CUSTNAME",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$
+		List$[2]=Cust$,fdel$,RTrim$(Cust.Name$),fdel$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		! now send shipping data
+		Clear List$[]
+		List$[0]=bsdel$,"SHIPLIST",fdel$
+		Webstr$="SHIPID",fdel$,"NAME",fdel$,"ADDRESS1",fdel$
+		Webstr$=webstr$,"ADDRESS2",fdel$,"CITY",fdel$
+		Webstr$=webstr$,"STATE",fdel$,"ZIPCODE",fdel$
+		List$[1]=webstr$
+		row=2;tmpcnt=maxcnt
+		! first have cust as option
+		WebStr$=Cust$,fdel$,RTrim$(Cust.Name$),fdel$
+		webstr$=webstr$,RTrim$(cust.Addr1$),fdel$
+		webstr$=webstr$,RTrim$(cust.Addr2$),fdel$
+		webstr$=webstr$,RTrim$(cust.City$),fdel$
+		webstr$=webstr$,Cust.State$,fdel$
+		webstr$=webstr$,RTrim$(cust.Zip4$),fdel$
+		List$[row]=webstr$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		! now send shiplist
+		SLKey$=" ",SLKey$
+		SLKey$[1,6]=CustNo Using "######"
+		SLKey$[7]=""
+		do
+			SLR=filegetshiplist(e$,SLC,">",1,SLKey$,shl.)
+			if SLR<=0 exit do
+			X2=SLKey$[1,6] \ if x2<>CustNo exit do
+			WebStr$=SLKey$,fdel$,RTrim$(shl.Name$),fdel$
+			webstr$=webstr$,RTrim$(shl.Address$),fdel$
+			webstr$=webstr$,RTrim$(shl.OptAddress$),fdel$
+			webstr$=Webstr$,RTrim$(shl.City$),fdel$
+			webstr$=webstr$,shl.State$,fdel$
+			webstr$=webstr$,RTrim$(shl.ZipCode$),fdel$
+			List$[row]=webstr$
+			row=row+1
+			If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Loop
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		! now send Order Data
+		clear List$[]
+		clear SList$[]
+		List$[0]=bsdel$,"OT15HDATA",fdel$
+		Webstr$="ORDERID",fdel$,"SHIPNAME",fdel$
+		webstr$=webstr$,"SHIPADDR1",fdel$,"SHIPADDR2",fdel$
+		webstr$=webstr$,"SHIPCITY",fdel$,"SHIPST",fdel$
+		webstr$=webstr$,"SHIPZIP",fdel$,"SHIPDATE",fdel$
+		List$[1]=webstr$
+		row=2
+		SList$[0]=bsdel$,"OT15LDATA",fdel$
+		webstr$="ORDERID",fdel$,"LINENO",fdel$,"PRODID",fdel$
+		webstr$=webstr$,"DESC1",fdel$,"DESC2",fdel$
+		webstr$=webstr$,"QTYORD",fdel$,"QTYOPEN",fdel$
+		webstr$=webstr$,"QTYREL",fdel$,"QTYUM",fdel$
+		webstr$=webstr$,"LTYPE",fdel$ ! ,"SNFLAG",fdel$
+		webstr$=webstr$,"QTYFACT",fdel$ ! ,"KIT",fdel$
+		SList$[1]=webstr$
+		row2=2;tmpcnt2=maxcnt
+		OKey$=" ",OKey$
+		OKey$[1,6]=CustNo Using "######"
+		OKey$[7]=""
+		Do
+			OHR=filegetrohz(e$,SCHN[],">",2,okey$,roh.,ros., rot.)
+			If OHR<=0 exit do
+			X2=okey$[1,6] \ if x2<>CustNo Exit do
+			If roh.ordtype<>15 goto BPOrd ! not ot15
+			If roh.status>4 ! not open
+				if roh.status>90 ! in edit
+					if roh.OrgStatus>4 goto BPOrd
+				Endif
+				goto BPOrd
+			Endif
+			! okay got order, now lines - first see if any lines
+			OLKey$=" ",OLKey$;hdrsent=0
+			OLKey$=roh.OrdNum using "######"
+			Do
+				OLR=filegetrolz(e$,OLC,">",1,olkey$,rol.)
+				if OLR<=0 exit do
+				x2=olkey$[1,6] \ if x2<>roh.ordnum exit do
+				x3=rol.QtyOrd-(rol.QtyBO-rol.BORelQty)-rol.PrevQtyShip
+				if x3>0 ! okay - can release
+				  If hdrsent=0 ! DO NOT SEND MULTIPLE HEADERS!!!
+					Webstr$=Str$(roh.ordnum),fdel$,RTrim$(ros.Name$),fdel$
+					webstr$=webstr$,RTrim$(ros.Address$),fdel$,RTrim$(ros.Address2$),fdel$
+					webstr$=webstr$,RTrim$(ros.City$),fdel$,ros.State$,fdel$
+					webstr$=webstr$,RTrim$(ros.ZipCode$+ros.Zip4$),fdel$
+					tmp$="";x2=roh.ShipDate
+					If x2 tmp$=PDate$(x2)
+					webstr$=webstr$,tmp$,fdel$
+					List$[row]=webstr$
+					row=row+1
+					If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+					hdrsent=1
+				  Endif ! one header - multi lines
+					webstr$=Str$(rol.OrdNum),fdel$ ! key to header
+					webstr$=webstr$,Str$(rol.LineNum),fdel$,RTrim$(rol.ProdCode$),fdel$
+					webstr$=webstr$,RTrim$(rol.Desc1$),fdel$,RTrim$(rol.Desc2$),fdel$
+					clear pr.
+					NonStk=rol.NStkItem
+					call setprtorol() ! set up conv factors
+					cnvtu[0]=0;cnvtu[1]=rol.UMSell;cnvtu[2]=1
+					CNVTA=rol.QtyOrd
+					amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+					webstr$=webstr$,LTrim$(amount using QMask$),fdel$ ! ordered
+					CNVTA=X3 ! cal'd above
+					amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+					webstr$=webstr$,LTrim$(amount using QMask$),fdel$ ! open
+					CNVTA=rol.CurrRelQty
+					amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+					webstr$=webstr$,LTrim$(amount using QMask$),fdel$ ! curr rel
+					tmp$=XUnit$(rol.UMSell,ccc)
+					webstr$=webstr$,tmp$,fdel$  ! SELL U/M
+					tmp$="STK" \ if nonstk let tmp$="NSTK"
+					webstr$=webstr$,tmp$,fdel$ ! line type
+					!if not(nonstk)
+					!	PRR=rol.PDRecNum
+					!	read record #PRC,PRR,0;pr.;
+					!Endif
+					!tmp$="N" \ if pr.SerNoTrack$="Y" let tmp$="Y"
+					!webstr$=webstr$,tmp$,fdel$ ! sn tracking
+					webstr$=webstr$,Str$(rol.SellFactor),fdel$ ! qty factor(s/n)
+					!webstr$=webstr$,RTrim$(rol.KitDesignation$),fdel$
+					SList$[row2]=webstr$
+					row2=row2+1
+					If row2>tmpcnt2 let tmpcnt2=expandarray(e$,SList$[])
+				Endif
+			Loop
+		BPOrd: ! bypass
+		Loop
+		List$[row]=esdel$
+		SList$[row2]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! order headers
+	call AddToStr(e$,rstr$,SList$[]) ! order lines
+	CustInv: ! cust no good
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! CustDtls
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Sub sbmrelq()
+! this only updates relqty/shipqty
+  Try
+	dim nrol. as rolnew ! copy of
+	dim rolkey$[60]
+	dim 3%,V3[9]
+	Clear etr.
+	Clear nrol.
+	Call DXGet("ORDERID",tmp$)
+	If RTrim$(tmp$)="" 
+		ReturnStatus=0
+		Message$="NO ORDER PASSED"
+		goto UDLDone:
+	Endif
+	OrderNo=tmp$
+	If OrderNo<1 or OrderNo>999999 or Fra(OrderNo)
+		ReturnStatus=0
+		Message$="ORDER NUMBER "+Str$(orderno)+" INVALID"
+		Goto UDLDone
+	Endif
+	OHR=GetOrdRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.)
+	If OHR<=0 or (OHR>0 and roh.ordtype<>15) ! not found
+		ReturnStatus=0
+		Message$="ORDER "+Str$(Orderno)+" WAS NOT FOUND"
+		if ohr>0 let message$="ORDER "+Str$(Orderno)+" IS WRONG TYPE"
+		goto udldone
+	Else
+		Credit=0 \ if rot.Status=22 let Credit=1 ! instead of roh.status check
+	Endif
+	Call DXGet("LN",tmp$) ! +Str$(X1),tmp$)
+	if RTRIM$(TMP$)=""
+		returnstatus=0
+		message$="NO LINE # PASSED"
+		goto udldone
+	Endif
+	nrol.LineNum=tmp$ ! line # (zero on new lines)
+	LineNo=nrol.LineNum;v3[4]=0
+	if nrol.linenum>0 ! get prev data
+			rolkey$=" ",rolkey$
+			rolkey$[1,6]=OrderNo Using "######"
+			rolkey$[7,9]=nrol.linenum using "###"
+			rolkey$[11]="" ! cut to length (space @ 10)
+			OLR=filegetrolz(e$,OLC,"=",1,rolkey$,rol.)
+			if olr<=0 ! what do we do if not found?
+				returnstatus=0
+				message$="ORDER LINE NOT FOUND"
+				goto udldone
+			Endif
+			If OLR>0
+				if rol.NStkItem=1 and rol.LineType<>3
+					NSR=rol.PDRecNum
+					Read record #NSC,NSR,0;nstk.
+					PRR=0;PWR=0;nonstk=1
+				Endif
+				If Not(rol.NStkItem) ! get prod & whse
+					PRR=rol.PDRecNum
+					Read record #PRC,PRR,0;pr.;
+					Tmp$=" ",tmp$
+					tmp$=Pr.ProdCode$+rol.Whse Using "##"
+					PWR=filegetprodwhse(e$,PWC,"=",1,tmp$,pw.)
+					if PWR<0 ! not found - add new
+						Clear pw.
+					Endif
+					nonstk=0;stk=1
+				Endif ! of stk item
+			Endif ! of line found
+	Else ! no line
+			Returnstatus=0
+			message$="LINE NUMBER NOT PASSED"
+			goto udldone
+	Endif
+	if rol.NStkItem=1 and rol.LineType=3 goto UDLDone ! nothing to do!
+	If OLR>0 Read Record #OLC,OLR,0;nrol. ! read / lock with prev values
+	If OLR<=0 Let NewLn=1
+	if NEWLN=1 and roh.ordtype=15 and roh.boctr<>0 ! no add
+		returnstatus=0
+		message$="Invoice has been accepted. No new lines allowed"
+		goto UDLDone
+	Endif
+	Call DXGet("QTYREL",tmp$) ! +Str$(X1),tmp$)
+	Let V3[5]=tmp$
+		! if roh.ordtype=15 let nrol.CurrRelQty=v3[5] ! is relqty
+	! so nrol. has new, rol. has orig
+	Call setprtorol() ! set to rol. factors
+	! convert prev ship to Sell (for tot_sell)
+	if not(NewLn) ! would be no prev
+		cnvtu[0]=0;cnvtu[1]=rol.umsell;cnvtu[2]=1
+		Cnvta=rol.qtyship
+		V3[4]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	Endif
+		! convert sent to base as sent in display um
+	CNVTU[0]=nrol.UMSell;Cnvtu[1]=0;Cnvtu[2]=1
+	cnvta=V3[5]
+	nrol.QtyShip=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	nrol.CurrRelQty=nrol.qtyship
+	if rol.qtyord<nrol.CurrRelQty+rol.PrevQtyShip+(rol.QtyBO-rol.BORelQty)
+		returnstatus=0
+		message$="YOU CANNOT RELEASE MORE THAN IS OPEN!"
+		goto udldone
+	Endif
+	if rol.WgtFactor<=0 let rol.WgtFactor=1
+	nrol.ExtNetWgt=FNR(Abs((nrol.QtyShip*rol.LbsUnit)/rol.WgtFactor))
+	If ETr.EtAction=0 ! no check yet
+			if nrol.Qtyord<>rol.QtyOrd let ETr.EtAction=1
+			if nrol.QtyBO<>rol.QtyBo let ETr.EtAction=1
+			if nrol.QtyShip<>rol.QtyShip let ETr.EtAction=1
+			if nrol.UnitPrice<>rol.UnitPrice let ETr.EtAction=1;HFlg[4]=1 ! prc chg/hold
+			if nrol.unitcost<>rol.unitCost let ETr.EtAction=1;Hflg[5]=1 ! cost chg/hold
+	Endif
+	If P60$[44,44]="Y" and etr.EtAction<>0
+		call edttrkdo(rol.,nrol.) ! org, new
+	Endif ! of edit tracking
+	! that's all
+	Write record #OLC,OLR,0;nrol.;
+	if nonstk ! add'l processing
+		X=1 \ if credit let x=-1
+		cnvtu[0]=0;cnvtu[1]=nrol.UMSell;cnvtu[2]=1
+		cnvta=nrol.QtyShip
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		nstk.QtyShip=(Amount*x) ! store credits as neg (IN SELL UM!)
+		Write record #NSC,NSR,0;nstk.;
+	Endif
+	! now change totals fields for totwgt/cube
+	X3[1]=FNR(Abs(rol.QtyShip * rol.CubeUnit) / rol.CubeFactor) ! org cube
+	X3[2]=FNR(Abs(nrol.QtyShip * rol.CubeUnit) / rol.CubeFactor) ! new cube
+	rot.TotCubes=rot.TotCubes-x3[1]+X3[2] ! old minus new plus
+	rot.TotWgt=rot.TotWgt-rol.ExtNetWgt+nrol.ExtNetWgt ! -org+new
+	Write record #OTC,roh.TotRec,0;rot.;
+	!roh.TotSellUnits=roh.TotSellUnits-rol.QtyShip+nrol.QtyShip
+	roh.TotSellUnits=roh.TotSellUnits-V3[4]+v3[5] ! out with old - in with new
+	Write record #OHC,OHR,0;roh.;
+	UDLDone: ! finished
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! sbmrelq
+! 
+!--------------------------------------------------------------------
+Sub EdtTrkDo(oorl. as rolnew, corl. as rolnew)
+! roh. and rot. read PREVIOUSLY
+! Have etr.etaction SET UP ALREADY
+! oorl. = Original rol data
+! corl. = Current/new rol data (CANNOT BE CLEAR!)
+ Try
+	If etr.EtAction=0 EXIT SUB ! no action
+	fChan[0]=-1;fchan[1]=-1 ! no files open - etrack/usercntrl
+	etr.OrdNum=corl.OrdNum
+	etr.LineNum=corl.LineNum
+	etr.Status=roh.OrgStatus \ IF etr.Status<=0 let etr.Status=roh.Status
+	etr.ProdCode$=corl.ProdCode$
+	IF ETR.etaction=14 let etr.ProdCode$="208"+blank$ ! prog #
+	etr.OrgQtyOrd=oorl.Qtyord;etr.NewQtyOrd=corl.QtyOrd
+	etr.OrgQtyShip=oorl.QtyShip;etr.NewQtyShip=corl.QtyShip
+	etr.OrgQtyBO=oorl.QtyBo;etr.NewQtyBO=corl.QtyBO
+	e$=""
+	! date,time,port,access gotten in call
+	etr.AccessCode$=Userid$+Blank$
+	etr.UMSell=corl.UMSell
+	etr.NstkFlag=corl.NStkItem
+	etr.OrgOrdTot=rot.OrdTot
+	etr.CustNum=roh.CustNum
+	etr.InvNum=roh.InvNum
+	etr.Slsm=roh.SlsmNum
+	etr.OrgUnitPrice=oorl.UnitPrice
+	etr.NewUnitPrice=corl.UnitPrice
+	etr.UMPrice=corl.UMPrice
+	etr.UMCost=corl.UMCost
+	etr.OrgLoadCost=oorl.UnitCost
+	etr.NewLoadCost=corl.UnitCost
+	etr.UnitNetWgt=corl.LbsUnit
+	etr.NetWgtFact=corl.WgtFactor
+	etr.SpareNU$=Blank$
+	if etr.etaction=11 or etr.etaction=2 ! add SET ORIG=NEW/cURR on ADD or DELETE
+		etr.OrgQtyOrd=etr.NewQtyOrd
+		etr.OrgQtyShip=etr.NewQtyShip
+		etr.OrgQtyBO=etr.NewQtyBO
+		etr.OrgUnitPrice=etr.NewUnitPrice
+		etr.OrgLoadCost=etr.NewLoadCost
+	Endif	
+	Call MakeEdittrack(e$,IntCo,fchan[],etr.)
+	if debugdetail
+		dmsg$="Edittrack "+Str$(etr.OrdNum)+"-"+Str$(etr.LineNum)+" "+Str$(etr.EtAction)+e$ \ Call updatelog(debug)
+	Endif
+	e$=""
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! EdtTrkDo
+! 
+!--------------------------------------------------------------------
+Sub sbmrelh()
+! submit header changes
+ Try
+	dim ZKey$[60],SKey$[60]
+	dim 4%,Shipnum
+	dim 3%,Param[9]
+	clear etr.
+	dim nrol. as rolnew
+	clear nrol.
+	clear rol.
+	Call DXGet("ORDERID",tmp$)
+	If RTrim$(tmp$)=""
+		ReturnStatus=0
+		Message$="NO ORDER ID PASSED"
+		goto UDHDone:
+	Endif
+	OrderNo=tmp$
+	If OrderNo<1 or OrderNo>999999 or Fra(OrderNo)
+		ReturnStatus=0
+		Message$="ORDER NUMBER INVALID"
+		Goto UDHDone
+	Endif
+	OHR=GetOrdRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.)
+	If OHR<=0 or (OHR>0 and roh.ordtype<>15) ! not found
+		ReturnStatus=0
+		Message$="ORDER WAS NOT FOUND"
+		goto udhdone
+	Else
+		Credit=0 \ if rot.Status=22 let Credit=1 ! instead of roh.status check
+	Endif
+	Cust$=roh.CustNum using "######"
+	call getcust()
+	If cur<0
+		ReturnStatus=0
+		Message$="CUSTOMER "+Cust$+" NOT FOUND"
+		Goto UDHDone
+	Endif
+	call dxget("SHIPDATE",tmp$)
+	if RTrim$(tmp$)<>"" ! sent one
+		tmp1$=chkDateFrmt$(tmp$) ! chk/convert to mm/dd/yyyy
+		if tmp1$[1,1]<"0" and tmp1$[1,1]>"9" let tmp1$=""
+		x$=formatdate2$(tmp1$) ! from mm/dd/yyyy to yyyymmdd
+		x2=X$[3,8]
+		if x2>101 ! valid date
+			if x2<>roh.shipdate let etr.EtAction=14
+			roh.ShipDate=x2
+		Else ! not valid date
+			returnstatus=0
+			message$="DATE NOT VALID"
+			goto udhdone
+		Endif
+		if p61$[34,34]<>"Y" ! just do closed check
+			If roh.shipdate <> 999999
+				LET VDATE=roh.shipdate;STAT=1;WARN=0;PARAM[0]=roh.wh;PARAM[1]=roh.div
+				CALL "validdate",vdate,STAT,WARN,PARAM[]  
+				if not(stat) let roh.shipdate=vdate
+			endif
+		Endif
+		write record #OHC,OHR,0;roh.
+	Endif
+	Call dxget("SHIPID",tmp$) ! we'll assume correct id sent (6 or 6.6)
+	if RTrim$(tmp$)<>"" ! sent new one
+		tmp$=RTrim$(tmp$)
+		if len(tmp$)=6 ! sent customer
+			x2=tmp$
+			if x2<>roh.Custnum
+				returnstatus=0
+				message$="Cannot ship to different customer"
+				goto udhdone
+			Endif
+			! ok - now change
+			ros.Name$=cust.Name$+blank$
+			ros.Address$=cust.Addr1$+blank$
+			ros.Address2$=cust.Addr2$+blank$
+			ros.City$=cust.City$+blank$
+			ros.State$=cust.State$+blank$
+			ros.ZipCode$=cust.Zip4$[1,5]+blank$
+			ros.Zip4$=cust.Zip4$[6,10]+blank$
+			ros.Country$=cust.Country$+blank$
+			ros.Zone$=cust.ZoneNumber$
+			!ros.Truck=? ! FROM zonefle
+			roh.StopNum=cust.sStop
+			!roh.ShipVia$=? ! from zone!
+			if ros.shipedit<>0 let etr.EtAction=14
+			ros.ShipCust=roh.custnum
+			ros.ShipCode=0
+			ros.ShipEdit=0 ! used cust address
+		Else ! sent shiplist?
+			let shipnum=tmp$
+			SKey$=Shipnum Using "######.&&&&&&"
+			SLR=filegetshiplist(e$,SLC,"=",1,SKey$,shl.)
+			if SLR<=0
+				returnstatus=0
+				message$="SHIP LIST ID "+SKey$+" NOT FOUND"
+				goto udhdone
+			Endif
+			ros.Name$=shl.Name$+blank$
+			ros.Address$=shl.Address$+blank$
+			ros.Address2$=shl.OptAddress$+blank$
+			ros.City$=shl.City$+blank$
+			ros.State$=shl.State$+blank$
+			ros.ZipCode$=shl.ZipCode$[1,5]+blank$
+			ros.Zip4$=shl.ZipCode$[6,10]+blank$
+			ros.Country$=shl.Country$+blank$
+			ros.Zone$=shl.Zone$
+			!ros.Truck=? ! FROM zonefle
+			x2=skey$[1,6];x2[1]=skey$[8] ! cust & shipto #'s
+			roh.StopNum=shl.sStop$
+			roh.ShipVia$=shl.Routing$+Blank$ ! cb from zone!
+			if x2<>ros.shipcust let etr.EtAction=14
+			if x2[1]<>ros.shipcode let etr.EtAction=14
+			ros.ShipCust=X2
+			ros.ShipCode=x2[1]
+			Let x1=ros.shipedit ! before
+			if x2[1]=0 let ros.ShipEdit=1 ! used cust address
+			if x2[1]<>0 let ros.Shipedit=2 ! used shipto#
+			if x2<>roh.custnum let ros.shipedit=4 ! diff cust
+			if x1<>ros.shipedit let etr.EtAction=14
+		Endif
+		if p61$[34,34]="Y" ! multi-zone customer
+			shipdate=roh.shipdate ! DO NOT USE CALC'D DATE
+			if not (ros.shipcust) let ros.shipcust=roh.custnum
+			if not (shipdate) let shipdate=roh.orddate
+			if roh.shipdate let shipdate=0-shipdate
+			call "MXOHCSZONE",ros.shipcust,ros.shipcode,roh.orddate,roh.div,roh.wh,shipdate,ros.zone$,roh.stopnum,IntCo
+			if shipdate>0 and shipdate<>999999 let roh.shipdate=shipdate
+		Endif ! get from zonefile shipvia,truck
+		ZKey$=" ",ZKey$
+		ZKey$=ros.zone$
+		ZNR=FileGetZonefle(e$,ZNC,"=",1,ZKey$,zn.)
+		if znr>0 ! okay its there
+			let ros.truck=zn.trucknum
+			if rtrim$(zn.shipvia$)<>""
+				let roh.shipvia$=zn.shipvia$+Blank$
+			endif
+		Endif
+		
+	Endif ! of sent shipid
+	! done write records
+	Write Record #OSC,roh.ShipRec,0;ros.;
+	Write Record #OHC,OHR,0;roh.;
+	If P60$[44,44]="Y" and etr.EtAction<>0
+		nrol.OrdNum=roh.OrdNum ! uses for order
+		call edttrkdo(rol.,nrol.) ! org, new (no line data)
+	Endif ! of edit tracking
+	Clear List$[]
+	List$[0]=bsdel$,"SDATECALC",fdel$
+	List$[1]="SHIPDATE",fdel$
+	x2=roh.shipdate;tmp$=""
+	tmp$=PDATE$(X2)
+	List$[2]=RTrim$(tmp$),fdel$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	UDHDone: ! finished
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! sbmrelh
+! 
+!--------------------------------------------------------------------
+Function chkDateFrmt$(DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY (not m/d/yy or m/d/yyyy)
+! if not make it MM/DD/YYYY (2 digit month/day)
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE" or DIn$="0"
+	  Let DOut$=UCase$(DIn$)
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function DOut$ ! chkDateFrmt$
+!--------------------------------------------------------------------------------

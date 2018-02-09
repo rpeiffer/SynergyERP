@@ -1,0 +1,1119 @@
+Declare Intrinsic Sub FindF,FindF,String
+Option Default Dialect IRIS1
+!
+! loadsave -w -n 100,10 -o prog/dxport/op268sfax.dl4 src/op268sfax.src
+!
+! OP268SFAX  v2.0  Fax Print from entry/inqury program 
+!GED:07/21/99:Redo menu
+!GED:11/23/99:Changes for remote server operation
+!zyc 02/24/00 cct132640 modified op268sfax from op268 to fax from entry/inqury
+!                       programs: 201,208,239,281,283  
+!zyc 02/20/01 cct144592 modified prompt
+!zyc 01/06/02 cct163855 problem when swapping from 201 or 208
+!zyc 04/29/03 cct167363 add "Fax Cover Sheet: " question
+!zyc 07/30/04 cct181261 add remotesrv$
+!dgh 04/14/05 cct189527 modify to fax from 286 since it is an order.
+
+!#savename progtmp/op268sfax
+
+include "src/copyright.inc"
+Declare Intrinsic Sub FormatDate
+Declare Intrinsic Sub FindF,String
+Declare Intrinsic Function FindChannel 
+External Lib "ubsfunc.dl4"
+Declare External Function GetUIDRec, GetUIDInfo$
+Declare External Sub DialCode
+
+External Lib "libgeneral.lib"
+Declare External Sub getsession,AddToStr,SetOutPut,CreateNetStatus,Dialcode
+
+Try
+
+Com 1%,pfu1[20],cnvtu[2],un[2]
+Com 2%,s9[9],status,swpsrc
+Com 3%,pfu2[6],cnvta,a[33],amount,no,invno
+Com address1$[30],address2$[30],city$[15],state$[2],zip$[10]
+Com contact$[30],faxno$[30],name$[30],coid$[1],cover$[80]
+Com from$[30],remark$[10000],RemoteSrv$[40]
+Com cname$[30],CADD$[30],CADD2$[30],CCITY$[15],CSTZIP$[8]
+Com UserName$[20],j4$[60],timer$[12],fxdir$[80],custorvend$[7]
+Com basedir$[30],remsys$[30],remdir$[30]
+Com faxpriority$[1],source$[10]
+Com faxcover$[1]
+
+If Err 0 Gosub err_trap
+
+! "===================================== dim vars
+Dim 1%,j9[2],r1,xpos,ypos,fxrunning,true,false,faximage
+Dim 1%,poh4[3]
+Dim 2%,h0[12],ph0[5],ph3[4],otc,pos_,custnum,vendnum,x1
+Dim 3%,j,a3[7],e,sel,ORef[5],Rec_Ros,h07
+Dim sel$[4],s1$[118],k1$[6],vend$[6],cust$[6],Work$[100]
+Dim j$[60],j0$[10],j1$[60],j2$[20],j3$[40],j5$[75],j7$[75],j9$[75],in$[10]
+Dim x$[10],p9$[50],f$[16],k2$[60],k5$[60],k7$[60],p60$[50],P61$[256]
+Dim u5$[30],cna0$[68],cna1$[142],a2$[30],blank$[30],ven$[264],m2$[72],v$[100]
+Dim c$[16],a5$[60],pomsg$[80]
+Dim file$[80],filecvr$[80],filetmp$[80],filemsg$[80],ua2$[50],asroot$[50]
+Dim plat$[60],asrootend$[50],line_$[85],comm$[30],scriptname$[30],fxstatus$[20]
+Dim resp$[5],filename$[80],FNAME$[50],MEMODIR$[30],savename$[80],workno$[30]
+Dim dir$[20],priority$[10],VWFax$[30],VWCont$[20],X1$[30]
+Dim fax$[40],FAXNUM$[50],ATTN$[40],CC1$[48],CC2$[48],CC3$[48]
+
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100],msg$[250],pdffilename$[100],mergedir$[200]
+Dim 2%,uport,tmp$[500]
+
+Dim action$[30],options$[30],userid$[8],b$[200],3%
+Dim action1$[30],action2$[30],action3$[30] ! actions for programs
+Dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1000] ! .net delimiters
+Dim WebStr$[1000],Message$[200]
+b$ = " ",b$
+
+! Call dxopen()
+  !
+  Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+
+! Call dxsave(0,"/x1/xslspro/rce.1!") ! \ stop
+
+!  Call dxsave(0,"/x1/xslspro/rce.in!")  ! \ Stop
+
+Call DXGet("S_USER.AppID",tmp$) \ coid=tmp$
+COID$ = Str$(coid)
+Call DXGet("u_port",tmp$) \ uport=tmp$ \ if not(uport) let uport=1
+Call DXGet("prntid",tmp$) \ printerselected=tmp$
+Call DXGet("orderid",tmp$) \ no=tmp$ \ s9[0]=no  ! order#
+Call DXGet("invid",tmp$) \ invno=tmp$ ! invoice#
+Call DXGet("custid",tmp$) \ custcode=tmp$ \ cust=tmp$ ! customer
+Call DXGet("ADDONS",tmp$) \ ADD_ONS_ONLY = tmp$  ! 0=no, 1=yes
+
+Call DXGet("STATUS",tmp$) \ status=tmp$
+If action$= "GETFAXINFO" let swpsrc=201
+If action$= "GETQTFAXINFO" let swpsrc=201
+If action$= "GETINVFAXINFO" let swpsrc=239
+if status=9 let swpsrc=241 ! credits
+h0[7]=no 
+h07=no \ If invno Let h07=invno
+h0[4]=custcode
+
+ ! swpsrc=201;status=1
+
+  ReturnStatus = 0
+  Message$ = "ACTION NOT FOUND"
+
+!"====================================== initialization
+! if using remote server:
+!  set basedir$ = remote mount of remote temp dir  (location from this system)
+!  set remdir$  = local mount of remote temp dir (location from server)
+!  set remsys$  = remote system command, eg: "rcmd sysname "
+!      !!!! note space after system name !!!!                ^^^
+! if faxing from local system:
+!  set basedir$="/tmp/"
+!  set remdir$="/tmp/"
+!  set remsys$=""
+
+If Len(RemoteSrv$) > 0 And RemoteSrv$[1,8] <> "        "
+  basedir$ = "/fax"
+  remdir$ = "/fax"
+Else 
+  basedir$ = "/tmp"
+  remdir$ = "/tmp"
+End If 
+remsys$ = ""
+source$ = "OP268SFAX"
+true = 1;false = Not(true)
+
+!If Sel<0 let S9[3]=Sel ! "retain where came from (Swapped into)
+If swpsrc = 239 And status = 30 Let sel = 1 !inv hist
+If swpsrc = 239 And status = 31 Let sel = 2 !c/m hist
+If swpsrc = 241 Or swpsrc = 243 Let sel = 6 !c/m
+If swpsrc = 281 Or swpsrc = 283 Let sel = 5 !quote
+If swpsrc = 201 Or swpsrc = 208 Or swpsrc = 286 Let sel = 6 !order
+sel = 8 !customer
+vendor_flag = 0
+fxdir$ = "FXDIR" !"this is Optio FaxFX's home spool directory
+System 28,fxdir$ !"get the value of this environment variable
+fxdir$ = fxdir$ To " " !"strip of trailing spaces
+line_$ = ""
+
+If Err 0 Rem 
+c$ = "cntrl/CNTRL" + Str$(coid)
+Close 
+Open #1,c$
+
+If Err 0 Gosub err_trap
+Mat Read #1,3,0;cname$;
+Mat Read #1,3,30;CADD$;
+Mat Read #1,3,60;CADD2$;
+Mat Read #1,3,90;CCITY$;
+Mat Read #1,3,104;CSTZIP$;
+Mat Read #1,61,0;P61$;
+
+!"retrieve the user's access code so as to identify who sent the fax
+Open #8,"cntrl/usercntrl"
+uid_rec = GetUIDRec(e$, intCO, userid$)
+If uid_rec <> -1
+  Read #8,uid_rec,280;UserName$;
+  Mat Read #8,uid_rec,336;ua2$;
+Else 
+  UserName$ = "UBS Admin" !"user logged in as super user
+  ua2$[4,13] = "YYYYYYYYYY" !"set security to make every selection authorized
+End If 
+Close #8
+Work$ = RTrim$(UserName$)  !  \ Gosub RTrim_ \ UserName$ = Work$
+
+!"====================================== open files
+For i = 2 To 13
+  Read f
+  If f <> -1
+    Read #1,88,Abs(f);f$;
+    If f > 0 Open #i,f$ Else Ropen #i,f$
+  End If 
+Next i
+Data "2400","1120","2416","1808","1136","720","1280","-1","1840","1392","1152","1856"
+
+!"=================== more initialization
+Read #1,2,200;otc; ! "one time customer id
+blank$ = " ",blank$
+timer$ = " ",timer$
+timer$ = "NOW"
+cover$ = fxdir$ + "/lj/paper/std_cvr" + coid$ + ".sheet" ! "cover sheet name
+v$ = "\15\",v$
+RemoteSrv$ = ""
+Mat Read #1,60,42;RemoteSrv$[1,8]; \ Call String(2,RemoteSrv$)
+Mat Read #1,60,50;p60$; ! su flags
+remark$ = "";timer$ = "NOW";from$ = UserName$
+If RemoteSrv$[1,4] = "none" Goto OutEnd
+If sel = 1 Or sel = 2 Or sel = 5 Or sel = 6 Or sel = 8 Goto ByPassMenu Else Goto OutEnd
+
+ByPassMenu: ! "Swapped in from elsewhere with Sel & No already known
+! ===================================================================
+! ---- Security check ---------(future use)--------------------------
+! ===================================================================
+If (sel >= 1 And sel <= 7)
+  ! "check if the user is authorized to select this
+  If (sel = 1 Or sel = 2) And ua2$[4,4] = "N" Let fax_allowed = false !"invs or c/ms
+  If sel = 3 And ua2$[6,6] = "N" Let fax_allowed = false !"purchasing
+  If sel = 4 And ua2$[7,7] = "N" Let fax_allowed = false !"statements
+  If sel = 5 And ua2$[8,8] = "N" Let fax_allowed = false !"quotes
+  If sel = 6 And ua2$[5,5] = "N" Let fax_allowed = false !"orders
+  If sel = 7 And ua2$[6,6] = "N" Let fax_allowed = false !"debit memo     
+  ! These two aren't on the menu yet!
+  If sel = 99 And ua2$[13,13] = "N" Let fax_allowed = false !"batch purchasing
+  If sel = 99 And ua2$[10,10] = "N" Let fax_allowed = false !"batch ordering
+  fax_allowed = true ! for future use --- all allowed for now!!!!
+  If Not(fax_allowed)
+    j7$ = "Sorry, not authorized to run this selection"
+    ! Gosub iserrmsg
+    Goto OutEnd
+  End If 
+End If 
+If cust Goto ByPass_Selector Else Goto OutEnd ! "Swapped in with order
+
+ByPass_Selector: ! "swapped in with Sel & No already there                      
+On sel Gosub Srch_For_Inv_CM,Srch_For_Inv_CM,Srch_For_Po,Fnd_Customer,Srch_For_Quote,Srch_For_Order,Srch_For_Po,Fnd_Customer ! "validate                
+Goto OutEnd
+Goto Display_And_Edit ! "go on, return +1 used from validate
+
+Sel_File_To_Use: !"===================== select which file to use
+s9[1] = 0
+If p60$[8,8] <> "Y" Return ! "not flaged for frozen file
+Read #1,88,1504;f$;
+f$[Len(f$) + 1] = ".FROZ"
+Call FindF(f$,found) \ If Not(found) Return ! "frozen file doesn't exist
+! Window Open @5,14; Size 60,6; Using " FILE SELECTION "
+Prompt_Frozen: Print @0,1;
+Print "Report using <C>urrent or <F>rozen A/R file? ";'CE';
+Input Len 16384 + 1;""in$
+Call String(1,in$)
+If in$ <> "F" And in$ <> "C" Print 'RB'; \ Goto Prompt_Frozen
+If in$ = "F"
+  s9[1] = 1
+End If 
+If in$ = "C"
+  Goto Exit_Frozen
+End If 
+Prompt_Age_Date: !"select date for frozen file aging
+Print @0,2;
+Print "Enter date to base aging on (MMDDYY):";
+j0$ = "5 00063802" \ j1 = 0
+j5$ = ""
+Gosub isinput
+If j4$ = "" Goto Prompt_Age_Date
+j1$ = " ",j1$;j1$ = j4$[5,6],j4$[1,4];s9[2] = j1$ ! "date in yymmdd
+Exit_Frozen: Print @0,0;'CE';
+! Window Close 
+Return 
+
+Srch_For_Inv_CM: ! search for invoice/credit
+k2$ = " ",k2$
+If sel = 1 Let k2$[1,2] = "30"
+If sel = 2 Let k2$[1,2] = "31"
+k2$[3,12] = no Using "##########"
+k2$[3,12] = invno Using "##########"
+Search #6,2,1;k2$,R2,e \ If e > 1 Gosub err_search
+If e
+  Gosub Display_NotOnFile
+  Return 
+End If 
+Mat Read #6,R2,0;h0;
+Mat Read #6,R2,512;ORef;
+cust = h0[4]
+Gosub Fnd_Customer \ Gosub Get_ShipTo ! "find customer
+Return 1
+
+Srch_For_Quote: ! search for quote
+k2$ = " ",k2$
+k2$ = status Using "##"
+k2$[3] = no Using "######"
+Search #8,2,1;k2$,R2,e \ If e > 1 Gosub err_search
+If e Gosub Display_NotOnFile \ Return 
+Mat Read #8,R2,0;h0;
+cust = h0[4]
+Gosub Fnd_Customer \ Gosub Get_ShipTo
+Return 1
+
+Srch_For_Order: ! search for order
+k2$ = " ",k2$
+Loop_ord: k2$[1,2] = status Using "##";k2$[3] = no Using "######"
+Search #10,2,1;k2$,R2,e
+if e and status=1 let status=2 \ goto loop_ord ! try again??
+if e and status=9 let status=10 \ goto loop_ord ! try again??
+If e Gosub Display_NotOnFile \ Return 
+Mat Read #10,R2,0;h0;
+cust = h0[4]
+Gosub Fnd_Customer \ Gosub Get_ShipTo ! "find customer
+Return 1
+
+Fnd_Customer: ! find customer
+k5$ = cust Using "######"
+Search #5,2,1;k5$,r5,e
+If sel = 4 And e Gosub Display_NotOnFile \ Return 
+If e Gosub err_search
+Mat Read #5,r5,0;cna1$
+Mat Read #5,r5,348;a2$;
+Search #7,2,1;k5$,r7,e
+If e
+  cna0$ = " ",cna0$
+Else 
+  Mat Read #7,r7,100;cna0$;
+End If 
+contact$ = " ",contact$
+contact$ = cna1$[1,20]
+Work$ = cna0$[9,28] 
+let work$=cna0$[9,28] 
+let custnum=cust
+if swpsrc=201
+   CALL "DocDeliv.dl4","CS",custnum,"SO  ",X1,FAXNUM$,ATTN$,CC1$,CC2$,CC3$,37,38,e$,IntCo,rstr$  
+else
+   CALL "DocDeliv.dl4","CS",custnum,"INV ",X1,FAXNUM$,ATTN$,CC1$,CC2$,CC3$,37,38,e$,IntCo,rstr$ 
+endif
+if x1=1
+   let work$=faxnum$
+   if attn$[1,1] <> "" and attn$[1,5] <> "     "
+      let contact$[1,30]=attn$[1,30] 
+   endif
+endif
+Gosub Clean_fax_no
+name$ = cna1$[31,60]
+address1$ = cna1$[61,90]
+address2$ = cna1$[91,120]
+city$ = cna1$[121,135]
+state$ = cna1$[136,137]
+zip$ = a2$[1,10]
+If sel = 8 Return 1
+If sel = 4 Gosub Sel_File_To_Use \ Return 1
+Return
+
+Get_ShipTo: ! for one-time customer, use ship to info for fax cover
+If otc <> h0[4] Return 
+chan = 12;Rec_Ros = ORef[4]
+If sel = 5 Let chan = 11;Rec_Ros = h0[2]
+If sel = 6 Let chan = 13;Rec_Ros = h0[2]
+Read #chan,Rec_Ros,8;s1$;
+name$ = s1$[1,30]
+address1$ = s1$[31,60]
+address2$ = s1$[61,90]
+city$ = s1$[91,105]
+state$ = s1$[106,107]
+zip$ = s1$[108,117]
+faxno$ = ""
+Return
+
+Srch_For_Po: ! search for po header
+If sel = 3 Let st = 1
+If sel = 7 Let st = 11
+Loop_For_Po: Rem
+If (sel = 3 And st <= 7) Or (sel = 7 And st <= 14)
+  k2$[1,2] = st Using "##"
+  k2$[3] = no Using "######"
+  Search #4,2,1;k2$,R2,e
+  If e > 1 Gosub err_search
+  If e Let st = st + 1 \ Goto Loop_For_Po
+End If 
+If e Gosub Display_NotOnFile \ Return 
+Mat Read #4,R2,0;ph0
+Mat Read #4,R2,222;ph3;
+Mat Read #4,R2,242;poh4;
+Mat Read #2,ph0[1];ven$
+Mat Read #2,ph0[1],498;a3
+Mat Read #2,ph0[1],576;a5$;
+k7$ = " ",k7$
+k7$[1,6] = ph3[3] Using "######"
+Search #3,2,1;k7$,r7,e
+If e > 1 Gosub err_search
+If e
+  m2$ = " ",m2$
+Else 
+  Mat Read #3,r7,314;m2$;
+End If 
+VWFax$ = " ",VWFax$;VWCont$ = " ",VWCont$
+If P61$[63,63] = "Y" ! "Vendor Warehouse for Fax # and Contact
+  Flag = 1 ! "retrieve fax # only 
+  Call "POVWMIN",ph3[3],poh4[1],rec3[],VWFax$,Flag ! "rec3 just placeholder
+  Flag = 0 ! "need vendor contact only - send dummy placholders Rec3[],x1$
+  Call "POVWHSE",ph3[3],poh4[1],rec3[],rec3[],X1$,X1$,VWCont$,Flag
+End If 
+If m2$[43,43] <> "" If m2$[43,46] <> "    " !use fax# from vendtag first
+  Work$ = m2$[43,72]
+Else 
+  Work$ = a5$[31,60]
+End If 
+If VWFax$[1,1] <> "" And VWFax$[1,5] <> "     " ! "use VendWhse if exists!
+  Work$ = VWFax$[1,30]
+End If 
+let vendnum=ph3[3]                                                            
+CALL "DocDeliv.dl4","VD",VENDNUM,"PO  ",X1,faxnum$,ATTN$,cc1$,cc2$,cc3$,37,38,e$,IntCo,rstr$  
+if x1=1                                                                   
+   let work$=faxnum$                                                      
+endif   
+Gosub Clean_fax_no
+name$ = ven$[1,30]
+If VWCont$[1,1] <> "" And VWCont$[1,5] <> "     " ! use vendwhse if there
+  contact$ = VWCont$[1,20]
+Else ! "use vendor file
+  contact$ = ven$[129,148]
+End If 
+if x1=1 and attn$[1,1] <> "" and attn$[1,5] <> "     "
+   let contact$[1,30]=attn$[1,30]  
+endif
+address1$ = ven$[31,60]
+address2$ = ven$[61,90]
+city$ = ven$[91,105]
+state$ = ven$[106,107]
+zip$ = ven$[108,116]
+Return 1
+
+Display_And_Edit: ! display and edit cover sheet info
+pos_ = 0
+For i = Len(cover$) To 1 Step -1
+  If (cover$[i,i] = "/" Or cover$[i,i] = "\\") And (pos_ = 0) Let pos_ = i
+Next i
+! Window Open @3,2; Size 76,22; Using " FAX COVER SHEET INFORMATION " + cover$[pos_ + 1] + " "
+! Print @0,0;'CE';
+Display_And_Edit_Again: !
+dsply_flag = 0 !  don't display in checking routine
+j$ = Rtrim$(name$) \ Gosub RmIllegalCharCvr \ name$ = j$
+j$ = Rtrim$(address1$) \ Gosub RmIllegalCharCvr \ address1$ = j$
+j$ = Rtrim$(address2$) \ Gosub RmIllegalCharCvr \ address2$ = j$
+j$ = Rtrim$(city$) \ Gosub RmIllegalCharCvr \ city$ = j$
+j$ = Rtrim$(state$) \ Gosub RmIllegalCharCvr \ state$ = j$
+j$ = Rtrim$(zip$) \ Gosub RmIllegalCharCvr \ zip$ = j$
+j$ = Rtrim$(faxno$) \ Gosub RmIllegalCharCvr \ Gosub RmIllegalCharPhone \ faxno$ = j$
+j$ = Rtrim$(contact$) \ Gosub RmIllegalCharCvr \ contact$ = j$
+j$ = Rtrim$(from$) \ Gosub RmIllegalCharCvr \ from$ = j$
+
+dsply_flag = 0  ! 1 !  show during checking
+! Print @2,1;
+	Call AddToStr(e$,rstr$,bsdel$+"FAXINFO"+fdel$+rdel$)  ! section header
+	tmp$="ID"+fdel$+"REF#"+FDEL$+"Name"+FDEL$+"Add1"+fdel$+"Add2"+fdel$+"City"+fdel$+"State"+fdel$+"Zipcode"+fdel$
+	tmp$=tmp$+"Fax#"+fdel$+"To"+fdel$+"From"+fdel$+"Remarks"+fdel$+"Time"+fdel$+"Priority"+fdel$+"Cover"+fdel$
+	Call AddToStr(e$,rstr$,tmp$+rdel$) ! row header
+
+If sel = 1
+  ! Print 'BD';"1) Cust/Vend:";'ED';h0[4];
+  ! Print Tab (32);'BD';"Invoice #";'ED';ORef[1]; ! " h0[6];
+  tmp$=Str$(h0[4])+fdel$+Str$(oref[1])+fdel$
+End If 
+If sel = 2
+  ! Print 'BD';"1) Cust/Vend:";'ED';h0[4];
+  ! Print Tab (32);'BD';"Credit Memo #";'ED';h0[7];
+  tmp$=Str$(h0[4])+fdel$+Str$(h07)+fdel$
+End If 
+If sel = 3
+  ! Print 'BD';"1) Cust/Vend:";'ED';ph3[3];
+  ! Print Tab (32);'BD';"Purchase Order #";'ED';ph0[2];
+  tmp$=tmp$+Str$(ph3[3])+fdel$+Str$(pho[2])+fdel$
+End If 
+If sel = 4
+  ! Print 'BD';"   Statement For Customer #";'ED';no;
+  tmp$=Str$(no)+fdel$+""+fdel$
+End If 
+If sel = 5 Or sel = 8
+  ! Print 'BD';"1) Cust/Vend:";'ED';h0[4];
+  ! Print Tab (32);'BD';"Quote #";'ED';h0[7];
+  tmp$=Str$(h0[4])+fdel$+Str$(h07)+fdel$
+End If 
+If sel = 6
+  ! Print 'BD';"1) Cust/Vend:";'ED';h0[4];
+  ! Print Tab (32);'BD';"Order #";'ED';h0[7];
+  tmp$=Str$(h0[4])+fdel$+Str$(h07)+fdel$
+End If 
+If sel = 9
+  ! Print 'BD';"1) Cust/Vend:";'ED';h0[4];
+  ! Print Tab (32);'BD';"Document Image";'ED';
+  tmp$=Str$(h0[4])+fdel$+"Image"+fdel$
+End If 
+If sel = 200
+  ! Print 'BD';"1) Cust/Vend:";'ED';h0[4];
+  ! Print Tab (32);'BD';"Fax Memo";'ED';
+  tmp$=Str$(h0[4])+fdel$+"Memo"+fdel$
+End If 
+
+! Print @2,3;'BD';"2) Name     : ";'ED';name$
+! Print @2,4;'BD';"3) Address 1: ";'ED';address1$
+! Print @2,5;'BD';"4) Address 2: ";'ED';address2$
+! Print @2,6;'BD';"5) City     : ";'ED CL';
+! Print @16,6;city$;
+! Print @32,6;'BD';"State: ";'ED';state$;
+! Print @42,6;'BD';"Zip: ";'ED';zip$;
+tmp$=tmp$+name$+fdel$+address1$+fdel$+address2$+fdel$+city$+fdel$+state$+fdel$+zip$+fdel$
+
+!Call DialCode(faxno$)
+Call "dialcode.dl4",faxno$ 
+!
+!
+! LET WORKNO$=FAXNO$
+! LET FAXNO$[1,4]=WORKNO$[1,4];FAXNO$[5]="-";FAXNO$[6,8]=WORKNO$[5,7];FAXNO$[9]="-";FAXNO$[10,13]=WORKNO$[8,11]
+! Print @2,8;'CL BD';"6) Fax number: ";'ED';faxno$
+If faxno$[1,Len(faxno$)] = blank$[1,Len(faxno$)]
+  ! Print @30,8;'RB BB';"<<< No fax number entered ";'EB';
+End If 
+! Print @2,9;'CL BD';"7) To        : ";'ED';contact$
+! Print @2,10;'CL BD';"8) From      : ";'ED';from$
+! Print @2,11;'CL BD';"9) Remarks...  ";'ED'; \ If remark$ Print "<entered>";
+! Print @1,14;'CL BD';"10) Time To Send: ";'ED';timer$
+priority$ = "PRIORITY"
+faxpriority$ = "5"
+! Print @1,15;'CL BD';"11) Fax Priority: ";'ED';priority$;" ";
+If sel <> 200
+  faxcover$ = "Y"
+  ! Print @1,16;'CL BD';"12) Fax Cover Sheet: ";'ED';faxcover$;" ";
+End If
+!
+tmp$=tmp$+faxno$+fdel$+contact$+fdel$+from$+fdel$+""+fdel$+timer$+fdel$+priority$+fdel$+faxcover$+fdel$
+Call AddToStr(e$,rstr$,tmp$+rdel$+esdel$)
+!
+Prompt_Edt_Cvr: Gosub Chk_Fax_No
+
+If sel = 6 And Not(vendor_flag) And Not(cust)
+  u5$ = "V"
+  vendor_flag = 1
+  Goto Custom_Chg_VendCust
+End If 
+! Print @0,Msc(34) - 1;"  Enter  #:edit field    C:continue    A:abort   ";'CL';
+! Input ""u5$
+!
+U5$="C"
+!
+Call String(1,u5$)
+u5 = u5$
+! NO EDITING IN ERP
+! Process_Selection: If Not(u5)
+!   If u5$ <> "C" And u5$ <> "A" Goto Prompt_Edt_Cvr
+!   If u5$ = "C" And faxno_len < 7 Let u5 = 6 \ Goto Process_Selection
+!   If u5$ = "C" And Not(remark$) And sel = 200
+!     Input @0,Msc(34) - 1;"  Press <CR> to enter remarks  ";'CE';u5$
+!     u5 = 9
+!     Goto Process_Selection
+!   End If 
+! Else 
+!   If u5 = 1 Goto Chg_VendCust
+!   On u5 - 1 Gosub Edt_Customer,Edt_Addr1,Edt_Addr2,Edt_City,Edt_Fax_No,Edt_Contact,Edt_From,Edt_Remarks,Edt_FaxTime,Edt_Priority,Edt_Faxcover
+!   Goto Prompt_Edt_Cvr
+! End If 
+! Window Close
+
+If u5$ = "C"
+  ! chain to cover sheet
+  If from$ = "" Or from$[1,5] = "     " Let from$ = cname$
+  ! Print 'CS';
+  For X = 2 To 13
+    If X = 9 Goto theend
+    Close #X
+theend: Rem
+  Next X
+  ! If sel = 1 Or sel = 2 Chain "op268b"
+  If sel = 5 Chain "op268e"
+  If sel = 1 or sel=2 or sel=6 or sel = 8 ! all done now
+	ReturnStatus = 1
+	Message$ = "OK"
+	Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	Call AddToStr(e$,rstr$,WebStr$)
+	Call SetOutPut(e$,rstr$)
+	End
+  End If
+	! stop \ x=x ! Chain "op268f" !"order                                            
+End If 
+If u5$ = "A" Let remark$ = "" \ Goto OutEnd
+
+Edt_Fax_No: ! edit fax number
+j0$ = "2 00301708"
+j5$ = "Enter the fax number (at least 7 digits) or E to exit"
+j1$ = faxno$
+! Print @30,8;'CL';
+Gosub isinput
+Gosub RmIllegalCharCvr \ Gosub RmIllegalCharPhone
+faxno$ = j$
+Return 
+
+Edt_Contact: ! edit contact
+j0$ = "2 00301709"
+j5$ = "Enter the name of the person receiving the fax"
+j1$ = contact$
+Gosub isinput
+Gosub RmIllegalCharCvr
+contact$ = j$
+Return 
+
+Edt_From: ! edit from
+j0$ = "2 00301710"
+j5$ = "Enter the name of the person sending the fax"
+j1$ = from$
+Gosub isinput
+Gosub RmIllegalCharCvr
+from$ = j$
+Return 
+
+Edt_FaxTime: !"edit the time to send the fax
+xpos = 19;ypos = 14
+Call "OP268time",xpos,ypos,timer$
+Return
+
+Edt_Priority: !"edit priority
+Print @0,Msc(34) - 1;"  Enter    E:Express   P:Priority  ";'CL';
+Input ""resp$
+Call String(1,resp$)
+If resp$ = "" Let resp$ = "P"
+If resp$ <> "E" And resp$ <> "P" Goto Edt_Priority
+If resp$ = "E" Let priority$ = "EXPRESS" \ faxpriority$ = "0"
+If resp$ = "P" Let priority$ = "PRIORITY" \ faxpriority$ = "5"
+Print @1,15;'CL BD';"11) Fax Priority: ";'ED';priority$;" ";
+Return
+
+Edt_Faxcover: !"edit faxcover                                   
+If sel = 200 Return 
+Print @0,Msc(34) - 1;"  Enter    Y: Cover sheet   N: No cover sheet  ";'CL';
+Input ""faxcover$
+Call String(1,faxcover$)
+If faxcover$ = "" Let faxcover$ = "Y"
+If faxcover$ <> "Y" And faxcover$ <> "N" Goto Edt_Faxcover
+Print @1,16;'CL BD';"12) Fax Cover Sheet: ";'ED';faxcover$;" ";
+Return
+
+Edt_Remarks: ! remarks
+!"This routine allows the user to edit any remarks that they wish to
+!"appear on every fax cover sheet.                           
+If sel = 200
+  remark$ = ""
+cpmemo: Print @0,13;'CL';
+  Print @0,12;'CL BD';"     Copy from another memo? (Y/<cr>=N) ";'ED';
+  Input ""resp$
+  Call String(1,resp$)
+  If resp$ = "" Goto start_edt
+  If resp$ <> "Y" And resp$ <> "N" Goto cpmemo
+  If resp$ = "Y"
+    Print @0,13;'CL BD';"     Enter file name to copy from: ";'ED';
+    Input ""FNAME$ \ If FNAME$ = "" Goto cpmemo
+    If FNAME$[Len(FNAME$)] = " " Let FNAME$[Len(FNAME$)] = "" \ Goto cpmemo
+    If FNAME$[Len(FNAME$)] = "!" Let FNAME$[Len(FNAME$)] = "" \ Goto cpmemo
+    filename$ = MEMODIR$ + FNAME$
+    Call FindF(filename$,X)
+    If Not(X)
+      Print @0,Msc(34) - 1;"     File not found     ";'CL';
+      Signal 3,30 \ Print @0,Msc(34) - 1;'CL';
+      Goto cpmemo
+    End If 
+  Else 
+    Print @2,12;'CL';
+  End If 
+End If 
+start_edt: filemsg$ = basedir$ + "/remark" + Spc(6) Using "&&&&"
+Build #0, + filemsg$ + "!"
+If X System "cat " + filename$ + " > " + filemsg$
+If remark$
+  Print #0;remark$
+End If 
+remark$ = ""
+Close #0
+!"allow user to edit the messages
+! Window Open @0,0; To @79,23; Using ""
+Send Spc(6),filemsg$
+Swap 0,"geoedit"
+Open #0,filemsg$
+! Window Close 
+ctr = 0 !"don't exceed 30 lines of text (I think that's how many will fit in the free-form text box of the cover sheet).
+loop_edtr: Read #0;line_$
+If line_$
+  remark$ = remark$ + line_$
+  ctr = ctr + 1
+  Goto loop_edtr
+End If 
+If remark$ And sel = 200
+  Print @0,13;'CL';
+memo: Print @0,12;'CL BD';"     Save this memo? (Y/<cr>=N) ";'ED';'CL';
+  Input ""resp$
+  Call String(1,resp$)
+  If resp$ = "" Goto exit_memo
+  If resp$ <> "Y" And resp$ <> "N" Goto memo
+  If resp$ = "Y"
+svmemo: FNAME$ = " ",FNAME$
+    Print @0,13;'CL BD';"     Enter file name to save: ";'ED';
+    Input ""FNAME$ \ If FNAME$ = "" Goto memo
+    If FNAME$[Len(FNAME$)] = " " Let FNAME$[Len(FNAME$)] = "" \ Goto memo
+    If FNAME$[Len(FNAME$)] = "!" Let FNAME$[Len(FNAME$)] = "" \ Goto memo
+    savename$ = MEMODIR$ + FNAME$
+    Call FindF(savename$,X)
+    If X
+file_exist: Print @0,Msc(34) - 1;"     FILE ALREADY EXISTS   O:overwrite  N:new filename  ";'ED';
+      Input ""resp$
+      Call String(1,resp$)
+      If resp$ <> "N" And resp$ <> "O" Goto file_exist
+      If resp$ = "N" Goto svmemo
+      If resp$ = "O" System "cat " + filemsg$ + " > " + savename$
+    Else 
+      System "cat " + filemsg$ + " > " + savename$
+    End If 
+  End If 
+End If 
+exit_memo: Rem
+Close #0
+Kill filemsg$
+Print @2,11;'CL BD';"9) Remarks...  ";'ED'; \ If remark$ Print "<entered>";
+Return
+
+RmIllegalCharCvr: ! remove for illegal characters in fax cover sheet text fields
+If Len(j$) = 0 Return 
+For i2 = 1 To Len(j$)
+  If Asc(j$[i2,i2]) = 162 Or j$[i2,i2] = "`" Let j$[i2,i2] = " "
+Next i2
+If dsply_flag
+  ! Print @Val(j0$[7,8]),Val(j0$[9,10]);j$
+End If 
+Return
+
+RmIllegalCharPhone: ! remove illegal characters in phone number
+If Len(j$) = 0 Return 
+u5$ = ""
+For i2 = 1 To Len(j$)
+  If j$[i2,i2] = "(" Let j$[i2,i2] = " "
+  If j$[i2,i2] = ")" Let j$[i2,i2] = "-"
+  If j$[i2,i2] <> " " Let u5$ = u5$ + j$[i2,i2]
+Next i2
+j$ = " ",j$ \ j$[1,Len(u5$)] = u5$
+If dsply_flag
+  j$ = j$[1,Val(j0$[5,6])]
+  ! Print @Val(j0$[7,8]),Val(j0$[9,10]);j$
+End If 
+Return
+
+Display_NotOnFile: ! not on file
+If sel = 1 Let j7$ = "Invoice"
+If sel = 2 Let j7$ = "Credit Memo"
+If sel = 3 Let j7$ = "Purchase Order"
+If sel = 4 Let j7$ = "Customer"
+If sel = 5 Let j7$ = "Quote"
+If sel = 6 Let j7$ = "Order or Credit Memo Number"
+j7$ = j7$ + " number " + Str$(no) + " not on file"
+! Gosub iserrmsg
+Return
+
+Edt_PO_Msg: ! ========== edit standard purchase order messages       
+!"This routine allows the user to edit the standard po messages      
+!"that appear on every po fax cover sheet.                           
+filecvr$ = fxdir$ + "/lj/paper/po_cvr" + coid$ + ".txt"
+filemsg$ = "1/fax.pom" !"po messages stored here                   
+Gosub Edt_Msg
+Return 
+
+Edt_OA_Msg: ! ========== edit standard order acknowledgement messages
+!"This routine allows the user to edit the standard order messages   
+!"that appear on every order fax cover sheet.                        
+filecvr$ = fxdir$ + "/lj/paper/oa_cvr" + coid$ + ".txt"
+filemsg$ = "1/fax.oam" !"order acknowledgement messages stored here
+Gosub Edt_Msg
+Return
+
+View_Log: !
+! Print 'CS';
+Chain "op268log"
+
+Fax_Status: !
+! Print 'CS';"Please wait . . . ";'CR'
+Chain "op268stat"
+
+New_Cover: !
+h0[4] = 0
+name$ = ""
+address1$ = "";address2$ = ""
+city$ = ""
+state$ = ""
+zip$ = ""
+faxno$ = ""
+contact$ = ""
+from$ = UserName$
+remark$ = ""
+timer$ = "NOW"
+custorvend$ = ""
+Goto Display_And_Edit
+
+cancel_fax: ! cancel an outbound fax from the queqe
+! Print 'CS';
+!chain "op268g"
+Chain "op268x"
+
+Batch_POs: ! fax all purchase orders which need to be faxed
+! Print 'CS';
+Chain "op268cbat"
+
+Batch_Orders: ! fax all orders which need to be faxed
+! Print 'CS';
+Chain "op268fbat"
+
+Cust_Price_List: ! cust price list fax
+! Print 'CS';
+Chain "op268fax"
+
+Cust_Price_Change: ! cust price change notification
+! Print 'CS';
+Chain "op268pcn"
+
+Chg_VendCust: ! ======== option to let user use diffenent cust or vendor
+Print @2,Msc(34) - 1;'CE';"Enter  C:customer code   V:vendor code  : ";
+Input ""u5$
+Call String(1,u5$)
+If u5$ <> "C" And u5$ <> "V" Print 'RB'; \ Goto Chg_VendCust
+invalid = 0
+If u5$ = "C" Print @5,1;'BD';"Customer :   ";'ED';
+If u5$ = "V" Print @5,1;'BD';"Vendor   :   ";'ED';
+Custom_Chg_VendCust: ! ======== custom cct#144592
+If sel = 1 Or sel = 2 Or sel = 4 Or sel = 5 Or sel = 6 Or sel = 8 Or sel = 9 Or sel = 200
+  If u5$ = "C"
+Prompt_Enter_CCode: invalid = 0
+    j5$ = "Enter code, name, ''-'' +name"
+    j0$ = "1 00061601"
+    j1$ = h0[4] Using "######";cust$ = h0[4] Using "######"
+    Gosub edit_customer
+    If invalid Goto Prompt_Enter_CCode
+    h0[4] = cust$[1,6]
+    custorvend$ = "C" + cust$[1,6]
+    Goto Display_And_Edit_Again
+  Else 
+Prompt_Enter_VCode: invalid = 0
+    j5$ = "Enter code, name, ''-'' +name"
+    j0$ = "1 00061601"
+    j1$ = h0[4] Using "######";vend$ = h0[4] Using "######"
+    Gosub edit_vendor
+    If invalid Goto Prompt_Enter_VCode
+    h0[4] = vend$[1,6]
+    custorvend$ = "V" + vend$[1,6]
+    Goto Display_And_Edit_Again
+  End If 
+End If 
+If sel = 3
+  If u5$ = "C"
+Prompt_Enter_CCode1: invalid = 0
+    j5$ = "Enter code, name, ''-'' +name"
+    j0$ = "1 00061601"
+    j1$ = ph3[3] Using "######";cust$ = ph3[3] Using "######"
+    Gosub edit_customer
+    If invalid Goto Prompt_Enter_CCode1
+    ph3[3] = cust$[1,6]
+    Goto Display_And_Edit_Again
+  Else 
+Prompt_Enter_VCode1: invalid = 0
+    j5$ = "Enter code, name, ''-'' +name"
+    j0$ = "1 00061601"
+    j1$ = ph3[3] Using "######";vend$[1,6] = ph3[3] Using "######"
+    Gosub edit_vendor
+    If invalid Goto Prompt_Enter_VCode1
+    ph3[3] = vend$[1,6]
+    Goto Display_And_Edit_Again
+  End If 
+End If 
+Goto Display_And_Edit_Again
+
+edit_customer: !================== edit customer #
+Gosub isinput
+If j4$
+  Gosub Lst_Customers \ Return 
+  Rem let's continue
+End If 
+Loop_strip3: If j$[1,1] = " " Let j$ = j$[2] \ Goto Loop_strip3
+e9 = j$ \ If e9 <= 0 Goto Bad_Cust_Exit
+j$ = e9 Using "######"
+k5$ = j$
+Search #5,2,1;k5$,r5,e
+If e = 0
+  Mat Read #5,r5,0;cna1$;
+  Mat Read #5,r5,348;a2$;
+  Search #7,2,1;k5$,r7,e
+  If e
+    cna0$ = " ",cna0$
+  Else 
+    Mat Read #7,r7,100;cna0$;
+  End If 
+  contact$ = " ",contact$
+  contact$ = cna1$[1,20]
+  Work$ = cna0$[9,28] 
+  let custnum=e9
+  if swpsrc=201                                                        
+	   CALL "DocDeliv.dl4","CS",custnum,"SO  ",X1,FAXNUM$,ATTN$,CC1$,CC2$,CC3$,37,38,e$,IntCo,rstr$ 
+  else                                                                        
+	   CALL "DocDeliv.dl4","CS",custnum,"INV ",X1,FAXNUM$,ATTN$,CC1$,CC2$,CC3$,37,38,e$,IntCo,rstr$ 
+  endif                                                                       
+  if x1=1
+	 let work$=faxnum$
+	  if attn$[1,1] <> "" and attn$[1,5] <> "     "
+	     let contact$[1,30]=attn$[1,30]
+	  endif
+  endif
+  Gosub Clean_fax_no
+  cust$ = k5$[1,6]
+  name$ = cna1$[31,60]
+  address1$ = cna1$[61,90]
+  address2$ = cna1$[91,120]
+  city$ = cna1$[121,135]
+  state$ = cna1$[136,137]
+  zip$ = a2$[1,10]
+  Return 
+End If 
+Bad_Cust_Exit: j7$ = "Customer not found!" ! \ Gosub iserrmsg
+invalid = 1
+Return 
+
+edit_vendor: Rem ==================== edit vendor #
+Prompt_Vendor: Gosub isinput
+If j4$[1,1] = "-" Swap 1,"lavend" \ Goto Prompt_Vendor
+Loop_strip5: If j$[1,1] = " " Let j$ = j$[2] \ Goto Loop_strip5
+x2 = j$ \ If x2 <= 0 Goto Vend_Not_Found
+k1$ = x2 Using "######"
+Search #2,2,1;k1$,R2,e
+If Not(e)
+  Mat Read #2,R2;ven$;
+  Mat Read #2,R2,498;a3;
+  Mat Read #2,R2,576;a5$;
+  k7$ = " ",k7$
+  k7$[1,6] = x2 Using "######"
+  Search #3,2,1;k7$,r7,e
+  If e > 1 Gosub err_search
+  If e
+    m2$ = " ",m2$
+  Else 
+    Mat Read #3,r7,314;m2$;
+  End If 
+  VWFax$ = " ",VWFax$;VWCont$ = " ",VWCont$
+  If P61$[63,63] = "Y" ! "Vendor Warehouse File
+    Flag = 1 ! "retrieve Fax # only
+    Call "POVWMIN",x2,poh4[1],rec3[],VWFax$,Flag ! "rec3 just syntax
+    Flag = 0 ! "get contact name from VWhse file
+    Call "POVWHSE",x2,poh4[1],rec3[],rec3[],X1$,X1$,VWCont$,Flag
+  End If 
+  !  let work$=a5$[31,60] \ gosub clean_fax_no:
+  If m2$[43,43] <> "" If m2$[43,46] <> "    "
+    Work$ = m2$[43,72]
+  Else 
+    Work$ = a5$[31,60]
+  End If 
+  If VWFax$[1,1] <> "" And VWFax$[1,5] <> "     " ! "use VendWhse if exists
+    Work$ = VWFax$[1,30]
+  End If 
+  let vendnum=x2
+  CALL "DocDeliv.dl4","VD",VENDNUM,"PO  ",X1,faxnum$,ATTN$,cc1$,cc2$,cc3$,37,38,e$,IntCo,rstr$ 
+  if x1=1
+	 let work$=faxnum$
+  endif
+  Gosub Clean_fax_no
+  If Not(faxno$)
+    Work$ = m2$[43,72]
+    Gosub Clean_fax_no
+  End If 
+  vend$ = k1$[1,6]
+  name$ = ven$[1,30]
+  If VWCont$[1,1] <> "" And VWCont$[1,5] <> "     " ! "use vendwhse if exists
+    contact$ = VWCont$[1,20]
+  Else 
+    contact$ = ven$[129,148]
+  End If 
+  if x1=1 and attn$[1,1] <> "" and attn$[1,5] <> "     "
+	 let contact$[1,30]=attn$[1,30]  
+  endif
+  address1$ = ven$[31,60]
+  address2$ = ven$[61,90]
+  city$ = ven$[91,105]
+  state$ = ven$[106,107]
+  zip$ = ven$[108,116]
+  Return 
+End If 
+Vend_Not_Found: j7$ = "Vendor not found!" ! \ Gosub iserrmsg
+invalid = 1
+Return
+
+Edt_Customer: ! ======== edit customer name
+j0$ = "2 00301603"
+j5$ = "Enter customer name"
+j1$ = name$
+Gosub isinput
+Gosub RmIllegalCharCvr
+name$ = j$
+Return 
+
+Edt_Addr1: ! ========= edit address 1
+j0$ = "2 00301604"
+j5$ = "Enter address 1"
+j1$ = address1$
+Gosub isinput
+Gosub RmIllegalCharCvr
+address1$ = j$
+Return 
+
+Edt_Addr2: ! ========== edit address 2
+j0$ = "2 00301605"
+j5$ = "Enter address 2"
+j1$ = address2$
+Gosub isinput
+Gosub RmIllegalCharCvr
+address2$ = j$
+Return 
+
+Edt_City: ! ============ edit city, state, zip
+j0$ = "2 00151606"
+j5$ = "Enter city"
+j1$ = city$
+Gosub isinput
+Gosub RmIllegalCharCvr
+city$ = j$
+j0$ = "2 00023906"
+j5$ = "Enter state"
+j1$ = state$
+Gosub isinput
+Gosub RmIllegalCharCvr
+state$ = j$
+j0$ = "2 00104706"
+j5$ = "Enter zip"
+j1$ = zip$
+Gosub isinput
+Gosub RmIllegalCharCvr
+zip$ = j$
+Return 
+
+Edt_Msg: ! ========== edit standard fax messages
+file$ = filecvr$ \ Gosub ffind
+If found !"special messages are only available on this cover sheet
+  !"look for existing messages
+  file$ = filemsg$ \ Gosub ffind
+  If Not(found) System "touch " + filemsg$,e !"create it then
+  If e Return !"Oh dear, I don't have permission to write to that directory
+  !"allow user to edit the messages
+  ! Window Open @0,0; To @79,23; Using ""
+  Send Spc(6),filemsg$
+  Swap 0,"geoedit"
+  !"lets return to the main menu
+  ! Window Close 
+End If 
+Return 
+
+ffind: !====================== check for the existance of the given file
+!"this file check is case sensitive (unlike call $findf, which only 
+!"recognizes lower case file names)
+System "ls -d " + file$ + " >/dev/null 2>&1",found
+found = Not(found) !"system returns zero if file exists
+Return 
+
+Lst_Customers: ! swap
+If Len(j4$) <= 6 If j4$[1,1] >= "0" If j4$[1,1] <= "9" Return 1
+Swap 1,"mxcust"
+Print @36,3; \ Signal 3,0
+Input ""j$ \ If j$ = "" Return 
+Return 1
+
+Chk_Fax_No: ! check how many char in fax # field
+fax$ = ""
+For i2 = 1 To Len(faxno$)
+  If faxno$[i2,i2] = "(" Let faxno$[i2,i2] = " "
+  If faxno$[i2,i2] = ")" Let faxno$[i2,i2] = "-"
+  If faxno$[i2,i2] <> " " Let fax$ = fax$ + faxno$[i2,i2]
+Next i2
+faxno$ = " ",faxno$ \ faxno$[1,Len(fax$)] = fax$ \ faxno$ = faxno$[1,30]
+i = 1
+Loop_Fax_No: If i < 30
+  If faxno$[i,i] <> " " Let i = i + 1 \ Goto Loop_Fax_No
+End If 
+faxno_len = i - 1
+Return 
+
+Clean_fax_no: !=============================================================
+!== get rid of any spaces, alpha or special characters in the fax #       ==
+!== inbound: work$ must be set to fax number to be cleaned                ==
+!== outbound: faxno$ is the result                                        ==
+!===========================================================================
+i = 1;j = Len(Work$)
+faxno$ = ""
+Loop_Clean: !
+If i <= j
+  If ((Work$[i,i] >= "0" And Work$[i,i] <= "9") Or Work$[i,i] = "-")
+    faxno$ = faxno$ + Work$[i,i]
+  End If 
+  i = i + 1
+  Goto Loop_Clean
+End If 
+Return
+
+Fax_Exception: !========== Generate a fax exception (failure) report ========
+Close 
+! Print 'CS';
+Chain "op268except"
+
+RTrim_: If Work$[Len(Work$)] = " "
+  Work$[Len(Work$)] = ""
+  Goto RTrim_
+End If 
+Return
+
+! #include call.input.i
+ISINPUT:!
+Return
+
+Err_Escape: !
+ERR_TRAP: Rem
+If Spc(8) = 123
+  Escdis 
+  Escclr 
+  Return -1
+End If 
+Goto ERR_MAIN
+ERR_SEARCH: Rem
+ENUM = E + 1000;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "
+Goto ERR_MAIN
+ERR_MAIN: Rem
+If Err 0 Rem
+e$ = msg$
+If Spc(8) <> 10000 Call suberr(e$,Spc(8),Spc(10),Msc$(2))
+Call mainerr(e$,Spc(8),buttonlist$[],nextlist$[])
+Stop 
+!--------------------------------------------------------
+OutEnd: ! exit
+! ! Print 'CS';
+Close 
+
+Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+Call AddToStr(e$,rstr$,WebStr$)
+Call SetOutPut(e$,rstr$)
+End
+! Chain ""
+! Stop 
+
+Else   ! main try
+  include "src/callmainerrnet.inc"
+End Try

@@ -1,0 +1,2409 @@
+!Program Name: ubsfunc 
+! loadsave -w -n 100,10 -o prog/dxport/ubsfunc.dl4 src/ubsfunc.src
+!                                                  
+!Last Updated:                                     
+!zyc 09/01/04 cct182085 modified path for include  
+!zyc 09/03/04 cct182085 add Function Buildsort
+!zyc 09/09/04 cct182085 modified CalcARs and FMTPhone$
+!zyc 09/17/04 cct182085 modified OpenFile
+!zyc 12/28/04 cct185577 add Sub UserCntrl
+!rce 10/10/05 Function SalesGroup
+!rce 10/20/05 function escape$
+!jjg 06/01/06 function formatdate$ formatdate2$
+!jjg 06/14/06 function roundit
+!jjg 08/08/06 function taxable
+!mtg 03/05/07 fuction arbuck
+!mtg 03/14/07 sub taxflag
+!tcw 05/22/07 add sfcashfle to openfile routine
+!tcw 01/30/08 add sub utmonths
+!mtg 03/19/08 add sub getportdefault
+!jcs 04/10/08 function chkaltitem
+!jcs 03/06/12 function chkbadchars
+!jcs 04/18/12 function clrtxtc
+! List of Subs and Functions in Lib
+!
+!  Func   taxable
+!  Func   roundit
+!  Func   Formatdate$
+!  Func   Formatdate2$
+!  Func   MMDDYYYY2JulianDate$
+!  Func   Warehouse
+!  Sub    UserCntrl
+!  Func   OpenFile
+!  Func   XMLFile$
+!  Func   FDate$
+!  Func   PDate$
+!  Func   JDate$
+!  Func   Basename$
+!  Func   FMTPhone$
+!  Func   FMTPhone2$  format to (xxx) xxx-xxxx
+!  Sub    CalcARs
+!  Func   FixText$
+!  Func   ReplaceChar$
+!  Func   buildsort
+!  Sub    SalesGroup
+!  Func   Escape$
+!  Func   arrEscape$
+!  Sub    TaxFlag
+!  Sub    ArBuck
+!  Func   CheckSlsm
+!  Sub    Utage5
+!  Sub    UTMonths
+!  Sub    GetCostLevel
+!  Sub	  GetPortDefault
+!  Func   ChkAltItem$
+!  Func   GetUIDRec
+!  Func   GetUIDSalesRep
+!  Func   GetUIDInfo$
+!  Func   Numericonly$     strips a string to numbers only
+!  Func	  chkDteFrmt$ ! make sure date is MM/DD/YYYY
+!  Func   chkbadchars ! check if cntrl/other chars used in string
+!  Func   clrtxtc$ ! strips control chars from string
+!  Func   OpenMySQLChan
+!  Func   OpenMySQLBrowserOutput ! same as OpenMySQLChan + 
+!             check to see if report output tables defined
+!  Func   OpenMySQLMirror ! same as OpenMySQLChan + check MySQL Mirror Flag
+!  Func   GetASPIDFileDirectory
+!  Func   RunningInTest
+!  Sub    GetASPs
+!  Sub    LogAccess
+!  Func   GetMySQLReportHeader
+!  Sub    AddMySQlReportColumnHeadings
+!  Function    AddMySQLReportData
+!  Sub    FinishMySQLReport
+External Lib "libgeneral.lib" !general routines
+Declare External Sub suberr,searcherr
+Declare External Function GetParameter$
+!
+External Lib "ubsfunc.dl4"
+Declare External Sub UserCntrl
+!
+External Lib "mysql_lib.lib"
+Declare External Function MysqlOpen
+
+
+declare intrinsic sub dxget,dxsave
+Declare Intrinsic Sub Env
+!
+Include "src/ubssar.inc"
+Include "src/ubssales.inc"
+Include "src/inc/fileprtdefault.inc" ! port defaults
+Include "src/inc/SQL_progaccess.inc" ! program access logging
+Include "src/inc/SQL_progaccess_parameter.inc" ! program access logging
+Include "src/inc/sql_reportheader.inc" ! browser based output header
+Include "src/inc/sql_reportcolumnheaders.inc" ! browser based output column header
+Include "src/inc/sql_reportdata.inc" ! browser based output data rows
+!
+! ---------------------------------------------------------
+External Function taxable(e$,p60$,ctxc,cua03,cuc21,lpstaxcode,pra17)
+! pass p60$ (ctlc,60,50), ctxc channel # of tax type file, cua03 (cu.a0[3] from customer file), cuc21 (cu.c2[1] fr0m customer file)
+! lpstaxcode (lps.[].taxcode), pra17 (pr.a1[7] from product file)
+try
+  dim 1%,tax[100]
+  mat read #ctxc,cua03,36;tax;                    !"a0[3] - tax type        
+  if p60$[42,42]<>"Y" let taxcode=tax[PRA17]       !"y=1/n=0                
+  if p60$[42,42]="Y"        !"tax by line item                                 
+     if tax[PRA17] let taxcode=cuc21        !" tax code from cust file   
+	 if lpstaxcode >=0 let taxcode=lpstaxcode   !"tax code from lps  
+  End If 
+else
+ if spc(8)<>10000
+   call suberr(e$,Spc(8),Spc(10),Msc$(2))
+  end if
+  error 10000
+ end try
+end function taxcode !taxable
+!
+! ---------------------------------------------------------
+External Function roundit(amount,decimals,roundflag$)
+ !DEF FNN(H)=INT(ABS(H)*10^Q0[1]+.5)*10^-Q0[1]*SGN(H)
+ !DEF FNT(H)=INT(ABS(H)*10^Q0[1])*10^-Q0[1]*SGN(H)
+ !DEF FNV(H)=INT(ABS(H)*10^Q0[1]+.9999999)*10^-Q0[1]*SGN(H)
+ if roundflag$="N" !normal
+  amount=int(abs(amount)*10^decimals+.5)*10^-decimals*sgn(amount)
+ else if roundflag$="T" !truncate
+  amount=int(abs(amount)*10^decimals)*10^-decimals*sgn(amount)
+ else if roundflag$="U" !always up
+  amount=int(abs(amount)*10^decimals+.9999999)*10^-decimals*sgn(amount)
+ end if
+End function amount
+!
+! ---------------------------------------------------------
+External Function Formatdate$(date$)
+  !date yyyymmdd to mm/dd/yyyy
+  Dim TMP$[10]
+  If date$[1,2] <> "  "
+   Let TMP$ = date$[5,6],"/",date$[7,8],"/",date$[1,4]
+  End If
+End Function TMP$ !Formatdate$
+!
+! ---------------------------------------------------------
+External Function Formatdate2$(date$)
+  !date mm/dd/yyyy or mm/dd/yy or null to yyyymmdd or bbbbbbbb
+  Dim TMP$[8]
+  If date$ = ""
+    TMP$ = "        "
+  Else if len(date$)=8
+    TMP$ = "20",date$[7,8],date$[1,2],date$[4,5]
+    if date$[7,7]>"3" let tmp$[1,2]="19"
+  Else
+    TMP$ = date$[7,10],date$[1,2],date$[4,5]
+  End If
+End Function TMP$ !Formatdate2$
+!
+! ---------------------------------------------------------
+External Function Warehouse(intSalesMan, intCompany)
+Declare External Function OpenFile
+
+Dim SMK$[10],Temp$[10],2%,SMC,SMR,SME,WHSE
+Dim SM. as SLSM
+Try
+   SMC=OpenFile(1824, intCompany)
+
+   SMK$=intSalesMan Using "### "
+   Temp$=SMK$
+
+   Search #SMC,2,1;SMK$,SMR,SME
+   If SMK$[1,4] <> Temp$ Let SME=22
+
+   If SME=0 Then
+      Read Record #SMC,SMR;SM.;
+   Else
+      Clear SM.
+   End If
+
+   WHSE = SM.S3[3]
+   Close #SMC
+   Exit Function WHSE
+Else
+   Exit Function 1
+End Try
+
+End Function -1
+!
+! ---------------------------------------------------------
+External Sub UserCntrl(userID$,A2$,A5[],ss,intCompany)
+Declare Intrinsic Function FindChannel,Trim$ 
+
+Dim UCK$[20],Temp$[20]
+Dim UCA2$[50]
+
+Dim 1%,A5[10]
+Dim 2%,UCC
+Dim 2%,UCR
+Dim 2%,UCE
+
+UCC = OpenFile(-9988, intCompany)
+
+!init
+Let UCA2$=" ",UCA2$
+For xx=0 to 10
+    Let A5[xx]=0
+Next xx
+Let ss=1
+
+!main
+Let UCK$=" ",UCK$;UCK$=userID$
+Let Temp$=" ",Temp$;Temp$=UCK$                                           
+Search #UCC,2,1;UCK$,UCR,UCE                                                 
+If Trim$(UCK$) <> Trim$(Temp$) Let UCE=22                                 
+
+If UCE=0 Then                                                                
+   Mat Read #UCC,UCR,336;A2$;      
+   Mat Read #UCC,UCR,386;A5; 
+   Let ss=0
+End If  
+Close #UCC
+End Sub                                                          
+!
+!----------------------------------------------------------
+External Function OpenFile(...)
+! pass filenumber to open (negative to ropen), pass company # to open/close cntrl file
+! new - can pass FILECODE$ instead of file #, pass company #, optionally pass readonly$="R" for Ropen, "N" to not open,only return filename
+! new - if company # passed as negative, it is assumed control file is alrady open on #1
+dim tmp$[10],e$[300]
+ try
+  enter intFileNumber,...
+ else
+  enter filename$,...
+ end try 
+ Try
+	enter Company,...
+ else
+	company = GetParameter$("S_USER.AppID")
+	if company<=0 exit function -1
+ end try
+ try enter readonly$ else dim readonly$[1]
+intCompany=abs(company)
+Declare Intrinsic Function FindChannel,Trim$
+Dim strFile$[16],strControl$[32],1%,intChannel,iChan,3%
+Try
+   strControl$= intCompany using "files/cntrl/cntrl#"
+
+   If abs(intFileNumber) = 9999  ! Special case for this file 
+	  iChan = 1 
+	  if intfilenumber=-9999
+	   try ROpen #iChan,strControl$ else rem
+	  else
+	   try Open #iChan,strControl$ else rem
+	  end if
+      Exit Function iChan                                     
+   Endif
+   if Company>0  !need to open & close control file, otherwise assume opened on #1
+     iChan = FindChannel()
+     ROpen #iChan,strControl$
+   else
+     iChan = 1
+   end if
+   !
+   Let strFile$=""
+   !
+   if intfilenumber = 0
+    !convert filename$ to number
+	select case ucase$(filename$)
+	 case is ="DFAUDIT", is = "AUDIT"
+	   strfile$="FILEDEFAUDIT"+Str$(intCompany)
+	 case "MATCODE"
+	   intfilenumber = 2272
+	 case "SPRODCATGY"
+	   intfilenumber = 1984
+	 case "CCODES"
+	   intfilenumber = 1728
+	 case "CHARGEBACK"
+	   strFile$="2/CHARGEBACK"+Str$(intCompany)
+   	 case "CPIHEAD"
+	   strFile$="2/CPIHEAD"+Str$(intCompany)
+   	 case "CPIDET"
+	   strFile$="2/CPIDET"+Str$(intCompany)
+   	 case "CPICUST"
+	   strFile$="2/CPICUST"+Str$(intCompany)
+   	 case "CPICBTBL"
+	   strFile$="2/CPICBTBL"+Str$(intCompany)
+   	 case "CPICBHIST"
+	   strFile$="2/CPICBHIST"+Str$(intCompany)
+   	 case "PARCNT"
+	   strFile$="2/PARCNT"+Str$(intCompany)
+   	 case "PARCNTSL"
+	   strFile$="2/PARCNTSL"+Str$(intCompany)
+   	 case "PARCNTROL"
+	   strFile$="2/PARCNTROL"+Str$(intCompany)
+	 case "COMMODITY"
+	   strFile$="2/COMMODITY"+Str$(intCompany)
+	 case "SORDTYPE"
+	   strFile$="3/SORDTYPE"+Str$(intCompany)
+	 case "COSTGRP"
+		intfilenumber = 9916
+	 case "LPCOMMGRID"
+		intfilenumber = 9917
+	 case "BUYER"
+	   intfilenumber = 9991
+	 case "A80VM"
+	   intfilenumber = 2400
+	 case "ARTERMCODE"
+	   intfilenumber = 9981
+	 case "SPECMSG"
+	   intfilenumber = 1776
+	 case "CUSTCAT"
+	   intfilenumber = 2096
+	 case "ZONEFLE"
+	   intfilenumber = 1920
+	 case "SORCE"
+	   intfilenumber = 1216
+	 case "DIVFLE"
+	   intfilenumber = 688
+	 case "MSDFLE" 
+	   intfilenumber = 672
+	 case "PRTYPEFLE"
+	   intfilenumber = 752
+	 case "DEPTFLE"
+	   intfilenumber = 1632
+	 case "TAXCODE"
+	   intfilenumber = 2176
+	 case "GL.GLM"
+	   intfilenumber = 176
+	case "AP.A00AP10"
+	   intfilenumber = 16
+	 case "GL.ACF"
+	   intfilenumber = 48
+	 case "PTAXTYPE"
+	   intfilenumber = 944
+	 case "SVCHGCD"
+	   intfilenumber = 2160
+	 case "ENTDBY"
+	   intfilenumber = 1664
+	 case "CONTWT"
+	   intfilenumber = 2368
+	 case "PICKEDBY"
+	   intfilenumber = 10104
+	 case "EXLIST"
+	   intfilenumber = 1760
+	 case "CTAXTYPE"   !???wrong?
+	   intfilenumber = 928
+	 case "CUSTTAX"
+	   intfilenumber = 928
+	 case "WHIN"
+	   intfilenumber = 2768
+	 case "BRKTBL"
+	   intfilenumber = 1952
+	 case "ZONEFLE"
+	   intfilenumber = 1920
+	 case "DIVIFLE"
+	   intfilenumber = 688
+	 case "SSLSM"
+	   intfilenumber = 1824
+	 case "CUST"
+	   intfilenumber = 1808
+	 case "PROD"
+	   intfilenumber = 1792
+	 case "POFRGTH"
+	   intfilenumber = 9962
+         case "CASHACC"
+	   intfilenumber = 1456
+	 case "PRODWHSE"
+	   intfilenumber = 1744
+	 case "COLLAGENT"
+	   intfilenumber = 3040
+	 case "WHLOC"
+	   intfilenumber = 2736
+	 case "WHINFO","WHINFOZ"
+	   intfilenumber = 2768
+	 case "CCCTYPE"
+	   intfilenumber = 9970
+	 case "CASHOTHER"
+	   intfilenumber = 1488
+	 case "CASHRECF"
+	   intfilenumber = 1440
+	 case "POOCNFRT"
+	   strFile$="3/POOCNFRT"+Str$(intCompany)
+	 case "POCDUTY"
+	   strFile$="3/POCDUTY"+Str$(intCompany)
+	 case "POBROKER"
+	   strFile$="3/POBROKER"+Str$(intCompany)
+	 case "LOADMARK"
+	   strfile$="3/LOADMARK"+Str$(intCompany)
+	 case "COMMHEAD"
+	   intfilenumber = 2288
+	 case "APCASH"
+	   intfilenumber = 112
+	 case "APA10VL"
+	   intfilenumber = 32
+	  case "APAPDIV"
+	   intfilenumber = 9805
+	  case "SALESPLAN"
+		intfilenumber = 224
+	  case "GBKCOLOR"
+		intfilenumber = 9977 
+	  case "GBKFINISH"
+		intfilenumber = 9976 
+	  case "GBKSECTION"
+		intfilenumber = 9975 
+	  case "GBKGRADE"
+		intfilenumber = 9974
+	  case "USERCNTRL"
+		intfilenumber = 9988
+	  case "GLGLSTFLE"
+		intfilenumber = 192
+	   case "MISCCHRG"
+	   intfilenumber = 2032
+	  Case "POMISCCHRG"
+		intFileNumber=9949
+	  case "INVH"
+	    intfilenumber = 1136
+      case "INVL"
+	    intfilenumber = 	  1184
+	  case "INVS"
+	    intfilenumber = 	  1152
+	  case "INVT"
+	    intfilenumber = 	  1168
+	  case "INVM"
+	    intfilenumber =       10105
+	  case "CUSTGP"
+	    intfilenumber = 9934
+	  case "CUSTGRP"
+	    intfilenumber = 9933
+	  case "POSHPVIA"
+		intfilenumber=9954
+	  CASE "GBKGCLASS"
+		intfilenumber=9922
+	  Case "FSCTABLE"
+		intfilenumber=9921
+	  Case "SYNGPRBK"
+		intfilenumber=9923
+	  Case "COSTHIST"
+		intfilenumber=9920
+	  Case "PRODGROUP"
+		intfilenumber=9965
+	  Case "SPRICEMARK" ! as it's different from old pricemark (@2720)
+		strfile$="2/SPRICEMARK"+Str$(intCompany)
+	  Case "RPROD"
+		intfilenumber=9915
+	  Case "CMTYPE"
+	    intfilenumber=9914
+	  Case "MHRTYPE"
+		intfilenumber=9912
+	  Case "MHPUTAWAY"
+		intfilenumber=9911
+	  Case "RFPICKCTL"
+		intfilenumber=9602
+	  Case "RFPICKQ"
+		intfilenumber=9603
+	  Case "RFPICKQH"
+		intfilenumber=9604
+	  Case "CUSTBANK"
+		intfilenumber=9605
+	  Case "CURRENCY"
+		intfilenumber=9712
+	end select
+	!
+	if ucase$(readonly$)="R" let intfilenumber=intfilenumber*(-1) \if intfilenumber=0 let intfilenumber=-1  !ropen
+   end if
+   !
+   !
+   if abs(intfilenumber) >= 10001 and abs(intfilenumber)<10110
+   if abs(intfilenumber) = 10001 strfile$ = "3/sfcarthdr" + str$(intcompany)
+   if abs(intfilenumber) = 10002 strfile$ = "3/sfcartdet" + str$(intcompany)
+   if abs(intfilenumber) = 10003 strfile$ = "3/sfcartsp" + str$(intcompany)
+	! if abs(intfilenumber) = 10004 strfile$ = ""+ str$(intcompany)
+	! if abs(intfilenumber) = 10005 strfile$ = ""+ str$(intcompany)
+	! if abs(intfilenumber) = 10006 strfile$ = ""+ str$(intcompany)
+	! if abs(intfilenumber) = 10007 strfile$ = ""+ str$(intcompany)
+
+   if abs(intfilenumber) = 10011 strfile$ = "3/sfcartqoh" + str$(intcompany)
+   if abs(intfilenumber) = 10012 strfile$ = "3/sfcartqol" + str$(intcompany)
+   if abs(intfilenumber) = 10013 strfile$ = "3/sfcartqom" + str$(intcompany)
+   if abs(intfilenumber) = 10014 strfile$ = "3/sfcartqoc" + str$(intcompany)
+   if abs(intfilenumber) = 10015 strfile$ = "3/sfcashfle" + str$(intcompany)
+   if abs(intfilenumber) = 10016 strfile$ = "3/sfcartns" + str$(intcompany)
+   if abs(intfilenumber) = 10100 strfile$ = "3/ctwtqty" + str$(intcompany)
+   if abs(intfilenumber) = 10101 strfile$ = "4/ctwtqtyh"+ str$(intcompany)
+   if abs(intfilenumber) = 10102 strfile$ = "2/vendweb"+ str$(intcompany)
+   if abs(intfilenumber) = 10103 strfile$ = "2/produrl"+ str$(intcompany)
+   if abs(intfilenumber) = 10104 strfile$ = "4/pickedby"+ str$(intcompany)
+   if abs(intfilenumber) = 10105 strfile$ = "4/sordflemh"+ str$(intcompany)
+   if abs(intfilenumber) = 10106 strfile$ = "3/sorddep"+ str$(intcompany)
+   if abs(intfilenumber) = 10107 strfile$ = "4/sorddeph"+ str$(intcompany)
+   if abs(intfilenumber) = 10108 strfile$ = "3/sordtype"+ str$(intcompany)
+   ! if abs(intfilenumber) = 10109 strfile$ = ""+ str$(intcompany)
+!
+   endif
+   if abs(intfilenumber)>=9980 and abs(intfilenumber)<9999
+    If abs(intFileNumber)= 9998 strFile$="2/CONTLIST"+Str$(intCompany)
+    If abs(intFileNumber)= 9997 strFile$="3/CSZONE"+Str$(intCompany)
+    If abs(intFileNumber)= 9996 strFile$="2/EDITTRACK"+Str$(intCompany)
+    If abs(intFileNumber)= 9995 strFile$="2/ENTDBY"+Str$(intCompany)
+    If abs(intFileNumber)= 9994 strFile$="4/SORDFLEHHKEY"+Str$(intCompany) 
+    If abs(intFileNumber)= 9993 strFile$="7/PRDWORDIDX"+Str$(intCompany) 
+    If abs(intFileNumber)= 9992 strFile$="6/SFUPDATE"+Str$(intCompany)
+    If abs(intFileNumber)= 9991 strFile$="2/BUYERS"
+    If abs(intFileNumber)= 9990 strFile$="cntrl/prtdflt"          
+    If abs(intFileNumber)= 9989 strFile$="cntrl/userport"          
+    If abs(intFileNumber)= 9988 strFile$="cntrl/usercntrl"          
+    If abs(intFileNumber)= 9987 strFile$="6/IMIndex"+Str$(intCompany)
+    If abs(intFileNumber)= 9986 strFile$="6/IMStore"+Str$(intCompany)
+    If abs(intFileNumber)= 9985 strFile$="3/eccosregion"
+    If abs(intFileNumber)= 9984 strFile$="2/SARDETL"+Str$(intCompany)
+    If abs(intFileNumber)= 9983 strFile$="4/SARDETLH"+Str$(intCompany)
+    If abs(intFileNumber)= 9982 strFile$="3/SLLSTPRC"+Str$(intCompany)
+    If abs(intFileNumber)= 9981 strFile$="2/ARTERMCODE"+Str$(intCompany)
+    If abs(intFileNumber)= 9980 strFile$="3/CUSTQUOTE"+Str$(intCompany)
+   Endif
+   if abs(intfilenumber)>=9960 and abs(intfilenumber)<9980
+    if abs(intFileNumber)= 9979 strFile$="2/PKEYWORD"+Str$(intCompany)
+    if abs(intFileNumber)= 9978 strFile$="2/PRODPRBK"+Str$(intCompany)
+    if abs(intFileNumber)= 9977 strFile$="2/GBKCOLOR"+Str$(intCompany)
+    if abs(intFileNumber)= 9976 strFile$="2/GBKFINISH"+Str$(intCompany)
+    if abs(intFileNumber)= 9975 strFile$="2/GBKSEC"+Str$(intCompany)
+    if abs(intFileNumber)= 9974 strFile$="2/GBKGRADE"+Str$(intCompany)
+    if abs(intFileNumber)= 9973 strFile$="2/CUSTSHNOTE"+Str$(intCompany)
+    if abs(intFileNumber)= 9972 strFile$="3/CSLKEYWRD"+Str$(intCompany)
+    if abs(intFileNumber)= 9971 strFile$="3/CKEYWIDX"+Str$(intCompany)
+    if abs(intFileNumber)= 9970 strFile$="3/CCCTYPE"+Str$(intCompany)
+    if abs(intFileNumber)= 9969 strFile$="2/CSTSLSLSM"+Str$(intCompany)
+    if abs(intFileNumber)= 9968 strFile$="2/DOCDELIV"+Str$(intCompany)
+    if abs(intFileNumber)= 9967 strFile$="2/SPRODUDA"+Str$(intCompany)
+    if abs(intFileNumber)= 9966 strFile$="2/WEEKLYSLS"+Str$(intCompany)
+    if abs(intFileNumber)= 9965 strFile$="2/PRODGRP"+Str$(intCompany)
+    if abs(intFileNumber)= 9964 strFile$="3/FRCSTWGT"+Str$(intCompany)
+    if abs(intFileNumber)= 9963 strFile$="4/PWSALES"+Str$(intCompany)
+    if abs(intFileNumber)= 9962 strFile$="3/POFRGTH"+Str$(intCompany)
+    if abs(intFileNumber)= 9961 strFile$="3/VENDWHSE"+Str$(intCompany)
+    if abs(intFileNumber)= 9960 strFile$="4/NSINVTRANS"+Str$(intCompany)
+   Endif
+   if abs(intfilenumber)>=9940 and abs(intfilenumber)<9960
+		If abs(intFileNumber)= 9959 strFile$="2/PKEYWIDX"+Str$(intCompany)
+		if abs(intFileNumber)= 9958 strFile$="2/RSNRTS"+Str$(intCompany)
+		If abs(intFileNumber)= 9957 strFile$="2/CUSTCONT"+Str$(intCompany)
+		IF abs(intFileNumber)= 9956 strFile$="2/REBTNOTES"+Str$(intCompany)
+		If abs(intFileNumber)= 9955 strFile$="4/SORDFLEMH"+Str$(intCompany)
+		If abs(intFileNumber)= 9954 strFile$="3/POSHPVIA"+Str$(intCompany)
+		IF abs(intFileNumber)= 9953 strFile$="2/CONTNOTES"+Str$(intCompany)
+		IF abs(intFileNumber)= 9952 strFile$="3/POFRGTL"+Str$(intCompany)
+		IF abs(intFileNumber)= 9951 strFile$="2/PUPS"+Str$(intCompany)
+		IF abs(intFileNumber)= 9950 strFile$="3/SORDROLTAG"+Str$(intCompany)
+		IF abs(intFileNumber)= 9949 strFile$="2/POMISCCHRG"+Str$(intCompany)
+		IF abs(intFileNumber)= 9948 strFile$="4/FIFOSPC"+Str$(intCompany)
+		IF abs(intFileNumber)= 9947 strFile$="2/POCTFLE"+Str$(intCompany)
+		IF abs(intFileNumber)= 9946 strFile$="3/PORFLINE"+Str$(intCompany)
+        IF abs(intFileNumber)= 9945 strFile$="6/MISCRTS"+Str$(intCompany)
+		if abs(intFileNumber)= 9944 strFile$="2/POCTFLE"+Str$(intCompany)
+		if abs(intFileNumber)= 9943 strFile$="2/COMMODITY"+Str$(intCompany)
+		if abs(intFileNumber)= 9942 strFile$="3/SFDFRCST"+Str$(intCompany)
+		if abs(intFileNumber)= 9941 strfile$="3/LOADMARK"+Str$(intCompany)
+	    If abs(intFileNumber)= 9940 strFile$="cntrl/progdflt"+Str$(intCompany)  	
+	Endif
+	if abs(intfilenumber)>=9900 and abs(intfilenumber)<9940
+		If abs(intFileNumber)= 9939 strFile$="4/SORDINVLTAG"+Str$(intCompany)
+		If abs(intFileNumber)= 9938 strFile$="3/QORDROLTAG"+Str$(intCompany)
+		If abs(intFileNumber)= 9937 strFile$="3/CUSTQUOTE"+Str$(intCompany)
+		If abs(intFileNumber)= 9936 strFile$="3/PORDPOLTAG"+Str$(intCompany)
+		If abs(intFileNumber)= 9935 strFile$="4/SPRDDESCH"+Str$(intCompany)
+		if abs(intFileNumber)= 9934 strFile$="2/CUSTGP"+Str$(intCompany)
+		if abs(intFileNumber)= 9933 strFile$="2/CUSTGRP"+Str$(intCompany)
+		if abs(intFileNumber)= 9932 strFile$="4/SSLSMCOMMH"+Str$(intCompany)
+		if abs(intFileNumber)= 9931 strFile$="4/COMMAUDIT"+Str$(intCompany)
+		if abs(intFileNumber)= 9930 strFile$="4/COMMAUDITH"+Str$(intCompany)
+		if abs(intFileNumber)= 9929 strFile$="2/CPIHEAD"+Str$(intCompany)
+		if abs(intFileNumber)= 9928 strFile$="2/CPIDET"+Str$(intCompany)
+		if abs(intFileNumber)= 9927 strFile$="2/CPICUST"+Str$(intCompany)
+		if abs(intFileNumber)= 9926 strFile$="2/PARCNT"+Str$(intCompany)
+		if abs(intFileNumber)= 9925 strFile$="2/PARCNTSL"+Str$(intCompany)
+		if abs(intFileNumber)= 9924 strFile$="2/PARCNTROL"+Str$(intCompany)
+		if abs(intFileNumber)= 9923 strFile$="2/SYNGPRBK"+Str$(intCompany)
+		if abs(intFileNumber)= 9922 strFile$="2/GBKGCLASS"+Str$(intCompany)
+		if abs(intFileNumber)= 9921 strFile$="2/FSCTABLE"+Str$(intCompany)
+		if abs(intFileNumber)= 9920 strFile$="4/COSTHIST"+Str$(intCompany)
+		if abs(intFileNumber)= 9919 strFile$="2/CPICBTBL"+Str$(intCompany)
+		if abs(intFileNumber)= 9918 strFile$="2/CPICBHIST"+Str$(intCompany)
+		if abs(intFileNumber)= 9917 strFile$="2/LPCOMMGRID"+Str$(intCompany)
+		if abs(intFileNumber)= 9916 strFile$="2/COSTGRP"+Str$(intCompany)
+		if abs(intFileNumber)= 9915 strFile$="2/RPROD"+Str$(intCompany)
+		if abs(intFileNumber)= 9914 strFile$="2/CMTYPE"+Str$(intCompany)
+		if abs(intFileNumber)= 9913 strFile$="4/INVCOST"+Str$(intCompany)
+		if abs(intFileNumber)= 9912 strFile$="2/MHRTYPE"+Str$(intCompany)
+		if abs(intFileNumber)= 9911 strFile$="2/MHPUTAWAY"+Str$(intCompany)
+		if abs(intFileNumber)= 9910 strFile$="6/MYSQLUPDQ"+Str$(intCompany)
+		if abs(intfilenumber)= 9909 strFile$="2/CCTRACK"+STR$(INTCOMPANY)
+		if abs(intfilenumber)= 9908 strFile$="4/SORDFLEHHH"+STR$(INTCOMPANY)
+		if abs(intfilenumber)= 9907 strFile$="4/SORDFLELHH"+STR$(INTCOMPANY)
+		if abs(intfilenumber)= 9906 strFile$="2/COMMGRIDH"+STR$(INTCOMPANY)
+		if abs(intfilenumber)= 9905 strFile$="3/COMMHYPO"+STR$(INTCOMPANY)
+		if abs(intfilenumber)= 9904 strFile$="4/COMMAHYPO"+STR$(INTCOMPANY)
+		if abs(intfilenumber)= 9903 strFile$="3/COMMAMALG"+STR$(INTCOMPANY)
+		if abs(intfilenumber)= 9902 strFile$="4/SORDFLEHHA"+STR$(INTCOMPANY)
+		if abs(intfilenumber)= 9901 strFile$="4/SORDFLELHA"+STR$(INTCOMPANY)
+
+	Endif 
+	if abs(intfilenumber)>=9800 and abs(intfilenumber)<9900 ! for ap files
+	 dim groupid$[1]
+	 Call dxget("u_group",groupid$)
+	 If rtrim$(groupid$)="" let groupid$="0" ! no group id sent so default to 0
+	 if abs(intFileNumber)= 9801 strFile$="2/A20OI"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9802 strFile$="2/APPOH"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9803 strFile$="2/APPOL"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9804 strFile$="2/APBTH"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9805 strFile$="2/APDIV"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9806 strFile$="2/A20DI"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9807 strFile$="2/APPOHH"+Str$(intCompany)
+	 if abs(intFileNumber)= 9808 strFile$="2/APPOLH"+Str$(intCompany)
+	 if abs(intFileNumber)= 9809 strFile$="2/APREC"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9810 strFile$="2/APRED"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9811 strFile$="2/A10AJ"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9812 strFile$="2/A10AD"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9813 strFile$="2/A50DB"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9814 strFile$="2/A50DD"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9815 strFile$="2/A50CR"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9816 strFile$="2/A10VC"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9817 strFile$="2/APCLSDH"+Str$(intCompany)
+	 if abs(intFileNumber)= 9818 strFile$="2/APCLSDD"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9819 strFile$="2/APVDV"+Str$(intCompany)+groupid$
+	 if abs(intFileNumber)= 9820 strFile$="2/APDETM"+Str$(intCompany)
+	 if abs(intFileNumber)= 9821 strFile$="2/APDETT"+Str$(intCompany)
+	endif ! 9800
+	if abs(intfilenumber)>=9700 and abs(intfilenumber)<=9799 ! gl drill down files
+		if abs(intFileNumber)= 9701 strFile$="4/GLARDETL"+Str$(intCompany)
+		if abs(intFileNumber)= 9702 strFile$="4/GLAPDETL"+Str$(intCompany)
+		if abs(intFileNumber)= 9703 strFile$="4/GLCDDETL"+Str$(intCompany)
+		if abs(intFileNumber)= 9704 strFile$="4/GLCRDETL"+Str$(intCompany)
+		if abs(intFileNumber)= 9705 strFile$="4/GLMFGDETL"+Str$(intCompany)
+		if abs(intFileNumber)= 9706 strFile$="4/GLMRDETL"+Str$(intCompany)
+		if abs(intFileNumber)= 9707 strFile$="4/GLVRDETL"+Str$(intCompany)
+		if abs(intFileNumber)= 9708 strFile$="4/GLXADETL"+Str$(intCompany)
+		if abs(intFileNumber)= 9709 strFile$="4/GLPODETL"+Str$(intCompany)
+		if abs(intFileNumber)= 9710 strFile$="6/GLPOCNTRL"+Str$(intCompany)
+		if abs(intFileNumber)= 9711 strFile$="6/GLPOPRONTO"+Str$(intCompany)
+		if abs(intFileNumber)= 9712 strFile$="2/CURRENCY"+Str$(intCompany)
+				
+	endif ! 9700-9799
+	if abs(intfilenumber)>=9600 and abs(intfilenumber)<=9699
+		if abs(intFileNumber)= 9605 strFile$="2/CUSTBANK"+Str$(intCompany)
+		if abs(intFileNumber)= 9604 strFile$="4/RFPICKQH"+Str$(intCompany)
+		if abs(intFileNumber)= 9603 strFile$="3/RFPICKQ"+Str$(intCompany)
+		if abs(intFileNumber)= 9602 strFile$="CNTRL/RFPKCTL"+Str$(intCompany)
+		if abs(intFileNumber)= 9601 strFile$="2/COMMCBT"+Str$(intCompany)
+	end if ! 9600-9699
+	!		endif ! 9940
+	!	endif ! 9960
+	!endif ! 9980
+   ! endif ! 10001
+   !
+   If strFile$=""                    
+	  Read #iChan,88,abs(intFileNumber);strFile$;     
+	  strFile$=Trim$(strFile$)                   
+   End If                                        
+   !													   												   
+   if Company>0 Close #iChan  
+   !
+   intChannel=FindChannel()
+   !
+   If intFileNumber<0 Then ROpen #intChannel,"files/"+strFile$
+   If intFileNumber>=0 Then  Open #intChannel,"files/"+strFile$
+   !
+   if ucase$(readonly$)="N"  close #intchannel\intchannel=0\filename$="files/"+strfile$
+   !
+   Exit Function intChannel
+Else
+   Exit Function -1
+End Try
+!
+End Function -1
+!
+!----------------------------------------------------------
+External Function XMLFile$(strFileType$)
+
+Declare Intrinsic Sub FindF
+Declare Intrinsic Function FindChannel,Trim$
+
+
+Def FNF(X)= 1000000 * FRA(X/100) + Int(X/100)
+
+Dim File$[128]
+Dim Path$[128]
+Dim Temp$[256]
+Dim 2%,Status, iChan, iCounter
+
+! Path$="C:\\InetPub\\wwwroot\\dx\\ubs\\XML\\"
+Path$="XML/"
+
+
+If LCase$(strFileType$)="oo" Then
+  Exit Function "null"
+End If
+For iCounter=0 to 9999
+
+	File$=strFileType$,FNF(Tim(4)) USING "&&&&&&" ,iCounter USING "&&&&&&.xml"
+
+	Temp$=Trim$(Path$+File$)
+
+	Call FindF(Temp$,Status)
+
+	If Status=0 Then
+		Try
+			iChan=FindChannel()
+			!Build #iChan, +"<00> " + Temp$ + "!"
+			!Print #iChan;"<?xml  version=''1.0''?>"
+			!Close #iChan
+			!Exit Function Temp$
+		Else
+			Status=Status 
+
+		End Try
+	End If
+
+Next iCounter
+
+Error 42
+
+End Function ""
+!
+!----------------------------------------------------------
+External Function FDate$(intDate)
+Declare Intrinsic Sub FormatDate
+Declare Intrinsic Function DateUsing$
+
+Dim 2%,Stat,strDate1$[12],strDate2$[12],dtDate#
+
+If intdate=999999 Then
+	Exit Function "9999/99/99"
+End If
+strDate1$=intDate using "&&&&&&"
+Call FormatDate(strDate1$,strDate2$,Stat,4)
+
+If Stat Then
+	If intDate=0 Then
+		strDate2$="0000/00/00"
+	Else
+		strDate2$="Err ",strDate1$
+	End If
+	Exit Function strDate2$
+Else
+	dtDate#=Dat#(Val(strDate2$[7]),Val(strDate2$[1,2]),Val(strDate2$[4,5]))
+	strDate2$=DateUsing$(dtDate#,"YYYY/MM/DD")
+End If
+
+End Function strDate2$
+!
+!----------------------------------------------------------
+External Function PDate$(intDate)
+Declare Intrinsic Sub DateToJulian, JulianToDate
+Dim D1$[12],D2$[12]
+
+If intDate=999999 Exit Function "N/A"
+
+D1$=intDate Using "&&&&&&"
+
+Call DateToJulian(1,D1$,D2$,F)
+Clear D1$
+Call JulianToDate(5,D2$,D1$,F)
+If F Let D1$=intDate Using "&&&&&&"
+
+End Function D1$
+!
+!----------------------------------------------------------
+External Function JDate$(intJDate)
+Declare Intrinsic Sub JulianToDate
+Dim D1$[12],D2$[12]
+
+D2$=intJDate Using "&&&&&"
+Clear D1$
+Call JulianToDate(5,D2$,D1$,F)
+If F Let D1$="Err"
+
+End Function D1$
+!
+!----------------------------------------------------------
+External Function MMDDYYYY2JulianDate$(strDate$)
+	Declare Intrinsic Sub Date, JulianToDate
+	! validate date string in format "MMDDYY" or "MMDDYYYY"
+	! and then convert to julian returning the converted date
+	! returns "" if not valid.
+	Dim d1$[10], d2$[10]
+	call date(strDate$, d1$, 8, e)
+	if e exit function ""
+	call DateToJulian(5, d1$, d2$)
+End Function d2$
+!
+! ---------------------------------------------------------
+External Function Basename$(File$)
+!
+! Name: Basename$ - Returns the Basename of a fully qualified file
+!
+! Synopsis:
+!   Var$=Basename$(Filename$)
+
+Dim F$[256]
+Clear F$
+If Len(File$) < 1 Exit Function F$
+For I = Len(File$) to 1 Step -1
+   If File$[I,I]="\\" Or File$[I,I]="/" Then
+        Exit For
+   End If
+Next I
+If I=0 Let I=1
+If File$[I,I] = "\\" or File$[I,I]="/"  Let F$=File$[I+1] Else Let F$=File$
+End Function F$
+!
+!----------------------------------------------------------
+External Function FMTPhone$(N)
+
+Dim PH$[20],Work$[20],1%,TRUE,FALSE,OneFlag
+
+FALSE=0
+TRUE=NOT(FALSE)
+
+PH$="                       "
+
+If Not(N) Then
+  Exit Function PH$
+End IF
+
+!PH$=Str$(N),"            "
+PH$="";PH$=Str$(N)
+
+If Len(PH$)>11 Then
+  If PH$[1,2]="11" Then 
+     Work$="0",PH$
+     Exit Function Work$
+  End If
+End If
+
+OneFlag=False
+If PH$[1,1]="1" Then
+   OneFlag=TRUE
+   PH$=PH$[2]
+End If
+
+If OneFlag Work$="1-"
+
+If Len(PH$)>7 Then
+  Work$=Work$,PH$[1,3],"-",PH$[4,6],"-",PH$[7,10]," "
+Endif
+If Len(PH$)=7 Then
+  Work$=Work$,PH$[1,3],"-",PH$[4,7],"               "
+End If
+
+End Function Work$
+!
+!----------------------------------------------------------
+External Function FMTPhone2$(N$)
+! formats to 011xxxxxxxxxx or (xxx) xxx-xxxx or xxx-xxxx
+
+Dim PH$[20],Work$[20],4%
+N=N$
+If N=0 Exit function ""
+
+PH$=Str$(N)
+
+If Len(PH$)>11 Then
+  If PH$[1,2]="11" Then 
+     Work$="0",PH$
+     Exit Function Work$
+  End If
+End If
+
+If PH$[1,1]="1" Then
+   PH$=PH$[2]
+End If
+
+If Len(PH$)>7 Then
+  Work$="(",PH$[1,3],") ",PH$[4,6],"-",PH$[7,10]
+Endif
+If Len(PH$)=7 Then
+  Work$=PH$[1,3],"-",PH$[4,7]
+End If
+
+End Function Work$
+!
+!----------------------------------------------------------
+External Sub CalcARs(Cust,ARS[],P9$,ARC,CTLC)
+!
+! review aging --- not using cntrl file age day -- check age credit,age by terms,age by month or days
+Declare Intrinsic Sub DateToJulian
+
+Def FNF(X)= 1000000 * FRA(X/100) + Int(X/100)
+Dim ARK$[30],Temp$[30]
+
+Dim AR. As SarAct
+Dim 2%,Type,JulToday$[10],JulToday,ArDt, DTDiff, i
+Dim 2%,ARDate,JARDate
+Dim 3%, tAmt
+
+Read #CTLC,0,108;ARDate; 
+
+For i=0 to 4
+  ARS[i]=0
+Next i
+
+!JulToday$=FNF(Tim(4)) Using "&&&&&&"
+!Call DateToJulian(1,Jultoday$,JulToday$,ERRStat)
+!JulToday=Val(JulToday$)
+Call DateToJulian(1,ARDate Using "&&&&&&",JulToday$)
+JARDate=Val(JulToday$)
+
+ARK$=Cust Using "######"
+Temp$=ARK$
+SARNext: Search #ARC,3,2;ARK$,ARR,ARE
+If ARK$[1,6]<>Temp$[1,6] Let ARE=22
+If ARE Goto SAREnd:
+
+Read Record #ARC,ARR;AR.;
+
+Type=ARK$[19]
+ARDt=AR.A2[4]
+!If P9$[35,35]="Y" Then
+!  If AR.A4[3] Then
+!    JulToday$=AR.A4[3] Using "&&&&&&"
+!    Call DateToJulian(1,JulToday$,JulToday$,ErrStat)
+!    If ErrStat=0 Let ARDt=Val(JulToday$)
+!  End If
+!End If
+
+DTDiff = JARDate - ARDt
+tAmt=AR.A3[0]-AR.A3[1]-AR.A3[2]
+
+If Type > 5 Let tAmt=-tAmt
+
+ARS[4]=ARS[4]+tAmt
+
+If DTDiff <= 30 Then
+   ARS[0] = ARS[0] + tAmt
+Else If DTDiff <= 60 Then
+   ARS[1]=ARS[1] + tAmt
+Else If DTDiff <= 90 Then
+   ARS[2]=ARS[2] + tAmt
+Else 
+   ARS[3]=ARS[3] + tAmt
+End If
+
+Goto SARNext:
+
+SAREnd: Rem
+
+End Sub
+!
+!----------------------------------------------------------
+External Function FixText$(N$)
+Dim Temp$[300],retVal$[300]
+Temp$=N$
+
+retVal$=""
+For X1=1 to Len(Temp$)
+	If Temp$[X1,X1]="'" Then
+           retVal$=retVal$,"\\"
+        End If
+	retVal$=retVal$,Temp$[X1,X1]
+Next X1
+
+End Function retVal$
+!
+!----------------------------------------------------------
+External Function numericonly$(Desc$)
+ !removes any characters that are not numeric
+ if desc$="" exit function desc$
+ Dim temp$[len(desc$)]
+ for i=1 to len(desc$)
+  if desc$[i,i]>="0" if desc$[i,i]<="9" let temp$=temp$,desc$[i,i]
+ next i
+End Function temp$
+!
+!----------------------------------------------------------
+External Function ReplaceChar$(Desc$)
+ !remove single quote and replace with double quote
+
+ Declare External Function Escape$
+ dim temp$[255]
+ temp$ = desc$
+ ! Let position=0                                                     
+ ! SubChar: !                                                         
+ ! Search desc$,"'",position                                          
+ ! If position then let desc$[position,position]="''" \ goto subChar: 
+End Function Escape$(temp$)
+!
+!----------------------------------------------------------
+! buildsort
+!
+! keylen - key length in words
+! flag - 0 = build, 1 = open
+! optional
+!   channel to open file on, -1 = find a channel
+!   extension to name, if opening multiple sorts
+!     you must provide a unique extension to the
+!     file name so that the sort file you are
+!     creating has a unique name.
+External Function buildsort(e$,keylen,flag,...)
+Declare Intrinsic Function dateusing$,FindChannel
+Declare Intrinsic Sub DXGet
+! standard routine - builds a key only sort file and returns channel #
+! pass keylen in words, flag=0 build, 1 open
+! optionally, can pass channel # to build and open on
+ Try
+  try enter sortchan,... else sortchan=-1
+  try
+	enter sortnameExt$
+  else
+	dim sortnameExt$[1]
+	sortnameExt$ = ""
+  end try
+  Dim ID$[8],filename$[60],v$[keylen*2],filename2$[60],4%
+  Call DXGet("S_User.ID",ID$)
+  filename$="files/sort",ID$,sortnameExt$
+  if sortchan=-1 let sortchan = FindChannel() !assign a channel
+  If flag = 1 
+   Open #sortchan,filename$
+  Else
+   filename2$ = "<660> [10:256] ",filename$,"!"
+   Build #sortchan,filename2$ As "Universal Indexed-Contiguous"
+   Rem key lengths in words
+   r = keylen
+   Search #sortchan,0,1;v$,r,e
+   If e  
+    Close #sortchan
+    sortchan = e * -1
+   Else
+    v$=""\r=0\e=0
+    Search #sortchan,0,0;v$,r,e
+    If e
+     Close #sortchan
+     sortchan = e * -1
+    End If
+   End If
+   If e=0
+    Close #sortchan
+    Open #sortchan,filename$
+   End If
+  End If
+ Else
+  If Spc(8) <> 10000 Let e$ = "Error ",Spc(8)," at ",Spc(10)," in buildsort"
+  Error 10000
+ End Try
+End Function sortchan !buildsort
+!
+!----------------------------------------------------------
+External Sub SalesGroup(intSalesMan, intCompany, arrSales[])
+Declare External Function OpenFile
+
+Dim SMK$[10],Temp$[10]
+Dim 1%,counter, sgroup
+Dim 2%,SMC,SMR,SME,WHSE
+Dim SM. as SLSM
+Try
+   SMC=OpenFile(1824, intCompany)  ! slsm file
+
+   !! loop through all salesreps, creating an array of salescodes
+   !! for all reps who belong to the same salesgroup
+   SMK$ = intSalesMan Using "### " !! read salesrecord to get group
+   Search #SMC,2,1;SMK$,SMR,SME                                   
+   If SME Exit Sub                                                
+   Read Record #SMC,SMR;SM.;                                      
+   sgroup = SM.S3[9]                                              
+
+   SMK$=""
+   Temp$=SMK$
+
+   SMCTOP: !
+   Search #SMC,3,1;SMK$,SMR,SME
+
+   If SME=0 Then
+      Read Record #SMC,SMR;SM.;
+	  If SM.S3[9]=sgroup   ! intSalesMan
+		arrSales[counter]=val(SMK$[1,3])
+		counter=counter+1
+	  Endif
+	  goto SMCTOP
+   End If
+
+   Close #SMC
+Else
+	clear SM.
+End Try
+
+End Sub
+!
+!----------------------------------------------------------
+External Function Escape$(rpl$)
+	declare intrinsic function replace$
+	rpl$ = replace$(rpl$, "'", "\\'")
+	rpl$ = replace$(rpl$, "''", "\\''")
+End Function rpl$
+!
+!----------------------------------------------------------
+External Function arrEscape$(rpl$[])
+!! this function is having some issues with error 61, watch out
+	Declare Intrinsic Function replace$
+	Declare External Function Escape$
+	Dim 2%,x
+	Try
+		Do Until rpl$[x] = ""  ! 1st null indicates end of array
+			Call Escape$(rpl$[x])
+			x = x + 1
+		Loop
+	Else
+	End Try
+End Function rpl$[]
+!
+!----------------------------------------------------------
+External Sub TaxFlag(keycust$,keyprod$,shipcust,shipcode,dept,prodtaxtype,intco,dfatax,dfatype,taxback)
+!
+! get ur taxes here
+Declare External Function OpenFile
+Declare Intrinsic Function FindChannel,Trim$
+!!! notes: p9$[44,44]="Y" - dept in last price or "N" dept=0 in last price file
+!!! 			If used will need to submit dept # in call
+!!! notes: p60$[42,42]= "Y" - tax by line returns the tax code
+!!!	                "N" - no tax by line use shipto/customer defaults
+!!!			"T" - tax by line returns 0-nontax 1-taxable
+!!! notes: p61$[64,64]="Y" ShipList Last Price  Y 
+!!! currently no option to ship to another customer 
+!!! PASS CUSTCODE, PRODCODE,SHIPLIST CODE, DEPT, PRODTAXTYPE, COMP # , TAXCODE,TAXTYPE,TAXBACK
+
+dim p9$[50],P60$[50],P61$[256]
+dim 1%,xchan,ch_lastpr
+dim 1%,tax[100]
+dim 3%,rec,rec_lastpr
+dim 2%,shiptaxcode,shiptaxtype,lprtax
+dim 1%,custtaxcode,2%,custtaxtype
+dim 2%,taxcode,taxtype,lpdept,taxback
+let shiptaxcode=0;shiptaxtype=0
+dim keyshipto$[50],keylastpr$[50],keyship$[6]
+
+!! OPEN FILES
+let xchan= OpenFile(-9999,intCo) \ If xchan = -1 Error 42  ! CNTRL FILE
+MAT  READ #xchan,19,50;P9$;
+MAT  READ #xchan,60,50;P60$;
+MAT  READ #xchan,61,0;P61$;
+
+if xchan>1 close #xchan
+let xchan=0
+!! lets get shiplist
+let xchan= OpenFile(-2112 ,intCo) \ If xchan = -1 Error 42  ! shiplist file
+let shiptaxcode=0;shiptaxtype=0
+if shipcust<=0 let shipcust=val(keycust$)
+LET KEYSHIPTO$=(SHIPCODE)/10^6+(shipcust) USING "######.######" 
+search #xchan,2,1;keyshipto$,rec,e
+if not (e)
+	read #xchan,rec,184;shiptaxcode;
+	read #xchan,rec,196;shiptaxtype;
+endif
+if xchan>0 close #xchan
+!! let get customer info
+let custtaxcode=0; custtaxtype=0
+let xchan= OpenFile(-1808 ,intCo) \ If xchan = -1 Error 42  ! customer file
+let keyship$=shipcust using "######"
+search #xchan,2,1;keyship$,rec,e
+if not (e)
+	read #xchan,rec,196;custtaxcode;
+	read #xchan,rec,498;custtaxtype;
+endif
+IF xchan>0 close #xchan
+let taxtype=0;taxcode=0
+if shiptaxcode<>0
+	let taxcode=shiptaxcode
+else
+	if custtaxcode<>0
+		let taxcode=custtaxcode
+	else
+		let taxcode=dfatax ! brought over from call
+	endif
+endif
+if shiptaxtype<>0
+	let taxtype=shiptaxtype
+else
+	if custtaxtype<>0
+		let taxtype=custtaxtype
+	else
+		let taxtype=dfatype ! brought over from call
+	endif
+endif
+!! now get customer tax types for products
+let xchan= OpenFile(-928 ,intCo) \ If xchan = -1 Error 42  ! CNTRL FILE
+mat read #xchan,taxtype,36;tax; 
+if xchan>0 close #xchan 
+if p60$[42,42]<>"Y" and P60$[42,42]<>"T"
+	let taxback=tax[prodtaxtype]
+	goto donetax
+endif
+!!! set up defaults if not tax
+if p60$[42,42]="Y" ! tax by line get a tax code
+	if tax[prodtaxtype] let taxback=taxcode else let taxback=0
+endif
+if p60$[42,42]="T"  ! tax by line get taxable y or n
+	if tax[prodtaxtype] let taxback=1 else let taxbacK=0
+endif
+lpdept=dept
+if p9$[44,44]<>"Y" let lpdept=0 ! last price does not keep dept
+!!! now lets get the ship list last price
+if p61$[64,64]="Y" ! last price ship to search              
+	let ch_lastpr= OpenFile(-9982,intCo) \ If ch_lastpr = -1 goto getlastprice
+	let keylastpr$=" ",keylastpr$                           
+    	let keylastpr$[1,6]=shipcust using "######"             
+    	let keylastpr$[7,12]=(shipcode) using "&&&&&&"            
+    	let keylastpr$[13,16]=lpdept using "####"                 
+    	let keylastpr$[17]=keyprod$                             
+    	search #ch_lastpr,2,1;keylastpr$,rec_lastpr,e           
+    	if not(e)
+		read #ch_lastpr,rec_lastpr,288;lprtax;
+		if lprtax>=0
+			taxback=lprtax
+			goto donetax
+		endif
+       endif                                                      
+       if ch_lastpr>0 close #ch_lastpr
+endif  
+
+getlastprice:  !!!! getting the last price file
+let ch_lastpr= OpenFile(-1376,intCo) \ If ch_lastpr = -1 goto donetax
+let keylastpr$=" ",keylastpr$                       
+let keylastpr$[1,6]=shipcust using "######"         
+let keylastpr$[7,10]=lpdept using "####"              
+let keylastpr$[11]=keyprod$                         
+search #ch_lastpr,2,1;keylastpr$,rec_lastpr,e       
+if not (e)                           
+	If shipcode<>0  
+		if p60$[42,42]="Y"                              
+			 if shiptaxcode<>0 and shiptaxcode<>custtaxcode                        
+				 goto donetax                         
+			 endif                                     
+			if shiptaxtype<>0 and shiptaxtype<>custtaxtype                             
+				goto donetax
+			endif 
+		endif
+	endif
+	read #ch_lastpr,rec_lastpr,288;lprtax;
+	if lprtax>=0 let taxback=lprtax ! could be -1 or -2 
+endif
+	donetax: ! that's all folks! 
+	if ch_lastpr>0 close #ch_lastpr
+End Sub                                       
+!                    
+!----------------------------------------------------------
+External Sub ArBuck(arbuck$[],intCompany)
+Declare External Function OpenFile
+Declare Intrinsic Function FindChannel,Trim$
+dim 1%,agebuck[3],CTOpen
+dim 2%,xtlc
+dim p9$[50],p61$[256]
+xtlc=1
+Try
+  Try
+    MAT  READ #xtlc,19,50;P9$;
+	CTOpen=1
+  Else
+    xtlc=OpenFile(-9999, intCompany)
+	CTOpen=0
+  End Try
+  MAT  READ #xtlc,19,50;P9$;
+  MAT READ #xtlc,61,0;P61$;
+  mat read #xtlc,20,130;agebuck;
+  Arbuck$[0]="Total"
+  Arbuck$[1]="Current"
+  Arbuck$[2]="Past Due"
+  Arbuck$[3]="30 Days"
+  Arbuck$[4]="60 Days"
+  Arbuck$[5]="90 Days"
+  
+  IF P9$[50,50]="M" ! age by month                         
+   IF P9$[25,25]="Y" ! age by due date 
+   !! age by month and age by dure date
+    ArBUCK$[2]="Past Due"                         
+    ArBUCK$[3]="1 Month"                               
+    ArBUCK$[4]="2 Month"                               
+    ArBUCK$[5]="3 Month"                               
+   ELSE    
+   !! age by month and aged by transaction date
+     ArBUCK$[2]="1 Month"                              
+     ArBUCK$[3]="2 Month"                              
+     ArBUCK$[4]="3 Month"                              
+     ArBUCK$[5]="4 Month "
+  ENDIF                                                 
+ ELSE  ! not age by month                                                  
+  IF P61$[67,67]="Y"   ! age by customer ar terms  
+     !! age by day and use customer terms for aging buckets
+     FOR X=0 TO 4                                       
+       LET ArBUCK$[x+1]=(X+1) USING "Period #" 
+     NEXT X                                              
+  ELSE  
+     !! age by day -- use defined aging buckets from cntrl file
+     FOR X=0 TO 3                                
+	if agebuck[x]>99
+		LET ArBUCK$[x+2]=AGEBUCK[X] USING "### Days"
+	else
+		if agebuck[x]>9
+			LET ArBUCK$[x+2]=AGEBUCK[X] USING "## Days"
+		else
+			LET ArBUCK$[x+2]=AGEBUCK[X] USING "# Days"
+		endif
+	endif
+     NEXT X                                              
+     IF P9$[25,25]="Y" AND AGEBUCK[0]=0  ! aging by days and aging by dye date                 
+       LET ArBUCK$[2]="Past Due" 
+     ENDIF
+  ENDIF ! age by terms 
+ ENDIF 
+ Arbuck$[0]="Total"
+ If Not(CTOpen) close #xtlc
+Else ! try failed
+	Arbuck$[0]="Total"
+	ARBUCK$[1]="Current"
+	ARBUCK$[2]="Over 30"
+	ARBUCK$[3]="Over 60"
+	ARBUCK$[4]="Over 90"
+	ARBUCK$[5]="Over 120"
+	
+End Try
+
+End Sub                                                          
+!
+!--------------------------------------------------------------------
+External Function CheckSlsm(arrSales[],intSalesMan, slsm)
+	if intSalesMan = 999 Exit Function 1  ! always success (means all reps)
+	
+	If arrSales  ! multiple sales# for this person                         
+		for counter=0 to 999
+				if arrSales[counter]=slsm Exit Function 1  ! success           
+				if not(arrSales[counter]) counter=999 ! zero means skip to end 
+		next counter
+	Else  ! not(arrSales)
+		if intSalesMan=slsm Exit Function 1  ! success                     
+	Endif
+End Function 0  ! failure
+!
+!--------------------------------------------------------------------
+EXTERNAL SUB utage5(e$,P9$,AGE[],CTLChan)
+Declare Intrinsic Sub DateToJulian, JulianToDate
+declare intrinsic sub programdump
+Try
+
+DIM 2%,X1,X2,X3
+DIM X$[8],X1$[8],P61$[256]
+DIM 1%,AGEBUCKET[3],DDAY
+DIM 3%
+
+MAT  READ #CTLChan,61,0;P61$;
+MAT  READ #CTLChan,20,130;AGEBUCKET;
+LET AGE[0]=0
+LET AGE[1]=0
+IF NOT(AGE[2]) LET AGE[0]=1 \ GOTO OUTEND
+IF NOT(AGE[3]) LET AGE[0]=2 \ GOTO OUTEND
+IF NOT(AGE[4]) IF P9$[50,50]="D" LET AGE[4]=1
+IF NOT(AGE[4]) IF P9$[50,50]="M" LET AGE[4]=2
+IF AGE[6] ! channel for age buckets
+	IF P61$[67,67]="Y" AND AGE[4]<>2 ! age by terms code - aging not by month
+		IF AGE[7]>0 AND AGE[7]<=99
+			READ #AGE[6],AGE[7],30;DDAY;
+			IF DDAY=0 LET DDAY=1
+			IF DDAY>0
+				LET AGEBUCKET[0]=DDAY
+				LET AGEBUCKET[1]=DDAY*2
+				LET AGEBUCKET[2]=DDAY*3
+				LET AGEBUCKET[3]=DDAY*4
+			ENDIF 
+		ENDIF 
+	ENDIF 
+ENDIF 
+LET X$=AGE[2] USING "&&&&&&"
+CALL DateToJulian(1,X$,X1$,E) \ IF E LET AGE[0]=1 \ GOTO OUTEND
+IF AGE[4]=1 ! "age by days (use julian format)
+	LET AGE[2]=X1$
+ELSE 
+	IF AGE[4]=2 ! "age by month (# of months since 01/01/1900)
+		IF X$[1,2]<"70"
+			LET AGE[2]=X$[1,2];AGE[2]=(AGE[2]+100)*12;X1=X$[3,4];AGE[2]=AGE[2]+X1
+		ELSE 
+			LET AGE[2]=X$[1,2];AGE[2]=AGE[2]*12;X1=X$[3,4];AGE[2]=AGE[2]+X1
+		ENDIF 
+	ENDIF 
+ENDIF 
+LET X$=AGE[3] USING "&&&&&&"
+CALL DateToJulian(1,X$,X1$,E) \ IF E LET AGE[0]=2 \ GOTO OUTEND
+IF AGE[4]=1 ! "age by days (use julian format)
+	LET AGE[3]=X1$
+ELSE 
+	IF AGE[4]=2 ! "age by month (# of months since 01/01/1900)
+		IF X$[1,2]<"70"
+			LET AGE[3]=X$[1,2];AGE[3]=(AGE[3]+100)*12;X1=X$[3,4];AGE[3]=AGE[3]+X1
+		ELSE 
+			LET AGE[3]=X$[1,2];AGE[3]=AGE[3]*12;X1=X$[3,4];AGE[3]=AGE[3]+X1
+		ENDIF 
+	ENDIF 
+ENDIF 
+LET AGE[1]=AGE[2]-AGE[3]
+IF AGE[4]=1 ! aging by days
+	IF AGE[1]<=AGEBUCKET[0]
+		LET BUCK=0
+	ELSE 
+		IF AGE[1]<=AGEBUCKET[1]
+			LET BUCK=1
+		ELSE 
+			IF AGE[1]<=AGEBUCKET[2]
+				LET BUCK=2
+			ELSE 
+				IF AGE[1]<=AGEBUCKET[3]
+					LET BUCK=3
+				ELSE 
+					LET BUCK=4
+				ENDIF 
+			ENDIF 
+		ENDIF 
+	ENDIF 
+ELSE  ! aging by month
+	LET BUCK=AGE[1]
+	IF AGE[1]<=0
+		LET BUCK=0
+	ELSE 
+		IF AGE[1]>5 ! over 5 months old
+			LET BUCK=5
+		ENDIF 
+	ENDIF 
+ENDIF 
+LET AGE[1]=INT(AGE[1])+(BUCK/10)
+OUTEND: REM "=========================================== done
+
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! utage5
+!
+!--------------------------------------------------------------------
+External sub UTMonths(e$,MTH[],MTH$,BegYrMth)
+  !
+  !  e$        : error string$
+  !  MTH[]     : Month parameters
+  !  MTH$      : Month Names
+  !  BegYrMth  : Beginning Month for Fiscal Year
+  !
+  try
+    DIM 1%,Z1                                                        
+    DIM Z1$[108] !   ,MTH$[108]                                               
+    MTH[0]=0 ! "assume no error                                         
+    MTH$=" ",MTH$ \ Z1$="" ! result headings                               
+    IF MTH[2] LET BegYrMth=MTH[2] ! use this value instead 
+	!
+    ! set up default formats                                               
+    IF MTH[1]=1 LET Z1$="JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC" \ Z1=3         
+    IF MTH[1]=2 LET Z1$="JanFebMarAprMayJunJulAugSepOctNovDec" \ Z1=3         
+    IF MTH[1]=3 LET Z1$="JANUARY  FEBRUARY MARCH    APRIL    MAY      JUNE     "                                                          
+    IF MTH[1]=3 LET Z1$=Z1$,"JULY     AUGUST   SEPTEMBEROCTOBER  NOVEMBER DECEMBER " \ Z1=9     
+    IF MTH[1]=4 LET Z1$="January  February March    April    May      June     "                                                        
+    IF MTH[1]=4 LET Z1$=Z1$,"July     August   SeptemberOctober  November December " \ Z1=9     
+    IF MTH[1]=-1 LET Z1$="DECNOVOCTSEPAUGJULJUNMAYAPRMARFEBJAN" \ Z1=3        
+    IF MTH[1]=-2 LET Z1$="DecNovOctSepAugJulJunMayAprMarFebJan" \ Z1=3        
+    IF MTH[1]=-3 LET Z1$="DECEMBER NOVEMBER OCTOBER  SEPTEMBERAUGUST   JULY     "                                                         
+    IF MTH[1]=-3 LET Z1$=Z1$,"JUNE     MAY      APRIL    MARCH    FEBRUARY JANUARY  " \ Z1=9
+    IF MTH[1]=-4 LET Z1$="December November October  SeptemberAugust   July     "                                                         
+    IF MTH[1]=-4 LET Z1$=Z1$,"June     May      April    March    February January  " \ Z1=9
+    IF Z1$
+      IF BegYrMth=1 
+	    MTH$=Z1$! fiscal year = calander year
+	  else
+        MTH$=Z1$[BegYrMth*Z1-(Z1-1),12*Z1],Z1$[1,BegYrMth*Z1-Z1]
+      endif
+	else
+	  LET MTH[0]=1
+	endif
+  Else
+    include "src/callsuberr.inc"
+  End Try
+  !
+End sub ! UTMonths
+!
+!--------------------------------------------------------------------
+External sub GetCostLevels(e$,Cost_Lev[],IntCO,UserID$)
+  !
+  !  e$          : error string$
+  !  Cost_Lev[]  : Cost Levels
+  !  IntCo       : Company ID
+  !
+  try
+    !
+    Dim 1%,FndUID,UA5[10] ! vars for call usercntrl
+    Dim UA2$[50],TUID$[10] ! vars for call usercntrl
+    !
+    let TUID$=UserID$+"          " ! set up temp var
+    If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max as usercntrl is 10 chars vs 8 for .net
+    If TUID$[1,10]<>"          " !  no blank users!
+	  Call UserCntrl(TUID$,UA2$,UA5[],FndUID,intCo)
+	  If FndUID=0 ! means found it, =1 is not found
+	    Cost_Lev[0]=UA5[0];Cost_Lev[1]=UA5[1] ! avg / load
+		Cost_Lev[2]=UA5[2] ! PO
+		Try 
+			Cost_Lev[3]=UA5[3] ! base not always sent or needed
+		Else
+			Rem
+		End try
+	  Endif ! if not found would be zeroes from dim
+    Endif
+  Else
+    include "src/callsuberr.inc"
+  End Try
+  !
+End sub ! GetCostLevels
+!
+!--------------------------------------------------------------------
+External Sub GetPortDefault(e$,IntCO,UserID$,portnum,rec_uac,prt.as prtdefault)
+
+! e$ = error message
+! prt. = port default file fields
+! intcompany = company number
+! userid$ = user's id
+! port number = user's defined port # - will be sent back
+Declare Intrinsic Function FindChannel,Trim$ 
+
+try
+
+Dim UCK$[20],Temp$[20]
+Dim UCA2$[50]
+DIM 3%,A4[3]
+Dim 1%,A5[10]
+Dim 2%,UCC
+Dim 2%,UCR
+Dim 2%,UCE
+
+UCC = OpenFile(-9988, intCo)
+PCC = OpenFile(-9990,intco)
+!init
+Let UCA2$=" ",UCA2$
+For xx=0 to 10
+    Let A5[xx]=0
+Next xx
+
+
+!main
+Let UCK$=" ",UCK$;UCK$=userID$
+Let Temp$=" ",Temp$;Temp$=UCK$                                           
+Search #UCC,2,1;UCK$,UCR,UCE                                                 
+If Trim$(UCK$) <> Trim$(Temp$) Let UCE=22                                 
+let portnum=0
+let rec_uac=0
+If UCE=0
+   rec_uac=ucr
+   Mat Read #UCC,UCR,300;A4;
+   let portnum=a4
+   if not (a4[0])
+	clear prt.
+   else
+	Read Record #pcc,a4[0];prt.;
+   endif
+  
+End If
+If UCC>0 Close #UCC
+If PCC>0 Close #PCC
+ Else
+    include "src/callsuberr.inc"
+  End Try
+End Sub   
+!--------------------------------------------------------------------
+External Function ChkAltItem$(e$,intCompany,InKey$,...)
+! in: coid#, Key to check, (optional Cust#)
+! back: ProdID$ or null=not an altitem
+Declare External Function OpenFile
+Try
+  Try Enter CustNum Else Let CustNum=-1 ! -1=not used
+  Dim K29$[60],Prod$[12],Spaces$[60]
+  Dim 1%,AIC
+  Dim 2%,Cust
+  Dim 3%,Rec
+  Let Prod$="" ! default=not found
+  Let Spaces$=" ",spaces$
+
+  AIC=Openfile(-2352,IntCompany) \ if AIC=-1 Goto AIDone
+  Let K29$=InKey$+spaces$
+  Let K29$[25]="" ! cut at itemcode
+  Search #AIC,2,1;K29$,Rec,E 
+  if Not(e) ! found
+	If CustNum>0 ! wants a cust# check also <0=get any altitem
+		MAT  READ #AIC,Rec,0;CUST;         
+		IF CUST AND CUST<>CustNum GOTO AIDone ! only for specific Cust & you're not it
+	Endif
+	LET Prod$=" ",Prod$
+	Let Prod$=K29$[25,36] ! fill in result
+  Endif ! of found a key
+AIDone: ! finito
+  If AIC>0 Close #AIC ! close file opened here
+else
+ if spc(8)<>10000
+   call suberr(e$,Spc(8),Spc(10),Msc$(2))
+  end if
+  error 10000
+
+end try
+end function Prod$ !chkaltitem
+!
+! ----------------------------------------------------------------
+External Function GetUIDRec(e$,IntCo,Userid$)
+! in: Coid & UserID
+! back: UserCntrl Record #
+Declare External Function OpenFile
+Try
+	Dim K1$[50],UID$[10]
+	Dim 1%,UCC
+	Dim 3%,Rec,URec
+	URec=0
+	Let UID$=UCase$(UserId$)
+	Let UID$=UID$+"          "
+	K1$=UID$
+	UCC=OpenFile(-9988,IntCo) \ if UCC=-1 goto GURecDone
+	Search #UCC,2,1;k1$,Rec,E
+	If E let Rec=0
+	Close #UCC
+	GURecDone: ! finished
+	URec=Rec
+Else
+  if spc(8)<>10000
+   call suberr(e$,Spc(8),Spc(10),Msc$(2))
+  end if
+  error 10000
+
+end try
+end function URec !getuidrec
+
+! get the sales rep associated with the
+! user.  If no user ID passed in, use
+! the current user's ID
+!
+! Returns the salesrep code associated with id:
+! -1 = userid not on file
+! 0 = all
+! >0 = rep id
+!
+External Function GetUIDSalesRep(e$,...)
+try
+	enter userid$
+else
+	dim userid$[10]
+	userid$ = ucase$(GetParameter$("S_USER.ID"))
+end try
+try
+	dim ruserid$[10]
+	dim 1%,intco,a5[10],srep
+	dim 3%,userRec
+	
+	intCo = GetParameter$("S_USER.AppID") !company #
+	if not(intCo) let intCo = 1
+	ruserid$ = userid$,"          "
+	UCC=OpenFile(-9988,IntCo) \ if UCC=-1 error 42
+	Search #UCC,2,1;ruserid$,userRec,E \ if e>1 error 11000
+	If E
+		let srep=-1
+	else
+		mat read #ucc,userRec,386;a5;
+		srep = a5[5]
+	end if
+	Close #UCC
+else ! main try
+	include "src/callsuberr.inc"
+end try
+end function srep
+
+!
+! ----------------------------------------------------------------
+External Function GetUIDInfo$(e$,IntCo,URec)
+! in: Coid # and Userid Record
+! out: User's ID and Desc
+Declare External Function OpenFile
+Try
+	Dim A1$[40]
+	Dim 1%,UCC
+	Dim 3%,Rec
+	A1$=" ",a1$
+	LET A1$[1,10]="NO ID FND "       
+	LET A1$[21]="USER ID REC INVALID"
+	UCC=OpenFile(-9988,IntCo) \ if UCC=-1 goto GUDDone
+	Let Rec=URec
+	If Rec>0 and Rec<CHF(UCC)
+		Mat read #UCC,Rec,260;A1$;
+		Let A1$[11,20]="          " ! DO NOT SEND PASSWORD EVER!
+	Endif
+	IF REC=-1 ! superuser ! for Unibasic PM use
+		LET A1$=" ",A1$
+		LET A1$[1,10]="SYSADMINST"
+		LET A1$[21]="SYSTEM ADMINISTRATOR"
+	ENDIF
+	Close #UCC
+	GUDDone: ! finished
+Else
+  if spc(8)<>10000
+   call suberr(e$,Spc(8),Spc(10),Msc$(2))
+  end if
+  error 10000
+
+end try
+end function A1$ !GetUIDInfo$
+!
+! ----------------------------------------------------------------
+External Function chkDteFrmt$(E$,DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY (also MM-DD-)
+! if not make it MM/DD/YYYY
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE" or DIn$="0"
+	  Let DOut$=UCase$(DIn$)
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    if spc(8)<>10000
+	   call suberr(e$,Spc(8),Spc(10),Msc$(2))
+	end if
+	error 10000
+ end try
+end Function DOut$ ! chkDteFrmt$
+! 
+!--------------------------------------------------------------------
+External FUNCTION CHKBADCHARS(e$,tmp$)
+! use check text string for bad/invalid chars
+! returns: 0=fail test (Not(ok)) 1=okay
+! always fail special/control chars and other chars causing issues
+  try
+	Dim Badchar$[128] ! set characters that cause failure in here!
+	Dim Work$[200] ! working var
+	strgok=1 ! 1=ok, 0=no good - fail it
+	BadChar$="<~" ! so far < task 12229; ~ task 31938
+	Work$=Trim$(tmp$) ! get rid of start/end spaces
+	if len(work$)<1 goto bccdone ! blank/null ok
+	for x=1 to len(work$)
+		if work$[x,x]<" " or work$[x,x]>"~" ! control never ok
+			let strgok=0
+			goto BCCDone
+		Endif
+		for x1=1 to len(badchar$) ! go thru & check each one
+			if work$[x,x]=BadChar$[x1,x1] ! found it
+				let strgok=0
+				goto BCCDone
+			Endif
+		Next X1
+	Next X
+	! all checked - done
+	BCCDone: ! finished
+  else
+    if spc(8)<>10000
+		call suberr(e$,Spc(8),Spc(10),Msc$(2))
+	end if
+	error 10000
+  end try
+end function strgok ! CHKBADCHARS
+! 
+!--------------------------------------------------------------------
+External function clrtxtc$(e$,Msg$)
+! check text string for control chars & strip 'em out 
+! will not replace 'em - just strip 
+! a < causes webpage to not show the remainder of the data on the line
+  Try
+	Dim Work$[500]
+	Dim Badchar$[128] ! set characters that cause failure in here!
+	If Len(Msg$)=0 or MSG$="" goto ClrMDone ! nothing there
+	BadChar$="<~" ! so far < task 12229, ~ task 31938
+	Work$=" ",work$
+	Clear Work$
+	For x=1 to Len(Msg$)
+		if Msg$[x,x]<" " or MSG$[x,x]>"~" goto NxtMChar ! bypass - not valid
+		for x1=1 to len(badchar$) ! go thru & check each one
+			if Msg$[x,x]=BadChar$[x1,x1] goto NxtMChar ! found it
+		Next X1
+		Work$=Work$+Msg$[x,x] ! add to work - it's ok
+	NxtMChar: ! 
+	Next X
+	Msg$=" ",msg$ ! clear for send back
+	Clear MSG$ ! null it
+	Msg$=Work$ ! move in the valid ASCII 
+	ClrMDone: ! finished - send back
+  else
+    if spc(8)<>10000
+		call suberr(e$,Spc(8),Spc(10),Msc$(2))
+	end if
+	error 10000
+  end try
+end Function Msg$ ! clrtxtc$
+!--------------------------------------------------------------------------------
+External Function OpenMySQLChan(e$,...)
+try
+	enter forceChan,...
+else
+	dim %1,forceChan
+	forceChan = -1
+end try
+try enter do_rtrim else do_rtrim = 0
+! This function will open a new channel to the ERP database - returns
+! -1 if MySQL database not defined - errors out if defined and we
+! still can't open
+  Declare Intrinsic Function FindChannel
+  Declare External Function OpenFile
+  try
+	dim database$[50],server$[100],tmp$[100],user$[50],password$[50],p61$[256]
+	dim myUser$[10],myPasswd$[10]
+	dim 1%,retVal,company
+	dim 2%,portNo
+	dim 3%
+
+	retVal = -1
+	company = GetParameter$("S_USER.AppID")
+	chan = FindChannel()
+	ROpen #chan,company using "files/cntrl/cntrl#"
+	mat read #chan,61,0;p61$;
+	close #chan
+	if p61$[107,107] <> "Y" exit Function retVal
+	database$ = GetParameter$("u_mysql_db")
+	! if no MySQL database defined, this option is not
+	! enabled at this site
+	if database$ = "" exit function retVal
+	!
+	! ERP database access - user id and password out of 958
+	!
+	myUser$ = ucase$(GetParameter$("S_USER.ID"))
+	tmp = GetUIDRec(e$,company,myuser$) \ if tmp = 0 exit function retVal
+	chan=OpenFile(-9988,IntCo) \ if chan=-1 error 42
+	mat read #chan,tmp,270;myPasswd$;
+	close #chan
+	let myUser$ = rtrim$(myUser$)
+	let myPasswd$ = rtrim$(ucase$(myPasswd$))
+	server$ = GetParameter$("u_mysql_server")
+	portNo = GetParameter$("u_mysql_port")
+	let retVal = MySQLOpen(forceChan,database$,do_rtrim,myUser$,myPasswd$,server$,portNo)
+	if retVal < 0
+		! no access - possibly because user ID and password not
+		! set up - try logging in with the template erp user
+		! and password.  If OK - create the new user and
+		! reattempt
+		user$ = GetParameter$("u_mysql_user")
+		password$ = GetParameter$("u_mysql_password")
+		let retVal = MySQLOpen(forceChan,database$,0,user$,password$,server$,portNo)
+		if (retVal < 0) ! parameters defined for open, but failed!
+			error 42
+		end if
+		! OK - try creating the userID (NOTE, this will also update the
+		! password if the user id already exists in the event that is
+		! really the issue)
+		search #retVal;"CALL adderpid(''"+myUser$+"'',''"+myPasswd$+"'',''Y'')"
+		tmp = chf(retVal)
+		if tmp < 1
+			e$ = "Error creating user id in MySQL Database!"
+			error 10000
+		end if
+		read #retVal;idAdd,tmp$
+		if idAdd = 0
+			e$ = "Error creating user id in MySQL Database - "+tmp$
+			error 10000
+		end if
+		! OK user ID added / updated, now try to reopen
+		close #retVal
+		let retVal = MySQLOpen(forceChan,database$,do_rtrim,myUser$,myPasswd$,server$,portNo)
+		if retVal < 0 error 42
+	end if
+  else
+    if spc(8)<>10000
+		call suberr(e$,Spc(8),Spc(10),Msc$(2))
+	end if
+	error 10000
+  end try
+end Function retVal ! clrtxtc$
+!--------------------------------------------------------------------------------
+External Function OpenMySQLMirror(e$,...)
+try
+	enter forceChan
+else
+	dim %1,forceChan
+	forceChan = -1
+end try
+! This function will open a new channel to the ERP database for purposes
+! of mirroring data - returns -1 if not available
+  Declare Intrinsic Function FindChannel
+  Declare External Function OpenFile,OpenMySQLChan
+  try
+	dim p61$[256],tmp$[100]
+	dim 1%,retVal,company
+	dim 2%,portNo
+	dim 3%
+
+	retVal = -1
+	company = GetParameter$("S_USER.AppID")
+	chan = FindChannel()
+	ROpen #chan,company using "files/cntrl/cntrl#"
+	mat read #chan,61,0;p61$;
+	close #chan
+	if p61$[107,107] <> "Y" exit Function retVal ! no mysql integration
+	if p61$[114,114] <> "Y" exit Function retval ! mirror of data to MySQL not enabled
+	retval = OpenMySQLChan(e$, forceChan)
+  else
+    if spc(8)<>10000
+		call suberr(e$,Spc(8),Spc(10),Msc$(2))
+	end if
+	error 10000
+  end try
+end Function retVal ! clrtxtc$
+
+
+!--------------------------------------------------------------------------------
+External Function OpenMySQLBrowserOutput(e$,...)
+try
+	enter forceChan
+else
+	dim %1,forceChan
+	forceChan = -1
+end try
+! This function will open a new channel to the ERP database for purposes
+! of mirroring data - returns -1 if not available
+  Declare Intrinsic Function FindChannel
+  Declare External Function OpenFile,OpenMySQLChan
+  try
+	dim p61$[256],tmp$[100]
+	dim 1%,retVal,company
+	dim 2%,portNo
+	dim 3%
+
+	retVal = -1
+	company = GetParameter$("S_USER.AppID")
+	chan = FindChannel()
+	ROpen #chan,company using "files/cntrl/cntrl#"
+	mat read #chan,61,0;p61$;
+	close #chan
+	if p61$[107,107] <> "Y" exit Function retVal ! no mysql integration
+	retval = OpenMySQLChan(e$, forceChan)
+	if retval > -1 ! got a channel
+		! make sure we have the ReportHeader table
+		search #retval;"SHOW TABLES LIKE 'ReportHeader'"
+		if chf(retval) < 0
+			close #retval
+			retval = -1
+		end if
+	end if
+  else
+    if spc(8)<>10000
+		call suberr(e$,Spc(8),Spc(10),Msc$(2))
+	end if
+	error 10000
+  end try
+end Function retVal ! clrtxtc$
+
+
+!--------------------------------------------------------------------------------
+!
+! Try to determine what the home directory for synergy ERP
+!
+! Paramenters:
+! e$ = error string
+! ASPID$ (optional) - check for home directory of passed in UBSASPID
+!        "" or "NonASP" for nonASP setup
+!        if not passed in, assume none (non-ASPID setup)
+!
+! Returns:
+!
+! Home directory for files if it can be determined, "" if not
+!
+! OPTIONAL - if numeric array companies is passed in, load with
+!            comany numbers found in instance (0 indicates end of list)
+!
+! NOTE: Routine will first try to determine if running in test account or not
+!       and return the appropriate value (test or not for ASPID).  If it cannot
+!       determine whether we are running in test or not, routine will fail
+!       (return "")
+!
+External Function GetASPIDFileDirectory$(e$,...)
+try
+	enter ASPID$,...
+else
+	! note - if aspid not passed in,
+	! get_asp_dirs will return information for
+	! the "NonASP" setup
+	dim ASPID$[10]
+end try
+try
+	enter companies[]
+else
+	dim 1%,companies[99]
+end try
+try
+	Declare External Function RunningInTest
+	Declare Intrinsic Function FindChannel
+	dim returnDir$[100],buffer$[100],lookingFor$[20],lookingForCompanies$[20]
+	dim companiesStr$[100]
+	dim 3%
+	
+	! get_asp_dirs checks for NONASP setup by default
+	
+	clear companies[]
+	if (ucase$(ASPID$) = "NONASP") let ASPID$ = ""
+	lookingFor$ = "SE_L_HOME"
+	lookingForCompanies$ = "PM_L_COMPANIES"
+	inTest = RunningInTest(e$)
+	! -1 = couldn't determine if running in test or not, bail out
+	if inTest = -1 exit function ""
+	if inTest
+		lookingFor$ = "SE_T_HOME"
+		lookingForCompanies$ = "PM_T_COMPANIES"
+	end if
+	pipeCh = FindChannel()
+	try
+		open #pipeCh,"$$/usr/ub/bin/get_asp_dirs "+ASPID$
+	else
+		! couldn't open pipe to program, bail out
+		exit function ""
+	end try
+	do
+		read #pipeCh;buffer$
+		if buffer$[1,len(lookingFor$)] = lookingFor$
+			let returnDir$ = buffer$[len(lookingFor$)+2,len(buffer$)-1]+"/files/"
+		end if
+		if buffer$[1,len(lookingForCompanies$)] = lookingForCompanies$
+			! load companies array
+			let companiesStr$ = buffer$[len(lookingForCompanies$)+2,len(buffer$)-1]
+			if companiesStr$ <> "" ! got something here "c1,c2,c3,..."
+				! load the companies array with the results
+				compIdx = 0
+				curPos = 1
+				do
+					search companiesStr$[curPos],",",endPos
+					if not(endPos) ! last one
+						companies[compIdx] = companiesStr$[curPos]
+						exit do
+					end if
+					companies[compIdx] = companiesStr$[curPos,curPos+endPos-2]
+					compIdx = compIdx + 1
+					curPos = curPos + endPos
+				loop
+			end if
+		end if
+	loop until buffer$ = ""
+	try close #pipeCh else rem
+else
+	include "src/callsuberr.inc"
+end try
+end Function returnDir$
+
+!--------------------------------------------------------------------------------
+!
+! Try to determine if we are running in the test account or live.
+! RETURNS
+! -1 = couldn't determine
+!  0 = Running in live
+!  1 = Running in test
+!
+External Function RunningInTest(e$)
+try
+	Declare Intrinsic Function FindChannel
+	dim ASPID$[20],home$[100],buffer$[100]
+	dim 3%,retval
+	
+	retval = -1 ! could not determine
+	call env(1,"UBSASPID",ASPID$)
+	call env(1,"HOME",home$)
+	pipeCh = FindChannel()
+	try
+		open #pipeCh,"$$/usr/ub/bin/get_asp_dirs "+ASPID$
+	else
+		! couldn't open program - bail out
+		exit function -1
+	end try
+	do
+		read #pipeCh;buffer$
+		if buffer$[1,10] = "SE_L_HOME=" AND len(buffer$)>11 ! might be empty
+			if buffer$[11,len(buffer$)-1] = home$
+				retval = 0 ! running in live, not test
+				buffer$ = ""
+			end if
+		end if
+		if buffer$[1,10] = "SE_T_HOME=" AND len(buffer$)>11 ! might be empty
+			if buffer$[11,len(buffer$)-1] = home$
+				retval = 1 ! running in test
+				buffer$ = ""
+			end if
+		end if
+	loop until buffer$ = ""
+	try close #pipeCh else rem
+else
+	include "src/callsuberr.inc"
+end try
+end Function retval
+
+!--------------------------------------------------------------------------------
+!
+! Return a list of ASP IDs defined on the system.  Loads into
+! ASPS$[] array.
+!
+! NOTE - will load an entry called "NonASP" if a non-asp instance is
+! detected.
+!
+!
+External Sub GetASPs(e$,ASPS$[])
+try
+	Declare Intrinsic Function FindChannel
+	dim buffer$[100]
+	dim 1%,counter
+	dim 3%
+	
+	clear ASPS$[]
+	pipeCh = FindChannel()
+	try
+		open #pipeCh,"$$/usr/ub/bin/get_asps"
+	else
+		! couldn't open program - bail out
+		exit sub
+	end try
+	counter = 1
+	do
+		read #pipeCh;buffer$
+		if buffer$ <> ""
+			ASPS$[counter] = buffer$[1,len(buffer$)-1]
+			counter = counter + 1
+		end if
+	loop until buffer$ = ""
+	try close #pipeCh else rem
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+!--------------------------------------------------------------------------------
+!
+! LogAccess
+!
+! Create a log entry as someone accessed an option
+External Sub LogAccess(e$,...)
+try
+	try
+		enter comment$
+	else
+		dim comment$[1]
+	end try
+	Declare External Sub LogAccessParameters
+	
+	dim tmp$[100]
+	dim proga. as SQL_progaccess
+	dim 3%,newID
+	
+	ch_sql = OpenMySQLChan(e$)
+	If ch_sql=-1 exit sub ! no MySQL
+
+	call progaccess_SQLNull(e$, proga.)
+	
+	! SQL database design will take care of
+	! "who" and "when"
+	proga.dxoption$ = rtrim$(ucase$(GetParameter$("option")))
+	proga.blockid$ = rtrim$(ucase$(GetParameter$("blockid")))
+	proga.action$ = rtrim$(ucase$(GetParameter$("action")))
+	proga.action1$ = rtrim$(ucase$(GetParameter$("action1")))
+	proga.action2$ = rtrim$(ucase$(GetParameter$("action2")))
+	proga.action3$ = rtrim$(ucase$(GetParameter$("action3")))
+	proga.action4$ = rtrim$(ucase$(GetParameter$("action4")))
+	proga.action5$ = rtrim$(ucase$(GetParameter$("action5")))
+	call env(1,"ERP_FROM_CRON",tmp$) \ proga.RunFromScheduler = tmp$
+	proga.comment$ = comment$
+	e = progaccess_SQLInsert(e$, ch_sql, proga.)
+	if e ! successful add
+		search #ch_sql;"SELECT LAST_INSERT_ID()"
+		read #ch_sql;newID
+		call LogAccessParameters(e$,ch_sql,newID)
+	end if
+	close #ch_sql
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+!--------------------------------------------------------------------------------
+!
+! LogAccessParameters
+!
+! For a given access of a program / option, gather and log all
+! parameters.
+!
+External Sub LogAccessParameters(e$,ch_sql,progaID)
+try
+	Declare Intrinsic Function FindChannel
+	dim progap. as SQL_progaccess_parameter
+	dim tmp$[100],tmpFile$[100],inputLine$[1000]
+	dim 3%
+	
+	call env(1,"PID",tmp$)
+	tmpFile$ = "/tmp/PROGACCESS_"+tmp$
+	call dxsave(0,tmpFile$+"!")
+	saveCH = FindChannel()
+	ropen #saveCH,tmpFile$
+	do
+		read #saveCH;inputline$
+		if inputLine$ = "" exit do
+		inputLine$[len(inputLine$)] = "" ! trim line termination
+		! convert any cntrl charcters to spaces - causes
+		! MySQL driver to blow out
+		for x=1 to len(inputLine$)
+			if inputLine$[x,x]<" " or inputLine$[x,x]>"~" ! control never ok
+				inputLine$[x,x] = " "
+			End if
+		next x
+		search inputLine$,"=",idx
+		if idx and idx>1
+			call progaccess_parameter_SQLNull(e$, progap.)
+			progap.progaccessID = progaID
+			progap.parameterKey$ = inputLine$[1,idx-1]
+			if idx<len(inputLine$) progap.parameterValue$ = inputLine$[idx+1]
+			if progap.parameterKey$[1,1] <> "&" ! bad parse of options
+				e = progaccess_parameter_SQLInsert(e$,ch_sql,progap.)
+			end if
+		end if
+	loop
+	close #saveCH
+	kill tmpFile$
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+!--------------------------------------------------------------------------------
+!
+! GetMySQLReportHeader
+!
+External Function GetMySQLReportHeader(e$,mysql_ch,comment$,...)
+try
+	enter reportName$
+else
+	dim reportName$[1]
+	reportName$ = ""
+end try
+try
+	
+	dim reph. as sql_reportheader
+	dim 3%,newID
+	
+	call reportheader_SQLNull(e$, reph.)
+	
+	! SQL database design will take care of
+	! "who" and "when"
+	reph.Description$ = rtrim$(comment$)
+	reph.NumberColumns = 0
+	reph.NumberRows = 0
+	reph.UserAborted = 0
+	if reportName$ <> ""
+		! report name is used to create
+		! a unique occurrence of a report
+		! this can be accessed later
+		! NOTE - report names are global and
+		! unique so any prior versions of this
+		! "report name" must be deleted before
+		! we can add it!
+		search #mysql_ch;"DELETE from ReportHeader WHERE ReportName = ''"+reportName$+"''"
+		reph.ReportName$ = reportName$
+	end if
+	e = reportheader_SQLInsert(e$, mysql_ch, reph.)
+	if e ! successful add
+		search #mysql_ch;"SELECT LAST_INSERT_ID()"
+		read #mysql_ch;newID
+		call env(2,"MYSQL_REPORT_ID",str$(newID))
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end function newID
+
+
+!--------------------------------------------------------------------------------
+!
+! AddMySQlReportColumnHeadings
+!
+External Sub AddMySQlReportColumnHeadings(e$,mysql_ch,mysqlReportID,fdel$,headings$)
+try
+	
+	dim repch. as sql_reportcolumnheaders
+	dim 1%,fdelLen,headingsLen
+	dim 3%,pos1,pos2
+	dim 3%
+	
+	fdelLen = len(fdel$)
+	headingsLen = len(headings$)
+	pos1 = 1
+	! headings should be in the format col1<fdel>col2<fdel>...
+	do
+		search headings$[pos1],fdel$,pos2
+		if not(pos2) exit do
+		call reportcolumnheaders_SQLNull(e$, repch.)
+		repch.HeaderID = mysqlReportID
+		! note: pos2 is RELATIVE to pos1
+		repch.ColumnName$ = headings$[pos1,pos1 + (pos2-2)]
+		e = reportcolumnheaders_SQLInsert(e$, mysql_ch, repch.)
+		if not(e) ! fail
+			e$ = "Failed to add report header column!"
+			error 10000
+		end if
+		pos1 = pos1 + pos2 + fdelLen - 1
+		if pos1 > headingsLen exit do
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+!--------------------------------------------------------------------------------
+!
+! AddMySQLReportData
+!
+! returns: 1 if row added, 0 if not (could be an abort condition - if UserAborted
+! flag is set, this means user requested an abort)
+!
+External Function AddMySQLReportData(e$,mysql_ch,mysqlReportID,fdel$,dataRow$)
+try
+	dim reph. as sql_reportheader
+	dim repd. as sql_reportdata
+	dim 1%,fdelLen,dataRowLen,colsLoaded,rowAdded
+	dim 3%,pos1,pos2
+	dim 3%
+	
+	rowAdded = 0
+	! get the column header IDs for the add
+	reph.ID = mysqlReportID
+	if reportheader_SQLGet(e$,mysql_ch,reph.) < 1
+		e$ = "Could not find report header: "+str$(mysqlReportID)
+		error 10000
+	end if
+	if reph.UserAborted = 1
+		! delete the report as user has aborted!
+		search #mysql_ch;"DELETE FROM ReportHeader WHERE ID = "+str$(mysqlReportID)
+		if chf(mysql_ch) < 1
+			e$ = "Could not delete report header: "+str$(mysqlReportID)
+			error 10000
+		end if
+		exit function rowAdded ! user has aborted
+	end if
+	dim 3%,colIDs[reph.NumberColumns]
+	search #mysql_ch;"CALL FetchColumnHeaderIDs("+str$(mysqlReportID)+")"
+	if chf(mysql_ch)<>reph.NumberColumns
+		e$ = "Number of columns returned does not match number in header!"
+		error 10000
+	end if
+	for i = 1 to reph.NumberColumns
+		read #mysql_ch;colIDs[i]
+	next i
+	fdelLen = len(fdel$)
+	dataRowLen = len(dataRow$)
+	pos1 = 1
+	! data row should be in the format col1<fdel>col2<fdel>...
+	do
+		search dataRow$[pos1],fdel$,pos2
+		if not(pos2) exit do
+		colsLoaded = colsLoaded + 1
+		if colsLoaded > reph.NumberColumns
+			e$ = "Number of columns loaded greater than number in header!"
+			error 10000
+		end if
+		call reportdata_SQLNull(e$, repd.)
+		repd.ColumnHeaderID = colIDs[colsLoaded]
+		repd.RowNumber = reph.NumberRows + 1
+		! note: pos2 is RELATIVE to pos1
+		if pos2 = 1 ! NULL field
+			repd.DataValue$ = ""
+		else
+			repd.DataValue$ = dataRow$[pos1,pos1 + (pos2-2)]
+		end if
+		e = reportdata_SQLInsert(e$, mysql_ch, repd.)
+		if not(e) ! fail
+			e$ = "Failed to add report data column!"
+			error 10000
+		end if
+		pos1 = pos1 + pos2 + fdelLen - 1
+		if pos1 > dataRowLen exit do
+	loop
+	if colsLoaded <> reph.NumberColumns
+		e$ = "Number of columns loaded less than number in header!"
+		error 10000
+	end if
+	rowAdded = 1
+else
+	include "src/callsuberr.inc"
+end try
+end function rowAdded
+
+!--------------------------------------------------------------------------------
+!
+! FinishMySQLReport
+!
+External Sub FinishMySQLReport(e$,mysql_ch,mysqlReportID)
+try
+	dim reph. as sql_reportheader
+	dim 3%
+	
+	search #mysql_ch;"UPDATE ReportHeader SET DateTimeCompleted = NOW() WHERE ID = "+str$(mysqlReportID)
+	if chf(mysql_ch) < 1
+		e$ = "Could not update report header: "+str$(mysqlReportID)
+		error 10000
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub

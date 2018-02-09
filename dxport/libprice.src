@@ -1,0 +1,2514 @@
+! libprice.lib
+! external library for price call (now a subroutine)
+Rem
+Rem
+Rem
+Rem
+!
+! loadsave -w -n 100,10 -o prog/dxport/libprice.lib src/libprice.src
+!
+! this is taken from the original working version of "price.dl4"
+! 04/28/2011 - add multi-level special/contract pricing
+! TXC 239151  If promo price is higher then non-promo price for a customer, use the non-promo price
+! 11683 - add cost select to price markup calc (no load costs in file)
+!
+! --- custom_customer$ -----
+! Omaha: cct#180384/task#10226 Ctrt By Comm Code Provide Flat $ Price in Cost UM
+!  Omaha: cct126349/task12854 use min qty q/m - want default purchasing
+! Omaha: cct216065/task12854 - for contracts that are for all products or comdty
+! AMWAX: cct132458/task31041 - only use listprice1 or 2 on commodity price?
+!               based don't check u/m on contract again
+! ------------------  notes for rev10 upgrade for Jersey Paper  -----------------
+! rjs 05/17/02 cct 154557 add free goods logic and hard code warehouse pricing 
+!              to be on to handle the pricing hierarchy for whse pricing  
+!              without all the other stuff that goes with whse pricing turned on
+! ------------------------------------------------------------------------------
+!
+! rgp 10/15/13 - task 29088 - additional files, that if opened already, will be used
+!		FLEPTR[9,0] = rebate contract header (304)
+!		FLEPTR[10,0] = rebate detail (320)
+!		FLEPTR[11,0] = pricemark
+!		FLEPTR[12,0] = prodmark (1712)
+!		FLEPTR[13,0] = vendor tag (1120)
+!		FLEPTR[14,0] = loadmark
+! rgp 09/22/14
+!		FLEPTR[15,0] = cpidet
+!
+! ------------------------------------------------------------------------------
+
+
+include "src/copyright.inc" ! dx
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,BuildSort
+External Lib "librebates.lib"
+Declare External Sub rebates
+External Lib "libprice.lib"
+Declare External Sub SysPriceCalc
+Declare Intrinsic Sub DateToJulian,InpBuf,String,programdump
+
+External Lib "cpiavail.dl4"
+Declare External Function CPIQtyAvail
+
+!
+External Sub SysPriceCalc(e$,FLEPTR[],SPECS[],MSGDESC$,...)
+! e$ = Error messages
+! Fleptr[] ! file channel & records
+! specs[] ! the data passer
+! msgdesc$ ! price calc description
+! optional debug,dlog$ ! debug 0/1 & debug log name
+! optional rstr$ ! reports use for reporting errors to web
+! optional exSpecs[] ! extended data passer
+Try	Enter debug,... Else debug=0
+Try Enter dlog$,... Else dim dlog$[30]
+Try Enter rstr$,... Else Dim rstr$[500]
+! extended specifications
+!
+! [0] = line level rebate contract expiration date (set by routine)
+! [1] = line level price contract expiration date (doesn't look to be used)
+!
+! Next fields are used to override current costs in the system to check and
+! see if an old cost vs. the current cost has impacted price or margin
+! exspecs[2] must be set to non-zero to use
+!
+! [2] = Cost Override Warehouse
+!    -1 = Main Product record
+!     0 = DO NOT USE ANY COST OVERRIDE FIELDS
+!     1-99 = Warehouse Level Cost Override
+! [3] = Overriding loaded cost (passed in, 0 = none)
+! [4] = Overriding loaded 2 cost (passed in, 0 = none)
+! [5] = Overriding PO cost (passed in, 0 = none)
+! [6] = Overriding Net PO cost (passed in, 0 = none)
+! [7] = Overriding Base cost (passed in, 0 = none)
+! [8] = Overriding Average cost (passed in, 0 = none)
+! [9] = Overriding Load Markup Table (passed in, -1 = none)
+! [10] = Overriding Load Markup Table 2 (passed in, -1 = none)
+! 
+Try
+	Enter exSpecs[]
+Else
+	Dim 3%,exSpecs[50]
+	exSpecs[8] = -1
+	exSpecs[9] = -1
+end try
+! if additional (optional) vars needed add ,... to last one & add new here
+
+! Option Default Dialect IRIS1
+Rem
+Rem
+Rem
+! Enter FLEPTR[],SPECS[],MSGDESC$,IntCo,debug,dlog$
+Try 
+  !
+  Declare Intrinsic Function FindChannel,Trim$
+  
+  Dim 1%,AMALG,B3,BRACKET,C3[2],CH_BRKTBL,CH_CCODES,CH_COMMODITY
+  Dim 1%,CH_CMDTY,CH_CTRCT,CH_LASTPR,CH_LMARK,CH_PMARK,CH_PRODMARK,CH_PRWH,CH_CPIDET
+  Dim 1%,CH_PROD,expspec,spjump,nopromo,PM5[5,4],TIMCHECK,ISCPI
+  Dim 1%,CH_REBATEDTL,CH_RCONTRACTH,CH_SPRICE,CH_VENDTAG,CHANNEL_[10],COST2
+  Dim 1%,COST2RBT,CNVTU[2],CONVFLAG,CT,DFT_COST,EDII,END_,WHSE,I,I1
+  Dim 1%,LM1[37,5],DEPTLP,LTBL,MATPR,MODE,M5[3],NOCUST,NOPROD,P3,PERMPRICE
+  Dim 1%,PPBREAK,PROD,REBATE_TYPE,RECS[8],SC,SPCUM[1],SPNOTVALID,SPWH,SR
+  Dim 1%,START,STARTCHAN,STATUS,T0,UN[2],UNIT,UNITSEQUAL,WH,WHSEPR
+  Dim 1%,debugdtl,FUTURE,NOLOWER,PRFAC,LM3[37,3],COID,mlvl
+  Dim 1%,SPC6[4],aptype[8],abtype[8],amtype[8],3%,apfact[8],amqty[8],OrdQty ! add'l spcl prices2-9
+  dim 1%,lp_source,cpiChan[99]
+  Dim 2%,chan,DATE,E,E1,FLAG,H0[12],H5[16],JUMP_,JUNK,L4[3],L6[5]
+  Dim 2%,L9[1],LCO[1],LM2[37,3],M6[3],Q0[1],RBASE_TYPE,RBSLCOST_TYPE
+  Dim 2%,SBASE_TYPE,SPC1[5],SPCOM,SPSLCOST_TYPE,TEMP_LCO,TYPE,VNUM,X1[9]
+  Dim 2%,CUSTCODE,ARDATE,JULARDATE,DT3[1],JDATE[9],LM4[37,3]
+  Dim 2%,LPMRK[5]
+  Dim 3%,AMOUNT,B1[9,2],BASE,BASEHOLD,BRKAMT,CMODE,CNVTA,COST,CST[1],CUNIT
+  Dim 3%,FIELD,L5[3],L7[12],M7,OLM[6],PPRICE,PREC[2],RB_BASECOST,RBCOST
+  Dim 3%,RBSLCOST,REC_BRKTBL,UNITPRICE,HLDCOST,ROL0
+  Dim 3%,REC_CCODES,REC_CMDTY,REC_CTRCT,REC_LASTPR,REC_LMARK,REC_PMARK
+  Dim 3%,REC_PRODMARK,SELLFAC,tmpspecs[30],PM6[5,3]
+  dim 3%,lp_price,lp_cost,lp_rebatecost,lp_RBcontractnum,lp_time,lp_contract
+  Dim 3%,REC_PRWH,REC_PROD,REC_REBATEDTL,REC_RCONTRACTH,REC_SPRICE,S3[17]
+  Dim 3%,SPC4[6],SPC5[4],SPSLCOST,STOCK,UWORK[15],X2[9],X4,REBATE_ARGS[10,4]
+  Dim 3%,LEVEL,COSTHOLD,HldLbs[5,1]
+  Dim 4%
+  Dim BRD$[100],DBASE$[10],DCOST$[10],DDESC$[75],DTYPE$[75],tmp1$[200]
+  Dim F1$[16],I$[60],I1$[50],J4$[50],K9$[60],KCUST$[50],DBG$[70],P61$[256]
+  Dim L1$[20],MASK5$[5],P60$[50],P9$[50],PMASK$[12],UNIT$[4],X$[10],K15$[50]
+  Rem
+  Dim A$[156],HZ$[90],PR_A2$[30],C1$[32],PSN$[20],U3$[60]
+  Dim PRFLG$[10],PRMKUPTYP$[4],PIC$[50],PRIML$[12]
+  Dim 1%,LLC,PFTB[3],PFU1[20],LM[1],UPCT,PR_PO[1]
+  Dim 1%,PRBASE,PRPARC2[3],PRD1[4],AGEDAY
+  Dim 2%,A2,A3[2],B[24],PR_C4[10],PFCO[3],PLC[3],PSN[1],U2,U4[1]
+  Dim 2%,STK[2],FDT[1],PRMKUP[3],PRD0[2]
+  Dim 3%,A1[7],A[33],PF_LOAD2,PFU2[6],PLV[1],PRPARC[3],U3,PFN[1]
+  Dim 3%,LBSORD,FUT[1],PRREDI[1],PRD2[3],orgrec_sprice
+  Rem
+  Rem
+  Dim W1$[32],WH3$[24],WHFLG$[10],WHMKUPTYP$[4],WCOMM$[4]
+  Dim 2%,W2[9],W7[14],WH7[3],WHLPOOL,WHFDT[1],WHMKUP[3]
+  Dim 1%,W0[3],W1[2],WH8[47],WHPARC[5],WHRPLN,WHLM[1],FCWGT
+  Dim 1%,RESTRICTED,WHBASE,WHPARC2[3]
+  Dim 3%,W3[24],W5[25],WH9[25],WHLV[2],WHMISC[6],WHMISC2[7]
+  Dim 3%,WHFUT[2],VLIST,WHREDI[1],WHLBS[1]
+  Rem
+  Rem
+  Dim LP$[12],LP2$[84],LPMT$[2]
+  Dim 1%,LPC3[4],AI,LPEUN[2],LPWH,LPCPT,PPPUSERID
+  Dim 2%,LPDF,LPC1[2],LPR1[3],LPC5[3],LPPCDATE,LPCSDT,LPDEPT,PPPCID[1]
+  Dim 3%,LPC2[2],LPC4[3],LPR[4],LPUNF[6],PERM[1],LPLPERM,LPCURR[1]
+  Dim 3%,LPFPERM[1],LPUNIT[1]
+  Rem
+  Rem
+  Dim 1%,RCN$[70]
+  Dim 3%,RCN3[3]
+  Rem
+  Rem
+  Dim 1%,RB$[12],SPUDA2$[30]
+  Dim 1%,RBUM[1],RB[2],RBWH,RBL1[1]
+  Dim 2%,RB1[5],RBMIN,RBCOM
+  Dim 3%,RB3[6],RBN,RB5[2]
+  Rem
+  Rem
+  Dim CCODE$[4],CCPT$[3],CMDTYUPCHG$[1],CMDTY$[36],CCOPEN$[72]
+  Dim 1%,CMDTYBASE,CMDTYBRKTBL,CMDTYBRKFLAG,PRFAC
+  Dim 2%,CMDTYMULTI,CMDTYUPCHG,CCOMMISSION
+  Rem
+  Dim 3%,RESSTKAMT,QTYALLOCTED,CPIAMOUNTLEFT
+  !
+  dim buttonlist$[5,50],nextlist$[5,100] !error handling variables
+  dim action$[30],options$[30],UserId$[10],tmp$[1000]
+  Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10] ! ,rstr$[2000]
+  Dim msg$[256],pgmName$[20],CUSTOM_CUSTOMER$[30],k_sort$[50]
+  
+  Dim 3%
+   RptRun=0 ! variable signalling report has run this (web thing)
+   If rstr$<>"" Let RptRun=1
+  !
+  Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+  Def FNN(H) = Int(Abs(H) * 10 ^ Q0[1] + .5) * 10 ^ - Q0[1] * Sgn(H)
+  Def FNT(H) = Int(Abs(H) * 10 ^ Q0[1]) * 10 ^ - Q0[1] * Sgn(H)
+  Def FNV(H) = Int(Abs(H) * 10 ^ Q0[1] + .9999999) * 10 ^ - Q0[1] * Sgn(H)
+  Def FNU(H) = Int(Abs(H) + Sgn(Fra(Abs(H)))) * Sgn(H)
+  Def FNF(H) = Int((Abs(H) * 20 + .5) * Sgn(H)) / 20
+  !
+  ! cannot call getsession - wipes out passed data!
+  !call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+   Call DXGet("S_USER.ID",userid$) \ userid$ = Ucase$(userid$) !user id
+   userid$=userid$,"        "
+   Call DXGet("S_USER.APPID",tmp$) !company #
+   try let intCo=Val(tmp$) else let intCo=1 !company #
+   COID = IntCo
+  ! 2 debugs - debug as passed stores main info (start/end/errors)
+  ! debugdtl - as passed in specs[21] for detail info (mostly Special Price)
+  pgmName$ = "price"
+  msg$ = "start...program " + pgmName$ \ Gosub Updatelog
+  If Not(FLEPTR[0,0])
+	CH_cntrl = OpenFile(-9999,IntCo) \ if ch_cntrl=-1 Error 42
+  Else 
+	CH_cntrl = FLEPTR[0,0]
+  End If 
+  !
+  Mat Read #1,3,172;DATE;
+  Mat Read #1,19,50;P9$; \ Mat Read #1,60,50;P60$;
+  Mat Read #1,61,0;P61$;
+  mat read #1,115,60;custom_customer$;
+  MAT  READ #1,115,92;TIMCHECK;
+  Custom_customer$=UCase$(Trim$(custom_customer$))
+  Mat Read #1,115,40;Q0; \ If Not(Q0[1]) Let Q0[1] = 2
+  MASK5$ = "#####";PMASK$ = "-----#.",MASK5$[1,Q0[1]]
+  FOR x1=0 to 30 \ tmpspecs[x1]=specs[x1] \ next x1
+  For X1 = 22 To 30
+	SPECS[X1] = 0
+  Next X1
+MAIN: Rem
+  DTYPE$ = " ",DTYPE$;DDESC$ = " ",DDESC$;DBASE$ = " ",DBASE$
+  DCOST$ = " ",DCOST$;BASEHOLD = 0
+  MODE = Int(SPECS[0])
+  If MODE = 5 Let MODE = 0;NOPROMO = 1 Else Let NOPROMO = 0
+  if mode = 299 let mode=0;noamalg=1 else let noamalg=0
+  Gosub VALIDATE
+  If Not(SPECS[0])
+	Gosub SETVARS
+	! If debug Gosub OPEN_DBGWINDOW
+	!
+	!if noamalg call programdump("tmp/lpdump.txt!","")
+	Gosub READPROD
+	!use perm price cust first
+	If Not(REC_LASTPR) And Not(NOCUST) And Not(MODE) and fleptr[0,1]<>0 Gosub GETPMLP
+	If Not(REC_LASTPR) And Not(NOCUST) And Not(MODE) Gosub GETLP
+	If REC_LASTPR>0 And Not(MODE) Gosub READLP
+	Gosub CONVORD
+	If (Not(MODE) Or (MODE = 4 And Not(LEVEL))) And LM1[H5[7] - 1,4] <> 5
+		Gosub SETCOST
+	End If 
+	If MODE
+		If (MODE <> 4 Or (MODE = 4 And LEVEL))
+				On MODE Gosub MANLP,MANLEVEL,MANBRACKET,ASENTERED
+		End If 
+	Else 
+		If Not(AMALG)
+			if p61$[100,100]="Y" and fleptr[0,1]<>0 and fleptr[0,1]<>specs[3]
+				let custcode=fleptr[0,1] ! price master customer
+				Gosub SP_CHKREBATE
+				let custcode=specs[3]
+				if status<>0
+					gosub sp_chkrebate
+				endif	
+			else
+				Gosub SP_CHKREBATE
+			endif
+			if p61$[100,100]="Y" and fleptr[0,1]<>0 and fleptr[0,1]<>specs[3]
+				let custcode=fleptr[0,1]
+				Gosub SP_CHKSP ! check for price master customer
+				let custcode=specs[3]
+				If spnotvalid<>0
+					let spnotvalid=0
+					gosub SP_CHKSP ! check using order customer if not special price
+				endif
+			else
+				gosub sp_chksp ! no price master 
+			endif
+			If LCO < 1 Or LCO > 7 Let ROL0 = 0
+		End If 
+		If Not(L9[0]) And PERMPRICE And Not(AMALG) And REC_LASTPR>0 Gosub GETPERM
+		If UNITPRICE = -2 Let UNITPRICE = 0;JUMP_ = C3[1]
+		If MATPR And PR_C4[2] = 1 And Not(UNITPRICE)
+			Gosub MATPSETUP
+			If DTYPE$[1,3] = "   " And UNITPRICE
+				DTYPE$ = "Matrix price"
+				If PR_C4[3] Let DTYPE$ = DTYPE$,PR_C4[3] Using " (table ###)"
+				If Not(pr_c4[3]) Let dtype$=DType$+" (manual %)" ! Progressive
+			End If 
+		End If 
+		If PR_C4[2] = 2 And (Not(UNITPRICE) Or UNITPRICE = -1)
+			Gosub GETTENBPRICE
+			If DTYPE$[1,3] = "   " And UNITPRICE
+				DTYPE$ = "10 bracket price"
+				DTYPE$ = DTYPE$," (table ",PR_C4[3] Using "###"
+				DTYPE$ = DTYPE$,", bracket",BRACKET Using "##"
+				If BRD$[BRACKET * 10 - 9,BRACKET * 10 - 8] <> "  " Let DTYPE$ = DTYPE$,"-",BRD$[BRACKET * 10 - 9,BRACKET * 10]
+				DTYPE$ = DTYPE$,")"
+			End If 
+		End If 
+		If UNITPRICE <> -3
+			Gosub CHECKBREAK
+			If SPJUMP
+				OLM[3] = UNITPRICE - L6[1]
+				OLM[3] = OLM[3] - (OLM[3] * (L6[0] / 100))
+				L6[1] = 0;L6[0] = 0;L9[0] = 2
+				If SPC5[0]
+					OLM[3] = (OLM[3] * ((100 + SPC5[0]) / 100))
+				End If 
+				UNITPRICE = OLM[3]
+			End If 
+			Gosub UPCHARGE
+			If L7[8] Gosub UPTYPE
+		End If 
+	End If 
+	Gosub SETVARS2
+	If CH_RCONTRACTH>0 AND NOT(FLEPTR[9,0]) Try Close #CH_RCONTRACTH Else Rem
+	If CH_REBATEDTL>0 AND NOT(FLEPTR[10,0]) Try Close #CH_REBATEDTL Else Rem
+	If CH_PMARK>0 AND NOT(FLEPTR[11,0]) Try Close #CH_PMARK Else Rem
+	If CH_PRODMARK>0 AND NOT(FLEPTR[12,0]) Try Close #CH_PRODMARK Else Rem
+	If CH_VENDTAG>0 AND NOT(FLEPTR[13,0]) Try Close #CH_VENDTAG Else Rem
+	If CH_LMARK>0 AND NOT(FLEPTR[14,0]) Try Close #CH_LMARK Else Rem
+	If CH_CPIDET>0 AND NOT(FLEPTR[15,0]) Try Close #CH_CPIDET Else Rem
+	If CH_ROLNEW>0 Try Close #CH_ROLNEW Else Rem
+	IF CH_SORT>0 Try Close #CH_SORT ELSE Rem
+	! Close #CH_REBATEDTL,#CH_RCONTRACTH,#CH_PMARK,#CH_PRODMARK,#CH_VENDTAG,#CH_LMARK
+	if nopromo=0 and (l9[0]=3 or l9[0]=7 or l9[0]=8 or l9[0]=11 or l9[0]=16)
+		! promos allowed and one is being uses              
+		tmpspecs[0]=5    ! no promos allowed                          
+		!CALL "PRICE",FLEPTR[],tmpSPECS[],p61$ 
+		Call SysPriceCalc(e$,FLEPTR[],tmpSPECS[],tmp1$)
+		if tmpspecs[20]<specs[20] and tmpspecs[20]<>0
+			for x1=0 to 30
+				specs[x1]=tmpspecs[x1]
+			next x1
+			msgdesc$=tmp1$ ! p61$
+		endif
+	endif   
+  End If 
+  If SPECS[0] < 0 Let SPECS[0] = 0
+Goto Outend
+  !
+! start of subroutines
+VALIDATE: Rem
+	SPECS[0] = 0
+	If SPECS[8] = 8 Or SPECS[8] = 16 Let SPECS[0] = -1
+	If MODE And MODE <> 4
+		If MODE = 1
+			If SPECS[11] < 1 Or SPECS[11] > 6 Let SPECS[0] = 23
+		Else 
+			If MODE = 2 Or MODE = 3
+				If SPECS[11] < 1 Or SPECS[11] > 10 Let SPECS[0] = 23
+			Else 
+				SPECS[0] = 24
+			End If 
+		End If 
+	End If 
+	For X1 = 1 To 8
+		If Not(FLEPTR[X1,0])
+			SPECS[0] = X1
+		End If 
+	Next X1
+	If Not(FLEPTR[1,1])
+		SPECS[0] = 13
+	End If 
+	If Not(FLEPTR[3,1])
+		! let specs[0]=14
+		! find commodity rec later
+	End If 
+	If Not(SPECS[3]) And Not(SPECS[7])
+		SPECS[0] = 18
+	End If 
+	For X1 = 13 To 15
+		If Not(SPECS[X1])
+			SPECS[0] = X1 + 6
+		End If 
+	Next X1
+	! Errstm Let X2 = Spc(8)
+	EXPSPEC = 1
+	Try 
+		let ROL0 = SPECS[40]
+	Else
+		EXPSPEC = 0
+	End try
+Return 
+
+FILEOPEN: Rem NOT USED!!
+	!
+	!If debug Print "Opening files..."
+	Read #1,88,320;F1$;
+	Ropen #CH_REBATEDTL,F1$
+	Read #1,88,304;F1$;
+	Ropen #CH_RCONTRACTH,F1$
+	Read #1,88,2720;F1$;  ! ON REV9 uses pricemark - xrev9 uses Spricemark
+	F1$="2/SPRICEMARK"+STR$(COID)
+	Ropen #CH_PMARK,F1$
+	Read #1,88,1712;F1$;
+	Ropen #CH_PRODMARK,F1$
+	Read #1,88,1120;F1$;
+	Ropen #CH_VENDTAG,F1$
+	Read #1,150,32;F1$;
+	Ropen #CH_LMARK,F1$
+Return 
+
+SETVARS: Rem
+	CH_PROD = FLEPTR[1,0];REC_PROD = FLEPTR[1,1]
+	CH_PRWH = FLEPTR[2,0];REC_PRWH = FLEPTR[2,1]
+	CH_CMDTY = FLEPTR[3,0];REC_CMDTY = FLEPTR[3,1]
+	CH_LASTPR = FLEPTR[4,0];REC_LASTPR = FLEPTR[4,1]
+	CH_SPRICE = FLEPTR[5,0];CH_CTRCT = FLEPTR[6,0]
+	CH_CCODES = FLEPTR[7,0];CH_BRKTBL = FLEPTR[8,0]
+	CH_RCONTRACTH = FLEPTR[9,0]
+	CH_REBATEDTL = FLEPTR[10,0]
+	CH_PMARK = FLEPTR[11,0]
+	CH_PRODMARK = FLEPTR[12,0]
+	CH_VENDTAG = FLEPTR[13,0]
+	CH_LMARK = FLEPTR[14,0]
+	CH_CPIDET = FLEPTR[15,0]
+	!
+	! moved from fileopen
+	if not(CH_RCONTRACTH) CH_RCONTRACTH = OpenFile(-304,IntCo) \ if CH_RCONTRACTH =-1 Error 42
+	!Read #CH_cntrl,88,304;F1$; \ Ropen #CH_RCONTRACTH,"files/" + F1$
+	if not(CH_REBATEDTL) CH_REBATEDTL = OpenFile(-320,IntCo) \ if CH_REBATEDTL =-1 Error 42
+	!Read #CH_cntrl,88,320;F1$; \ Ropen #CH_REBATEDTL,"files/" + F1$
+	if not(CH_PMARK) CH_PMARK = OpenFile("SPRICEMARK",IntCo,"R") \ if CH_PMARK =-1 Error 42
+	!Read #CH_cntrl,88,2720;F1$; \ Ropen #CH_PMARK,"files/" + F1$
+	if not(CH_PRODMARK) CH_PRODMARK = OpenFile(-1712,IntCo) \ if CH_PRODMARK =-1 Error 42
+	!Read #CH_cntrl,88,1712;F1$; \ Ropen #CH_PRODMARK,"files/" + F1$
+	if not(CH_VENDTAG) CH_VENDTAG = OpenFile(-1120,IntCo) \ if CH_VENDTAG =-1 Error 42
+	!Read #CH_cntrl,88,1120;F1$; \ Ropen #CH_VENDTAG,"files/" + F1$
+	if not(CH_LMARK) CH_LMARK = OpenFile(-9941,IntCo) \ if CH_LMARK =-1 Error 42
+	!Read #CH_cntrl,150,32;F1$; \ Ropen #CH_LMARK,"files/" + F1$
+	if p61$[111,111]="Y"
+		if not(CH_CPIDET) CH_CPIDET = OpenFile(-9928,IntCo) \ if CH_CPIDET =-1 Error 42
+		cpiChan[0] = 1
+		cpiChan[1] = CH_CPIDET
+		cpiChan[2] = CH_SPRICE
+		cpiChan[3] = CH_PROD
+		CH_ROLNEW = openfile(-1888,IntCo) \ if CH_ROLNEW = -1 error 42
+		cpiChan[4] = CH_ROLNEW
+	end if
+	if p61$[137,137] = "Y"
+		! contract priority by date started
+		CH_SORT = buildsort(e$,25,0)
+	end if
+	L7[2] = ABS(SPECS[1])
+	S3[4] = ABS(SPECS[2])
+	CUSTCODE = SPECS[3]
+	NOCUST = 0 \ If Not(CUSTCODE) Let NOCUST = 1
+	WHSE = SPECS[4] \ If Not(WHSE) Let WHSE = 1
+	H0[9] = SPECS[5] \ If Not(H0[9]) Let H0[9] = DATE
+	FUTURE = 0;NOLOWER = 0
+	If H0[9] < 0 And (H0[9] <> -99 Or H0[9] <> -999999)
+		FUTURE = 1;H0[9] = Abs(H0[9])
+		NOLOWER = SPECS[12]
+	End If 
+	X2 = H0[9] \ If X2 <> 999999 Gosub YMD2JUL \ X2 = 0
+	JDATE[0] = X2
+	L9[1] = SPECS[6]
+	P3 = SPECS[7] \ If Not(P3) Let P3 = 1
+	H5[7] = SPECS[8] \ If Not(H5[7]) Let H5[7] = 1
+	DFT_COST = SPECS[9]
+	EDII = SPECS[10]
+	LEVEL = SPECS[11]
+	UN[0] = SPECS[13]
+	UN[1] = SPECS[14]
+	UN[2] = SPECS[15]
+	L7[8] = SPECS[16]
+	L5[1] = SPECS[17]
+	CST[0] = SPECS[18]
+	PPRICE = SPECS[20]
+	debugdtl = SPECS[21]
+	If EXPSPEC Let ROL0 = SPECS[40] Else Let ROL0 = 0
+	MATPR = 0 \ If P9$[10,10] = "Y" Let MATPR = 1
+	UNITSEQUAL = 0 \ If P60$[30,30] = "Y" Let UNITSEQUAL = 1
+	WHSEPR = 0 \ If P9$[32,32] = "Y" Let WHSEPR = 1
+	! force warehouse pricing for calculation for RUNGE
+	if (custom_customer$ = "RUNGE") Let WHSEPR = 1
+	rem if custom_customer$="JPAPER" let whsepr=1 ! custom jersey paper
+	DEPTLP = 0 \ If P9$[44,44] = "Y" Let DEPTLP = 1
+	AMALG = 0 \ If P60$[12,12] = "Y" Let AMALG = 1
+	if noamalg let amalg=0 ! used in 299 - so no amalg bypass
+	PERMPRICE = 0 \ If P60$[33,33] = "Y" Let PERMPRICE = 1
+	COST2 = Val(P60$[38,38])
+	COST2RBT = 0 \ If P60$[39,39] = "Y" Let COST2RBT = 1
+	NOPROD = 0 \ If REC_PROD < 0 Let NOPROD = 1;REC_PROD = Abs(REC_PROD)
+	! validate exspecs
+	if exspecs[2] = 0 ! NO COST OVERRIDES
+		for i = 3 to 8 \ exspecs[i] = 0 \ next i
+		exspecs[9] = -1
+		exspecs[10] = -1
+	end if
+	If debug and dlog$="" let debug=0 ! no file - no debug
+Return 
+
+SETVARS2: Rem
+	If UNITPRICE < 0
+		UNITPRICE = 0;L6[0] = 0;L6[1] = 0;L7[8] = 0;UWORK[11] = 0
+		DTYPE$ = " ",DTYPE$;DDESC$ = " ",DTYPE$
+	End If 
+	CNVTA = UNITPRICE;CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2
+	Gosub CONVERT
+	CNVTA = AMOUNT;CNVTU[0] = UN[1];CNVTU[1] = 0;CNVTU[2] = 2
+	Gosub CONVERT
+	UNITPRICE = AMOUNT
+	OLM[3] = UNITPRICE - L6[1]
+	OLM[3] = OLM[3] - (OLM[3] * (L6[0] / 100))
+	If L7[8] > 0
+		OLM[3] = OLM[3] + (OLM[3] * (L7[8] / 100))
+	Else 
+		OLM[3] = OLM[3] + Abs(L7[8])
+	End If 
+	CNVTA = OLM[3];CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2
+	Gosub CONVERT
+	CNVTA = AMOUNT;CNVTU[0] = UN[1];CNVTU[1] = 0;CNVTU[2] = 2
+	iF L6[4] let A[6] = L6[4]
+	Gosub CONVERT
+	OLM[3] = AMOUNT
+	A[6] = X2[6]
+	If Not(OLM[3]) Let DDESC$ = " ",DDESC$;DTYPE$ = " ",DTYPE$;DTYPE$ = "No price can be calculated."
+	If Not(OLM[3]) And C3[0] = 7
+		DDESC$ = " ",DDESC$;DTYPE$ = " ",DTYPE$
+		If OLM[2]
+			DTYPE$ = OLM[2] Using "SP/Contract Free Goods (Contract #####)"
+		Else 
+			DTYPE$ = "SP/Contract Free Goods"
+		End If 
+	End If 
+	If OLM[3] And OLM[2] Let DTYPE$ = DTYPE$,OLM[2] Using " (Contract #####)"
+	If Not(L9[0]) Let L9[0] = -7
+	If P61$[50,50] = "Y"
+		If L9[0] = 0 Goto ENDPRICECOMRND
+		If L9[0] = -7 Goto ENDPRICECOMRND
+		If C3[0] < 4 Or C3[0] > 5
+			If L9[0] = 2 Or L9[0] = 3 Or L9[0] = 6 Or L9[0] = 7 Or L9[0] = 8 Goto ENDPRICECOMRND
+			If L9[0] = 11 Or L9[0] = 12 or L9[0]=16 Goto ENDPRICECOMRND
+		End If 
+		If L9[0] = 13 Goto ENDPRICECOMRND
+		Try
+			Mat Read #CH_CMDTY,REC_CMDTY,40;PRFAC;
+		Else
+			PRFAC=0
+		End try
+		If PRFAC > 0 And PRFAC < 9
+			If UNITPRICE
+				CNVTA = UNITPRICE;CNVTU[0] = 0;CNVTU[1] = PFU1[12];CNVTU[2] = 2
+				Gosub CONVERT
+				Call "pricernd",PRFAC,AMOUNT
+				CNVTA = AMOUNT;CNVTU[0] = PFU1[12];CNVTU[1] = 0;CNVTU[2] = 2
+				Gosub CONVERT
+				UNITPRICE = AMOUNT
+			End If 
+			If OLM[3]
+				CNVTA = OLM[3];CNVTU[0] = 0;CNVTU[1] = PFU1[12];CNVTU[2] = 2
+				Gosub CONVERT
+				Call "pricernd",PRFAC,AMOUNT
+				CNVTA = AMOUNT;CNVTU[0] = PFU1[12];CNVTU[1] = 0;CNVTU[2] = 2
+				Gosub CONVERT
+				OLM[3] = AMOUNT
+			End If 
+		End If 
+		ENDPRICECOMRND: Rem
+	End If 
+	MSGDESC$ = " ",MSGDESC$
+	MSGDESC$ = DTYPE$[1,75],"                                                                           "
+	MSGDESC$[76] = DDESC$[1,75],"                                                                           "
+	CNVTA = UNITPRICE;CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2
+	Gosub CONVERT
+	If L6[4] let A[6] = L6[4]
+	CNVTA = AMOUNT;CNVTU[0] = UN[1];CNVTU[1] = 0;CNVTU[2] = 2
+	Gosub CONVERT
+	UNITPRICE = AMOUNT
+	A[6] = X2[6]
+	CNVTA = L5[1];CNVTU[0] = 0;CNVTU[1] = UN[2];CNVTU[2] = 2
+	Gosub CONVERT
+	CNVTA = AMOUNT;CNVTU[0] = UN[2];CNVTU[1] = 0;CNVTU[2] = 2
+	If L6[4] let A[6] = L6[4]
+	Gosub CONVERT
+	L5[1] = AMOUNT
+	A[6] = X2[6]
+	CNVTA = CST[0];CNVTU[0] = 0;CNVTU[1] = UN[2];CNVTU[2] = 2
+	Gosub CONVERT
+	CNVTA = AMOUNT;CNVTU[0] = UN[2];CNVTU[1] = 0;CNVTU[2] = 2
+	If L6[4] let A[6] = L6[4]
+	Gosub CONVERT
+	CST[0] = AMOUNT
+	A[6] = X2[6]
+	FLEPTR[4,1] = REC_LASTPR
+	FLEPTR[8,1] = REC_BRKTBL
+	If REC_CTRCT And OLM[2]
+		Let FLEPTR[6,1] = REC_CTRCT
+		if ISCPI LET FLEPTR[15,1] = REC_CPIDET
+	END IF
+	If REC_SPRICE And (l9[0]>1 and l9[0]<17 and l9[0]<>5 and l9[0]<>9 and l9[0]<>10 and l9[0]<>14) Let FLEPTR[5,1] = REC_SPRICE
+	SPECS[0] = 0
+	SPECS[14] = UN[1]
+	SPECS[15] = UN[2]
+	SPECS[16] = L7[8]
+	SPECS[17] = L5[1]
+	SPECS[18] = CST[0]
+	SPECS[20] = UNITPRICE \ If Not(SPECS[20]) And MODE Let SPECS[20] = PPRICE
+	SPECS[21] = L6[1]
+	SPECS[22] = L6[0]
+	SPECS[23] = OLM[3]
+	SPECS[24] = LCO[1]
+	SPECS[25] = L9[0]
+	SPECS[26] = LCO[0]
+	SPECS[27] = OLM[2]
+	SPECS[28] = OLM[4]
+	SPECS[29] = L7[9]
+	SPECS[30] = UWORK[11]
+	If EXPSPEC Let SPECS[40] = ROL0
+	if TIMCHECK <> 0 and not(future) gosub update_lastprice:
+Return 
+
+OPEN_DBGWINDOW: Rem
+	!Window On 
+	!Window Open @5,5; Size 70,15; Using "PRICE TRACKING"
+	!Print 'CS';
+Return 
+
+DBG: Rem as no display - write logfile
+	Msg$=DBG$
+	Gosub Updatelog
+Return 
+
+READPROD: Rem
+	Rem
+	Mat Read #CH_PROD,REC_PROD,0;A$
+	Mat Read #CH_PROD,REC_PROD,156;B
+	Mat Read #CH_PROD,REC_PROD,256;A
+	Mat Read #CH_PROD,REC_PROD,460;A1
+	Mat Read #CH_PROD,REC_PROD,508;A2
+	Mat Read #CH_PROD,REC_PROD,512;PFU1
+	Mat Read #CH_PROD,REC_PROD,554;PFU2
+	Mat Read #CH_PROD,REC_PROD,596;PRPARC
+	Mat Read #CH_PROD,REC_PROD,620;LM
+	Mat Read #CH_PROD,REC_PROD,624;PR_PO
+	Mat Read #CH_PROD,REC_PROD,628;AGEDAY
+	Read #CH_PROD,REC_PROD,630;LLC
+	Mat Read #CH_PROD,REC_PROD,632;PSN$
+	Mat Read #CH_PROD,REC_PROD,652;PSN
+	Mat Read #CH_PROD,REC_PROD,660;U2
+	Mat Read #CH_PROD,REC_PROD,664;LBSORD
+	Mat Read #CH_PROD,REC_PROD,670;U4
+	Read #CH_PROD,REC_PROD,678;U3
+	Mat Read #CH_PROD,REC_PROD,684;U3$
+	Mat Read #CH_PROD,REC_PROD,744;HZ$
+	Mat Read #CH_PROD,REC_PROD,834;A3
+	Mat Read #CH_PROD,REC_PROD,846;PFTB
+	Read #CH_PROD,REC_PROD,854;UPCT
+	Mat Read #CH_PROD,REC_PROD,856;C1$
+	Mat Read #CH_PROD,REC_PROD,894;PR_C4
+	Read #CH_PROD,REC_PROD,938;PF_LOAD2
+	Mat Read #CH_PROD,REC_PROD,944;PR_A2$
+	Mat Read #CH_PROD,REC_PROD,974;PFCO
+	Mat Read #CH_PROD,REC_PROD,990;PLV
+	Mat Read #CH_PROD,REC_PROD,1002;PLC
+	Mat Read #CH_PROD,REC_PROD,1018;PFN
+	Mat Read #CH_PROD,REC_PROD,1030;STK
+	Mat Read #CH_PROD,REC_PROD,1048;FDT
+	Mat Read #CH_PROD,REC_PROD,1056;PRFLG$
+	Mat Read #CH_PROD,REC_PROD,1066;PRBASE
+	Mat Read #CH_PROD,REC_PROD,1068;PRMKUP
+	Mat Read #CH_PROD,REC_PROD,1084;PRMKUPTYP$
+	Mat Read #CH_PROD,REC_PROD,1088;FUT
+	Mat Read #CH_PROD,REC_PROD,1100;PRPARC2
+	Mat Read #CH_PROD,REC_PROD,1108;PRREDI
+	Mat Read #CH_PROD,REC_PROD,1120;PIC$
+	if custom_customer$="PRBRICK"
+		Mat Read #CH_Prod,Rec_Prod,1198;LPMRK
+	Endif
+	Mat Read #CH_PROD,REC_PROD,1270;PRD0
+	Mat Read #CH_PROD,REC_PROD,1282;PRIML$
+	Mat Read #CH_PROD,REC_PROD,1294;PRD1
+	Mat Read #CH_PROD,REC_PROD,1304;PRD2
+	if exspecs[2] = -1 ! overrides in effect for main product rec
+		if exspecs[3] <> 0 let b[8] = exspecs[3] ! overriding loaded cost
+		if exspecs[4] <> 0 let PF_LOAD2 = exspecs[4] ! overriding loaded 2 cost
+		if exspecs[5] <> 0 let b[10] = exspecs[5] ! overriding PO cost
+		if exspecs[6] <> 0 let PRPARC[2] = exspecs[6] ! overriding NET PO cost
+		if exspecs[7] <> 0 let PR_C4[4] = exspecs[7] ! overriding base cost
+		if exspecs[8] <> 0 let B[21] = exspecs[8] ! overriding average cost
+		if exspecs[9] <> -1 let LM[0] = exspecs[9] ! overriding load markup table
+		if exspecs[10] <> -1 let LM[1] = exspecs[10] ! overriding load 2 markup table
+	end if
+	Rem
+	Unlock #CH_PROD
+	If debugdtl let DBG$="Reading product: "+A$[140,151] \ gosub DBG
+	If Not(REC_CMDTY)
+		UNIT$ = A$[152,155]
+		Search #CH_CMDTY,2,1;UNIT$,REC_CMDTY,E \ If E Gosub Err_Search
+		UNIT$ = ""
+	End If 
+	If Not(A[5]) Let A[5] = 1
+	If L7[2] Let L6[4] = Abs((S3[4] / L7[2]) * A[5])
+	If NOPROD Let A[6] = L6[4]
+	if A[6]=0 let a[6]=1
+	X2[6] = A[6]
+	Let Hldlbs[0,0]=A[6];HldLbs[0,1]=A[5] ! "retain prod info
+	If REC_PRWH
+		Rem
+		Mat Read #CH_PRWH,REC_PRWH,0;W1$
+		Mat Read #CH_PRWH,REC_PRWH,32;W1
+		Mat Read #CH_PRWH,REC_PRWH,38;W2
+		Mat Read #CH_PRWH,REC_PRWH,78;W3
+		Mat Read #CH_PRWH,REC_PRWH,228;W5
+		Mat Read #CH_PRWH,REC_PRWH,384;WHPARC
+		Read #CH_PRWH,REC_PRWH,396;WHLPOOL
+		Mat Read #CH_PRWH,REC_PRWH,400;WCOMM$
+		Read #CH_PRWH,REC_PRWH,404;FCWGT
+		Mat Read #CH_PRWH,REC_PRWH,420;W0
+		Mat Read #CH_PRWH,REC_PRWH,428;WH7
+		Mat Read #CH_PRWH,REC_PRWH,444;WH8
+		Mat Read #CH_PRWH,REC_PRWH,540;WH9
+		Mat Read #CH_PRWH,REC_PRWH,696;W7
+		Mat Read #CH_PRWH,REC_PRWH,756;WH3$
+		Mat Read #CH_PRWH,REC_PRWH,780;WHLV
+		Read #CH_PRWH,REC_PRWH,798;WHRPLN
+		Mat Read #CH_PRWH,REC_PRWH,800;WHMISC
+		Mat Read #CH_PRWH,REC_PRWH,842;WHLM
+		Mat Read #CH_PRWH,REC_PRWH,846;WHMISC2
+		Read #CH_PRWH,REC_PRWH,894;RESTRICTED
+		Mat Read #CH_PRWH,REC_PRWH,896;WHFUT
+		Mat Read #CH_PRWH,REC_PRWH,914;WHFDT
+		Read #CH_PRWH,REC_PRWH,922;VLIST
+		Mat Read #CH_PRWH,REC_PRWH,928;WHFLG$
+		Read #CH_PRWH,REC_PRWH,938;WHBASE
+		Mat Read #CH_PRWH,REC_PRWH,940;WHMKUP
+		Mat Read #CH_PRWH,REC_PRWH,956;WHMKUPTYP$
+		Mat Read #CH_PRWH,REC_PRWH,960;WHPARC2
+		Mat Read #CH_PRWH,REC_PRWH,968;WHREDI
+		Mat Read #CH_PRWH,REC_PRWH,980;WHLBS
+		if exspecs[2] = W1[0] ! cost overrides in effect for this warehouse
+			if exspecs[3] <> 0 let W3[17] = exspecs[3] ! overriding loaded cost
+			if exspecs[4] <> 0 let W3[14] = exspecs[4] ! overriding loaded 2 cost
+			if exspecs[5] <> 0 let W3[16] = exspecs[5] ! overriding PO cost
+			if exspecs[6] <> 0 let WHMISC[2] = exspecs[6] ! overriding NET PO cost
+			if exspecs[7] <> 0 let W3[18] = exspecs[7] ! overriding base cost
+			if exspecs[8] <> 0 let W3[15] = exspecs[8] ! overriding average cost
+			if exspecs[9] <> -1 let WHLM[0] = exspecs[9] ! overriding load markup table
+			if exspecs[10] <> -1 let WHLM[1] = exspecs[10] ! overriding load 2 markup table
+		end if
+		Rem
+	End If 
+	Unlock #CH_PROD,#CH_PRWH
+	Gosub SETWHSE
+	If FUTURE Gosub SETPEND
+	PREC[0] = REC_PROD \ Gosub CALCLOAD
+	If UPCT And U2
+		CNVTU[0] = PFU1[16];CNVTU[1] = 0;CNVTU[2] = 2
+		CNVTA = U2 \ Gosub CONVERT
+		U2 = 0 - AMOUNT
+	End If 
+	If REC_CMDTY
+		CH_COMMODITY = FindChannel()
+		Let F1$ = "2/COMMODITY"+Str$(COID)
+		Ropen #CH_COMMODITY,"files/" + F1$
+		Try
+			Mat Read #CH_CMDTY,REC_CMDTY,0;CMDTY$;
+			X$[1,4] = CMDTY$[32,35]
+		Else
+			x$[1,4]=A$[152,155]
+		End try
+		X$[5] = P3 Using "### "
+		Search #CH_COMMODITY,2,1;X$,REC_TCMDTY,E
+		If E
+			CMDTYBASE = 0;CMDTYMULTI = 0;CMDTYUPCHG = 0;CMDTYBRKTBL = 0
+		Else 
+			CH_TCMDTY = CH_COMMODITY
+			Rem
+			Mat Read #CH_TCMDTY,REC_TCMDTY,0;CCODE$
+			Mat Read #CH_TCMDTY,REC_TCMDTY,25;CCPT$
+			Mat Read #CH_TCMDTY,REC_TCMDTY,40;CMDTYBASE
+			Mat Read #CH_TCMDTY,REC_TCMDTY,42;CMDTYMULTI
+			Mat Read #CH_TCMDTY,REC_TCMDTY,46;CMDTYBRKTBL
+			Mat Read #CH_TCMDTY,REC_TCMDTY,48;CMDTYUPCHG$
+			Mat Read #CH_TCMDTY,REC_TCMDTY,49;CMDTYUPCHG
+			Mat Read #CH_TCMDTY,REC_TCMDTY,53;CMDTYBRKFLAG
+			Mat Read #CH_TCMDTY,REC_TCMDTY,55;CCOPEN$
+			Rem
+		End If 
+		If Not(CMDTYBASE) And Not(CMDTYMULTI) Let CMDTYMULTI = 1
+		If CH_COMMODITY>0 Try Close #CH_COMMODITY Else rem
+	Else 
+		CMDTYBASE = 0;CMDTYMULTI = 0
+	End If 
+Return 
+
+SETWHSE: Rem
+	If WHSEPR
+		X2 = W3[19] + W3[20] + W3[21] + W3[22] + W3[23] + W3[24]
+		If WHPARC[1] Let PR_C4[3] = WHPARC[1] ! Else If X2 Let PR_C4[3] = 0 ! DO NOT ZERO OUT!
+		! newer versions save the list price to product & warehouse so still needs recalc!
+		For X2 = 20 To 25
+			If Not(W3[X2 - 1]) Let W3[X2 - 1] = A[X2]
+		Next X2
+		If Not(WHLM[0]) And Not(W3[17]) Let WHLM[0] = LM[0]
+		If Not(W3[17]) Let W3[17] = B[8]
+		If Not(WHLM[1]) And Not(W3[14]) Let WHLM[1] = LM[1]
+		If Not(W3[14]) Let W3[14] = PF_LOAD2
+		If Not(W3[15]) Let W3[15] = B[21]
+		If Not(W3[16]) Let W3[16] = B[10]
+		If Not(W3[18]) Let W3[18] = PR_C4[4]
+		If Not(WHMISC[2]) Let WHMISC[2] = PRPARC[2]
+		If REC_PRWH Let B[22] = WHPARC[0]
+		If Not(W2[3]) Let W2[3] = B[24]
+	End If 
+Return 
+
+SETPEND: Rem
+	If Not(FUTURE) Return 
+	If PRPARC[0] Let HLDCOST = B[8];B[8] = PRPARC[0]
+	If PFTB[0] Let B[22] = PFTB[0]
+	If PFTB[1] Let PR_C4[3] = PFTB[1]
+	X2 = PFCO[1] \ Gosub YMD2JUL \ X2 = 0
+	JDATE[1] = X2
+	If PFCO[0] And JDATE[1] <= JDATE[0]
+		HLDCOST = PR_C4[4];PR_C4[4] = PFCO[0]
+	End If 
+	X2 = PLC[1] \ Gosub YMD2JUL \ X2 = 0
+	JDATE[1] = X2
+	If PLC[0] And JDATE[1] <= JDATE[0]
+		HLDCOST = B[10];B[10] = PLC[0]
+	End If 
+	If WHSEPR
+		If WHMISC[0] Let HLDCOST = W3[17];W3[17] = WHMISC[0]
+		If WHPARC[4] Let WHPARC[0] = WHPARC[4]
+		If WHPARC[5] Let WHPARC[1] = WHPARC[5]
+		X2 = W7[3] \ Gosub YMD2JUL \ X2 = 0
+		JDATE[1] = X2
+		If W7[2] And JDATE[1] <= JDATE[0] Let HLDCOST = W3[18];W3[18] = W7[2]
+		X2 = W7[13] \ Gosub YMD2JUL \ X2 = 0
+		JDATE[1] = X2
+		If W7[7] And JDATE[1] <= JDATE[0] Let HLDCOST = W3[16];W3[16] = W7[7]
+	End If 
+Return 
+
+GETLP: Rem
+	START = 0;END_ = 999
+	If L9[1] Let START = L9[1];END_ = L9[1]
+	If Not(DEPTLP) Let START = 0;END_ = 0
+	X2 = START
+	LOOPME: Rem
+		I1$ = " ",I1$;I1$[1,6] = CUSTCODE Using "######"
+		I1$[7,10] = X2 Using "####"
+		I1$[11] = A$[140,151]
+		Search #CH_LASTPR,2,1;I1$,REC_LASTPR,E \ If E > 1 Gosub Err_Search
+		If E Let REC_LASTPR = 0
+		X2 = X2 + 1
+	If Not(REC_LASTPR) And X2 <= END_ Goto LOOPME
+Return 
+
+GETPMLP: Rem get price master last price
+	if not (fleptr[0,1]) return
+	START = 0;END_ = 999
+	If L9[1] Let START = L9[1];END_ = L9[1]
+	If Not(DEPTLP) Let START = 0;END_ = 0
+	X2 = START
+	LOOPPMLP: Rem
+		I1$ = " ",I1$;I1$[1,6] = fleptr[0,1] Using "######"
+		I1$[7,10] = X2 Using "####"
+		I1$[11] = A$[140,151]
+		Search #CH_LASTPR,2,1;I1$,REC_LASTPR,E \ If E > 1 Gosub Err_Search
+		If E Let REC_LASTPR = 0
+		X2 = X2 + 1
+	If Not(REC_LASTPR) And X2 <= END_ Goto LOOPPMLP
+Return 
+
+READLP: Rem
+	Rem
+	Mat Read #CH_LASTPR,REC_LASTPR,0;LP$
+	Read #CH_LASTPR,REC_LASTPR,12;LPDF
+	Mat Read #CH_LASTPR,REC_LASTPR,16;LPC1
+	Mat Read #CH_LASTPR,REC_LASTPR,28;LPC2
+	Mat Read #CH_LASTPR,REC_LASTPR,46;LPC3
+	Mat Read #CH_LASTPR,REC_LASTPR,56;LP2$
+	Mat Read #CH_LASTPR,REC_LASTPR,140;LPC4
+	Mat Read #CH_LASTPR,REC_LASTPR,164;LPMT$
+	Read #CH_LASTPR,REC_LASTPR,166;AI
+	Mat Read #CH_LASTPR,REC_LASTPR,168;LPR
+	Mat Read #CH_LASTPR,REC_LASTPR,198;LPR1
+	Mat Read #CH_LASTPR,REC_LASTPR,214;LPEUN
+	Mat Read #CH_LASTPR,REC_LASTPR,220;LPUNF
+	Mat Read #CH_LASTPR,REC_LASTPR,262;PERM
+	Read #CH_LASTPR,REC_LASTPR,274;LPWH
+	Mat Read #CH_LASTPR,REC_LASTPR,276;LPC5
+	Read #CH_LASTPR,REC_LASTPR,292;LPPCDATE
+	Read #CH_LASTPR,REC_LASTPR,296;LPLPERM
+	Mat Read #CH_LASTPR,REC_LASTPR,302;LPCURR
+	Read #CH_LASTPR,REC_LASTPR,314;LPCPT
+	Read #CH_LASTPR,REC_LASTPR,316;LPCSDT
+	Read #CH_LASTPR,REC_LASTPR,320;LPDEPT
+	Mat Read #CH_LASTPR,REC_LASTPR,324;LPFPERM
+	Mat Read #CH_LASTPR,REC_LASTPR,336;PPPUSERID
+	Mat Read #CH_LASTPR,REC_LASTPR,340;LPUNIT
+	Mat Read #CH_LASTPR,REC_LASTPR,352;PPPCID
+	Rem
+	Unlock #CH_LASTPR
+Return 
+
+CONVORD: Rem
+	CNVTU[0] = 0;CNVTU[1] = UN[0];CNVTU[2] = 1;CNVTA = L7[2]
+	Gosub CONVERT
+	UWORK[0] = AMOUNT
+Return 
+
+COSTUPCHARGE: Rem
+	If REC_LASTPR>0 And PERMPRICE And P61$[65,65] = "N"
+		If LPEUN[2]
+			ROL0 = 0
+			Return 
+		End If 
+	End If 
+	If LCO[0] > 0 And LCO < 8
+		If ROL0
+			PRD0 = ROL0
+		Else 
+			If PRD1 And PRD0
+				CNVTU[0] = PFU1[16];CNVTU[1] = 0;CNVTU[2] = 2
+				CNVTA = PRD0 \ Gosub CONVERT
+				PRD0 = 0 - AMOUNT
+			End If 
+		End If 
+		ROL0 = 0
+		If P61$[58,58] = "U"
+			If UN[0] = PFU1[16]
+				Return 
+			Else 
+				If UN[0] <> PFU1[0]
+					CNVTU[0] = UN[0];CNVTU[1] = 0;CNVTU[2] = 5;CNVTA = 1
+					Gosub CONVERT
+					SELLFAC = AMOUNT
+					CNVTU[0] = PFU1[16];CNVTU[1] = 0;CNVTU[2] = 5;CNVTA = 1
+					Gosub CONVERT
+					If SELLFAC >= AMOUNT Return 
+				End If 
+			End If 
+		Else 
+			If UN[0] = PFU1[16] And Not(Fra(UWORK[0])) Return 
+		End If 
+		CNVTU[0] = UN[0];CNVTU[1] = PFU1[16];CNVTU[2] = 5;CNVTA = Abs(UWORK[0])
+		Gosub CONVERT
+		If (AMOUNT > 0 And AMOUNT < 1) Or P61$[58,58] = "U"
+			ROL0 = PRD0
+		Else 
+			ROL0 = 0
+		End If 
+	End If 
+Return 
+
+UPCHARGE: Rem
+	If REC_LASTPR>0 And PERMPRICE And P61$[65,65] = "N"
+		If LPEUN[2]
+			L7[8] = 0
+			Return 
+		End If 
+	End If 
+	If P61$[37,37] = "Y" Or (L9[0] = 0 Or L9[0] = 1 Or L9[0] = 9 Or (L9[0] <= -1 And L9[0] >= -7))
+		If L7[8] Let U2 = L7[8]
+		L7[8] = 0
+		If P61$[58,58] = "U"
+			If UN[0] = PFU1[16]
+				Return 
+			Else 
+				If UN[0] <> PFU1[0]
+					CNVTU[0] = UN[0];CNVTU[1] = 0;CNVTU[2] = 5;CNVTA = 1
+					Gosub CONVERT
+					SELLFAC = AMOUNT
+					CNVTU[0] = PFU1[16];CNVTU[1] = 0;CNVTU[2] = 5;CNVTA = 1
+					Gosub CONVERT
+					If SELLFAC >= AMOUNT Return 
+				End If 
+			End If 
+		Else 
+			If UN[0] = PFU1[16] And Not(Fra(UWORK[0])) Return 
+		End If 
+		CNVTU[0] = UN[0];CNVTU[1] = PFU1[16];CNVTU[2] = 5;CNVTA = Abs(UWORK[0])
+		Gosub CONVERT
+		If (AMOUNT > 0 And AMOUNT < 1) Or P61$[58,58] = "U"
+			L7[8] = U2
+			If P60$[50,50] = "Y"
+				If CMDTYUPCHG$ = "$"
+					L7[8] = - CMDTYUPCHG
+				Else 
+					If CMDTYUPCHG$ = "%"
+						L7[8] = CMDTYUPCHG
+					End If 
+				End If 
+			End If 
+		Else 
+			L7[8] = 0
+		End If 
+	End If 
+Return
+
+UPTYPE: Rem
+	DTYPE$ = DTYPE$," with up-charge"
+	If L7[8] > 0
+		DDESC$ = DDESC$," +",L7[8] Using "###% u/c"
+	Else 
+		CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2;CNVTA = L7[8]
+		Gosub CONVERT
+		DDESC$ = DDESC$," +",Abs(AMOUNT) Using "###.## u/c"
+	End If 
+Return 
+
+CALCLOAD: Rem
+	CNVTA = 0
+	If WHSEPR
+		If WHLM[0]
+			WH = WHSE;LTBL = WHLM[0];CNVTA = 0
+			If PREC[0] And LTBL Gosub GETLOAD
+			W3[17] = CNVTA
+		End If 
+		If WHLM[1]
+			WH = WHSE;LTBL = WHLM[1];CNVTA = 0
+			If PREC[0] And LTBL Gosub GETLOAD
+			W3[14] = CNVTA
+		End If 
+	Else 
+		If LM[0]
+			WH = 0;LTBL = LM[0];CNVTA = 0
+			If PREC[0] And LTBL Gosub GETLOAD
+			B[8] = CNVTA
+		End If 
+		If LM[1]
+			WH = 0;LTBL = LM[1];CNVTA = 0
+			If PREC[0] And LTBL Gosub GETLOAD
+			PF_LOAD2 = CNVTA
+		End If 
+	End If 
+Return 
+
+GETLOAD: Rem
+	REC_LMARK = LTBL;COST = CNVTA
+	If REC_LMARK > 0 And REC_LMARK < Chf(CH_LMARK)
+		Mat Read #CH_LMARK,REC_LMARK,24;LM1;
+		Mat Read #CH_LMARK,REC_LMARK,480;LM2;
+		Mat Read #CH_LMARK,REC_LMARK,1100;LM3;
+		Mat Read #CH_LMARK,REC_LMARK,1404;LM4;
+		If Not(LM1[H5[7] - 1,4]) Or (LM1[H5[7] - 1,4] = 5 And COST <= 0) Return 
+		BASE = LM1[H5[7] - 1,4]
+		If NOPROD And BASE <> 5 Return 
+		If WHSEPR
+			If BASE = 1 Let COST = W3[15]
+			If BASE = 2 Let COST = W3[16]
+			If BASE = 3 Let COST = W3[18]
+			If BASE = 4 Let COST = WHMISC[2]
+		Else 
+			If BASE = 1 Let COST = B[21]
+			If BASE = 2 Let COST = B[10]
+			If BASE = 3 Let COST = PR_C4[4]
+			If BASE = 4 Let COST = PRPARC[2]
+		End If 
+		CNVTU[0] = 0;CNVTU[1] = PFU1[11];CNVTU[2] = 2;CNVTA = COST
+		Gosub CONVERT
+		M7 = AMOUNT
+		For X1 = 0 To 7
+			If X1 <= 3 Let M6 = LM2[H5[7] - 1,X1];M5 = LM1[H5[7] - 1,X1]
+			If X1 > 3 Let M6 = LM4[H5[7] - 1,X1 - 4];M5 = LM3[H5[7] - 1,X1 - 4]
+			If M6
+				If Not(M5) Let M7 = M7 + (M7 * (M6 / 100))
+				If M5 = 1 Let M7 = M7 + M6
+				If M5 = 2 Let M7 = (M7 / (100 - M6)) * 100
+				If M5 = 3
+					CNVTU[0] = -1;CNVTU[1] = PFU1[11];CNVTU[2] = 2;CNVTA = M6
+					Gosub CONVERT
+					M7 = M7 + AMOUNT
+				End If 
+			End If 
+		Next X1
+		CNVTA = M7
+		CNVTU[0] = PFU1[11];CNVTU[1] = 0;CNVTU[2] = 2
+		Gosub CONVERT
+		CNVTA = AMOUNT
+	End If 
+Return
+
+SETCOST: Rem
+	If WHSEPR
+		L5[1] = W3[17];LCO = 2;DCOST$ = "load"
+		If DFT_COST = 2
+			L5[1] = W3[14];LCO = 5;DCOST$ = "redi"
+		Else 
+			If DFT_COST = 3
+				L5[1] = W3[15];LCO = 4;DCOST$ = "average"
+			Else 
+				If DFT_COST = 4
+					L5[1] = W3[16];LCO = 3;DCOST$ = "last"
+				Else 
+					If DFT_COST = 5
+						L5[1] = W3[18];LCO = 1;DCOST$ = "base"
+					End If 
+				End If 
+			End If 
+		End If 
+	Else 
+		L5[1] = B[8];LCO = 2;DCOST$ = "load"
+		If DFT_COST = 2
+			L5[1] = PF_LOAD2;LCO = 5;DCOST$ = "redi"
+		Else 
+			If DFT_COST = 3
+				L5[1] = B[21];LCO = 4;DCOST$ = "average"
+			Else 
+				If DFT_COST = 4
+					L5[1] = B[10];LCO = 3;DCOST$ = "last"
+				Else 
+					If DFT_COST = 5
+						L5[1] = PR_C4[4];LCO = 1;DCOST$ = "base"
+					End If 
+				End If 
+			End If 
+		End If 
+	End If 
+	Gosub SET2NDLINECOST
+	Gosub COSTUPCHARGE
+Return 
+
+SET2NDLINECOST: Rem
+	If WHSEPR
+		If COST2 = 1 Let CST[0] = W3[17]
+		If COST2 = 2 Let CST[0] = W3[14]
+		If COST2 = 3 Let CST[0] = W3[15]
+		If COST2 = 4 Let CST[0] = W3[16]
+		If COST2 = 5 Let CST[0] = W3[18]
+		If COST2 = 7 Let CST[0] = WHMISC[2]
+	Else 
+		If COST2 = 1 Let CST[0] = B[8]
+		If COST2 = 2 Let CST[0] = PF_LOAD2
+		If COST2 = 3 Let CST[0] = B[21]
+		If COST2 = 4 Let CST[0] = B[10]
+		If COST2 = 5 Let CST[0] = PR_C4[4]
+		If COST2 = 7 Let CST[0] = PRPARC[2]
+	End If 
+Return 
+
+SETPENDCOST: Rem
+	If Not(FUTURE) Return 
+	If LPEUN[2] <> -7 Return 
+	If PERM[1] = 0 Or L5[1] = 0 Return 
+	If PERM[1] = L5[1] Return 
+	If NOLOWER And PERM[1] > L5[1] Return 
+	PERM[0] = L5[1] + (L5[1] * ((PERM[0] - PERM[1]) / PERM[1]))
+Return 
+
+GETPERM: Rem
+	UNITPRICE = 0;L9[0] = 0
+	BASEHOLD = 0;DDESC$ = " ",DDESC$;DTYPE$ = " ",DTYPE$;DBASE$ = " ",DBASE$
+	If LPEUN[2] <= -1 And LPEUN[2] >= -6
+		If MATPR And PR_C4[2] = 1 And (PERM[0] >= 1 And PERM[0] <= 6)
+			FIELD = PERM[0] ! + 1
+			BASE = PR_C4[4]
+			If WHSEPR Let BASE = W3[18]
+			If PR_C4[3]>0
+				Gosub GETMATPRICE
+				If WHSEPR Let W3[18 + FIELD] = X4 Else Let A[19 + FIELD] = X4
+			Else ! "Progressive has mup table 0!
+				if custom_customer$="PRBRICK"
+					gosub GetMatPrice
+					if whsepr let w3[18+field]=x4 else let a[19+field]=x4
+				ENDIF
+			End If 
+			If WHSEPR Let UNITPRICE = W3[18 + FIELD] Else Let UNITPRICE = A[19 + FIELD]
+			If UNITPRICE
+				L9[0] = LPEUN[2]+100
+				DTYPE$ = PERM[0] Using "Permanent list #"
+				If PR_C4[3] Let DTYPE$ = DTYPE$,PR_C4[3] Using " (table ###)"
+				if not(PR_C4[3]) Let DTYPE$ = DTYPE$+" (manual %)" ! Progressive
+			End If 
+		End If 
+	End If 
+	If LPEUN[2] <= -8 And LPEUN[2] >= -17
+		If PR_C4[2] = 2 And (PERM[0] >= 1 And PERM[0] <= 10)
+			C3[0] = 4;C3[1] = PERM[0]
+			Gosub GETTENBPRICE
+			If UNITPRICE
+				L9[0] = LPEUN[2]+100
+				DTYPE$ = PERM[0] Using "Permanent bracket ##"," (table "
+				DTYPE$ = DTYPE$,PR_C4[3] Using "###)"
+			End If 
+		End If 
+	End If 
+	If LPEUN[2] = -7
+		If FUTURE
+			Gosub SETPENDCOST
+			If LPFPERM[0] > 0 And LPFPERM[1]
+				X2 = LPFPERM[1] \ Gosub YMD2JUL \ X2 = 0
+				JDATE[1] = X2
+				If JDATE[1] <= JDATE[0]
+					PERM[0] = LPFPERM[0]
+				End If 
+			End If 
+		End If
+		If lpc3[3]=-3 and LPR1[0]<>X2[6] ! "catch weight wgt changed
+			Let A[6]=lpr1[0];A[5]=LPunf[5] ! "set to lp wgt
+			Let cnvtu[0]=0;cnvtu[1]=lpc3[3];cnvtu[2]=2
+			Let CNVTA=Perm[0] \ gosub convert: ! "to lp Pricing u/m
+			Let A[6]=HldLbs[0,0];A[5]=HldLbs[0,1] ! "back to product wgts
+			Let cnvtu[0]=lpc3[3];cnvtu[1]=0;cnvtu[2]=2
+			Let CNVTA=Amount  \ gosub convert:
+			Let Perm[0]=Amount ! "base in product wgt
+		Endif
+		UNITPRICE = PERM[0]
+		If UNITPRICE < 0
+			UNITPRICE = 0
+		Else 
+			L9[0] = LPEUN[2]+100
+			DTYPE$ = "Permanent fixed price"
+		End If 
+	End If 
+	If LPEUN[2] = 9
+		If MATPR And PR_C4[2] = 1 And (PERM[0] >= 1 And PERM[0] <= 10)
+			UNITPRICE = 0;JUMP_ = - PERM[0];L7[9] = 0
+			DTYPE$ = PERM[0] Using "Permanent break level ##"
+			DTYPE$ = DTYPE$,B[22] Using " (table ###)"
+			l9[0]=lpeun[2]+100
+		End If 
+	End If 
+	If LPEUN[2] = 10
+		If PERM[0] >= 1 And PERM[0] <= 100
+			L6[0] = PERM[0];L6[1] = 0;L9[0] = LPEUN[2]+100;L7[9] = 0;UNITPRICE = 0
+			DTYPE$ = PERM[0] Using "Permanent discount of ###%"
+		End If 
+	End If 
+	If LPEUN[2] = 14
+		If PERM[0] >= 1 And PERM[0] <= 99.99
+			UNITPRICE = (L5[1] / ((100 - PERM[0]) / 100))
+			If UNITPRICE
+				L9[0] = LPEUN[2]+100
+				DTYPE$ = PERM[0] Using "Permanent margin of ###.##%"
+				CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2;CNVTA = L5[1]
+				Gosub CONVERT
+				DDESC$ = AMOUNT Using PMASK$," [",DCOST$," cost] + "
+				DDESC$ = DDESC$,PERM[0] Using "###.##% margin"
+			End If 
+		End If 
+	End If 
+	If DTYPE$[1,3] = "   " Let DDESC$ = " ",DDESC$
+Return
+
+GETMATPRICE: Rem
+clear pm5[]
+clear pm6[]
+	if field>0 and field<7 ! "don't do loads here 1-6 = LP 1-6
+		let Rec_PMark=PR_C4[3] ! " (field*1000)-1000+pr_c4[3]
+		if Rec_Pmark>0 ! "get table
+			mat read #CH_PMark,Rec_PMark,18;pm5;
+			mat read #CH_PMark,Rec_PMark,78;pm6;
+		Else ! "using in prod markup %s
+		    IF CUSTOM_CUSTOMER$="PRBRICK"
+				Let pM6[field-1,0]=LPMRK[Field-1] ! "field = 1 to 6
+				!dbase$="Base Cost";CMDTYBASE = 9
+				let pm5[field-1,4]=0
+			ELSE
+				LET BASE=0 ! no pricemark - use manual list
+			ENDIF
+		Endif
+		If Not(PR_C4[3]) And Base<=0 ! "can't calc - keep List
+		   If WhsePr Let Amount=W3[Field+18] ! [19-24]
+		   If Not(WhsePr) Let Amount=A[field+19] ! [20-25]
+		   Let DDesc$="["+dbase$+"] "
+		   goto MPDone:
+		Endif
+			Let X1[5]=Field-1 ! "so ends as 0-5
+			If PM5[x1[5],4]=1
+				Let Base=B[10] \ if WhsePr Let Base=W3[16] ! "last
+			Endif
+			If PM5[x1[5],4]=2 ! "load cost
+				Let Base=B[8] \ if WhsePr Let Base=W3[17]
+			Endif
+			If PM5[x1[5],4]=3 ! "load2 cost
+				Let Base=PF_Load2 \ if WHSEPR Let Base=W3[14]
+			Endif
+			If PM5[x1[5],4]=4 ! "average cost
+				Let Base=B[21] \ if WHSEPR Let Base=W3[15]
+			Endif
+			If PM5[x1[5],4]=5 ! "NET PO
+				Let Base=PRPARC[2] \ if WhsePr Let Base=WHMISC[2]
+			Endif
+			CNVTA = BASE;CNVTU[0] = 0;CNVTU[1] = PFU1[11];CNVTU[2] = 2
+			Gosub CONVERT
+			M7 = AMOUNT
+			CNVTA = BASE;CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2
+			Gosub CONVERT
+			BASEHOLD = AMOUNT
+			!DDESC$ = "([",DBASE$,"] ",BASEHOLD Using PMASK$
+			let ddesc$="([",dbase$,"] "
+			if pm5[x1[5],4]=0 let ddesc$=ddesc$,"BSC "
+			if pm5[x1[5],4]=1 let ddesc$=ddesc$,"POC "
+			if pm5[x1[5],4]=2 let ddesc$=ddesc$,"LDC "
+			if pm5[x1[5],4]=3 let ddesc$=ddesc$,"L2C "
+			if pm5[x1[5],4]=4 let ddesc$=ddesc$,"AVC "
+			if pm5[x1[5],4]=4 let ddesc$=ddesc$,"NPC "
+			let ddesc$=ddesc$,basehold using pmask$
+			X1 = 0
+			MARKLOOP1: Rem
+				let X1[5]=Field-1 ! "so ends as 0-5
+				!"cct135153 "cct168744
+				if (mode=0 or mode=1) and pm6[x1[5],0]=0 and pm6[x1[5],1]=0 and pm6[x1[5],2]=0 and pm6[x1[5],3]=0 
+					let m7=0
+				endif
+
+				if pm6[x1[5],x1] ! "have a factor
+					let cnvtu[0]=pfu1[11];cnvtu[1]=un[1];cnvtu[2]=2
+					
+					if not(pm5[X1[5],x1])
+						let ddesc$=ddesc$,pm6[X1[5],x1] using " +###.##%"
+						let m7=m7+(m7*(pm6[X1[5],x1]/100)) ! "%
+						if custom_customer$="PRBRICK"
+							Let M7=FNR(M7) ! "old system round @ 2 - cct 187534 
+						endif
+					endif
+					
+					if pm5[X1[5],x1]=1
+						let cnvta=pm6[X1[5],x1] \ gosub Convert:
+						if pm6[X1[5],x1]>=0 let ddesc$=ddesc$," +" else let ddesc$=ddesc$," "
+						let ddesc$=ddesc$,amount using pmask$
+						let m7=m7+pm6[X1[5],x1] ! "$
+					endif
+					
+					if pm5[X1[5],x1]=2
+						let ddesc$=ddesc$,pm6[X1[5],x1] using " +###.##% g/p"
+						let m7=(m7/(100-pm6[X1[5],x1]))*100 ! "margin
+					endif
+					If Debug Let DBG$="Val="+Str$(X1)+" NV="+Str$(M7) \ gosub dbg:
+					if x1<3 let x1=x1+1 \ goto MarkLoop1: ! "next
+				endif
+			DDESC$ = DDESC$,")"
+			CNVTU[0] = PFU1[11];CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = M7
+			Gosub CONVERT
+			MPDone: ! progressive bypasses
+			X4 = AMOUNT
+		! End If ! OF VALID TABLE (Pr Brick has and uses table zero!)
+	End If ! OF VALID FIELD
+Return 
+
+GETTENBPRICE: Rem
+	UNITPRICE = 0
+	If (PR_C4[3] > 0 And B[22])
+		BRACKET = 0
+		If C3[0] = 4
+			BRACKET = C3[1]
+		Else 
+			REC_BRKTBL = B[22]
+			Mat Read #CH_BRKTBL,REC_BRKTBL,0;B1;
+			Read #CH_BRKTBL,REC_BRKTBL,200;B3;
+			Mat Read #CH_BRKTBL,REC_BRKTBL,202;BRD$;
+			If B3 = 2
+				CNVTA = Abs(UWORK[0]);CNVTU[0] = UN[0];CNVTU[1] = PFU1[8];CNVTU[2] = 1
+				Gosub CONVERT
+				UWORK[5] = AMOUNT
+				For X1 = 9 To 0 Step -1
+					X2 = Abs(B1[X1,0])
+					If (B1[X1,0] < 0 And S3[4] >= X2) Or (B1[X1,0] >= 0 And UWORK[5] >= X2)
+						BRACKET = X1 + 1;X1 = -99
+					End If 
+				Next X1
+				If C3[0] = 5 Let BRACKET = BRACKET + C3[1]
+			End If 
+		End If 
+		If BRACKET > 10 Let BRACKET = 10
+		If BRACKET
+			GET_PRODMARK_REC: Rem
+			REC_PRODMARK = (BRACKET * 1000) - 1000 + PR_C4[3]
+			If REC_PRODMARK > 0
+				Mat Read #CH_PRODMARK,REC_PRODMARK,0;M5;
+				Mat Read #CH_PRODMARK,REC_PRODMARK,10;M6;
+				If BRACKET > 1 And Not(M6[0]) Let BRACKET = BRACKET - 1 \ Goto GET_PRODMARK_REC
+				CNVTA = PR_C4[4] \ If P9$[32,32] = "Y" Let CNVTA = W3[18]
+				CNVTU[0] = 0;CNVTU[1] = PFU1[11];CNVTU[2] = 2
+				Gosub CONVERT
+				M7 = AMOUNT
+				CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2
+				CNVTA = PR_C4[4] \ If P9$[32,32] = "Y" Let CNVTA = W3[18]
+				Gosub CONVERT
+				BASEHOLD = AMOUNT
+				DDESC$ = "(",BASEHOLD Using PMASK$
+				X1 = 0
+				MARKLOOP2: Rem
+				If M6[X1]
+					CNVTU[0] = PFU1[11];CNVTU[1] = UN[1];CNVTU[2] = 2
+					If Not(M5[X1])
+						DDESC$ = DDESC$,M6[X1] Using " +###.##%"
+						M7 = M7 + (M7 * (M6[X1] / 100))
+						if custom_customer$="PRBRICK"
+							Let M7=FNR(M7) ! "old system round @ 2 - cct 187534 
+						endif
+					End If 
+					If M5[X1] = 1
+						CNVTA = M6[X1] \ Gosub CONVERT
+						If M6[X1] >= 0 Let DDESC$ = DDESC$," +" Else Let DDESC$ = DDESC$," "
+						DDESC$ = DDESC$,AMOUNT Using PMASK$
+						M7 = M7 + M6[X1]
+					End If 
+					If M5[X1] = 2
+						DDESC$ = DDESC$,M6[X1] Using " +###.##% g/p"
+						M7 = (M7 / (100 - M6[X1])) * 100
+					End If 
+					If X1 < 3 Let X1 = X1 + 1 \ Goto MARKLOOP2
+				End If 
+				DDESC$ = DDESC$,")"
+				If P60$[18,18] = "Y" And PFU1[11] = -1 Let M7 = FNF(M7)
+				CNVTU[0] = PFU1[11];CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = M7
+				Gosub CONVERT
+				UNITPRICE = AMOUNT
+			End If 
+		End If 
+	End If 
+	If UNITPRICE And Not(L9[0]) Let L9[0] = 5;OLM[2] = 0
+Return 
+
+MATPSETUP: Rem
+	DBASE$ = " ",DBASE$
+	If Not(CMDTYBASE) Let CMDTYBASE = CMDTYMULTI + 2;CMDTYMULTI = 1
+	If CMDTYBASE = 1 Let DBASE$ = "load cost"
+	If CMDTYBASE = 2 Let DBASE$ = "last cost"
+	If CMDTYBASE >= 3 And CMDTYBASE <= 8 Let FIELD = CMDTYBASE - 2;DBASE$ = CMDTYBASE - 2 Using "list #"
+	If CMDTYBASE = 9 Let DBASE$ = "base cost"
+	If CMDTYBASE = 10 Let DBASE$ = "redi cost"
+	If CMDTYBASE >= 3 And CMDTYBASE <= 8 ! PrBrick has 0 !" was And PR_C4[3]
+      if (custom_customer$<>"PRBRICK" and pr_c4[3]) or custom_customer$="PRBRICK" ! std = needs table  prbr=tbl 0
+		If WHSEPR
+			BASE = W3[18]
+			Gosub GETMATPRICE
+			If FIELD > 0 And FIELD < 7 Let W3[18 + FIELD] = X4
+		Else 
+			BASE = PR_C4[4]
+			Gosub GETMATPRICE
+			If FIELD > 0 And FIELD < 7 Let A[19 + FIELD] = X4
+		End If 
+	  Endif
+	End If 
+	If WHSEPR
+		If CMDTYBASE = 1 Let UNITPRICE = W3[17]
+		If CMDTYBASE = 2 Let UNITPRICE = W3[16]
+		If CMDTYBASE >= 3 And CMDTYBASE <= 8 Let UNITPRICE = W3[16 + CMDTYBASE]
+		If CMDTYBASE = 9 Let UNITPRICE = W3[18]
+		If CMDTYBASE = 10 Let UNITPRICE = W3[14]
+	Else 
+		If CMDTYBASE = 1 Let UNITPRICE = B[8]
+		If CMDTYBASE = 2 Let UNITPRICE = B[10]
+		if custom_customer$="AMWAX"
+			! "cct#132458
+			if CmdtyBase>=3 and CmdtyBase<=8 
+				let unitprice=a[20]
+				if a[21] let unitprice=a[21]
+			end if
+		Else ! everyone else
+			If CMDTYBASE >= 3 And CMDTYBASE <= 8 Let UNITPRICE = A[17 + CMDTYBASE]
+		endif ! custom or not
+		If CMDTYBASE = 9 Let UNITPRICE = PR_C4[4]
+		If CMDTYBASE = 10 Let UNITPRICE = PF_LOAD2
+	End If 
+	If Custom_customer$<>"PRBRICK" ! std - no table 0
+		If UNITPRICE And (CMDTYBASE = 1 Or CMDTYBASE = 2 Or CMDTYBASE = 9 Or CMDTYBASE = 10 Or Not(PR_C4[3]))
+			CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2;CNVTA = UNITPRICE
+			Gosub CONVERT
+			DDESC$ = "([",DBASE$,"] ",AMOUNT Using PMASK$,")"
+		End If 
+	Else
+		if unitprice and (CmdtyBase=1 or CmdtyBase=2 or CmdtyBase=9 or CmdtyBase=10) ! or not pr_c4[3])
+			let cnvtu[0]=0;cnvtu[1]=un[1];cnvtu[2]=2;cnvta=unitprice
+			gosub Convert:
+			let ddesc$="([",dbase$,"] ",amount using pmask$,")"
+		 Endif
+	endif
+	If Not(CMDTYMULTI) Let CMDTYMULTI = 1
+	UNITPRICE = UNITPRICE * CMDTYMULTI
+	If CMDTYMULTI <> 1 Let DDESC$ = DDESC$,CMDTYMULTI Using " x##.### factor"
+	If UNITPRICE And Not(L9[0]) Let L9[0] = 1;OLM[2] = 0
+Return 
+
+CHECKBREAK: Rem
+	If AMALG Or L9[0] = 10 Or PR_C4[2] <> 1 Or (Not(CMDTYBRKFLAG) And MATPR) Return 
+	L6[0] = 0;L6[1] = 0;UWORK[11] = 0;PPBREAK = 0
+	If L9[0] = 1 Or L9[0] = 9 Or JUMP_
+		L7[9] = 0
+		L5[0] = FNR(L7[2] * UNITPRICE)
+		If UN[1] = -2 Let L5[0] = FNR(UNITPRICE)
+		If P60$[50,50] = "Y" And CMDTYBRKTBL > 0 And CMDTYBRKTBL <= Chf(CH_BRKTBL)
+			REC_BRKTBL = CMDTYBRKTBL
+		Else 
+			REC_BRKTBL = B[22]
+			If REC_BRKTBL <= 0 Or REC_BRKTBL > Chf(CH_BRKTBL) Goto ENDBREAK
+		End If 
+		Mat Read #CH_BRKTBL,REC_BRKTBL,0;B1;
+		Read #CH_BRKTBL,REC_BRKTBL,200;B3;
+		Mat Read #CH_BRKTBL,REC_BRKTBL,202;BRD$;
+		If (B3 = 1 Or B3 = 3)
+			If JUMP_ < 0
+				L7[9] = REC_BRKTBL + (Abs(JUMP_) / 100)
+				JUMP_ = 0
+			End If 
+			I = -1
+			If L7[9] And Not(JUMP_)
+				I = Int(Fra(L7[9]) * 100) - 1
+				L7[9] = 0
+			End If 
+			If (I >= 0 And I <= 9)
+				X4 = B1[I,2];T0 = B1[I,1];PPBREAK = 1
+			Else 
+				X4 = 0;T0 = 99;I1 = 9
+				CNVTU[0] = UN[0];CNVTU[1] = PFU1[8];CNVTU[2] = 5
+				CNVTA = UWORK[0] \ Gosub CONVERT
+				STOCK = AMOUNT
+				If B3 = 1 Let BRKAMT = Abs(STOCK)
+				If B3 = 3 Let BRKAMT = Abs(L5[0])
+				For I = I1 To 0 Step -1
+					If B1[I,0] < 0 Goto ENDBREAK
+					If (B1[I,0] Or Not(I)) And BRKAMT >= B1[I,0] Goto GOTBREAK
+				Next I
+				If B3 = 1 If JUMP_
+					I = -1
+					Goto GOTBREAK
+				End If 
+				Goto ENDBREAK
+				GOTBREAK: Rem
+				If JUMP_ Let I = I + JUMP_;PPBREAK = 1 \ If I > 9 Let I = 9
+				X4 = B1[I,2];T0 = B1[I,1]
+			End If 
+			CHECKVALID: Rem
+			If Not(X4) And I > 0
+				I = I - 1
+				X4 = B1[I,2];T0 = B1[I,1]
+				Goto CHECKVALID
+			End If 
+			If X4
+				If Not(T0)
+					L6[0] = X4
+					If L6[0] Let DDESC$ = DDESC$," -",L6[0] Using "###.##% break"
+				Else 
+					L6[1] = X4
+					CNVTU[0] = PFU1[8];CNVTU[1] = 0;CNVTU[2] = 2
+					CNVTA = L6[1] \ Gosub CONVERT
+					L6[1] = AMOUNT;X4 = AMOUNT
+			End If 
+			L7[9] = REC_BRKTBL + ((I + 1) / 100);JUMP_ = 0
+		End If 
+	End If 
+	ENDBREAK: Rem
+	If L6[1] > UNITPRICE Let L6[1] = UNITPRICE;X4 = UNITPRICE
+	End If 
+	If L6[0] Or L6[1]
+		L9[0] = 9
+		If Not(PPBREAK)
+			DTYPE$ = DTYPE$," less break (table",REC_BRKTBL Using "###",", level",I + 1 Using "##"
+			If BRD$[(I + 1) * 10 - 9,(I + 1) * 10 - 8] <> "  " Let DTYPE$ = DTYPE$,"-",BRD$[(I + 1) * 10 - 9,(I + 1) * 10]
+			DTYPE$ = DTYPE$,")"
+		End If 
+	Else 
+		L7[9] = 0
+	End If 
+	If L6[1]
+		CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2;CNVTA = L6[1]
+		Gosub CONVERT
+		UWORK[11] = AMOUNT
+		DDESC$ = DDESC$," -",UWORK[11] Using "###.##"," break"
+	Else 
+		UWORK[11] = 0
+	End If 
+	If L9[0] = 9 Let OLM[2] = 0
+Return 
+
+SP_CHKREBATE: Rem
+	Mat REBATE_ARGS = Zer
+	REBATE_ARGS[0,0] = CH_cntrl
+	REBATE_ARGS[1,0] = CH_PROD
+	REBATE_ARGS[2,0] = CH_PRWH
+	REBATE_ARGS[3,0] = CH_VENDTAG
+	REBATE_ARGS[4,0] = CH_RCONTRACTH
+	REBATE_ARGS[5,0] = CH_REBATEDTL
+	REBATE_ARGS[1,1] = REC_PROD
+	REBATE_ARGS[2,1] = REC_PRWH
+	REBATE_ARGS[1,2] = WHSE
+	REBATE_ARGS[2,2] = CUSTCODE
+	REBATE_ARGS[3,2] = 0
+	if future
+	let REBATE_ARGS[4,2] = 0-h0[9]
+	else
+	REBATE_ARGS[4,2] = H0[9]
+	endif
+	REBATE_ARGS[5,2] = P3
+	if custom_customer$="HTBERRY"
+		IF H5[7]=2 ! do not look for rebates for OT 2
+			LET STATUS=1 ! CUSTOM FROM CCT 230337
+			GOTO SKIPREBATECALL
+		ENDIF
+	Endif
+	!Call "rebates.dl4",REBATE_ARGS[],A$[140,151],STATUS,IntCo,debug,dlog$
+	Call rebates(e$,REBATE_ARGS[],A$[140,151],status,debug,dlog$,rstr$)
+	Skiprebatecall: ! bypass the call
+	If Not(STATUS)
+		RBCOST = REBATE_ARGS[1,3]
+		RBSLCOST = REBATE_ARGS[2,3]
+		RB_BASECOST = REBATE_ARGS[4,3]
+		REBATE_TYPE = REBATE_ARGS[7,3]
+		REC_REBATEDTL = REBATE_ARGS[5,1]
+		Rem
+		Mat Read #CH_REBATEDTL,REC_REBATEDTL,12;RB1
+		Mat Read #CH_REBATEDTL,REC_REBATEDTL,36;RBUM
+		Mat Read #CH_REBATEDTL,REC_REBATEDTL,40;RB
+		Mat Read #CH_REBATEDTL,REC_REBATEDTL,118;RBWH
+		Mat Read #CH_REBATEDTL,REC_REBATEDTL,126;RBL1
+		Mat Read #CH_REBATEDTL,REC_REBATEDTL,138;RB5
+		Rem
+		exSpecs[0] = RB1[4]
+		LCO[1] = RB1[0]
+		If COST2RBT
+			If RBCOST And RBCOST < CST Let CST = RBCOST
+		End If 
+		If COST2 = 6 Let CST = RBCOST
+		If RBSLCOST And (Not(L5[1]) Or RBSLCOST < L5[1])
+			L5[1] = RBSLCOST;DCOST$ = "rebate"
+			LCO = 10
+		End If 
+	Else 
+		RBCOST = 0;RBSLCOST = 0;LCO[1] = 0;exSpecs[0] = 0
+		lco[1]=rb1[0] !"rebate contract #  save rebate contract # regardless
+	End If 
+Return 
+
+SP_CHKCONTRACT: Rem
+	if p61$[137,137] = "Y" ! change priority for contracts to start date
+		gosub SP_CHKCONTRACT_STARTDATE:
+		return
+	end if
+	I$ = " ",I$;I$[1,6] = CUSTCODE Using "######"
+	CT_HEADER: ! loop through all contracts for customer
+		Search #CH_CTRCT,3,2;I$,REC_CTRCT,E
+		If Not(E)
+			X2 = I$[1,6]
+			ISCPI = 0
+			if p61$[111,111] = "Y" MAT READ #CH_CTRCT,REC_CTRCT,50;ISCPI;
+			If X2 = CUSTCODE
+				! got one - set the contract number portion
+				! of the spec price key, the product "portion" is already
+				! set
+				K9$[1,6] = I$[7,12]
+				Search #CH_SPRICE,2,1;K9$,REC_SPRICE,E1
+				If Not(E1)
+					let cntrchk=0
+					if custom_customer$="OMAHA" let cntrchk=i$[8,12]
+					if custom_customer$="STERLING" let cntrchk=i$[8,12]
+					Gosub SP_GETIT
+					If Not(UNITPRICE)
+						let cntrchk=0
+						Goto CT_HEADER
+					endif
+					OLM[2] = I$[8,12]
+					cntrchk=0
+				Else 
+					Goto CT_HEADER
+				End If 
+			End If 
+		End If 
+Return 
+
+SP_CHKCONTRACT_STARTDATE: !
+	k_sort$ = " ",k_sort$;k_sort$[1,12] = k9$[7,18]
+	ContractSortLoop: !
+		search #ch_sort,3,1;k_sort$,REC_SPRICE,e1
+		if E1 goto EndContractSortLoop:
+		if k_sort$[1,12] <> k9$[7,18] goto EndContractSortLoop: ! wrong product
+		ISCPI = k_sort$[24,24]
+		REC_CTRCT = k_sort$[25,34]
+		let cntrchk=0
+		if custom_customer$="OMAHA" let cntrchk=i$[8,12]
+		if custom_customer$="STERLING" let cntrchk=i$[8,12]
+		Gosub SP_GETIT
+		If UNITPRICE
+			OLM[2] = k_sort$[19,23]
+			cntrchk=0
+			goto EndContractSortLoop:
+		endif
+		let cntrchk=0
+	goto ContractSortLoop:
+	EndContractSortLoop: !
+Return
+
+SP_CHKSP: Rem
+	if p61$[137,137] = "Y" ! change priority for contracts to start date
+		gosub SortContractLines:
+	end if
+	If debugdtl Let DBG$ = "Checking special price..." \ Gosub DBG
+	ISCPI = 0 ! special price is not cpi
+	SPSLCOST = 0;UNITPRICE = 0;SBASE_TYPE = 0
+	PROD = 99;L9[0] = 2
+	K9$ = " ",K9$;K9$[1,6] = CUSTCODE Using "######"
+	K9$[7,18] = A$[140,151];K9$[19] = ""
+	Search #CH_SPRICE,2,1;K9$,REC_SPRICE,E
+	If E > 1 Gosub Err_Search
+	If Not(E)
+		Gosub SP_GETIT
+		If UNITPRICE And debugdtl Let DBG$ = "Got single cust/prod price" \ Gosub DBG
+		If UNITPRICE Goto SP_END
+	End If 
+	Gosub SP_CHKCONTRACT
+	If UNITPRICE And debugdtl Let DBG$ = "Got contract price" \ Gosub DBG
+	If UNITPRICE Goto SP_END
+	ISCPI = 0 ! contract not found - can't be cpi
+	If NOPROMO = 0
+		If debugdtl Let DBG$ = "Checking single product promo..." \ Gosub DBG
+		K9$[1,6] = "999999";L9[0] = 3
+		Search #CH_SPRICE,2,1;K9$,REC_SPRICE,E
+		If E > 1 Gosub Err_Search
+		If Not(E)
+			Gosub SP_GETIT
+			If UNITPRICE And debugdtl Let DBG$ = "Got single product promo" \ Gosub DBG
+			If UNITPRICE Goto SP_END
+		End If 
+	End If 
+	! per committee - new cost group type comes BEFORE COMMODITY
+	if debugdtl let dbg$ = "Checking cust/cost grp..." \ gosub dbg:
+	let prod=0;l9[0]=15 ! "customer/costgrp price
+	let k9$=" ",k9$;k9$[1,6]=CustCode using "######";k9$[7,7]="-"
+	let k9$[8,18]=a$[116,126];k9$[19]=""
+	search #CH_SPrice,2,1;k9$,Rec_SPrice,e
+	if e>1 gosub Err_Search:
+	if not(e)
+		gosub SP_Getit:
+		if unitprice and debugdtl let dbg$="Got cust/cost grp price" \ gosub dbg:
+		if unitprice goto SP_End:
+	endif
+	gosub SP_ChkContract:
+	if unitprice and debugdtl let dbg$="Got contract price" \ gosub dbg:
+	if unitprice goto SP_End:
+
+	if nopromo=0    !  ok for promos
+		if debugdtl let dbg$ = "Checking cost group promo..." \ gosub dbg:
+		let k9$[1,6]="999999";l9[0]=16 ! "cost grp promotion
+
+		search #CH_SPrice,2,1;k9$,Rec_SPrice,e
+		if e>1 gosub Err_Search:
+		if not(e)
+			gosub SP_Getit:
+			if unitprice and debugdtl let dbg$="Got cost grp promo" \ gosub dbg:
+			if unitprice goto SP_End:
+		endif
+	endif
+	If debugdtl Let DBG$ = "Checking cust/commodity..." \ Gosub DBG
+	PROD = 0;L9[0] = 4
+	K9$ = " ",K9$;K9$[1,6] = CUSTCODE Using "######";K9$[7,7] = "*"
+	K9$[8,11] = A$[152,155];K9$[19] = ""
+	Search #CH_SPRICE,2,1;K9$,REC_SPRICE,E
+	If E > 1 Gosub Err_Search
+	If Not(E)
+		Gosub SP_GETIT
+		If UNITPRICE And debugdtl Let DBG$ = "Got cust/commodity price" \ Gosub DBG
+		If UNITPRICE Goto SP_END
+	End If 
+	Gosub SP_CHKCONTRACT
+	If UNITPRICE And debugdtl Let DBG$ = "Got contract price" \ Gosub DBG
+	If UNITPRICE Goto SP_END
+	If NOPROMO = 0
+		If debugdtl Let DBG$ = "Checking commodity promo..." \ Gosub DBG
+		K9$[1,6] = "999999";L9[0] = 7
+		Search #CH_SPRICE,2,1;K9$,REC_SPRICE,E
+		If E > 1 Gosub Err_Search
+		If Not(E)
+			Gosub SP_GETIT
+			If UNITPRICE And debugdtl Let DBG$ = "Got commodity promo" \ Gosub DBG
+			If UNITPRICE Goto SP_END
+		End If 
+	End If 
+	If debugdtl Let DBG$ = "Checking customer/size..." \ Gosub DBG
+	L9[0] = 12
+	UNIT = PFU1[19];UNIT$ = " ",UNIT$
+	If UNIT > 0 Mat Read #CH_CCODES,UNIT,10;UNIT$;
+	K9$ = " ",K9$;K9$[1,6] = CUSTCODE Using "######";K9$[7,7] = "&"
+	K9$[8,11] = UNIT$[1,4];K9$[12,15] = UNIT Using "####";K9$[19] = ""
+	Search #CH_SPRICE,2,1;K9$,REC_SPRICE,E
+	If E > 1 Gosub Err_Search
+	If Not(E)
+		Gosub SP_GETIT
+		If UNITPRICE And debugdtl Let DBG$ = "Got customer/size price" \ Gosub DBG
+		If UNITPRICE Goto SP_END
+	End If 
+	If UNITPRICE And debugdtl Let DBG$ = "Got contract price" \ Gosub DBG
+	Gosub SP_CHKCONTRACT
+	If UNITPRICE Goto SP_END
+	If NOPROMO = 0
+		If debugdtl Let DBG$ = "Checking size promo..." \ Gosub DBG
+		K9$[1,6] = "999999";L9[0] = 11
+		Search #CH_SPRICE,2,1;K9$,REC_SPRICE,E
+		If E > 1 Gosub Err_Search
+		If Not(E)
+			Gosub SP_GETIT
+			If UNITPRICE And debugdtl Let DBG$ = "Got size promotion" \ Gosub DBG
+			If UNITPRICE Goto SP_END
+		End If 
+	End If 
+	If debugdtl Let DBG$ = "Checking cust/all prod..." \ Gosub DBG
+	L9[0] = 6
+	K9$ = " ",K9$;K9$[1,6] = CUSTCODE Using "######"
+	K9$[7,7] = "#";K9$[19] = ""
+	Search #CH_SPRICE,2,1;K9$,REC_SPRICE,E
+	If E > 1 Gosub Err_Search
+	If Not(E)
+		Gosub SP_GETIT
+		If UNITPRICE And debugdtl Let DBG$ = "Got cust/all product price" \ Gosub DBG
+		If UNITPRICE Goto SP_END
+	End If 
+	Gosub SP_CHKCONTRACT
+	If UNITPRICE Goto SP_END
+	If NOPROMO = 0
+		If debugdtl Let DBG$ = "Checking all prod promo..." \ Gosub DBG
+		K9$[1,6] = "999999";L9[0] = 8
+		Search #CH_SPRICE,2,1;K9$,REC_SPRICE,E
+		If E > 1 Gosub Err_Search
+		If Not(E)
+			Gosub SP_GETIT
+			If UNITPRICE And debugdtl Let DBG$ = "Got all product promo" \ Gosub DBG
+			If UNITPRICE Goto SP_END
+		End If 
+	End If 
+	C3[0] = 0;C3[1] = 0;C3[2] = 0;UNITPRICE = 0;L9[0] = 0
+	DTYPE$ = " ",DTYPE$;DDESC$ = " ",DDESC$;DBASE$ = " ",DBASE$
+	LET SPNOTVALID=99 ! none found
+	SP_END: Rem
+Return 
+
+SortContractLines: ! if priority is contract start date instead of contract #
+	! clear any prior keys
+	k_sort$ = " ",k_sort$
+	ClearSortLoop: !
+		search #ch_sort,3,1;k_sort$,r_sort,e
+		if not(e)
+			search #ch_sort,5,1;k_sort$,r_sort,e
+			if e gosub Err_Search:
+			goto ClearSortLoop:
+		end if
+	! Sort all records for the given customer (CUSTCODE)
+	!
+	I$ = " ",I$;I$[1,6] = CUSTCODE Using "######"
+	ContractHeaderLoop: !
+		Search #CH_CTRCT,3,2;I$,REC_CTRCT,E
+		If E goto EndContractHeaderLoop:
+		X2 = I$[1,6]
+		If X2 <> CUSTCODE goto EndContractHeaderLoop:
+			! got one - set the contract number portion
+			! of the spec price key and get all the products
+			ISCPI = 0
+			if p61$[111,111] = "Y" MAT READ #CH_CTRCT,REC_CTRCT,50;ISCPI;
+			k9$ = " ",k9$
+			K9$[1,6] = I$[7,12]
+			ContractLineLoop: !
+				Search #CH_SPRICE,3,1;K9$,REC_SPRICE,E1
+				if E1 goto EndContractLineLoop:
+				if K9$[1,6] <> I$[7,12] goto EndContractLineLoop:
+				Mat Read #CH_SPRICE,REC_SPRICE,12;SPC1;
+				!
+				! k_sort$[1,12] = product code (includes specials)
+				! k_sort$[13,17] = start date (Julian)
+				! k_sort$[18,23] = contract number
+				! k_sort$[24,24] = CPI Flag
+				! k_sort$[25,34] = Contract Header Record
+				!
+				k_sort$ = " ",k_sort$
+				k_sort$[1,12] = k9$[7,18]
+				X2 = SPC1[2] \ Gosub YMD2JUL \ X2 = 0
+				k_sort$[13,17] = X2 using "#####"
+				k_sort$[18,23] = k9$[1,6]
+				k_sort$[24,24] = ISCPI using "#"
+				k_sort$[25,34] = REC_CTRCT using "##########"
+				search #ch_sort,4,1;k_sort$,REC_SPRICE,E
+				if e gosub Err_Search:
+			goto ContractLineLoop:
+			EndContractLineLoop: !
+	goto ContractHeaderLoop:
+	EndContractHeaderLoop: !
+RETURN
+
+SP_GETIT: Rem
+	Mat Read #CH_SPRICE,REC_SPRICE,12;SPC1;
+	Mat Read #CH_SPRICE,REC_SPRICE,36;SPCUM;
+	Mat Read #CH_SPRICE,REC_SPRICE,40;C3;
+	Mat Read #CH_SPRICE,REC_SPRICE,46;SPC4;
+	Read #CH_SPRICE,REC_SPRICE,118;SPWH;
+	Read #CH_SPRICE,REC_SPRICE,134;SPCOM;
+	Mat Read #CH_SPRICE,REC_SPRICE,138;SPC5;
+	mat read #CH_SPrice,Rec_SPrice,168;spc6; ! this & below - 9 add'l prices
+	mat read #CH_SPrice,Rec_SPrice,178;aptype;
+	mat read #CH_SPrice,Rec_SPrice,196;abtype;
+	mat read #CH_SPrice,Rec_SPrice,214;amtype;
+	mat read #CH_SPrice,Rec_SPrice,232;apfact;
+	mat read #CH_SPrice,Rec_SPrice,286;amqty;
+	SPNOTVALID = 0
+	X2 = SPC1[2] \ Gosub YMD2JUL \ X2 = 0
+	JDATE[2] = X2
+	If JDATE[2] > JDATE[0] Let SPNOTVALID = 1
+	X2 = SPC1[4] \ Gosub YMD2JUL \ X2 = 0
+	JDATE[2] = X2
+	If SPC1[4] And JDATE[2] < JDATE[0] Let SPNOTVALID = 1
+	if custom_customer$="JPAPER" 
+		if whse and spwh and spwh<>whse let SPNotValid=1 ! "wrong warehouse
+	else
+		If WHSEPR 
+			if whse and spwh and spwh<>whse let SPNotValid=1 ! "wrong warehouse
+		endif
+	endif
+
+	REM use to check for warehouse pricing native no longer checks changing to keep consistant
+	if SPNotValid goto SP_Exit: ! "get outta here - main data fail
+	if ISCPI
+		CPIAMOUNTLEFT = CPIQtyAvail(e$,SPC1[0],k9$[7,18],REC_CPIDET,cpiChan[])
+		if e$ = "" and CPIAMOUNTLEFT <= 0
+			SPNOTVALID = 1 ! reserve contract exhausted
+			REC_CPIDET = 0 !
+			goto SP_EXIT
+		else if e$ = "1" or e$ = "3"
+			ISCPI = 0 ! not a cpi contract or unknown error
+		end if
+	end if
+	if spc6[1]<>1 and spc6[1]<>2 let spc6[1]=1 ! default = qty min
+	! now the check of which price to use
+	let mlvl=0 ! no multiple levels yet
+	for x=0 to 8 \ if aptype[x] let mlvl=1 \ next x ! has a type (use prctype as decider)
+	if mlvl ! has levels - find right one - if not use main (orig)
+		gosub MLVL_SPR:
+	Endif
+	! to make less changes - move whatever level into std var names
+	if spc6[1]<>1 and spc6[1]<>2 let spc6[1]=1 ! default = qty min
+	If (C3[0] = 4 Or C3[0] = 5) And PR_C4[2] <> 2 Let SPNOTVALID = 1
+	If C3[2]<>0 OR (custom_customer$="OMAHA" and c3[2]<>0 and not (spc1[5]))  
+		UNIT = C3[2]
+		Gosub CHECKUNIT
+		If Not(UNIT) Let C3[2] = 0
+		!If SPC4[0] > 0 And Not(C3[2]) Let SPNOTVALID = 1
+		if spc4[0]>0 and SPC6[1]=1 and not(c3[2]) let SPNotValid=1 ! "failed check
+	End If 
+	If C3[2]<>0 OR (custom_customer$="STERLING" and c3[2]<>0 and not (spc1[5]))  
+		UNIT = C3[2]
+		Gosub CHECKUNIT
+		If Not(UNIT) Let C3[2] = 0
+		!If SPC4[0] > 0 And Not(C3[2]) Let SPNOTVALID = 1
+		if spc4[0]>0 and SPC6[1]=1 and not(c3[2]) let SPNotValid=1 ! "failed check
+	End If 
+	if custom_customer$="OMAHA"
+		if not(spc4[3]) let spc4[3]=3  ! omaha wants default purchasing cct126349
+		if spc4[0]>0   ! "new lines for min qty check
+			let cnvtu[0]=0;cnvtu[1]=pfu1[spc4[3]+7];cnvtu[2]=1;cnvta=l7[2] !convertqty
+			gosub Convert: ! "get quantity in AMOUNT
+			if amount<spc4[0] let SPNotValid=1 ! "didn't meet min quantity
+		endif
+		goto skip_forOmaha: ! the lines below are the old min qty check 
+	endif
+	if prod and spc4[0]>0 ! check min
+		If spc6[1]=1 and C3[2] ! qty
+			let cnvtu[0]=0;cnvtu[1]=c3[2];cnvtu[2]=1;cnvta=l7[2] ! "convert qty
+			gosub Convert: ! "get quantity in AMOUNT
+			if amount<spc4[0] let SPNotValid=1 ! "didn't meet min quantity
+		endif
+		if spc6[1]=2 and S3[4]<SPC4[0] let SPNotValid=1 ! "didn't meet min weight
+	endif
+	If (Not(PROD)) And (Not(C3[2]))
+		CNVTU[0] = 0;CNVTU[1] = PFU1[9];CNVTU[2] = 1;CNVTA = L7[2]
+		Gosub CONVERT
+		if spc6[1]=1 and amount<spc4[0] let SPNotValid=1 ! "didn't meet min quantity
+		if spc6[1]=2 and S3[4]<SPC4[0] let SPNotValid=1 ! "didn't meet min weight
+	End If 
+	skip_forOmaha: !
+	If SPNOTVALID Goto SP_EXIT
+	UNITPRICE = 0
+	SPJUMP = 0
+	UNIT = SPCUM[0]
+	Gosub CHECKUNIT
+	If Not(UNIT) Let SPCUM[0] = UN[1]
+	If Not(PROD) Let SPCUM[0] = PFU1[12]
+	UNIT = SPCUM[1]
+	Gosub CHECKUNIT
+	If Not(UNIT) Let SPCUM[1] = UN[2]
+	If Not(PROD) Let SPCUM[1] = PFU1[11]
+	If WHSEPR
+		If SPC5[4] = 1 Let BASE = W3[18]
+		If SPC5[4] = 2 Let BASE = W3[17]
+		If SPC5[4] = 3 Let BASE = W3[16]
+		If SPC5[4] = 4 Let BASE = RBCOST
+		If SPC5[4] = 5 Let BASE = W3[14]
+		if spc5[4]=6 let base=whmisc[2] ! net po
+	Else 
+		If SPC5[4] = 1 Let BASE = PR_C4[4]
+		If SPC5[4] = 2 Let BASE = B[8]
+		If SPC5[4] = 3 Let BASE = B[10]
+		If SPC5[4] = 4 Let BASE = RBCOST
+		If SPC5[4] = 5 Let BASE = PF_LOAD2
+		if spc5[4]=6 let base=prparc[2] ! netpo
+	End If 
+	If SPC5[3] = 1 And BASE
+		SPSLCOST = (BASE * ((100 + SPC5[1]) / 100))
+	End If 
+	If SPC5[3] = 2
+		AMOUNT = 0
+		If BASE
+			CNVTU[0] = 0;CNVTU[1] = SPCUM[1];CNVTU[2] = 2;CNVTA = BASE
+			Gosub CONVERT
+		End If 
+		If AMOUNT
+			CNVTU[0] = SPCUM[1];CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = (AMOUNT + SPC5[1])
+			Gosub CONVERT
+		End If 
+		If AMOUNT Let SPSLCOST = AMOUNT
+	End If 
+	If SPC5[3] = 3 And SPC5[1]
+		SPSLCOST = SPC5[1]
+		If Not(PROD)
+			CNVTU[0] = SPCUM[1];CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = SPSLCOST
+			Gosub CONVERT
+			SPSLCOST = AMOUNT
+		End If 
+	End If 
+	If SPSLCOST And (Not(L5[1]) Or SPSLCOST < L5[1] Or P61$[21,21] = "Y" Or SPC1[1] = 1)
+		COSTHOLD = SPSLCOST
+	Else 
+		COSTHOLD = L5[1]
+	End If 
+	If SPC5[3] = 5
+		SPSLCOST = 0;COSTHOLD = 0;L5[1] = 0;LCO[0] = 11
+	End If 
+	If COST2RBT And SPC5[2] And SPC5[2] < CST Let CST = SPC5[2]
+	OLM[4] = SPCOM
+	let unitprice=spc5[0];basehold=unitprice;dtype$="S/P "
+	if mlvl let dtype$=dtype$+Str$(Mlvl)+" "
+	dtype$=dtype$+"fixed price" ! "price/markup fixed price" ! "price/markup
+	If PROD
+		If Not(UNITSEQUAL)
+			UN[1] = SPCUM[0];UNIT = UN[1]
+		End If 
+		UN[2] = SPCUM[1];UNIT = UN[2]
+	End If 
+	If Not(PROD) And C3[0] = 3
+		CNVTU[0] = SPCUM[0];CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = UNITPRICE
+		if custom_customer$="OMAHA"
+			if cntrchk<>0
+				let cnvtu[0]=spcum[1]
+			endiF
+		endif
+		if custom_customer$="STERLING"
+			if cntrchk<>0
+				let cnvtu[0]=spcum[1]
+			endif
+		endif
+		Gosub CONVERT
+		UNITPRICE = AMOUNT;BASEHOLD = UNITPRICE
+	End If 
+	If Not(SPC5[0]) And (C3[0] = 4 Or C3[0] = 5)
+		UNITPRICE = -1;BASEHOLD = 0
+		let dtype$="S/P "
+		if mlvl let dtype$=dtype$+Str$(Mlvl)+" "
+		dtype$=dtype$+"10 bracket/"
+		If C3[0] = 4
+			DTYPE$ = DTYPE$,C3[1] Using "fixed level ##"," (table"
+			DTYPE$ = DTYPE$,PR_C4[3] Using "###",")"
+		Else 
+			DTYPE$ = DTYPE$,C3[1] Using "## level jump"," (table"
+			DTYPE$ = DTYPE$,PR_C4[3] Using "###",")"
+		End If 
+		Goto SP_EXIT
+	End If 
+	If C3[0] = 6
+		UNITPRICE = -2;BASEHOLD = 0;SPJUMP = 9
+		let dtype$="S/P "
+		if mlvl let dtype$=dtype$+Str$(Mlvl)+" "
+		dtype$=dtype$+"matrix/",c3[1] using "## level jump"
+		DTYPE$ = DTYPE$," (table",B[22] Using "###",")"
+		If SPC5[0]
+			DTYPE$ = DTYPE$,SPC5[0] Using " +###.###%"
+		End If 
+		Goto SP_EXIT
+	End If 
+	If (C3[0] = 1 Or C3[0] = 2 Or C3[0] = 8) Gosub GETBASE
+	If C3[0] <> 3 If C3[0] <> 7
+		If SPC5[0] And (C3[0] = 4 Or C3[0] = 5)
+			Gosub GETTENBPRICE
+			BASE = UNITPRICE;BASEHOLD = BASE;UNITPRICE = (BASE * ((100 + SPC5[0]) / 100))
+			If UNITPRICE
+				let dtype$="S/P "
+				if mlvl let dtype$=dtype$+Str$(Mlvl)+" "
+				dtype$=dtype$+"10 bracket with markup (table"
+				DTYPE$ = DTYPE$,PR_C4[3] Using "###",", bracket",BRACKET Using "##",")"
+				DDESC$ = DDESC$,SPC5[0] Using " +###%"
+			End If 
+		End If 
+		If C3[0] = 1
+			UNITPRICE = (BASE * ((100 + SPC5[0]) / 100))
+			CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2;CNVTA = BASEHOLD
+			Gosub CONVERT
+			let dtype$="S/P " \ if mlvl let dtype$=dtype$+Str$(Mlvl)+" "
+			dtype$=dtype$+"with % markup/markdown"
+			If C3[1] <> 12
+				DDESC$ = AMOUNT Using PMASK$," [",DBASE$,"]",SPC5[0] Using " +###.###%"
+			Else 
+				DDESC$ = DDESC$,SPC5[0] Using " +###.###%"
+			End If 
+		End If 
+		If C3[0] = 2
+			if spc5[0]=100 let spc5[0]=0 ! prevent be 
+			UNITPRICE = (BASE / ((100 - SPC5[0]) / 100))
+			CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2;CNVTA = BASEHOLD
+			Gosub CONVERT
+			let dtype$="S/P " \ if mlvl let dtype$=dtype$+Str$(Mlvl)+" "
+			dtype$=dtype$+"with margin"
+			If C3[1] <> 12
+				DDESC$ = AMOUNT Using PMASK$," [",DBASE$,"]",SPC5[0] Using " +###.###% g/p"
+			Else 
+				DDESC$ = DDESC$,SPC5[0] Using " +###.###% g/p"
+			End If 
+		End If 
+		If C3[0] = 8
+			UNITPRICE = BASE
+			AMOUNT = 0
+			If BASE
+				CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2;CNVTA = BASE
+				Gosub CONVERT
+			End If 
+			UNITPRICE = AMOUNT + SPC5[0]
+			If UNITPRICE
+				CNVTU[0] = UN[1];CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = UNITPRICE
+				Gosub CONVERT
+				UNITPRICE = AMOUNT
+			End If 
+			AMOUNT = 0
+			If BASEHOLD
+				CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2;CNVTA = BASEHOLD
+				Gosub CONVERT
+			End If 
+			let dtype$="S/P " \ if mlvl let dtype$=dtype$+Str$(Mlvl)+" "
+			dtype$=dtype$+"with $ markup/markdown"
+			If SPC5[0] >= 0
+				DDESC$ = AMOUNT Using PMASK$," [",DBASE$,"]",SPC5[0] Using " +$$$.### "
+			Else 
+				DDESC$ = AMOUNT Using PMASK$," [",DBASE$,"]",SPC5[0] Using " -$$$.### "
+			End If 
+		End If 
+	End If 
+	If C3[0] = 7 Let UNITPRICE = -3
+	SP_EXIT: Rem
+	If UNITPRICE
+		If C3[0] = 3 And (L9[0] = 2 Or L9[0] = 4 Or L9[0] = 6 Or L9[0] = 12 or L9[0]=15)
+			L9[0] = 13
+		End If 
+		If SPSLCOST And (Not(L5[1]) Or SPSLCOST < L5[1] Or P61$[21,21] = "Y" Or SPC1[1] = 1)
+			L5[1] = SPSLCOST
+			DCOST$ = "spec."
+			DBASE$ = "spec. cost"
+			LCO = 11
+		End If 
+	Else 
+		SPC5[0] = 0;SPC5[1] = 0;BASEHOLD = 0
+		DTYPE$ = " ",DTYPE$;DBASE$ = " ",DBASE$;DDESC$ = " ",DDESC$
+	End If 
+Return 
+
+CHECKUNIT: Rem
+	For X1 = 0 To 7
+		If UNIT = PFU1[X1] Return 
+	Next X1
+	UNIT = 0
+Return 
+
+GETBASE: Rem
+	If debugdtl Let DBG$ = " Getting base for special price..." \ Gosub DBG
+	BASE = 0;FIELD = 0
+	If C3[1] = 2 Let FIELD = 0
+	If C3[1] > 3 And C3[1] < 10 Let FIELD = C3[1] - 3
+	If C3[1] = 13 Let FIELD = 8
+	If WHSEPR
+		!If FIELD And PR_C4[2] = 1 And PR_C4[3]
+		if field and field<7 and pr_c4[2]=1 ! PrBrk=allow 0 !" was  and pr_c4[3]
+		  if (custom_customer$<>"PRBRICK" and pr_c4[3]) or custom_customer$="PRBRICK"
+			BASE = W3[18]
+			Gosub GETMATPRICE
+			If FIELD > 0 And FIELD < 7 Let W3[18 + FIELD] = X4
+		  Endif
+		End If 
+		If C3[1] = 1 Let BASE = W3[18];DBASE$ = "base cost"
+		If C3[1] = 2 Let BASE = W3[17];DBASE$ = "load cost"
+		If C3[1] = 3 Let BASE = W3[16];DBASE$ = "last cost"
+		If C3[1] = 4 Let BASE = W3[19];DBASE$ = "list 1"
+		If C3[1] = 5 Let BASE = W3[20];DBASE$ = "list 2"
+		If C3[1] = 6 Let BASE = W3[21];DBASE$ = "list 3"
+		If C3[1] = 7 Let BASE = W3[22];DBASE$ = "list 4"
+		If C3[1] = 8 Let BASE = W3[23];DBASE$ = "list 5"
+		If C3[1] = 9 Let BASE = W3[24];DBASE$ = "list 6"
+		If C3[1] = 10 Let BASE = SPSLCOST;DBASE$ = "s/p cost"
+		If C3[1] = 10 And SPC5[3] = 4 And L5[1]
+			BASE = L5[1];DBASE$ = "std cost"
+		End If 
+		If C3[1] = 11 Let BASE = COSTHOLD;DBASE$ = DCOST$," cost"
+		If C3[1] = 12
+			If PERM[0]
+				UNITPRICE = PERM[0]
+				DDESC$ = " ",DDESC$ \ DDESC$ = "([Perm] "
+				DDESC$ = DDESC$,UNITPRICE Using PMASK$ \ DDESC$ = DDESC$,") "
+				Goto MOVE_ON1
+			End If 
+			If PR_C4[2] = 1 Gosub MATPSETUP
+			If PR_C4[2] = 2 Gosub GETTENBPRICE
+			MOVE_ON1: BASE = UNITPRICE;UNITPRICE = 0;DBASE$ = "calc price"
+		End If 
+		If C3[1] = 13 Let BASE = W3[14];DBASE$ = "redi cost"
+		If C3[1] = 14 Let BASE = RBCOST;DBASE$ = "rebate cst"
+		if c3[1]=15 let base=whmisc[2];dbase$="netpo cost"
+	Else 
+		!If FIELD And PR_C4[2] = 1 And PR_C4[3]
+		if field and field<7 and pr_c4[2]=1 ! " was ! and pr_c4[3]
+		  if (custom_customer$<>"PRBRICK" and pr_c4[3]) or custom_customer$="PRBRICK"
+			BASE = PR_C4[4] \ Gosub GETMATPRICE
+			If FIELD > 0 And FIELD < 7 Let A[19 + FIELD] = X4
+		  Endif
+		End If 
+		If C3[1] = 1 Let BASE = PR_C4[4];DBASE$ = "base cost"
+		If C3[1] = 2 Let BASE = B[8];DBASE$ = "load cost"
+		If C3[1] = 3 Let BASE = B[10];DBASE$ = "last cost"
+		If C3[1] = 4 Let BASE = A[20];DBASE$ = "list 1"
+		If C3[1] = 5 Let BASE = A[21];DBASE$ = "list 2"
+		If C3[1] = 6 Let BASE = A[22];DBASE$ = "list 3"
+		If C3[1] = 7 Let BASE = A[23];DBASE$ = "list 4"
+		If C3[1] = 8 Let BASE = A[24];DBASE$ = "list 5"
+		If C3[1] = 9 Let BASE = A[25];DBASE$ = "list 6"
+		If C3[1] = 10 Let BASE = SPSLCOST;DBASE$ = "s/p cost"
+		If C3[1] = 10 And SPC5[3] = 4 And L5[1]
+			BASE = L5[1];DBASE$ = "std cost"
+		End If 
+		If C3[1] = 11 Let BASE = COSTHOLD;DBASE$ = DCOST$," cost"
+		If C3[1] = 12
+			If PERM[0]
+				UNITPRICE = PERM[0]
+				DDESC$ = " ",DDESC$ \ DDESC$ = "([Perm] "
+				DDESC$ = DDESC$,UNITPRICE Using PMASK$ \ DDESC$ = DDESC$,") "
+				Goto MOVE_ON2
+			End If 
+			If PR_C4[2] = 1 Gosub MATPSETUP
+			If PR_C4[2] = 2 Gosub GETTENBPRICE
+			MOVE_ON2: BASE = UNITPRICE;UNITPRICE = 0;DBASE$ = "calc price"
+		End If 
+		If C3[1] = 13 Let BASE = PF_LOAD2;DBASE$ = "redi cost"
+		If C3[1] = 14 Let BASE = RBCOST;DBASE$ = "rebate cst"
+		if c3[1] = 15 let base = PRPARC[2];DBase$="netpo cost"
+	End If 
+	BASEHOLD = BASE
+Return 
+
+MANLP: Rem
+	FIELD = LEVEL !  + 1
+	If MATPR And PR_C4[2] = 1
+		BASE = PR_C4[4]
+		If WHSEPR Let BASE = W3[18]
+		if field and field<7 and PR_C4[3]
+			Gosub GETMATPRICE
+			If WHSEPR Let W3[18 + FIELD] = X4 Else Let A[19 + FIELD] = X4
+		Else
+		   if custom_customer$="PRBRICK"
+			gosub getMatPrice:
+			if whsepr let w3[18+field]=x4 else let a[19+field]=x4
+		   ENDIF
+		End If 
+	End If 
+	If WHSEPR Let UNITPRICE = W3[18 + FIELD] Else Let UNITPRICE = A[19 + FIELD]
+	If UNITPRICE Let L9[0] = - LEVEL
+	DTYPE$ = " ",DTYPE$;DDESC$ = " ",DDESC$
+Return 
+
+MANLEVEL: Rem
+	If MATPR And PR_C4[2] = 1
+		JUMP_ = - LEVEL;L7[9] = 0;UNITPRICE = PPRICE
+		Gosub CHECKBREAK
+	End If 
+	DTYPE$ = " ",DTYPE$;DDESC$ = " ",DDESC$
+Return 
+
+MANBRACKET: Rem
+	If PR_C4[2] = 2
+		C3[0] = 4;C3[1] = LEVEL
+		Gosub GETTENBPRICE
+		If UNITPRICE Let L9[0] = -7 - LEVEL
+	End If 
+	DTYPE$ = " ",DTYPE$;DDESC$ = " ",DDESC$
+Return 
+
+ASENTERED: Rem
+	CNVTA = 0;PREC[0] = REC_PROD
+	If WHSEPR
+		If WHLM[0]
+			WH = WHSE;LTBL = WHLM[0];CNVTA = L5[1]
+			If PREC[0] And LTBL Gosub GETLOAD
+		End If 
+	Else 
+		If LM[0]
+			WH = 0;LTBL = LM[0];CNVTA = L5[1]
+			If PREC[0] And LTBL Gosub GETLOAD
+		End If 
+	End If 
+	L5[1] = CNVTA
+Return 
+Rem
+
+YMD2JUL: Rem
+	If X2 <= 0 Return 
+	X$ = X2 Using "&&&&&&"
+	Call DateToJulian(1,X$,X$,E) \ If E Return 
+	X2 = X$[1,5]
+Return 1
+
+Rem
+
+! sort special price 1 - 10 by min qty/wgt
+MLVL_SPR: ! multi level - return mlvl 1-10 (1 default)
+	if c3[2] ! qty um check
+		let unit=c3[2]
+		gosub CheckUnit: ! "check if valid unit
+		if not(unit) let c3[2]=0 ! "bad unit
+	Endif
+	amount=l7[2] ! base
+	if prod and c3[2]
+		let cnvtu[0]=0;cnvtu[1]=c3[2];cnvtu[2]=1;cnvta=l7[2] ! "convert qty
+		gosub Convert: ! "get quantity in AMOUNT
+	Endif
+	if not(prod) and not(c3[2])
+		let cnvtu[0]=0; cnvtu[1]=pfu1[9]; cnvtu[2]=1; cnvta=l7[2]
+		gosub convert:
+	Endif
+	OrdQty=amount ! for check of min=qty, s3[4]=weight
+	x2[1]=0;x2[2]=0;x2[3]=0;x2[4]=0 ! qty/wgt >=
+	if spc6[1]=1 ! main (price 1) - set the bar
+		if ordqty>=spc4[0] and x2[1]<=spc4[0] let x2[1]=spc4[0];mlvl=1
+	Endif
+	if spc6[1]=2 ! main (price 1) - set the bar
+		if s3[4]>=spc4[0] and x2[2]<=spc4[0] let x2[2]=spc4[0];mlvl=1
+	Endif
+	for x=0 to 8
+		if aptype[x]>0 and aptype[x]<9 ! prctype determines used
+			IF AMTYPE[X]<>2 LET AMTYPE[X]=1
+			if amtype[x]=1 ! qty
+				if ordqty>=amqty[x] and x2[1]<=amqty[x] let x2[1]=amqty[x];x2[3]=x+2
+			Endif
+			if amtype[x]=2 ! wgt
+				if s3[4]>=amqty[x] and x2[2]<=amqty[x] let x2[2]=amqty[x];x2[4]=x+2
+			Endif
+		Endif
+	Next x
+	! x2[3]=qtylvl;x2[4]=wgtlvl
+	if x2[3]=0 and x2[4]=0 RETURN ! no match of any other levels - use 1
+	if x2[1]=ordqty and X2[2]=s3[4] ! tie goes to wgt per specs
+		if x2[4] 
+			let mlvl=x2[4] 
+			goto mlsprdone:
+		Endif ! no wgt lvl - continue
+	Endif
+	MLvl=x2[4];x2[9]=0 ! wgt lvl has priority unless really low wgt lvl
+	if ordqty let X2[9]=s3[4]/ordqty ! unit wgt
+	if (x2[9]*x2[1])>x2[2] let mlvl=x2[3] ! qty lvl wgt>wgt lvl (ie: 20 cs>5 lbs)
+	If x2[1] and x2[2]=0 and x2[3]<>0 let mlvl=x2[3] ! qty level>0 - wght lvl=0
+	if x2[1]=0 and x2[2]=0 and x2[4]<>0 let mlvl=x2[4] ! both zero - use wgt
+	if mlvl=0 and x2[3]<>0 let Mlvl=x2[3] ! no wgt - use qty
+
+	MLSPRDone: ! done
+	if mlvl>1 ! from price 2-10 - move to standard vars
+		x=mlvl-2 ! var displ 0-8
+		C3[0]=APTYPE[X];C3[1]=ABTYPE[X]
+		spc4[0]=amqty[x];spc6[1]=amtype[x]
+		spc5[0]=apfact[x]
+	Endif
+	if mlvl<1 let mlvl=1
+Return
+Rem
+
+CONVERT: Rem
+	Mat Read #1,115,40;Q0;
+	If CNVTU[2] = 3 Gosub DISPVALIDUNITS \ Goto CONVEND
+	If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0]
+		AMOUNT = CNVTA
+		Goto CONVEND
+	End If 
+	If CNVTU[0] = -2 Or CNVTU[1] = -2
+		AMOUNT = CNVTA
+		Goto CONVEND
+	End If 
+	If CNVTU[2]
+		If Not(CNVTA)
+			AMOUNT = 0
+			Goto CONVEND
+		End If 
+	End If 
+	Gosub DOCONVERT
+	If CNVTU[2] <> 0 And CNVTU[2] <> 3
+		If FLAG Let E = FLAG \ Gosub Err_Search
+	End If 
+	CONVEND: Rem
+Return 
+
+DOCONVERT: Rem
+	CONVFLAG = 0;SR = 8;SC = 12
+	If CNVTU[2] = 5
+		CONVFLAG = 1
+		CNVTU[2] = 1
+	End If 
+	On CNVTU[2] + 1 Goto CHECKVALID1,DOCONVERT1,DOCONVERT1
+	E = 0 \ Gosub Err_Search
+	CHECKVALID1: Rem
+	For X1[1] = 0 To 1
+		If CNVTU[X1[1]] > 0
+			For X1[2] = 0 To 7
+				If CNVTU[X1[1]] = PFU1[X1[2]] Goto VALID
+			Next X1[2]
+			FLAG = 1 \ Return 
+		End If 
+		VALID: Rem
+	Next X1[1]
+	FLAG = 0
+Return 
+
+DOCONVERT1: Rem
+	AMOUNT = CNVTA
+	For X1[1] = 0 To 1
+		CMODE = 1 \ If X1[1] Let CMODE = -1
+		If CNVTU[X1[1]] <> 0
+			If CNVTU[X1[1]] > 0
+				For CUNIT = 0 To 7
+						If PFU1[CUNIT] = CNVTU[X1[1]] Goto CONVVALID
+				Next CUNIT
+				FLAG = 0 \ Return 
+				CONVVALID: Rem
+				If Not(CUNIT) Goto LOOPBACK
+			End If 
+			If CNVTU[2] = 2 Let CMODE = - CMODE
+			If CNVTU[X1[1]] = -1
+				If A[5] And CMODE < 0 Let AMOUNT = (AMOUNT * (A[6] / A[5])) / 100
+				If A[6] And A[5] And CMODE > 0 Let AMOUNT = AMOUNT * 100 / (A[6] / A[5])
+			Else 
+				If CNVTU[X1[1]] = -3
+					If A[5] And CMODE < 0 Let AMOUNT = (AMOUNT * (A[6] / A[5]))
+					If A[6] And A[5] And CMODE > 0 Let AMOUNT = AMOUNT / (A[6] / A[5])
+				Else 
+					If CMODE > 0 Let AMOUNT = AMOUNT * PFU2[CUNIT - 1]
+					If PFU2[CUNIT - 1] And CMODE < 0 Let AMOUNT = AMOUNT / PFU2[CUNIT - 1]
+				End If 
+			End If 
+		End If 
+		LOOPBACK: Rem
+	Next X1[1]
+	If CNVTU[2] = 1 And Not(CONVFLAG)
+		If CNVTU[1] And CNVTU[1] <> PFU1[0] Let AMOUNT = FNR(AMOUNT)
+		If Fra(AMOUNT) And (Not(CNVTU[1]) Or CNVTU[1] = PFU1[0]) Let AMOUNT = FNU(AMOUNT)
+	End If 
+	If CNVTU[2] = 2 And CNVTU[1]
+		If P9$[42,42] = "N" Let AMOUNT = FNN(AMOUNT)
+		If P9$[42,42] = "T" Let AMOUNT = FNT(AMOUNT)
+		If P9$[42,42] = "U" Let AMOUNT = FNV(AMOUNT)
+	End If 
+	FLAG = 0
+Return 
+
+DISPVALIDUNITS: Rem
+Return ! NOT USED SERP
+
+Rem
+!
+
+ERR_SEARCH: Rem
+	ENUM = E + 1000;ELINE = Spc(16);CTERR = 0
+	If E = 5 Let CTERR = Err(8)
+	msg$ = "RETURN STATUS",(E + (CTERR * .001))
+	msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM ",pgmname$
+	call programdump("tmp/pricese!","")
+	Gosub Updatelog
+	e$ = msg$
+	Error 19000
+	Goto OutEnd
+	Updatelog: !
+	If Not(debug) Return 
+	System "echo ''" + Msc$(0) + " " + msg$ + "'' >> " + dlog$
+Return 
+!
+
+update_lastprice: ! write back current info to last price
+	if not(rec_lastpr) return
+	lp_price=specs[20]
+	lp_cost=specs[17]
+	lp_rebatecost=rbcost
+	lp_rbcontractnum=specs[24]
+	lp_time=tim(2)
+	lp_source=specs[25]
+	lp_contract=specs[27]
+	try
+		! last price might be read only
+		write #ch_lastpr,rec_lastpr,378;lp_price
+		write #ch_lastpr,rec_lastpr,384;lp_cost
+		write #ch_lastpr,rec_lastpr,390;lp_rebatecost
+		write #ch_lastpr,rec_lastpr,396;lp_rbcontractnum
+		write #ch_lastpr,rec_lastpr,402;lp_time ! tim(2)
+		write #ch_lastpr,rec_lastpr,416;lp_source
+		write #ch_lastpr,rec_lastpr,418;lp_contract;
+	else
+		Chlpwrite = FindChannel()
+		read #1,88,1376;f1$;
+		open #Chlpwrite,f1$ ! " open last price to write.
+		unlock #Chlpwrite
+		write #Chlpwrite,rec_lastpr,378;lp_price
+		write #Chlpwrite,rec_lastpr,384;lp_cost
+		write #Chlpwrite,rec_lastpr,390;lp_rebatecost
+		write #Chlpwrite,rec_lastpr,396;lp_rbcontractnum
+		write #Chlpwrite,rec_lastpr,402;lp_time ! tim(2)
+		write #Chlpwrite,rec_lastpr,416;lp_source
+		write #Chlpwrite,rec_lastpr,418;lp_contract;
+		close #Chlpwrite
+	end try
+Return
+
+Outend: !
+msg$ = "doing...end of " + pgmName$ \ Gosub Updatelog
+ If CH_RCONTRACTH>0 AND NOT(FLEPTR[9,0]) Try Close #CH_RCONTRACTH Else Rem
+ If CH_REBATEDTL>0 AND NOT(FLEPTR[10,0]) Try Close #CH_REBATEDTL Else Rem
+ If CH_PMARK>0 AND NOT(FLEPTR[11,0]) Try Close #CH_PMARK Else Rem
+ If CH_PRODMARK>0 AND NOT(FLEPTR[12,0]) Try Close #CH_PRODMARK Else Rem
+ If CH_VENDTAG>0 AND NOT(FLEPTR[13,0]) Try Close #CH_VENDTAG Else Rem
+ If CH_LMARK>0 AND NOT(FLEPTR[14,0]) Try Close #CH_LMARK Else Rem
+ If CH_CPIDET>0 AND NOT(FLEPTR[15,0]) Try Close #CH_CPIDET Else Rem
+
+ 
+Else
+	include "src/callsuberr.inc"
+end try
+End Sub! the whole program
+END

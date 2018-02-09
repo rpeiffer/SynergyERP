@@ -1,0 +1,440 @@
+!
+! loadsave -w -n 100,10 -o prog/util/sysfbackup src/sysfbackup.src
+!
+Declare Intrinsic Sub FindF,String,Time
+Declare Intrinsic Function FindChannel
+Option Default Dialect IRIS1
+include "src/utilcopyright.inc"
+! sysfbackup -- File archive utility - callable version 
+!==============================================================================+
+! Purpose:  To backup a given file, either by using a file code or by file name|
+! Author:   Nate 04/22/96 -- Based on sysfbuild.s and ssup0207.                |
+! Modified:                                                                    |
+!==============================================================================+
+dim e$[300]
+try
+!----------------------------------------------------------------------------+
+!Inbound variables                                                           |
+!----------------------------------------------------------------------------+
+!fcode$  = Specify the file to copy by file code (as defined in ssup0201).   |
+!          Ignored if orig$ is defined, otherwise must be defined.           |
+!          Example: "ROH"                                                    |
+!coid    = Company number. Copies the given data file for this company.      |
+!          Ignored if orig$ is defined.                                      |
+!groupid = Group number. Copies the given data file for this group.          |
+!          Ignored if orig$ is defined.                                      |
+!--------------------------------- or ---------------------------------------+
+!orig$   = Specify the file to copy. If not defined, fcode$,coid and groupid |
+!          must be defined.                                                  |
+!          Example: "2/ccodes".                                              |
+!----------------------------------------------------------------------------+
+!dest$   = The destination directory or file name for the file to be archived|
+!          If the name ends with a /, then it is assumed to be a directory,  |
+!          otherwise it is treated as the destination file name.             |
+!          Example: databak/, /v/syspgms/databak/, and databak/whachamacallit|
+!----------------------------------------------------------------------------+
+!owrite$ = Overwrite existing files flag.                                    |
+!        = "Y" - overwrite the existing archived file                        |
+!        = "N" - don't overwrite the existing archived file                  |
+!        = "YE '...'" - Use the given extension [bounded by single quotes]   |
+!                       Overwrite the file if it already exists              |
+!                       For example, passing YE 'patch29' would result in    |
+!                       copying the given file to databak with the extension |
+!                       ".patch29". This provides excellent tracking of which|
+!                       program archived the given data file.                |
+!        = "NE '...'" - Use the given extension [bounded by single quotes]   |
+!                       Do NOT overwrite the file if it already exists       |
+!                       For example, passing NE 'patch29' would result in    |
+!                       copying the given file to databak with the extension |
+!                       ".patch29". This provides excellent tracking of which|
+!                       program archived the given data file.                |
+!----------------------------------------------------------------------------+
+!mode    = There are two modes -- a copy mode and a move mode.               |
+!        = 0 = copy mode -- this leaves the original file untouched.         |
+!        = 1 = move mode -- this moves the file, leaving no original behind. |
+!                           If the original is going to be rebuilt, you      |
+!                           might as well move it rather than copy it -- it's|
+!                           much faster, especially with very large files.   |
+!        = 2 = move + touch mode -- Does the same thing as mode=1 except that|
+!                           once the move has occurred, a empty text file is |
+!                           created at the original file's location. Why do  |
+!                           this? Well, this way, if you want to build a new |
+!                           file at the same location as the original, it    |
+!                           will be (if using sysfbuild, ssup0207, or makein)|
+!                           Note that this only works if the original        |
+!                           location is in the LUST.                         |
+!----------------------------------------------------------------------------+
+!row     = Row position to print progress   (recommend 23)                   |
+!col     = Column position to print progress (recommend 0)                   |
+!----------------------------------------------------------------------------+
+!ch_log  = It is up to the caller to build a text file for auditing purposes.|
+!          Please do not use channels 80-83.                                 |
+!        = -1 deactivates the use of a log.
+!----------------------------------------------------------------------------+
+Enter fcode$,coid,groupid,orig$,dest$,owrite$,mode,row,col,ch_log,destfilname$,reason$,e,...
+! if "fromUpgrade" don't send print statements with
+! control strings as this is being executed via
+! a job not attached to terminal.  Be sure to send
+! all output to ch_log as this will be reviewed and
+! sent back to software repository
+try
+	enter fromUpgrade
+else
+	dim 1%,fromUpgrade
+end try
+!----------------------------------------------------------------------------+
+!Outbound variables                                                          |
+!----------------------------------------------------------------------------+
+!destfilname$  = The path and name of the data file that was backed up.      |
+!----------------------------------------------------------------------------+
+!reason$ = Description of error. Please define it for at least 100 characters|
+!----------------------------------------------------------------------------+
+!e       = Error. Zero indicates success, non-zero indicates failure.        |
+!        = 0 = success                                                       |
+!        = 1 = fcode$, orig$ or dest$ not defined.                           |
+!        = 2 = invalid company                                               |
+!        = 3 = invalid group                                                 |
+!        = 4 = invalid log channel                                           |
+!        = 5 = log channel is not open                                       |
+!        = 6 = control file not found                                        |
+!        = 7 = ssuf02m is corrupt (search mode 2)                            |
+!        = 8 = file code not found in ssuf02m                                |
+!        = 9 = file name does not exist.                                     |
+!        = 10= destination file exists but overwrite flag is set to no.      |
+!        = 11= unable to copy/move file with the .idx extension              |
+!        = 12= unable to copy/move file with uppercase name                  |
+!        = 13= unable to copy/move file with lowercase name                  | 
+!        = 14= unibasic error 
+!----------------------------------------------------------------------------+
+! dimension vars
+Dim 1%,fname$[60],mask$[16],mask2$[30],suffix$[7],ext$[10]
+Dim 1%,type$[1],filname$[200],work$[200],d$[36],x$[100],filname16$[16]
+Dim 1%,resp$[1],kcode$[20],coid$[4],groupid$[4],u5$[10],filpathandname$[200]
+Dim 1%,tm$[30],logmsg$[200]
+Dim 1%,d0[3],z9[2000]
+Dim 2%,d2[2],rply$[3],destfilname$[200],cmnd$[80]
+Dim 3%,rec_ssuf02i,rec_ssuf02m,rec_cntrl,rec_log,rec_fcode
+
+! initialization
+groupid$ = Str$(groupid)
+false = 0;true = Not(false)
+do_copy = 0;do_move = 1;do_move_and_touch = 2
+
+!"clean up inbound data, if applicable, and initialize outbound data
+Call String(1,fcode$) !"convert to uppercase
+x$ = fcode$ \ Gosub Strip_Blanks \ fcode$ = x$[x,y] \ If fcode$ = " " Let fcode$ = ""
+x$ = orig$ \ Gosub Strip_Blanks \ orig$ = x$[x,y] \ If orig$ = " " Let orig$ = ""
+x$ = dest$ \ Gosub Strip_Blanks \ dest$ = x$[x,y] \ If dest$ = " " Let dest$ = ""
+If (fcode$ = "" And orig$ = "") Or (dest$ = "")
+	e = 1
+	reason$ = "Source and/or destination file names not defined: "
+	If fcode$ = "" Let reason$ = reason$ + "fcode=''''"
+	If orig$ = "" Let reason$ = reason$ + ", orig=''''"
+	If dest$ = "" Let reason$ = reason$ + ", dest=''''"
+	error 10000
+End If
+If orig$ <> "" Let fcode$ = "" !"orig$ has precedence over fcode$
+! DON't ZERO OUT COID OR GROUPID!!(you f*** up calling program!)
+If fcode$ !"coid and groupid are only used if fcode$ is defined.
+	If coid < 0 Or coid > 9
+		e = 2
+		reason$ = "Invalid company #: " + Str$(coid)
+		error 10000
+	End If
+	If groupid < 0 Or groupid > 99
+		e = 3
+		reason$ = "group number is invalid: " + Str$(groupid)
+		error 10000
+	End If
+End If
+work$ = owrite$[1,1] \ Call String(1,work$) !"convert to uppercase
+owrite$[1,1] = work$
+If Len(owrite$) > 1
+	work$ = owrite$[2] \ Call String(2,work$) !"convert to lowercase
+	owrite$[2] = work$
+End If
+If row < 0 Or row > 23 Let row = 23
+If col < 0 Or col > 79 Let col = 0
+! If ch_log >= 80 And ch_log <= 84
+! 	e = 4
+! 	reason$ = "The log file can't be assigned to channel " + Str$(ch_log)
+! 	error 10000
+! End If
+If ch_log <> -1 !"-1 indicates that the log is not to be used, so skip the check
+	ntopen = false
+	try
+		e = Chf$(800 + ch_log)
+	else
+		Let ntopen = Spc(8)
+	end try
+	If ntopen
+		e = 5
+		reason$ = "The log file is not open on channel #" + Str$(ch_log)
+		reason$ = reason$ + ". Please open it before calling this program."
+		error 10000
+	End If
+End If
+reason$ = ""
+e = 14
+logmsg$ = "Sysfbackup: Backing up "
+If orig$ = "" Let logmsg$ = logmsg$ + fcode$ Else Let logmsg$ = logmsg$ + orig$
+Gosub do_write_log
+If orig$
+	!"original file name is defined, so use different logic than if a
+	!"file code was being used.
+	Gosub Archive_File
+Else !"fcode$ is being used
+	! open files
+	Call FindF("cntrl/cntrl" + Str$(coid),found)
+	If Not(found)
+		reason$ = "Control file #" + Str$(coid) + " not found"
+		e = 6
+		error 10000
+	End If
+	ch_cntrl = FindChannel()
+	Ropen #ch_cntrl,"cntrl/cntrl" + Str$(coid)
+	ch_ssuf02m = FindChannel()
+	Ropen #ch_ssuf02m,"1/ssuf02m"
+	ch_ssuf02i = FindChannel()
+	Ropen #ch_ssuf02i,"1/ssuf02i"
+	! more dimensioning & initializing
+	klen = Chf(300 + ch_ssuf02i) * 2
+	Dim kdata$[klen]
+	ypos = 13
+	! main - let the building begin
+	Gosub Fnd_File !"get info on file from layouts (as defined in ssup0207)
+	Gosub Archive_File !"go and copy/move the file
+End If
+reason$ = "Success: built " + filname$
+Goto outend !"we're out of here
+
+Fnd_File: !"Find file in file layout database
+	work$ = "Searching for layout " + fcode$
+	logmsg$ = work$ \ Gosub do_write_log
+	if not(fromUpgrade) Print @col,row;work$;'CL';
+	work$ = fcode$ !"retain knowledge of original filecode
+	Srch_Fcode: Search #ch_ssuf02m,2,1;work$,rec_ssuf02m,e
+	If e > 2
+		reason$ = "SE#" + Str$(e) + " while looking up " + fcode$
+		e = 7
+		error 10000
+	End If
+	x$ = work$ \ Gosub Strip_Blanks \ x$ = x$[x,y]
+	If e Or x$ <> fcode$ !"beware of partial matches
+		e = 8
+		reason$ = fcode$ + " not defined in system layouts"
+		error 10000
+	End If
+	fcode$ = work$ !"yeah, I need an exact copy of the key
+	Mat Read #ch_ssuf02m,rec_ssuf02m,0;d$
+	Mat Read #ch_ssuf02m,rec_ssuf02m,36;d0
+	Mat Read #ch_ssuf02m,rec_ssuf02m,44;d2;
+Return ! Fnd_File
+
+Strip_Blanks: !"remove blanks only
+	x = 1;y = Len(x$)
+	Loop5: If x$[y,y] = " " And y > 1 Let y = y - 1 \ Goto Loop5
+	Loop6: If x$[x,x] = " " And x < y Let x = x + 1 \ Goto Loop6
+Return
+
+Archive_File: !"copy or move the file
+	If mode = do_copy
+		if not(fromUpgrade) Print @col,row;"Copying ";fcode$;'CL';
+	Else !"do_move
+		if not(fromUpgrade) Print @col,row;"Moving ";fcode$;'CL';
+	End If
+	If fcode$ !"we were given the file code; look up the actual file name
+		type$ = d$[36,36]
+		If type$ = "N" Let type$ = "C"
+		If type$ = "Y" Let type$ = "I"
+		filname$ = d$[1,16] \ If d0[1] >= 0 Read #ch_cntrl,88,d0[1];filname16$; \ filname$ = filname16$
+		x$ = filname$ \ Gosub Strip_Blanks \ filname$ = x$[x,y]
+		Gosub Add_Grp_Usr ! convert symbolic group (#) and user (%) to real values
+		Call String(2,filname$) !"convert to lower case
+		Call FindF(filname$,found)
+		If Not(found)
+			reason$ = filname$ + " doesn't exist"
+			e = 9
+			error 10000
+		End If
+	Else !"orig$ is defined; use it
+		filname$ = orig$
+		Call String(2,filname$) !"convert to lower case
+	End If
+	!"okay, at this point we have our source file.
+	!"as the next step, let's determine the name of the destination file
+	!"Is the destination a directory or a file name
+	Call String(2,dest$) !"convert to lower case
+	y = Len(dest$)
+	If dest$[y,y] = "/" !"this is a directory name
+		work$ = filname$ \ Gosub get_root_name
+		destfilname$ = dest$ + work$ !"the destination is formed from the given path and file as found in ssup0201
+	Else !"this is a file name
+		destfilname$ = dest$
+	End If
+	If owrite$[2,2] = "e" !"copy the file and stick on the given extension
+		Search owrite$,"'",pos_
+		destfilname$ = destfilname$ + "." + owrite$[pos_ + 1] To "'"
+	End If
+	Call String(2,destfilname$) !"convert all of it to lowercase
+	Call FindF(destfilname$,found)
+	If found
+		If owrite$[1,1] = "N"
+			e = 10
+			reason$ = destfilname$ + " exists and overwrite permission is set to no."
+			error 10000
+		End If
+	End If
+	If mode = do_copy
+		logmsg$ = "Copying " + filname$ + " to " + destfilname$
+		Gosub do_write_log
+		if not(fromUpgrade) Print @col,row;"Copying ";filname$;" to ";destfilname$;'CL';
+		cmnd$ = "cp "
+	Else !"do_move
+		logmsg$ = "Moving " + filname$ + " to " + destfilname$
+		Gosub do_write_log
+		if not(fromUpgrade) Print @col,row;"Moving ";filname$;" to ";destfilname$;'CL';
+		cmnd$ = "mv "
+	End If
+	!"determine the path of the file we are dealing with
+	ch_orig = FindChannel()
+	Ropen #ch_orig,filname$
+	filpathandname$ = Chf$(800 + ch_orig)
+	Close #ch_orig
+	! OK - chf$(800) in DL4 vs chf(800) in Unibasic don't
+	! return the same thing.  chf$(800) returns everything
+	! in upper case (blah!)
+	!"determine what kind of files we are dealing with
+	Call FindF(filname$ + ".idx",found)
+	! because of screwed up chf$(800) assume entire path is lower case
+	! (may be a bad assumtion)
+	filpathandname$ = lcase$(filpathandname$)
+	If found !"DL4 files in lower case, one with a .idx extension.
+		!"It looks like we have a DL4 database file on our hands.
+		!"Granted, this is too simplistic a way to check for file types.
+		work$ = cmnd$ + filpathandname$ + ".idx " + destfilname$ + ".idx"
+		logmsg$ = work$ \ Gosub do_write_log
+		if not(fromUpgrade) Print @col,row;work$;'CL';
+		System work$,e
+		If e
+			reason$ = "Unable to " + work$
+			e = 11
+			error 10000
+		End If
+	Else !"unibasic files in lowercase and uppercase
+		work$ = filpathandname$ \ Gosub get_root_name
+		Call String(1,work$) !"uppercase
+		filpathandname$[i] = "/" + work$
+		work$ = destfilname$ \ Gosub get_root_name
+		Call String(1,work$) !"uppercase
+		destfilname$[i] = "/" + work$
+		!"Check if the uppercase file name exists (call $findf only checks for the presence of the lower case file name)
+		System "test -f " + filpathandname$,e
+		If Not(e) !"Uppercase file exists, so move or copy it
+			work$ = cmnd$ + filpathandname$ + " " + destfilname$
+			logmsg$ = work$ \ Gosub do_write_log
+			if not(fromUpgrade) Print @col,row;work$;'CL';
+			System work$,e
+			If e
+				reason$ = "Unable to " + work$
+				e = 12
+				error 10000
+			End If
+		End If
+	End If
+	Call String(2,filpathandname$) !"lowercase
+	Call String(2,destfilname$) !"lowercase
+	work$ = cmnd$ + filpathandname$ + " " + destfilname$
+	logmsg$ = work$ \ Gosub do_write_log
+	if not(fromUpgrade) Print @col,row;work$;'CL';
+	System work$,e
+	If e
+		reason$ = "Unable to " + work$
+		e = 13
+		error 10000
+	End If
+	If cmnd$[1,2] = "mv" And mode = do_move_and_touch
+		!"Place an empty file in the original file's location so as to
+		!"mark the spot where the original resided. This way a build
+		!"command will build the file over this empty file. Otherwise, a
+		!"build would result in the file being built in the first filesystem
+		!"that contains the subdirectory of the file.
+		!"For example, if the original file was located in /v/4/sordflelh1,
+		!"but /u/4/ exists and /u appears before /v in the LUST table, then
+		!"after the file is moved out of /v/4, a rebuild command would try
+		!"to create a new file at /u/4/. This wouldn't be good if /u happens
+		!"to be nearly full. Obviously /v stands a better chance of being
+		!"empty if the original file was located there but has been moved out.
+		ch_orig = FindChannel()
+		Build #ch_orig, + filpathandname$
+		Print #ch_orig;Msc$(4);" created this file at ";Msc$(0);" to serve as a";
+		Print #ch_orig;" temporary file location marker. Please replace this file";
+		Print #ch_orig;" with a real data file."
+		Close #ch_orig
+	End If
+Return ! Archive_File
+
+get_root_name: !"strip off the path from the given work$
+	i = Len(work$)
+	loop_spath: If work$[i,i] <> "/" And i > 1 Let i = i - 1 \ Goto loop_spath
+	If work$[i,i] = "/" Let work$ = work$[i + 1]
+Return
+
+Add_Grp_Usr: !"Add group/user number to filename
+	coid$ = Str$(coid)
+	Search filname$,"#",pos_
+	work$ = filname$
+	If pos_
+		work$ = filname$[1,pos_ - 1],coid$,filname$[pos_ + 1]
+		filname$ = work$
+	End If
+	Search filname$,"%",pos_
+	work$ = filname$
+	If pos_
+		work$ = filname$[1,pos_ - 1],groupid$,filname$[pos_ + 1]
+		filname$ = work$
+	End If
+Return
+
+do_write_log: Call Time(tm$)
+	If ch_log <> -1 Print #ch_log;tm$;": ";logmsg$
+Return 
+
+outend: !"exit (return to caller)
+	if not(fromUpgrade) Print @col,row;'CL';
+	logmsg$ = "Exiting sysfbackup"
+	Gosub do_write_log
+	try
+		if fcode$ Close #ch_cntrl,#ch_ssuf02m,#ch_ssuf02i ! only close if we opened in here!
+	else
+		rem
+	end try
+	e = 0
+End
+
+else ! main try
+	origError = spc(8)
+	If Spc(8) <> 10000
+		dim msc4$[100] \ msc4$=msc$(4)
+		if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+		call env(2,"PROGNAME",msc4$)
+		e = 14
+		if spc(8) = 11000
+			call utilsearcherr(e$, e, Spc(10))
+		else
+			Call utilsuberr(e$,Spc(8),Spc(10),Msc$(2))
+		end if
+		call programdump()
+	else
+		e$ = reason$
+	End If
+	If ch_log <> -1
+		Print #ch_log;e$
+	End If
+	try
+		if fcode$ Close #ch_cntrl,#ch_ssuf02m,#ch_ssuf02i ! only close if we opened in here
+	else
+		rem
+	end try
+	error origError
+end try

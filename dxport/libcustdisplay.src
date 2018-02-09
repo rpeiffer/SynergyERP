@@ -1,0 +1,1861 @@
+! libcustdisplay.lib
+!
+! supporting library of customer routines for browser
+!
+! 1.0 09/17/07
+!
+! loadsave -w -n 100,10 -o prog/dxport/libcustdisplay.lib src/libcustdisplay.src
+!
+include "src/copyright.inc"
+!
+! sub & functions for list library
+!
+!  S  GetCustAR			get list of ARDetail
+!  S  GetCustCred		get Customer's Credit Info
+!  S  GetCustSales		get Customer's TY/LY Sales
+!  S  GetCustWkSls		get Customer's Weekly Sales
+!  S  GetCustCallNts    get Customer's Collection Call Notes
+!  S  GetCustCRHist     get Customer's Credit history (Flag p60$[20,20])
+!  S  GetCustRefDtl		get Customer's Reference Detail(R Option)
+
+include "src/inc/filecustnotes.inc" ! customer notes file
+include "src/inc/filecust.inc" ! "customer file
+include "src/inc/filesaract.inc" ! a/r file - current
+include "src/inc/filesaracth.inc" ! a/r file - history (is diff from saract)
+include "src/inc/fileroh.inc" ! order header
+include "src/inc/filerot.inc" ! order total
+include "src/inc/fileartermcode.inc" ! terms codes
+include "src/inc/filecustsls.inc" ! customer sales by month
+include "src/inc/fileweeklysls.inc" ! weekly sales file
+include "src/inc/filecallnotes.inc" ! collection notes file
+include "src/inc/filecustcrhist.inc" ! credit history
+include "src/inc/filesardetl.inc" ! ar detail
+include "src/inc/filesardetlh.inc" ! ar detail Hist (is same as sardetl)
+include "src/inc/filecashother.inc" ! cr other discounts
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+Declare External Sub ArBuck,Utage5,UserCntrl
+
+External Lib "getcredcdd.lib"
+Declare External Function Getcredcdd$
+
+External Lib "getartermd.lib"
+Declare External Function GetArTermd$
+
+External Lib "gettaxcdd.lib"
+Declare External Function Gettaxcdd$
+
+External Lib "libprod.lib"
+Declare External Function GetHldBill
+
+Declare Intrinsic Sub Env,FormatDate,JuliantoDate,DatetoJulian
+
+! --------------------------------------------------------------------------------------
+External Sub GetCustAR(e$,vers,List$[],maxcnt,intCo,ReturnStatus,Message$)
+  ! Creates a list of the customer's A/R Detail
+  !
+  ! e$         : error message
+  ! vers		: version - 0=Current A/R Only, 1=both curr&hist 2=History only
+  ! List$[]    : Customer Data list
+  ! maxcnt		: max # of lines for list$[]
+  ! intCo      : company id #
+  ! ReturnStatus : .net status
+  ! Message$	: .net message
+try
+!
+   dim 1%,tmp1,Dir,ARC,ARType,F,ARH,CTLChan,CustChan
+	dim 2%,tmp2,tmpcnt,Age[7],ARDate,DT3[5],X2
+	dim 2%,Y,IDate,custid,orderid,CJDATE
+    dim 3%,tmp3,ARRec,ARBal,CustRec,X3[9]
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[5000]
+    dim tmp$[200],tmp1$[200],WebStr$[5000],Message$[200]
+	dim CustKey$[64],Mode$[2],blank$[100],P61$[256],ARKey$[64]
+	dim P9$[50],P60$[50],P1$[60],Mask$[20],X$[10],Cust$[64]
+	Dim stkey$[60],Custom_customer$[30]
+!
+	dim ARC. as saract
+	dim ARH. as saracth
+	dim cust. as cust 
+	blank$=" ",blank$
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	Call DXGet("custid",cust$) \ custid=cust$
+	cust$=custid using "######"
+	cust$ = cust$+"            "
+	cust$[7]="" ! "cut after 6 chars
+  ! Open any files for this program
+    CTLChan=OpenFile(-9999,intCo) \ If CTLChan = -1 Error 42
+	CustChan=OpenFile(-1808,intCo) \ If CustChan = -1 Error 42
+	read #CTLChan,0,108;ARDate; ! system AR Date
+	mat read #CTLChan,19,50;p9$; ! system flags
+	mat read #CTLChan,60,50;p60$; ! system flags
+	mat read #CTLChan,61,0;P61$; ! system flags
+	CJDATE=TIM(6) ! curr julian date
+    ARC=OpenFile(-1504,intCo) \ if ARC= -1 Error 42 ! not found = Accounts Rec - Current
+	ARH=OpenFile(-1408,intCo) \ If ARH = -1 Error 42 ! not found - AR History
+    P1$= "INVSVCNSFD/ALATC/MUN.C/APAY" ! (USE 3 char) "INV S/C NSF D/A LCHGC/M UNCRC/A PMT "
+	! as the type above is going to be used for Ref detail lookup - USE SAME TYPES!
+	Mat read #ctlchan,115,60;custom_customer$; ! ALT
+	custom_customer$=RTrim$(UCase$(custom_customer$))
+	Mask$="----------#.##"
+	tmpcnt=maxcnt
+	maxrow=2000
+	IF Custom_customer$="JPAPER" then maxrow=3000
+	clear List$[]
+	ReturnStatus = 1
+	Message$="OK"
+!
+	call dxget("CURKEY",TMP$)
+	if rtrim$(tmp$)<>"" ! going for group 2+
+		let stkey$=RTrim$(tmp$) ! using dir 2 = CCCCCCDDDDDDIIIIIIIIIIT
+		! NEEDS CHECK FOR dropped spaces!
+		chklenstr: if len(stkey$)<23
+			tmp$=" "+stkey$ ! 1 is ALWAYS Customer
+			  stkey$=tmp$
+			  goto chklenstr
+		Endif ! done w/length check
+		! ok now 23 - see if spaces in middle gone?
+		x3=stkey$[1,6];x3[1]=stkey$[7,12] ! default - cust 6 / date 6 / inv 10
+		x3[2]=stkey$[13,22];x3[3]=stkey$[len(stkey$)];x1=0
+		for x=23 to 7 step -1
+			if stkey$[x,x]=" " ! found space from end
+			  if x1>0
+				x3=stkey$[1,x] ! first # = cust
+				x3[1]=stkey$[x+1,x+7] ! second=date(julian)
+			  Endif
+				if x1=0 
+					x1=Len(stkey$)-1 ! end invoice - before type
+					if x1<x+1 let x=x1-1 ! same start/end
+					let x3[2]=stkey$[x+1,x1] ! third (invoice) NOT TYPE
+				Endif
+			Endif
+			! if none after 6 - it's a full 6 digit # ! use as is
+		Next x
+		let stkey$[1,6]=x3 using "######"
+		!if x3[2]>0 let x3[2]=x3[2]+1 ! as its mode 6 - add 1 to start at last one sent
+		let stkey$[7,12]=x3[1] using "######"
+		let stkey$[13,22]=x3[2] using "##########"
+		let stkey$[23]=x3[3] using "# "
+	Else
+		clear stkey$
+	Endif
+	Cust$[7]="" ! make sure its only 6
+	mode$="=" ! "exact match or next
+	Dir=1 ! "of customer code / Ref
+	CustKey$=Cust$
+	CustRec=filegetcust(e$,CustChan,mode$,dir,CustKey$,cust.)
+	if CustRec<=0
+	  Clear cust.
+	  ReturnStatus = 0
+	  Message$="Customer Not Found"
+	  goto CARDone
+	endif
+	List$[0]=bsdel$,"AR DETAIL",fdel$
+	WebStr$="ID",fdel$,"Name",fdel$
+	List$[1]=WebStr$
+	WebStr$=Cust$,fdel$,RTrim$(Cust.Name$),fdel$ ! ID & Name
+	List$[2]=WebStr$
+	List$[3]=esdel$ ! could be 3 sections (1=header,2=current AR,3=History AR)
+	
+	!
+	row=4 ! starting row for data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	CustKey$=Cust$
+	if CustRec>0
+	  if vers<=1 ! vers=0 curr only, 1=both curr & hist, 2=hist only
+	  	List$[row]=bsdel$,"CURRENT AR",fdel$
+		row=row+1
+		WebStr$="ID",fdel$
+		WebStr$=WebStr$,"Date",fdel$
+		WebStr$=WebStr$,"Ref No",fdel$,"RefType",fdel$,"Cust PO - Order #",fdel$
+		! Webstr$=WebStr$,"Order #",fdel$,"OT",fdel$
+		Webstr$=WebStr$,"OT",fdel$  ! "Order # part of custPO
+		WebStr$=WebStr$,"Original $",fdel$,"Balance",fdel$
+		Webstr$=WebStr$,"Age",fdel$,"WH",fdel$,"LinkId",fdel$	
+		List$[row]=WebStr$
+		row=row+1
+	  ARKey$=Cust$[1,6]+"999" ! "   " (for mode$ >= )
+	  if stkey$<>"" let arkey$=stkey$
+	  Mode$="<=" ! "match or PREV
+	  Dir=2 ! "start w/ cust/ref (may switch to dir=2 - cust/date order)
+	  If vers=0 and p61$[123,123]="Y" 
+			let mode$=">="
+			If rtrim$(stkey$)="" ARKey$=Cust$[1,6]+"   " ! "   " (for mode$ >= )
+	  endif
+	  Do
+	   ARRec=filegetsaract(e$,ARC,Mode$,dir,ARKey$,ARC.)
+       if ARRec<0 or ARKey$[1,len(CustKey$)]<>CustKey$ exit do
+		Mode$="<" ! "get prev/next
+		if vers=0 and p61$[123,123]="Y" 
+			let mode$=">"
+		endif
+		
+		Dir=2 ! "dir 1/2
+		if row>maxrow+1 ! ALLOW FOR HEADER & this line
+			returnstatus=5 ! special status to tell web MORE TO COME
+			message$="CURKEY="+ARKey$+"&"
+			exit do ! reached limit
+		Endif
+	    WebStr$=Cust$,fdel$ ! cust #
+		if ARC.Date<>0 ! it's julian date
+		  tmp$=JDate$(ARC.Date) ! julian date to mm/dd/yyyy
+		else
+		  tmp$="      "
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! A/R date
+		ARTYPE=INT(FRA(ARC.AgeTypeCount)*100)
+		tmp$=""
+		if ARType>=1 and ARType<=9 let tmp$=P1$[(ARTYPE-1)*3+1,(ARTYPE-1)*3+3]
+	   ! WebStr$=WebStr$,Rtrim$(Str$(ARC.ReferenceNo)+" "+tmp$),fdel$ ! refno & type
+		WebStr$=WebStr$,Str$(ARC.ReferenceNo),fdel$ ! refno alone
+	   WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! type of doc (separate)
+	   tmp$=""
+	 
+	   IF ARC.EntryDescription$[1,2]="In" ! old style ar
+		tmp$=ARC.EntryDescription$[1,16]                        
+	   ELSE
+		IF ARC.EntryDescription$[1,2]<>"  "   ! not inv/cm                    
+			tmp$=ARC.EntryDescription$ ! [1,8]+" "+ARC.EntryDescription$[11,16]
+		ELSE ! new style
+			tmp$=RTrim$(ARC.PurchaseOrder$)
+			if len(tmp$)<8 let tmp$[len(tmp$)+1,8]=blank$
+			tmp$=tmp$+" - "+ARC.Order  USING "######"
+		ENDIF                                   
+	   ENDIF
+	   WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! description
+	   WebStr$=WebStr$,Str$(ARC.OrderType),fdel$ ! order type
+	   tmp3=ARC.OrigAmt
+	   if ARType>=6 let tmp3=0-tmp3 ! credit - give 
+		WebStr$=WebStr$,RTrim$(tmp3 using Mask$),fdel$ ! Original amount
+		ARBal=ARC.OrigAmt-ARC.PriorCredit-ARC.CurrentCredit
+		if ARType>=6 let ARBal=0-ARBal
+		If ARBal<>0 let WebStr$=WebStr$,RTrim$(ARBal using Mask$),fdel$ ! Open Balance
+		If ARBal=0 let WebStr$=WebStr$,RTrim$(ARC.LastCREntry using "C/R#####"),fdel$ ! CR Entry
+		! set up for Aging
+		tmp$="" ! variable holding data
+		X$=ARDate Using "&&&&&&"
+		CALL DateToJulian(1,X$,X$,E) \ If E let X$=Str$(TIM(6))
+		If ARC.Date<=0 Let ARC.Date=X$
+		If ARC.Date>0
+     
+		 LET X2=ARC.Date !  GOSUB L_7840: ! convert julian to yymmdd
+		 tmp1$=X2 Using "&&&&&"
+		 Call JulianToDate(5,tmp1$,X$,F) ! returns mm/dd/yyyy
+		 if Not(F) ! need it as yymmdd
+		   tmp1$=X$[9,10],X$[1,2],X$[4,5]
+		   x$=" ",x$
+		   x$=tmp1$[1,6]
+		 end if
+		 if F let X$=ARDate Using "&&&&&&"
+		 let DT3[0]=X$[1,6]
+		 LET Y=DT3[0];IDATE=DT3[0]
+		 IF P9$[25,25]="Y" And ARC.DueDate1 LET Y=ARC.DueDate1
+		 ! ARDate=system ar date
+		 LET AGE[1]=0;AGE[2]=ARDATE;AGE[3]=Y;AGE[4]=0
+		 IF NOT(ARBal)
+		  IF ARType>5
+	        IF ARC.LastPayDate LET AGE[2]=ARC.LastPayDate ELSE  LET AGE[2]=IDATE         
+	      ELSE
+	        IF ARC.LastPayDate LET AGE[2]=ARC.LastPayDate ELSE  IF ARC.Date LET AGE[2]=IDATE
+		  ENDIF ! type>5 (credit)
+	     ENDIF ! not(arbal)
+		endif ! ardate>0
+		Call utage5(e$,p9$,AGE[],CtlChan) ! use call for aging
+		IF AGE[1]<0
+		  tmp$="CUR"
+		ELSE
+		  tmp$=Int(Age[1]) USING "#####" 
+		ENDIF 
+		IF AGE[0]=2 let tmp$=""         
+		IF AGE[0]=1 LET tmp$=""
+		IF P9$[19,19]<>"Y" And ARType>5 let tmp$="" ! no ageing credits
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! age
+		WebStr$=WebStr$,RTrim$(Str$(ARC.Whse)),fdel$ ! Whse
+		let tmp$=""
+		if artype=1 or artype=6
+			if artype=1 let tmp$=str$(arc.ReferenceNo)
+			if artype=6 let tmp$=str$(ARC.Order) !
+			if artype=1 and arc.AcptSrc=247 let tmp$=str$(arc.order)
+			if artype=6 and arc.AcptSrc=227 let tmp$=str$(arc.ReferenceNo)
+		endif
+		webstr$=webstr$,rtrim$(tmp$),fdel$
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+	   Loop
+	  end if  ! of vers
+	  If Vers=1 ! need end of section if both sent
+		 List$[row]=esdel$ ! end of current ar section
+		 row=row+1
+		 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Endif
+    ! possibilty of current only or both
+	If Vers>0 ! they want History also (0=curr only, 1=both curr&hist, 2=hist only)
+
+	 List$[row]=bsdel$,"HISTORY AR",fdel$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	 WebStr$="ID",fdel$
+	 WebStr$=WebStr$,"Date",fdel$
+	 WebStr$=WebStr$,"Ref No",fdel$,"RefType",fdel$,"Cust PO - Order #",fdel$
+	 Webstr$=WebStr$,"OT",fdel$ ! order # part of Customer PO
+	 WebStr$=WebStr$,"Original $",fdel$,"Date Paid",fdel$
+	 WebStr$=WebStr$,"C/R",fdel$
+	 Webstr$=WebStr$,"Age",fdel$,"WH",fdel$,"LinkId",fdel$	
+     List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	 ! now ar history
+	  ARKey$=Cust$[1,6]+"999" ! "   " (for >=  )
+	  if stkey$<>"" let arkey$=stkey$
+	  Mode$="<=" ! "match or prev ! next
+	  Dir=2 ! "start w/ cust/ref (may switch to dir=2 - cust/date order)
+	  Do
+	   ARRec=filegetsaracth(e$,ARH,Mode$,dir,ARKey$,ARH.)
+       if ARRec<0 or ARKey$[1,len(CustKey$)]<>CustKey$ exit do
+		Mode$="<" ! "get prev/next
+		Dir=2 ! "dir 1/2
+		if row>maxrow+1 ! ALLOW FOR HEADER & this line
+			returnstatus=5 ! special status to tell web MORE TO COME
+			message$="CURKEY="+ARKey$+"&"
+			exit do ! reached limit
+		Endif
+	    WebStr$=Cust$,fdel$ ! cust #
+		if ARH.Date<>0 ! it's julian date
+		  !if row>12000 exit do ! rec limit = 1.5MB (240 pages!!)
+		  !if row>4000 and (CJDATE-1100)>arh.date exit do ! done if date<3 years ago & nearing 2MB
+		  ! on athens - cust 125575 - the above returned 800K file (100+pages)
+		  tmp$=JDate$(ARH.Date) ! julian date to mm/dd/yyyy
+		else
+		  tmp$="      "
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! A/R date
+		ARTYPE=INT(FRA(ARH.AgeTypeCount)*100)
+		tmp$=""
+		if ARType>=1 and ARType<=9 let tmp$=P1$[(ARTYPE-1)*3+1,(ARTYPE-1)*3+3]
+	   ! WebStr$=WebStr$,Rtrim$(Str$(ARH.Reference)+" "+tmp$),fdel$ ! refno & type
+	   WebStr$=WebStr$,Str$(ARH.Reference),fdel$ ! refno & type
+	   WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! type of Doc (now separate)
+	   tmp$=""
+	   IF ARH.EntryDescription$[1,2]="In"
+		tmp$=ARH.EntryDescription$[1,14]                        
+	   ELSE
+		IF ARH.EntryDescription$[1,2]<>"  "                       
+	     tmp$=ARH.EntryDescription$
+        ELSE
+		 tmp$=RTrim$(ARH.PurchaseOrder$)
+		 if len(tmp$)<8 let tmp$[len(tmp$)+1,8]=blank$
+		 tmp$=tmp$+" - "+ARH.Order  USING "######"
+	    ENDIF                                   
+	   ENDIF
+	   WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! description
+	   WebStr$=WebStr$,Str$(ARH.OrderType),fdel$ ! order type
+	   tmp3=ARH.OrigAmt
+	   if ARType>=6 let tmp3=0-tmp3 ! credit - give 
+	   WebStr$=WebStr$,RTrim$(tmp3 using Mask$),fdel$ ! Original amount
+	   tmp$=PDate$(ARH.LastPayDate)
+	   if ARType=9 let tmp$="" ! not for payments!
+	   WebStr$=WebStr$,tmp$,fdel$ ! last pay date
+	   tmp$="HIST"
+	   If ARH.LastCREntry Let tmp$=Str$(ARH.LastCREntry)
+	   WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! last c/r entry
+  		ARBal=ARH.OrigAmt-ARH.PriorCredit-ARH.CurrentCredit
+	   	! set up for Aging
+		tmp$="" ! variable holding data
+		X$=ARDate Using "&&&&&&"
+		CALL DateToJulian(1,X$,X$,E) \ If E let X$=Str$(TIM(6))
+		If ARH.Date<=0 Let ARH.Date=X$
+		If ARH.Date>0
+     
+		 LET X2=ARH.Date !  GOSUB L_7840: ! convert julian to yymmdd
+		 tmp1$=X2 Using "&&&&&"
+		 Call JulianToDate(5,tmp1$,X$,F) ! returns mm/dd/yyyy
+		 if Not(F) ! need it as yymmdd
+		   tmp1$=X$[9,10],X$[1,2],X$[4,5]
+		   x$=" ",x$
+		   x$=tmp1$[1,6]
+		 end if
+		 if F let X$=ARDate Using "&&&&&&"
+		 let DT3[0]=X$[1,6]
+		 LET Y=DT3[0];IDATE=DT3[0]
+		 IF P9$[25,25]="Y" And ARH.DueDate1 LET Y=ARH.DueDate1
+		 ! ARDate=system ar date
+		 LET AGE[1]=0;AGE[2]=ARDATE;AGE[3]=Y;AGE[4]=0
+		 IF NOT(ARBal)
+		  IF ARType>5
+	        IF ARH.LastPayDate LET AGE[2]=ARH.LastPayDate ELSE  LET AGE[2]=IDATE         
+	      ELSE
+	        IF ARH.LastPayDate LET AGE[2]=ARH.LastPayDate ELSE  IF ARH.Date LET AGE[2]=IDATE
+		  ENDIF ! type>5 (credit)
+	     ENDIF ! not(arbal)
+		endif ! ardate>0
+		Call utage5(e$,p9$,AGE[],CtlChan) ! use call for aging
+		IF AGE[1]<0
+		  tmp$="CUR"
+		ELSE
+		  tmp$=Int(Age[1]) USING "#####" 
+		ENDIF 
+		IF AGE[0]=2 let tmp$=""         
+		IF AGE[0]=1 LET tmp$=""
+		IF P9$[19,19]<>"Y" And ARType>5 let tmp$="" ! no ageing credits
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! age
+		WebStr$=WebStr$,RTrim$(Str$(ARH.Whse)),fdel$ ! Whse
+		let tmp$=""
+		if artype=1 or artype=6
+			if artype=1 let tmp$=Str$(ARH.Reference)
+			if artype=6 let tmp$=str$(ARh.Order) !
+			if artype=1 and arh.AcptSrc=247 let tmp$=str$(arh.order)
+			if artype=6 and arh.AcptSrc=227 let tmp$= Str$(ARH.Reference)
+		endif
+		webstr$=webstr$,rtrim$(tmp$),fdel$
+		!
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Loop
+	 Endif ! of they want history also
+
+	endif ! valid cust rec
+	If ARC>0 Close #ARC
+	If ARH>0 Close #ARH
+	!
+	List$[row]=esdel$ ! end of section
+	CARDone: ! finito
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetCustAR
+! --------------------------------------------------------------------------------------
+External Sub GetCustCred(e$,Cust$,UserId$,List$[],CustRec,maxcnt,intCo,CTLChan,CNChan,CustChan,cust. as cust)
+  ! Creates a list of the customer's A/R Detail
+  !
+  ! e$         : error message
+  ! Cust$      : Cust #
+  ! UserId$		: log on user id
+  ! List$[]    : Customer misc list
+  ! CustRec	   : Customer Record #
+  ! maxcnt     : max # of lines for list$[]
+  ! intCo      : company id #
+  ! CTLChan    : Control file channel
+  ! CNChan	   : CustNotes file channel
+  ! CustChan   : customer file channel
+  ! Cust.      : customer data
+   try
+!
+   dim 1%,tmp1,Dir,AMC,SZNC,ROHC,ROTC,A5[10],FndUID,UIDRec,UPC
+	dim 2%,tmp2,tmpcnt,CustID
+    dim 3%,tmp3,AMRec,ROHRec,ROTRec
+	dim 3%,PendCM,x3[9]
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[500]
+    dim tmp$[200],tmp1$[200],WebStr$[500],Message$[200]
+	dim CustKey$[64],Mode$[2],blank$[100],P61$[256],credcoded$[16]
+	dim artermd$[16],ROHKey$[64],arbuck$[5,10],X$[20],A2$[50]
+	Dim Mask$[30],Custom_customer$[30]
+	dim arcl$[30]
+!
+	dim CN. as custnotes
+	dim OrdH. as roh
+	dim OrdT. as rot
+
+!	dim cust. as cust  ! "we passed it!
+	Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+	Call UserCntrl(USERID$,A2$,A5[],status,intCo)
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	Mask$="----------#.##"
+!
+    try
+	  mat read #CTLChan,61,0;P61$; ! system flags
+	else
+		CTLChan=OpenFile(-9999,intCo) \ if CTLChan=-1 Error 42 ! "closed somewhere?
+	end try
+	mat read #CTLChan,61,0;P61$; ! system flags
+	Mat read #ctlchan,115,60;custom_customer$; ! ALT
+	custom_customer$=RTrim$(UCase$(custom_customer$))
+	ROHC=OpenFile(-1840,intCo) \ if ROHC=-1 Error 42 ! order header
+	ROTC=OpenFile(-1872,intCo) \ if ROTC=-1 Error 42 ! order totals
+	ch_acmgr=OpenFile(-3040,intCo) \ if ch_acmgr=-1 Error 42 ! account/collection manager
+
+!	UPC=OpenFile(-9989,intCo) \ if UPC=-1 Error 42 ! user port
+! Call programdump("/tmp/rlog1!","")
+	! get user control flags
+	! Read #UPC,SPC(6),0;UIDRec; ! can't use gets > file size
+!	Close #UPC
+! Call programdump("/tmp/rlog2!","")
+	blank$=" ",blank$
+	A5[6]=0 ! we only need collection notes flag
+	If Len(Userid$)<10 let Userid$=userid$+blank$
+	Let Userid$[11]="" ! Cut it at max
+	If UserID$[1,10]<>blank$[1,10] !  and UIDRec>=0
+	  Call UserCntrl(userID$,A2$,A5[],FndUID,intCo)
+	Endif
+	If UIDRec=-1 Let A5[6]=1 ! superuser
+	tmpcnt=maxcnt
+	clear List$[]
+! ADDED 03/2012 - CUSTOM GTI - Hold/Bill $$
+	if custom_customer$="GTI" ! in product UDA #11
+		CustID=cust.CustomerCode
+		HLDBillV=GetHldBill(e$,IntCo,custID)
+	Else
+		HldBillV=0
+	Endif
+    Call ArBuck(arbuck$[],intCo)
+	CTLChan=OpenFile(-9999,intCo) \ if CTLChan=-1 Error 42 ! "closed IN ARBUCK!?
+ 	List$[0]=bsdel$,"CUSTCREDIT",fdel$
+	! WebStr$="Field",fdel$,"Value",fdel$
+	WebStr$="ID",fdel$
+	WebStr$=WebStr$,"Name",fdel$,"AP Phone",fdel$
+	WebStr$=WebStr$,"AP Contact",fdel$,"Credit",fdel$
+	Webstr$=WebStr$,"Check",fdel$,"LastPayDate",fdel$,"Limit",fdel$
+	WebStr$=WebStr$,"Open Order$",fdel$,"Terms",fdel$
+	Webstr$=WebStr$,"Pend Credit$",fdel$,"MTD Pay",fdel$
+	WebStr$=WebStr$,"AvgPay",fdel$ ! ,ARBuck$[5],fdel$
+	! WebStr$=WebStr$,ARBuck$[4],fdel$,ARBuck$[3],fdel$
+	! webStr$=WebStr$,ARBuck$[2],fdel$,ARBuck$[1],fdel$
+	! WebStr$=WebStr$,"UNAPPLIED",fdel$,ARBuck$[0],fdel$
+	WebStr$=WebStr$,"DisplayFlag",fdel$
+	! for GTI - add'l fields (related to sales)
+	webstr$=webstr$,"MTD Sales",fdel$,"YTD Sales",fdel$
+	Webstr$=webstr$,"YTD Gross",fdel$
+	Webstr$=webstr$,"YTD Inv",fdel$,"Avg Inv",fdel$
+	! additional CUSTOM GTI Fields per task 10427
+	Webstr$=webstr$,"CustomCust",fdel$ ! Limit & Open Order$ above
+	Webstr$=webstr$,"CURR",fdel$,"TOT",fdel$ ! so can easily find them
+	webstr$=webstr$,"HLDBILL",fdel$,"Avail",fdel$ ! GTI = avail credit limit
+	webstr$=webstr$,"AcctManager",fdel$
+	webstr$=webstr$,"CreditAppDate",fdel$
+	webstr$=webstr$,"PREMIERCUST",fdel$
+    List$[1]=WebStr$ ! "send Header then fields
+	!
+	row=2 ! starting row for data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Cust$[7]="" ! make sure its only 6
+	CustKey$=Cust$
+	mode$="=" ! "exact match
+	Dir=1 ! "of customer code
+	! IF A5[6]=0 LET CUSTREC=-99 ! NO DISPLAY
+	
+	! CustRec=filegetcust(e$,CustChan,mode$,dir,CustKey$,cust.) - it's passed
+	if CustRec>0
+	  CNRec=filegetcustnotes(e$,CNChan,mode$,dir,CustKey$,CN.)
+	  If CNRec<0 Clear CN.
+	  WebStr$=Cust$,fdel$ ! cust #
+	  WebStr$=WebStr$,RTrim$(cust.Name$),fdel$ ! name
+	  WebStr$=WebStr$,RTrim$(CN.ApPhone$),fdel$ ! AP Phone
+	  WebStr$=WebStr$,RTrim$(CN.ApContact$),fdel$ ! AP contact
+	 
+	  ! CREDIT CODE
+      let tmpch=ctlchan
+      let credcoded$=getcredcdd$(tmpch,cust.CreditCode,intco)
+	  WebStr$=WebStr$,Str$(cust.CreditCode)," ",rtrim$(credcoded$),fdel$ ! credit code
+	  Webstr$=WebStr$,"Flag ",Str$(cust.CreditCheckDays)," Days Past Due",fdel$ ! credit check days
+	  x$=PDate$(Cust.LastPayDate)
+	  WebStr$=WebStr$,RTrim$(X$),fdel$ ! last pay date
+	  Webstr$=WebStr$,Ltrim$(cust.CreditLimit  using "$$$$$$$$$$$$.##"),fdel$ ! credit limit
+	  WebStr$=WebStr$,Ltrim$(cust.OpenOrder using "$$$$$$$$$$$$.##"),fdel$ ! open order $
+	  let tmpch=-1
+	  let artermd$=getartermd$(tmpch,cust.Terms,intco)
+  	  WebStr$=WebStr$,Str$(cust.Terms)," ",RTrim$(artermd$),fdel$ ! terms
+	  mode$=">="
+	  Dir=2 ! cust/order
+	  ROHKey$=Cust$+"  " ! cust and space fill it
+	  PendCM=0
+	  Do
+		ROHRec=filegetroh(e$,ROHC,mode$,dir,ROHKey$,OrdH.)
+		If ROHRec<0 or ROHKey$[1,6]<>Cust$ exit do
+		mode$=">" ! "switch to next only
+		Dir=2
+		IF OrdH.Status>=9 AND OrdH.Status<=11
+			ROTRec=OrdH.TotRec
+			if ROTRec>0 read record #ROTC,ROTRec,0;OrdT.;
+			If ROTREC<=0 Clear OrdT.
+		    LET PendCM=PendCM+OrdT.OrdTot
+		ENDIF                     
+
+	  Loop
+	  
+	  Webstr$=WebStr$,LTrim$(PendCM using "$$$$$$$$$$$$.##"),fdel$ ! "pend credit memos
+	  Webstr$=WebStr$,LTrim$(Cust.MtdPayments using "$$$$$$$$$$$$.##"),fdel$ ! mtd pays
+	  WebStr$=WebStr$,LTrim$(Cust.AvgPayDays USING "----#.##"),fdel$ ! avg pays
+	  tmp$="N"
+	  If A5[6]=1 Let tmp$="Y"
+	  WebStr$=WebStr$,tmp$,fdel$ ! collection notes display
+	  ! add add'l fields for GTI (sales info)
+	  webstr$=webstr$,LTrim$(cust.NetSalesMtd using Mask$),fdel$ ! mtd sales
+	  webstr$=webstr$,LTrim$(cust.NetSalesYtd using Mask$),fdel$ ! ytd sales
+	  ! x3=cust.NetSalesYtd+cust.SlsTxYtd+cust.FreightSalesYtd+cust.MiscChgYtd-cust.DiscountYtd
+	  x3=cust.GrProfitYtd ! pdf shows gross < sales - so is gp!
+	  x3[1]=0 \ if cust.NetSalesYtd let x3[1]=FNR(cust.GrProfitYtd*100/cust.NetSalesYtd)
+	  webstr$=webstr$,LTrim$(X3 using Mask$) ! ytd gp
+	  webstr$=webstr$,"  ",LTrim$(x3[1] using "----#.##%"),fdel$ ! ytd go %
+	  webstr$=webstr$,LTrim$(cust.InvoiceYtd using "#######"),fdel$ ! # inv ytd
+	  x3=0 \ if cust.InvoiceYtd let x3=FNR(cust.NetSalesYtd/cust.InvoiceYtd)
+	  webstr$=webstr$,LTrim$(X3 using Mask$),fdel$ ! ytd avg mdse sale
+	  ! the below added for GTI - task 10427 (web to realign screen based on custom_cust)
+	  webstr$=webstr$,Custom_customer$,fdel$
+	  X3[1]=(cust.CurrentArAgeBal+cust.AgeArAmt1+cust.AgeArAmt2+cust.AgeArAmt3+cust.AgeArAmt4)-cust.UnappliedCredit
+	  x3=0 \ x3=cust.CreditLimit-X3[1]-cust.OpenOrder-HLDBillV
+	  Webstr$=webstr$,LTrim$(cust.CurrentArAgeBal using Mask$),fdel$
+	  webstr$=webstr$,LTrim$(X3[1] using Mask$),fdel$ ! TOTAL A/R
+	  webstr$=webstr$,LTrim$(HLDBillV using Mask$),fdel$ ! hold/bill $
+	  webstr$=webstr$,LTrim$(X3 using Mask$),fdel$ ! Avail Credit
+	  let arcl$=""
+	  if cust.collectionagent>0
+			Try
+				Mat Read #ch_acmgr,cust.collectionagent,0;arcl$;
+			else
+				let arcl$=""
+			End Try
+	  endif
+	  let webstr$=webstr$,str$(cust.Collectionagent)," ",rtrim$(arcl$),fdel$ ! account manager
+	  LET tmp$=" ",tmp$
+	  IF cust.CreditApplicatDate<>0
+			LET tmp$=PDATE$(cust.CreditApplicatDate)
+		endif
+	  LET WEBSTR$=WEBSTR$,RTRIM$(tmp$),FDEL$
+	  ! add premier customer
+	  tmp$="N" \ if cn.PRMCUST$="A" or cn.PRMCUST$="S" let tmp$="Y"
+	  LET WEBSTR$=WEBSTR$,RTRIM$(tmp$),FDEL$ ! 62459 addition - word Premier on Inquiry
+  	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  List$[row]=esdel$ ! end of section
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  WebStr$=bsdel$,"BUCKETS",fdel$  ! -------- NEW SECTION ------
+	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  WebStr$="AGE",fdel$,"VALUE",fdel$
+	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  ! ,ARBuck$[5],fdel$
+	! WebStr$=WebStr$,ARBuck$[4],fdel$,ARBuck$[3],fdel$
+	! webStr$=WebStr$,ARBuck$[2],fdel$,ARBuck$[1],fdel$
+	! WebStr$=WebStr$,"UNAPPLIED",fdel$,ARBuck$[0],fdel$
+	  WebStr$=ARBuck$[5]+fdel$+LTrim$(cust.AgeArAmt4 using Mask$)+fdel$ ! bucket 4(oldest age)
+	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+      WebStr$=ARBuck$[4]+fdel$+LTrim$(cust.AgeArAmt3 using Mask$)+fdel$ ! bucket 3
+	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  WebStr$=ARBuck$[3]+fdel$+LTrim$(cust.AgeArAmt2 using Mask$)+fdel$ ! bucket 2
+	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+      WebStr$=ARBuck$[2]+fdel$+LTrim$(cust.AgeArAmt1 using Mask$)+fdel$ ! bucket 1 
+	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+      WebStr$=ARBuck$[1]+fdel$+LTrim$(cust.CurrentArAgeBal using Mask$)+fdel$ ! current
+	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+      ! if cust.UnappliedCredit <> 0 ! unapplied (always send it)
+	  ! let tmp$="Unapplied Cr"
+	   WebStr$="UNAPPLIED"+fdel$+LTrim$(cust.UnappliedCredit using Mask$)+fdel$ ! unapplied
+	   List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+      ! endif
+      WebStr$=ARBuck$[0]+fdel$+LTrim$((cust.CurrentArAgeBal+cust.AgeArAmt1+cust.AgeArAmt2+cust.AgeArAmt3+cust.AgeArAmt4)-cust.UnappliedCredit using Mask$)+fdel$ ! total AR
+
+	  !
+	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	endif ! valid cust rec
+	If ROHC>0 Close #ROHC
+	If ROTC>0 Close #ROTC
+	if ch_acmgr>0 close #ch_acmgr
+	!
+	List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetCustCred
+! --------------------------------------------------------------------------------------
+External Sub GetCustSales(e$,List$[],maxcnt,intCo,ReturnStatus,Message$)
+  ! Creates a list of the customer's Monthly Sales (mx102m)
+  !
+  ! e$         : error message
+  ! List$[]    : Customer misc list
+  ! maxcnt     : max # of lines for list$[]
+  ! intCo      : company id #
+  ! ReturnStatus	: used for status
+  ! Message$	: used for Status
+try
+!
+   dim 1%,tmp1,Dir,CustChan,CTLChan,CSLSChan
+    dim 1%,BOYMonth,EOYMonth,ARMonth,x1[9],I,x6,x7,x8
+	dim 2%,tmp2,tmpcnt,custid
+    dim 3%,tmp3,CustRec,T9[2]
+	dim 3%,S1[12,2],S2[12,2],Z1[12,2],Z2[12,2]
+	Dim 1%,FndUID,UA5[10],Cost_Lev[3] ! vars for call usercntrl
+	Dim UserID$[8],UA2$[50],TUID$[10] ! vars for call usercntrl
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[500]
+    dim tmp$[200],tmp1$[200],WebStr$[400],Message$[200]
+	dim CustKey$[64],Mode$[2],blank$[100],P61$[256],Cust$[64]
+	dim X$[20],Mth$[120],Mask$[15],fmth$[12,10]
+!
+	dim Cust. as cust
+	dim CSLS. as custsls
+
+!
+	!! get costlev
+	Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	let TUID$=UserID$+"          " ! set up temp var
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max as usercntrl is 10 chars vs 8 for .net
+	If TUID$[1,10]<>"          " !  no blank users!
+	  Call UserCntrl(TUID$,UA2$,UA5[],FndUID,intCo)
+	  If FndUID=0 ! means found it, =1 is not found
+	    Cost_Lev[0]=UA5[0];Cost_Lev[1]=UA5[1] ! avg / load
+		Cost_Lev[2]=UA5[2];Cost_Lev[3]=UA5[3] ! PO / base
+	  Endif ! if not found would be zeroes from dim
+	Endif
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	Call DXGet("custid",cust$) \ custid=cust$
+	cust$=custid using "######"
+	cust$ = cust$+"            "
+	cust$[7]="" ! "cut after 6 chars
+  ! Open any files for this program
+    CTLChan=OpenFile(-9999,intCo) \ If CTLChan = -1 Error 42
+	CustChan=OpenFile(-1808,intCo) \ If CustChan = -1 Error 42
+	CSLSChan=OpenFile(-2064,intCo) \ If CSLSChan = -1 Error 42
+
+	!Mth$[1]="January"
+	!Mth$[11]="February"
+	!Mth$[21]="March"
+	!Mth$[31]="April"
+	!Mth$[41]="May"
+	!Mth$[51]="June"
+	!Mth$[61]="July"
+	!Mth$[71]="August"
+	!Mth$[81]="September"
+	!Mth$[91]="October"
+	!Mth$[101]="November"
+	!Mth$[111]="December"
+	fmth$[1]="January"
+	fmth$[2]="February"
+	fmth$[3]="March"
+	fmth$[4]="April"
+	fmth$[5]="May"
+	fmth$[6]="June"
+	fmth$[7]="July"
+	fmth$[8]="August"
+	fmth$[9]="September"
+	fmth$[10]="October"
+	fmth$[11]="November"
+	FMth$[12]="December"
+	Mask$="---------.##" ! can do up to 99,999,999.99
+	ReturnStatus = 1
+	Message$="OK"
+    mode$="="
+	dir=1
+    CustRec = filegetcust(e$,CustChan,mode$,dir,cust$,cust.)
+	if CustRec<=0
+	  Clear cust.
+	  ReturnStatus = 0
+	  Message$="Customer Not Found"
+	endif
+!
+
+	mat read #CTLChan,61,0;P61$; ! system flags
+	Mat READ #CTLChan,51,74;BOYMONTH;
+	Mat READ #CTLChan,0,120;ARMONTH; 
+
+	tmpcnt=maxcnt
+	clear List$[]
+	! set up month names
+	X1=BOYMonth
+	for x=1 to 12
+		let x1[1]=((x-1)*10)+1 ! start of string
+		let mth$[x1[1]]=fmth$[x1]
+		x1=x1+1 \ if x1>12 let x1=1
+	Next x
+	! three sections - 1=header & cust info, 2=TY, 3=LY
+ 	List$[0]=bsdel$,"CUSTOMERSALES",fdel$
+	WebStr$="ID",fdel$,"Name",fdel$
+	List$[1]=WebStr$
+	WebStr$=cust$,fdel$,RTrim$(cust.Name$),fdel$
+	List$[2]=WebStr$
+	List$[3]=esdel$
+	WebStr$=bsdel$,"Current Year Sales",fdel$
+	List$[4]=WebStr$
+	WebStr$="MONTH",fdel$,"UNIT SALES",fdel$,"NET SALES",fdel$,"COST OF SALES",fdel$,"GP %",fdel$
+	List$[5]=WebStr$
+	row=6 ! start of data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	If CustRec>0 
+		read record #CSLSChan,CustRec,0;CSLS.;
+		! move names into z1[],z2[] so we can use variables instead of Names
+		
+		Let z1[0,0]=CSLS.TYYTDUnits;z1[0,1]=CSLS.TYYTDSDols;z1[0,2]=CSLS.TYYTDCost
+		Let Z1[1,0]=CSLS.TYJanUnits;z1[1,1]=CSLS.TYJanSDols;z1[1,2]=CSLS.TYJanCost
+		let z1[2,0]=CSLS.TYFebUnits;z1[2,1]=CSLS.TYFebSDols;z1[2,2]=CSLS.TYFebCost
+		let z1[3,0]=CSLS.TYMarUnits;z1[3,1]=CSLS.TYMarSDols;z1[3,2]=CSLS.TYMarCost
+		let z1[4,0]=CSLS.TYAprUnits;z1[4,1]=CSLS.TYAprSDols;z1[4,2]=CSLS.TYAprCost
+		let z1[5,0]=CSLS.TYMayUnits;z1[5,1]=CSLS.TYMaySDols;z1[5,2]=CSLS.TYMayCost
+		let z1[6,0]=CSLS.TYJunUnits;z1[6,1]=CSLS.TYJunSDols;z1[6,2]=CSLS.TYJunCost
+		let z1[7,0]=CSLS.TYJulUnits;z1[7,1]=CSLS.TYJulSDols;z1[7,2]=CSLS.TYJulCost
+		let z1[8,0]=CSLS.TYAugUnits;z1[8,1]=CSLS.TYAugSDols;z1[8,2]=CSLS.TYAugCost
+		let z1[9,0]=CSLS.TYSepUnits;z1[9,1]=CSLS.TYSepSDols;z1[9,2]=CSLS.TYSepCost
+		let z1[10,0]=CSLS.TYOctUnits;z1[10,1]=CSLS.TYOctSDols;z1[10,2]=CSLS.TYOctCost
+		let z1[11,0]=CSLS.TYNovUnits;z1[11,1]=CSLS.TYNovSDols;z1[11,2]=CSLS.TYNovCost
+		let z1[12,0]=CSLS.TYDecUnits;z1[12,1]=CSLS.TYDecSDols;z1[12,2]=CSLS.TYDecCost
+		Let z2[0,0]=CSLS.LYYTDUnits;z2[0,1]=CSLS.LYYTDSDols;z2[0,2]=CSLS.LYYTDCost
+		Let z2[1,0]=CSLS.LYJanUnits;z2[1,1]=CSLS.LYJanSDols;z2[1,2]=CSLS.LYJanCost
+		let z2[2,0]=CSLS.LYFebUnits;z2[2,1]=CSLS.LYFebSDols;z2[2,2]=CSLS.LYFebCost
+		let z2[3,0]=CSLS.LYMarUnits;z2[3,1]=CSLS.LYMarSDols;z2[3,2]=CSLS.LYMarCost
+		let z2[4,0]=CSLS.LYAprUnits;z2[4,1]=CSLS.LYAprSDols;z2[4,2]=CSLS.LYAprCost
+		let z2[5,0]=CSLS.LYMayUnits;z2[5,1]=CSLS.LYMaySDols;z2[5,2]=CSLS.LYMayCost
+		let z2[6,0]=CSLS.LYJunUnits;z2[6,1]=CSLS.LYJunSDols;z2[6,2]=CSLS.LYJunCost
+		let z2[7,0]=CSLS.LYJulUnits;z2[7,1]=CSLS.LYJulSDols;z2[7,2]=CSLS.LYJulCost
+		let z2[8,0]=CSLS.LYAugUnits;z2[8,1]=CSLS.LYAugSDols;z2[8,2]=CSLS.LYAugCost
+		let z2[9,0]=CSLS.LYSepUnits;z2[9,1]=CSLS.LYSepSDols;z2[9,2]=CSLS.LYSepCost
+		let z2[10,0]=CSLS.LYOctUnits;z2[10,1]=CSLS.LYOctSDols;z2[10,2]=CSLS.LYOctCost
+		let z2[11,0]=CSLS.LYNovUnits;z2[11,1]=CSLS.LYNovSDols;z2[11,2]=CSLS.LYNovCost
+		let z2[12,0]=CSLS.LYDecUnits;z2[12,1]=CSLS.LYDecSDols;z2[12,2]=CSLS.LYDecCost
+		
+		! Now adjust for fiscal years INTO S1[] & S2[] (taken from 102m program)
+		LET X7=BOYMONTH
+		FOR I=0 TO 12
+		  FOR X6=0 TO 2
+		   IF I LET S1[I,X6]=Z1[X7,X6] ELSE  LET S1[0,X6]=Z1[0,X6]
+		  NEXT X6
+		  IF I IF X7=ARMONTH LET I=13
+		  IF I LET X7=X7+1 \ IF X7=13 LET X7=1
+		NEXT I
+		LET X7=BOYMONTH;X8=0
+		FOR I=0 TO 12
+		  FOR X6=0 TO 2
+		    IF NOT(I)
+			  LET S2[0,X6]=Z2[0,X6]
+		    Else
+			  IF NOT(X8) LET S2[I,X6]=Z2[X7,X6] ELSE  LET S2[I,X6]=Z1[X7,X6]
+			endif
+		  NEXT X6
+		  IF I IF X7=ARMONTH LET X8=1
+		  IF I LET X7=X7+1 \ IF X7=13 LET X7=1
+		NEXT I
+		! okay now load strings (s1[1,x]=start of year monthly sales - BOYMONTH)
+		T9[0]=0;T9[1]=0;T9[2]=0
+		For X1=1 to 12
+			WebStr$=RTrim$(Mth$[(x1-1)*10+1,X1*10]),fdel$
+			WebStr$=WebStr$,S1[x1,0] Using Mask$,fdel$ ! "qty
+			WebStr$=WebStr$,S1[x1,1] Using Mask$,fdel$ ! dollars
+			If Cost_Lev[1]>0 ! load cost level
+			  WebStr$=WebStr$,S1[x1,2] Using Mask$,fdel$ ! cost
+			  tmp3=0
+			  If s1[x1,1]<>0 let tmp3=(((S1[x1,1]-S1[x1,2])/S1[x1,1])*100)
+			  WebStr$=WebStr$,tmp3 Using "----#.##","%",fdel$
+			Else ! no cost level
+			  WebStr$=WebStr$," ",fdel$ ! send blank for cost
+			  WebStr$=WebStr$," ",fdel$ ! send blank for gp %
+			Endif
+			List$[row]=WebStr$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			LET T9=T9+S1[X1,0];T9[1]=T9[1]+S1[X1,1];T9[2]=T9[2]+S1[X1,2]
+		Next X1
+		X1=0;S1[0,0]=T9;S1[0,1]=T9[1];S1[0,2]=T9[2]
+		WebStr$="YTD Total",fdel$
+		!WebStr$=WebStr$,S1[x1,0] Using Mask$,fdel$ ! "qty
+		WebStr$=WebStr$,str$(S1[x1,0]),fdel$ ! "qty
+		WebStr$=WebStr$,S1[x1,1] Using Mask$,fdel$ ! dollars
+		If Cost_Lev[1]>0 ! load cost level
+		  WebStr$=WebStr$,S1[x1,2] Using Mask$,fdel$ ! cost
+		  tmp3=0
+		  If s1[x1,1]<>0 let tmp3=(((S1[x1,1]-S1[x1,2])/S1[x1,1])*100)
+		  WebStr$=WebStr$,tmp3 Using "----#.##","%",fdel$
+		Else ! no cost level
+			  WebStr$=WebStr$," ",fdel$ ! send blank for cost
+			  WebStr$=WebStr$," ",fdel$ ! send blank for gp %
+		Endif
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		List$[row]=esdel$ ! end of section
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		! Headings for Last Year Section
+		WebStr$=bsdel$,"Last Year Sales",fdel$
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		WebStr$="MONTH",fdel$,"UNIT SALES",fdel$,"NET SALES",fdel$,"COST OF SALES",fdel$,"GP %",fdel$
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		! okay now load strings for LAST YEAR
+		T9[0]=0;T9[1]=0;T9[2]=0
+		For X1=1 to 12
+			WebStr$=RTrim$(Mth$[(x1-1)*10+1,X1*10]),fdel$
+			WebStr$=WebStr$,S2[x1,0] Using Mask$,fdel$ ! "qty
+			WebStr$=WebStr$,S2[x1,1] Using Mask$,fdel$ ! dollars
+			If Cost_Lev[1]>0 ! load cost level
+			  WebStr$=WebStr$,S2[x1,2] Using Mask$,fdel$ ! cost
+			  tmp3=0
+			  If s2[x1,1]<>0 let tmp3=(((s2[x1,1]-s2[x1,2])/s2[x1,1])*100)
+			  WebStr$=WebStr$,tmp3 Using "----#.##","%",fdel$
+			Else ! no cost level
+			  WebStr$=WebStr$," ",fdel$ ! send blank for cost
+			  WebStr$=WebStr$," ",fdel$ ! send blank for gp %
+			Endif
+			List$[row]=WebStr$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			LET T9=T9+s2[X1,0];T9[1]=T9[1]+s2[X1,1];T9[2]=T9[2]+s2[X1,2]
+		Next X1
+		X1=0;s2[0,0]=T9;s2[0,1]=T9[1];s2[0,2]=T9[2]
+		WebStr$="YTD Total",fdel$
+		!WebStr$=WebStr$,s2[x1,0] Using Mask$,fdel$ ! "qty
+		WebStr$=WebStr$,str$(s2[x1,0]),fdel$ ! "qty
+		WebStr$=WebStr$,s2[x1,1] Using Mask$,fdel$ ! dollars
+		If Cost_Lev[1]>0 ! load cost level
+			WebStr$=WebStr$,s2[x1,2] Using Mask$,fdel$ ! cost
+			tmp3=0
+			If s2[x1,1]<>0 let tmp3=(((s2[x1,1]-s2[x1,2])/s2[x1,1])*100)
+			WebStr$=WebStr$,tmp3 Using "----#.##","%",fdel$
+		Else ! no cost level
+			  WebStr$=WebStr$," ",fdel$ ! send blank for cost
+			  WebStr$=WebStr$," ",fdel$ ! send blank for gp %
+		Endif
+		! all done
+
+		Close #CustChan
+		Close #CSLSChan
+		Close #CTLChan
+
+		!
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	endif ! valid cust rec
+	!
+	List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetCustSales
+! --------------------------------------------------------------------------------------
+External Sub GetCustWkSls(e$,List$[],maxcnt,intCo,ReturnStatus,Message$)
+  ! Creates a list of the customer's Weekly Sales (weeklysls)
+  !
+  ! e$         : error message
+  ! List$[]    : Customer misc list
+  ! maxcnt     : max # of lines for list$[]
+  ! intCo      : company id #
+  ! ReturnStatus	: used for status
+  ! Message$	: used for Status
+try
+!
+   dim 1%,tmp1,Dir,CustChan,CTLChan,WSLSChan
+    dim 1%,maxwks
+	dim 2%,tmp2,tmpcnt,custid,JulDate[5]
+	dim 2%,YY,MM,DD,WN[6]
+    dim 3%,tmp3,CustRec,TYTot,LYTot,TYTotDol,LYTotDol
+	dim 3%,WSRec,TYUNITS,LYUNITS,TYDOL,LYDOL
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[500]
+    dim tmp$[200],tmp1$[200],WebStr$[400],Message$[200]
+	dim CustKey$[64],Mode$[2],blank$[100],Cust$[64]
+	dim X$[20],WSKey$[64]
+!
+	dim Cust. as cust
+	dim WSLS. as weeklysls
+
+!
+	Def FNU(H) = Int(Abs(H) + Sgn(Fra(Abs(H)))) * Sgn(H)
+
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	Call DXGet("custid",cust$) \ custid=cust$
+	cust$=custid using "######"
+	cust$ = cust$+"            "
+	cust$[7]="" ! "cut after 6 chars
+  ! Open any files for this program
+    CTLChan=OpenFile(-9999,intCo) \ If CTLChan = -1 Error 42
+	CustChan=OpenFile(-1808,intCo) \ If CustChan = -1 Error 42
+	WSLSChan=OpenFile(-9966,intCo) \ If CSLSChan = -1 Error 42
+
+	ReturnStatus = 1
+	Message$="OK"
+    mode$="="
+	dir=1
+    CustRec = filegetcust(e$,CustChan,mode$,dir,cust$,cust.)
+	if CustRec<=0
+	  Clear cust.
+	  ReturnStatus = 0
+	  Message$="Customer Not Found"
+	endif
+!
+	tmpcnt=maxcnt
+	maxwks=50 ! limit of display
+	JulDate[0]=Tim(6)
+	clear List$[]
+
+	! section and header
+	WebStr$=bsdel$+"WeeklySales"+fdel$
+	List$[0]=WebStr$
+	WebStr$="ID",fdel$,"EndDate"+fdel$
+	WebStr$=WebStr$+"Weeknumber"+fdel$
+	WebStr$=WebStr$+"This Year"+fdel$
+	WebStr$=WebStr$+"Last Year"+fdel$
+!	WebStr$=WebStr$+"Unit_UM"+fdel$ ! not on Customer?
+	WebStr$=WebStr$+"ThisYearDollarNumber"+fdel$
+	WebStr$=WebStr$+"LastYearDollarNumber"+fdel$
+!	WebStr$=WebStr$+"Dollar_UM"+fdel$ ! not on Customer?
+	List$[1]=WebStr$
+	row=2 ! start of data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	
+	TYTOT = 0;LYTOT = 0;TYTOTDOL = 0;LYTOTDOL = 0
+	TYUNITS=0;TYDOL=0
+	Dir = 2 ! customer (Year/week/cust/prod/div/whs
+	If CustRec>0
+	  For I = 1 To maxwks  ! number of weeks to display
+		X$ = JulDATE[0] Using "&&&&&&"
+		Call JulianToDate(1,X$,X$,E) ! julian to mm/dd/yy
+		MM = X$[1,2];DD = X$[4,5];YY = X$[7,8]
+		Call "weeknum",MM,DD,YY,WN[] ! dl4 program
+
+		JulDATE[1] = WN[4] + (7 - WN[3])
+		WSKey$=" ",WSKey$
+		WsKey$[1,4] = WN[1] Using "&&&&"
+		WSKey$[5,6] = WN[0] Using "##"
+		WSKey$[7,12] = CUST.CustomerCode Using "######"
+  
+		TYUNITS = 0;LYUNITS = 0
+		TYDOL = 0;LYDOL = 0
+		Mode$=">"
+		Do
+		  WSRec=filegetweeklysls(e$,WSLSChan,mode$,dir,WSKey$,wsls.)
+		  If WSRec<0 exit do
+		  If Val(WSKey$[1,4]) <> WN[1] exit do! diff year
+		  If Val(WSKey$[5,6]) <> WN[0] exit do! diff week
+		  If Val(WSKey$[7,12])=CUST.CustomerCode
+		   !units
+		   tmp3 = WSLS.WeekUnits
+		   TYTOT = TYTOT + tmp3
+		   TYUNITS = TYUNITS + tmp3
+		   ! dollars
+		   tmp3 = WSLS.WeekSales
+		   TYDOL = TYDOL + tmp3
+	       TYTOTDOL = TYTOTDOL + tmp3
+		  Endif ! cust matches
+		Loop
+		! Now need last year
+		WSKey$=" ",WSKey$
+		WSKey$[1,4] = WN[1] - 1 Using "&&&&"
+		WSKey$[5,6] = WN[0] Using "##"
+		WSKey$[7,12] = CUST.CustomerCode Using "######"
+		mode$=">"
+		Dir=2
+		
+		Do
+		  WSRec=filegetweeklysls(e$,WSLSChan,mode$,Dir,WSKey$,WSLS.)
+		  If WSRec<0 exit do
+		  If Val(WSKey$[1,4]) <> WN[1] - 1 exit do! diff year
+		  If Val(WSKey$[5,6]) <> WN[0] exit do! diff week
+		  If Val(WSKey$[7,12])=CUST.CustomerCode
+		   !units
+		   tmp3 = WSLS.WeekUnits
+		   LYTOT = LYTOT + tmp3
+		   LYUNITS = LYUNITS + tmp3
+		   ! dollars
+		   tmp3 = WSLS.WeekSales
+		   LYDOL = LYDOL + tmp3
+	       LYTOTDOL = LYTOTDOL + tmp3
+		  Endif ! cust matches
+		Loop
+		! all done with this week
+			! detail
+		X$ = JulDATE[1] Using "&&&&&&"
+		Call JulianToDate(5,X$,X$,E) ! julian to mm/dd/yyyy
+		WebStr$=cust$+fdel$+x$+fdel$	! cust # & end of week date
+		WebStr$=WebStr$,Str$(WN[0])+fdel$	! week number
+		WebStr$=WebStr$,Str$(TYUnits)+fdel$	! TYUnits
+		WebStr$=WebStr$,Str$(LYUnits)+fdel$	! LYUnits
+		! Call AddToStr(e$,rstr$,sunit$+fdel$)		! sellum
+		WebStr$=WebStr$,Str$(FNU(TYDOL))+fdel$	! TYDol
+		WebStr$=WebStr$,Str$(FNU(LYDOL))+fdel$	! LYDol
+		! Call AddToStr(e$,rstr$,sunit$+fdel$+rdel$)			! sellum
+		JulDATE[0] = JulDATE[0] - 7 ! to week previous
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   Next I
+
+		Close #CustChan
+		Close #WSLSChan
+		Close #CTLChan
+
+		!
+		! List$[row]=WebStr$
+		! row=row+1
+		! if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	endif ! valid cust rec
+	!
+	List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetCustWkSls
+! --------------------------------------------------------------------------------------
+External Sub GetCustCallNts(e$,Cust$,List$[],SList$[],CustRec,maxcnt,intCo,CTLChan,CustChan,cust. as cust)
+  ! Creates a list of the customer's Collection Notes
+  !
+  ! e$         : error message
+  ! Cust$      : Cust #
+  ! List$[]    : Customer Data list
+  ! SList$[]	: Summary Selector List
+  ! CustRec	   : Customer Record #
+  ! maxcnt     : max # of lines for list$[]
+  ! intCo      : company id #
+  ! CTLChan    : Control file channel
+  ! CustChan   : customer file channel
+  ! Cust.      : customer data
+try
+!
+   dim 1%,tmp1,Dir,CNC,row,srow,Cdir,A5[10]
+	dim 2%,tmp2,tmpcnt,ARDate,X2,JulDate[5],stmpcnt,RDate[5]
+    dim 3%,tmp3,CNRec,CurrCall,CurrFDate,CurrDate
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[500]
+    dim tmp$[200],tmp1$[200],WebStr$[500],Message$[200],cmode$[3]
+	dim CustKey$[64],Mode$[2],blank$[100],P61$[256],CNKey$[64]
+	dim P9$[50],P60$[50],P1$[60],X$[10],HoldNote$[70],CNKey1$[64]
+	DIM USERID$[10],A2$[50]
+!
+	dim CNote. as callnotes
+!	dim cust. as cust  ! "we passed it!
+!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+!
+	try
+		read #CTLChan,0,108;ARDate; ! system AR Date
+	else
+		CTLChan=OpenFile(-9999,intCo) \ if CTLChan=-1 Error 42 ! "closed somewhere?
+	end try
+	read #CTLChan,0,108;ARDate; ! system AR Date
+	mat read #CTLChan,19,50;p9$; ! system flags
+	mat read #CTLChan,60,50;p60$; ! system flags
+	mat read #CTLChan,61,0;P61$; ! system flags
+	Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	  Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Call UserCntrl(USERID$,A2$,A5[],status,intCo)
+    CNC=OpenFile(736,intCo) \ if CNC = -1 Error 42 ! not found = Collection Call Notes
+	! not readonly open - possibly change in inquiry mode?
+	tmpcnt=maxcnt
+	stmpcnt=maxcnt
+	clear List$[]
+	clear SList$[]
+!
+ 	SList$[0]=bsdel$,"CollectionNotes",fdel$
+	WebStr$="ID",fdel$
+	 WebStr$=WebStr$,"CallNo",fdel$,"Date",fdel$
+	 ! WebStr$=WebStr$,"Ref No",fdel$
+	 WebStr$=WebStr$,"First Line of Call",fdel$
+	 WebStr$=WebStr$,"Follow Up Date",fdel$	
+    SList$[1]=WebStr$
+
+	List$[0]=bsdel$,"CALL DATA",fdel$
+	WebStr$="ID",fdel$,"CallNo",fdel$
+	WebStr$=WebStr$,"MsgNo",fdel$,"Date",fdel$
+	WebStr$=WebStr$,"Note",fdel$,"FU Date",fdel$
+	List$[1]=WebStr$
+
+	JulDate[1]=0 ! earliest followup date (if needed)
+	!
+	row=2 ! starting row for data
+	srow=2
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	if srow>stmpcnt let stmpcnt=expandarray(e$,SList$[])
+	Cust$[7]="" ! make sure its only 6
+	mode$="=" ! "exact match or next
+	Dir=1 ! "of customer code / Ref
+	! CustRec=filegetcust(e$,CustChan,mode$,dir,CustKey$,cust.) - it's passed
+	IF A5[6]=0 LET CUSTREC=-99
+	CustKey$=Cust$
+	if CustRec>0
+	  CNKey$=" ",CNKey$
+	  CNKey$[1,6]=CustKey$
+	  mode$="<" ! was ">" - send highest # first
+	  CNKey$[7,8]="zz" ! for rev search
+	  Dir=1 ! only 1 - Cust/Callno/message
+	  FLFnd=0 ! first line of message found
+	  Do
+	    CNRec=filegetcallnotes(e$,CNC,mode$,dir,CNKey$,CNote.)
+		If CNRec<0 Exit do
+		If CNKey$[1,6]<>CustKey$ Exit do
+		If mode$=">" ! first to last order
+		 If CNote.sLine=0 ! "holds FU Date & "Call made on Date" info
+		  X$=CNote.FollowUpDate Using "&&&&&&"
+		  CALL DateToJulian(1,X$,X$,E) \ If E let X$=""
+		  JulDate[0]=X$
+		  If JulDate[1]<JulDate[0] ! if we need earliest date
+		    Let RDate[0]=CNote.FollowUpDate
+			Let JulDate[1]=JulDate[0]
+		  Endif
+		  FLFnd=0 ! ONLY WORKS ON > MODE - IF < MODE NEEDS CHANGE!!!
+		 Endif
+		 If Not(FLFnd) AND CNote.sLine>0 ! first line after zero - do selector
+		  FLFnd=1 ! first show first line is now found
+		  WebStr$=CustKey$,fdel$ ! Cust #
+		  WebStr$=WebStr$,CNote.CoCallNo Using "#####",fdel$ ! call #
+		  tmp$=PDate$(CNote.CallDate)
+		  WebStr$=WebStr$,tmp$,fdel$ ! call date
+		  WebStr$=WebStr$,RTrim$(CNote.CallNote$),fdel$ ! call note
+		  tmp$=PDate$(CNote.FollowUpDate)
+		  WebStr$=WebStr$,tmp$,fdel$
+		  SList$[srow]=WebStr$
+		  srow=srow+1
+		  If srow>stmpcnt let stmpcnt=expandarray(e$,SList$[])
+		 Endif
+		Else ! last to first order
+		 If CNote.sLine<>0 ! messages line - retain data
+		   Let HoldNote$=CNote.CallNote$
+		   Let CurrCall=CNote.CoCallNo
+		   Let CurrDate=CNote.CallDate
+		   Let CurrFDate=CNote.FollowUpDate
+		 Else ! date entered message line (last line of call)
+		   If CurrCall<>CNote.CoCallNo ! on diff message line 0 (no note lines?) - send line 0 data
+		    Let HoldNote$="CALL MADE ON "+RTrim$(CNote.CallNote$)
+		    Let CurrCall=CNote.CoCallNo
+			Let CurrDate=CNote.CallDate
+			Let CurrFDate=CNote.FollowUpDate
+		   Endif
+		   ! to line 0 of call - add to list
+		   WebStr$=CustKey$,fdel$ ! Cust #
+		   WebStr$=WebStr$,CurrCall Using "#####",fdel$ ! call #
+		   tmp$=PDate$(CurrDate)
+		   WebStr$=WebStr$,tmp$,fdel$ ! call date
+		   WebStr$=WebStr$,RTrim$(HoldNote$),fdel$ ! call note
+		   tmp$=PDate$(CurrFDate)
+		   WebStr$=WebStr$,tmp$,fdel$
+		   SList$[srow]=WebStr$
+		   srow=srow+1
+		   If srow>stmpcnt let stmpcnt=expandarray(e$,SList$[])
+		 Endif ! of header data determine/send
+		Endif ! of get firstline/fudate
+		If CNote.sLine=0 ! will always have zero
+		  ! as we don't want reverse messages! go thru AGAIN for all notes on the call
+		  CNKey1$=" ",CNKey1$
+		  CNKey1$[1,11]=CNKey$
+		  cmode$=">" !  send low first
+		  ! CNKey$[7,8]="zz" ! for rev search
+		  cDir=1 ! only 1 - Cust/Callno/message
+		  ! IF this is > order - will this work?
+		  ! get all note lines for call
+		  Do
+			CNRec=filegetcallnotes(e$,CNC,cmode$,cdir,CNKey1$,CNote.)
+			If CNRec<0 Exit do
+			If CNKey1$[1,11]<>CNKey$[1,11] Exit do ! diff message
+			! now data section (all lines the same) - line zero is header of call
+			WebStr$=CustKey$,fdel$ ! cust #
+			WebStr$=WebStr$,CNote.CoCallNo Using "#####",fdel$ ! call #
+			WebStr$=WebStr$,Str$(CNote.sLine),fdel$ ! line no
+			tmp$=PDate$(CNote.CallDate)
+			WebStr$=WebStr$,tmp$,fdel$ ! call date
+			tmp$=CNote.CallNote$
+			if CNote.sLine=0 Let tmp$="CALL MADE ON "+CNote.CallNote$
+			WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! call note
+			tmp$=PDate$(CNote.FollowUpDate) ! followup date
+			WebStr$=WebStr$,tmp$,fdel$
+			List$[row]=WebStr$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		  Loop ! of message for edit mode
+		Endif ! of send message
+	  Loop ! need 2 loops - 1 header rev order  2 lines norm order 
+	  
+	  Close #CNC
+		! Close #CTLChan
+
+		!
+		! List$[row]=WebStr$
+		! row=row+1
+		! if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	endif ! valid cust rec
+	!
+	List$[row]=esdel$ ! end of section
+	SList$[srow]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetCustCallNts
+! --------------------------------------------------------------------------------------
+External Sub GetCustCRHist(e$,List$[],maxcnt,intCo,ReturnStatus,Message$)
+  ! Creates a list of the customer's Credit history
+  !
+  ! e$         : error message
+  ! List$[]    : Customer misc list
+  ! maxcnt     : max # of lines for list$[]
+  ! intCo      : company id #
+  ! ReturnStatus	: used for status
+  ! Message$	: used for Status
+try
+!
+   dim 1%,tmp1,Dir,CustChan,CTLChan,CRHChan,X
+	dim 2%,tmp2,tmpcnt,custid,MYDate[30],Mth,Yr,CHT3[24]
+    dim 3%,tmp3,CustRec,CRHRec,CHT1[24],CHT2[24]
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[500]
+    dim tmp$[200],tmp1$[200],WebStr$[400],Message$[200]
+	dim CustKey$[64],Mode$[2],blank$[100],Cust$[64]
+	dim X$[20],P9$[50],P60$[50],P61$[256],PMask$[20]
+!
+	dim Cust. as cust
+	dim CRH. as custcrhist
+
+!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	Call DXGet("custid",cust$) \ custid=cust$
+	cust$=custid using "######"
+	cust$ = cust$+"            "
+	cust$[7]="" ! "cut after 6 chars
+  ! Open any files for this program
+    CTLChan=OpenFile(-9999,intCo) \ If CTLChan = -1 Error 42
+	CustChan=OpenFile(-1808,intCo) \ If CustChan = -1 Error 42
+	CRHChan=OpenFile(-336,intCo) \ If CRHChan = -1 Error 42
+	PMask$="----------#.##"
+	mat read #CTLChan,19,50;P9$;
+	mat read #CTLChan,60,50;P60$;
+	mat read #CTLChan,61,0;P61$;
+	ReturnStatus = 1
+	Message$="OK"
+    mode$="="
+	dir=1
+    CustRec = filegetcust(e$,CustChan,mode$,dir,cust$,cust.)
+	if CustRec<=0
+	  Clear cust.
+	  ReturnStatus = 0
+	  Message$="Customer Not Found"
+	endif
+!
+	tmpcnt=maxcnt
+	clear List$[]
+	List$[0]=bsdel$,"CREDITHISTORY",fdel$
+	WebStr$="ID",fdel$,"Month",fdel$
+	WebStr$=WebStr$,"AREOMBal",fdel$,"AvgPay",fdel$
+	WebStr$=WebStr$,"HighCredit",fdel$
+	List$[1]=WebStr$
+
+	If P60$[20,20]<>"Y" ! not flagged
+	   ReturnStatus=0
+	   Message$="System Flag is NOT turned ON"
+	endif
+	!
+	row=2 ! starting row for data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+	If CustRec>0 AND ReturnStatus=1 ! okay and flag is Y
+	   CustKey$=Cust$
+	   mode$="="
+	   Dir=1
+	   CRHRec=filegetcustcrhist(e$,CRHChan,mode$,dir,CustKey$,CRH.)
+	   If CRHRec<0 or CustKey$[1,6]<>Cust$[1,6] Clear CRH.
+	   If CRH.CurrentARPeriod>0 ! have a start date
+	     ! move into variables for loop (the downside of SQL field names)
+		 CHT1[0]=CRH.ArEomBalance1;CHT1[1]=CRH.ArEomBalance2;CHT1[2]=CRH.ArEomBalance3
+		 CHT1[3]=CRH.ArEomBalance4;CHT1[4]=CRH.ArEomBalance5;CHT1[5]=CRH.ArEomBalance6
+		 CHT1[6]=CRH.ArEomBalance7;CHT1[7]=CRH.ArEomBalance8;CHT1[8]=CRH.ArEomBalance9
+		 CHT1[9]=CRH.ArEomBalance10;CHT1[10]=CRH.ArEomBalance11;CHT1[11]=CRH.ArEomBalance12
+		 CHT1[12]=CRH.ArEomBalance13;CHT1[13]=CRH.ArEomBalance14;CHT1[14]=CRH.ArEomBalance15
+		 CHT1[15]=CRH.ArEomBalance16;CHT1[16]=CRH.ArEomBalance17;CHT1[17]=CRH.ArEomBalance18
+		 CHT1[18]=CRH.ArEomBalance19;CHT1[19]=CRH.ArEomBalance20;CHT1[20]=CRH.ArEomBalance21
+		 CHT1[21]=CRH.ArEomBalance22;CHT1[22]=CRH.ArEomBalance23;CHT1[23]=CRH.ArEomBalance24
+		 CHT1[24]=CRH.ArEomBalance25
+		 CHT2[0]=CRH.MoHighCredit1;CHT2[1]=CRH.MoHighCredit2;CHT2[2]=CRH.MoHighCredit3
+		 CHT2[3]=CRH.MoHighCredit4;CHT2[4]=CRH.MoHighCredit5;CHT2[5]=CRH.MoHighCredit6
+		 CHT2[6]=CRH.MoHighCredit7;CHT2[7]=CRH.MoHighCredit8;CHT2[8]=CRH.MoHighCredit9
+		 CHT2[9]=CRH.MoHighCredit10;CHT2[10]=CRH.MoHighCredit11;CHT2[11]=CRH.MoHighCredit12
+		 CHT2[12]=CRH.MoHighCredit13;CHT2[13]=CRH.MoHighCredit14;CHT2[14]=CRH.MoHighCredit15
+		 CHT2[15]=CRH.MoHighCredit16;CHT2[16]=CRH.MoHighCredit17;CHT2[17]=CRH.MoHighCredit18
+		 CHT2[18]=CRH.MoHighCredit19;CHT2[19]=CRH.MoHighCredit20;CHT2[20]=CRH.MoHighCredit21
+		 CHT2[21]=CRH.MoHighCredit22;CHT2[22]=CRH.MoHighCredit23;CHT2[23]=CRH.MoHighCredit24
+		 CHT2[24]=CRH.MoHighCredit25
+		 CHT3[0]=CRH.AveragePayDays1;CHT3[1]=CRH.AveragePayDays2;CHT3[2]=CRH.AveragePayDays3
+		 CHT3[3]=CRH.AveragePayDays4;CHT3[4]=CRH.AveragePayDays5;CHT3[5]=CRH.AveragePayDays6
+		 CHT3[6]=CRH.AveragePayDays7;CHT3[7]=CRH.AveragePayDays8;CHT3[8]=CRH.AveragePayDays9
+		 CHT3[9]=CRH.AveragePayDays10;CHT3[10]=CRH.AveragePayDays11;CHT3[11]=CRH.AveragePayDays12
+		 CHT3[12]=CRH.AveragePayDays13;CHT3[13]=CRH.AveragePayDays14;CHT3[14]=CRH.AveragePayDays15
+		 CHT3[15]=CRH.AveragePayDays16;CHT3[16]=CRH.AveragePayDays17;CHT3[17]=CRH.AveragePayDays18
+		 CHT3[18]=CRH.AveragePayDays19;CHT3[19]=CRH.AveragePayDays20;CHT3[20]=CRH.AveragePayDays21
+		 CHT3[21]=CRH.AveragePayDays22;CHT3[22]=CRH.AveragePayDays23;CHT3[23]=CRH.AveragePayDays24
+		 CHT3[24]=CRH.AveragePayDays25
+		 X$=CRH.CurrentARPeriod Using "&&&&" ! is yymm
+		 Yr=X$[1,2] \ if Yr>80 Let Yr=Yr+1900 Else Let Yr=yr+2000
+		 Mth=X$[3,4]
+		 let X$[1,4]=Yr Using "####" ! now 4 digit year
+		 x$[5,6]=Mth Using "&&"
+		 MYDate[0]=X$ ! for loop
+		 FOR X=1 TO 24 ! set up months for data
+			LET MYDate[X]=MYDate[X-1]-1 ! to previous ym
+			LET X$=MYDate[X] USING "&&&&&&" \ LET Mth=X$[5,6]
+			IF Not(Mth) ! "to BOY - set to prev yr Dec
+			 LET Yr=X$[1,4] \ LET Yr=Yr-1 \ LET Mth=12      
+			 LET X$[1,4]=Yr USING "&&&&" \ LET X$[5,6]=Mth USING "&&"            
+			 LET MYDate[X]=X$[1,6]
+			Endif
+		 NEXT X
+		 For X=1 to 24 ! now send data
+		   WebStr$=Cust$,fdel$ ! Customer
+		   X$=MYDate[x] Using "######"
+		   WebStr$=WebStr$,X$[5,6],"/",X$[1,4],fdel$ ! to MM/YYYY
+		   WebStr$=WebStr$,LTrim$(CHT1[X] using PMask$),fdel$ ! EOM Balance
+		   WebStr$=WebStr$,Ltrim$(CHT3[X] using PMask$),fdel$ ! Avg Pay
+		   WebStr$=WebStr$,Ltrim$(CHT2[X] using PMask$),fdel$ ! High Credit
+		   List$[row]=WebStr$
+		   row=row+1
+		   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		 Next X
+	   End If ! of valid data
+	endif ! valid cust rec
+	Close #CustChan
+	Close #CRHChan
+	Close #CTLChan
+
+	!
+
+	!
+	List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetCustCRHist
+! --------------------------------------------------------------------------------------
+External Sub GetCustRefDtl(e$,List$[],SList$[],DList$[],maxcnt,intCo,ReturnStatus,Message$)
+  ! Creates a list of the customer's Reference Detail
+  !
+  ! e$         : error message
+  ! List$[]    : Customer misc list
+  ! SList$[]	: Droplist Y/N & list
+  ! DList$[]	: pay detail list
+  ! maxcnt     : max # of lines for list$[]
+  ! intCo      : company id #
+  ! ReturnStatus	: used for status
+  ! Message$	: used for Status
+try
+!
+    dim 1%,tmp1,Dir,CustChan,CTLChan,SARChan,X,SARHChan
+    dim 1%,tmpCh,FndAR,ARCChan,ARHChan,CDir,TARDChan,FndAnyAR
+	dim 2%,tmp2,tmpcnt,custid,reftype,taxcode,terms,artype
+	dim 2%,TDate[5],Whs,Div,OType,Stmpcnt,row,srow,drow,dtmpcnt
+    dim 3%,tmp3,CustRec,SARRec,SARHRec,Refnum,linkid
+	dim 3%,ARCRec,ARHRec,OrigAmt,ARBal,ACRec,TARCRec
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[500]
+    dim tmp$[200],tmp1$[200],WebStr$[400],Message$[200]
+	dim CustKey$[64],Mode$[2],blank$[100],Cust$[64],Webdl$[400]
+	dim taxcoded$[20],artermd$[16],reftype$[3],CMode$[3]
+	dim X$[20],P9$[50],P60$[50],P61$[256],Type$[81],RefKey$[64]
+	dim SARKey$[64],ARKey$[64],CPO$[20],TDesc$[30],TARKey$[64]
+	Dim PMask$[20]
+!
+	dim Cust. as cust
+	dim ACust. as cust ! alt cust
+	dim ARC. as saract
+	dim TARC. as saract ! alt ar file
+	dim ARH. as saracth
+	dim TARH. as saracth ! alt arh file (it's diff than ar!?)
+	dim SAR. as sardetl
+	dim SARH. as sardetlh
+	dim CSHO. as cashother
+!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	Call DXGet("custid",cust$) \ custid=cust$
+	cust$=custid using "######"
+	cust$ = cust$+"            "
+	cust$[7]="" ! "cut after 6 chars
+	PMask$="----------#.##"
+	! We need the reference number to detail & optionally a ref type
+	Call DXGet("REFNUM",tmp$)
+	Let Refnum=tmp$
+	Call DXGet("REFTYPE",tmp$)
+	Let RefType$=RTrim$(tmp$)
+  ! Open any files for this program
+    CTLChan=OpenFile(-9999,intCo) \ If CTLChan = -1 Error 42
+	mat read #CTLChan,19,50;P9$;
+	mat read #CTLChan,60,50;P60$;
+	mat read #CTLChan,61,0;P61$;
+
+	CustChan=OpenFile(-1808,intCo) \ If CustChan = -1 Error 42
+	SARChan=OpenFile(-9984,intCo) \ If SARChan = -1 Let P61$[3,3]="N"
+	SARHChan=OpenFile(-9983,intCo) \ If SARHChan = -1 Let P61$[3,3]="N"
+	CSHOChan=OpenFile(-1488,intCo) \ if CSHOChan = -1 Error 42
+	ARCChan=OpenFile(-1504,intCo) \ If ARCChan = -1 Error 42
+	ARHChan=OpenFile(-1408,intCo) \ If ARHChan = -1 Error 42
+
+	ReturnStatus = 1
+	Message$="OK"
+	TYPE$ = "INVSVCNSFD/ALATC/MUN.C/APAY"
+	!! get the reference type number
+	let reftype=0
+	if refnum
+	 if len(reftype$)>=3
+		for x=1 to 9
+			if reftype$[1,3]=type$[((x*3)-2),(x*3)]
+				let reftype=x
+			endif
+		next x
+	 endif
+	endif
+    mode$="="
+	dir=1
+    CustRec = filegetcust(e$,CustChan,mode$,dir,cust$,cust.)
+	if CustRec<=0
+	  Clear cust.
+	  ReturnStatus = 0
+	  Message$="Customer Not Found"
+	endif
+!
+	tmpcnt=maxcnt;stmpcnt=maxcnt;dtmpcnt=maxcnt
+	clear List$[]
+	clear SList$[]
+	clear DList$[]
+	! added 01/29/08 - always send droplist y/n and droplist info(if needed)
+	Slist$[0]=bsdel$,"ARREFDROPS",fdel$
+	SList$[1]="Dropflag",fdel$
+	! Slist$[2] will be Y/N flag
+	SList$[3]=esdel$ ! as need endofsection after dropflag
+	Slist$[4]=bsdel$,"REFDROPLIST",fdel$
+	WebStr$="Key",fdel$,"ID",fdel$,"RefNumber",fdel$
+	WebStr$=WebStr$,"Type",fdel$,"Date",fdel$
+	SList$[5]=WebStr$
+	srow=6 \ if srow>stmpcnt let stmpcnt=expandarray(e$,SList$[])
+	If reftype ! if type is sent - NO Droplist
+	  SList$[2]="N",fdel$ ! ,esdel$ 
+	endif
+	! this sends 2 sections - header detail & ardetails
+	List$[0]=bsdel$,"ARREFDETAIL",fdel$
+	WebStr$="Key",fdel$,"ID",fdel$,"Name",fdel$
+	WebStr$=WebStr$,"RefNumber",fdel$,"Terms",fdel$
+	WebStr$=WebStr$,"Tax",fdel$,"CustomerPO",fdel$
+	WebStr$=WebStr$,"Type",fdel$,"TransDate",fdel$
+	WebStr$=WebStr$,"DueDate",fdel$,"Description",fdel$
+	WebStr$=WebStr$,"OrdType",fdel$,"Whs",fdel$,"Div",fdel$
+	WebStr$=WebStr$,"OrigAmt",fdel$,"Balance",fdel$
+	webstr$=webstr$,"OrderID",fdel$
+	webstr$=webstr$,"LinkID",fdel$
+	List$[1]=WebStr$
+	! now the pay detail header
+	  DRow=0 ! pay detail on separate list
+	  DList$[drow]=bsdel$,"ARPAYDETAIL",fdel$ ! start of section
+	  drow=drow+1
+	  if drow>dtmpcnt let dtmpcnt=expandarray(e$,DList$[])
+	  WebStr$="Key",fdel$,"Cust#",fdel$,"CustName",fdel$
+	  WebStr$=WebStr$,"Reference",fdel$
+	  WebStr$=WebStr$,"Date",fdel$,"ApplRef",fdel$,"ApplType",fdel$
+	  WebStr$=WebStr$,"ApplDate",fdel$,"TransAmt",fdel$
+	  WebStr$=WebStr$,"ApplAmt",fdel$
+	  DList$[drow]=WebStr$
+	  drow=drow+1
+	  if drow>dtmpcnt let dtmpcnt=expandarray(e$,DList$[])
+
+	If RefNum<=0 ! not passed
+	   ReturnStatus=0
+	   Message$="Reference Number not sent"
+	endif
+	If P61$[3,3]<>"Y" ! not flagged
+	   ReturnStatus=0
+	   Message$="Option is not available"
+	   RefNum=0 ! so it fails
+	Endif
+	!
+	row=2;FndAnyAR=0 ! starting row for data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Let CustKey$=Cust$
+	If CustRec>0 AND RefNum>0
+	  
+	  ARKEY$ = " ",ARKEY$
+	  ARKEY$[1,6] = CustKey$
+	  ARKEY$[7,16] = REFNUM Using "##########"
+	  if reftype>0 let arkey$[17]=(reftype-1) using "#"
+	  ARKey$[18]="" ! "need cut after 17
+	  ARCLoop: ! loop for next ref of current a/r
+	  Let FndAR=0
+	  mode$=">"
+	  dir=1
+	  Do
+	    ARCRec=filegetsaract(e$,ARCChan,mode$,dir,ARKey$,ARC.)
+		If ARCRec<0 exit do
+		If ARKey$[1,6]<>CustKey$ Exit do
+	    Let tmp3=ARKey$[7,16] \ If tmp3<>RefNum exit do
+	    let tmp1=ARKey$[17,17]
+		If Reftype
+		 If tmp1=reftype
+	      Let FndAr=9
+		  let artype=ARKey$[17,17]
+		  exit do! done - out		
+		 Endif
+		Else ! no reftype - take any found
+		  Let FndAr=9;FndAnyAR=FndAnyAR+1
+		  let artype=ARKey$[17,17]
+		  exit do! done - out	
+		Endif
+	  Loop
+	  If Not(FndAR) ! try ar history
+	    ARKEY$ = " ",ARKEY$
+	    ARKEY$[1,6] = CustKey$
+		ARKEY$[7,16] = REFNUM Using "##########"
+		if reftype>0 let arkey$[17]=(reftype-1) using "#"
+		ARKey$[18]="" ! "need cut after 17
+		ARHLoop: ! loop for next ref of history a/r
+		mode$=">"
+		dir=1;FndAR=0
+		Do
+		  ARHRec=filegetsaracth(e$,ARHChan,mode$,dir,ARKey$,ARH.)
+		  If ARHRec<0 exit do
+		  If ARKey$[1,6]<>CustKey$ Exit do
+		  Let tmp3=ARKey$[7,16] \ if tmp3<>RefNum exit do
+		  let tmp1=ARKey$[17,17]
+		  If Reftype
+		    If tmp1=reftype
+	         Let FndAr=1
+		     let artype=ARKey$[17,17]
+		     exit do! done - out		
+		    Endif
+		   Else ! no reftype - take any found
+		    Let FndAr=1;FndAnyAR=FndAnyAR+1
+		    let artype=ARKey$[17,17]
+		    exit do! done - out	
+		   Endif
+		Loop
+	  Endif ! check history
+	  If FndAr=0 and Reftype ! "NOT FOUND!
+	     Let ReturnStatus=0
+	     Message$="Reference Number Not Found"
+	  Endif
+	  If FndAR=0 and Not(RefType) And Not(FndAnyAR) ! NONE FOUND
+	     Let ReturnStatus=0
+	     Message$="Reference Number Not Found"
+	  Endif ! means found at least 1
+	  If FndAr=9 ! from current
+	    Let terms=ARC.Terms
+		Let taxcode=ARC.TaxCode
+		Let OrigAmt=ARC.OrigAmt
+		Let ARBal=ARC.OrigAmt-ARC.PriorCredit-ARC.CurrentCredit
+		let CPO$=ARC.PurchaseOrder$
+		Let TDate[0]=ARC.Date ! is julian
+		Let TDate[1]=ARC.DueDate1
+		Let TDesc$=ARC.EntryDescription$
+		Let OType=ARC.OrderType
+		Let Whs=ARC.Whse
+		Let Div=ARC.Division
+		let orderid=arc.Order
+		let linkid=0
+		if artype=1 or artype=6
+			if artype=1 let linkid=arc.ReferenceNo
+			if artype=6 let linkid=ARC.Order
+			if artype=1 and arc.AcptSrc=247 let linkid=arc.order
+			if artype=6 and arc.AcptSrc=227 let linkid=arc.ReferenceNo
+		endif
+	  Endif
+	  If FndAr=1 ! from history
+		Let terms=ARH.Terms
+		Let taxcode=ARH.TaxCode
+		Let OrigAmt=ARH.OrigAmt
+		Let ARBal=ARH.OrigAmt-ARH.PriorCredit-ARH.CurrentCredit
+		let CPO$=ARH.PurchaseOrder$
+		Let TDate[0]=ARH.Date ! is julian
+		Let TDate[1]=ARH.DueDate1
+		Let TDesc$=ARH.EntryDescription$
+		Let OType=ARH.OrderType
+		Let Whs=ARH.Whse
+		Let Div=ARH.Division
+		let orderid=arh.Order
+		if artype=1 or artype=6
+			if artype=1 let linkid=arh.Reference
+			if artype=6 let linkid=ARh.Order
+			if artype=1 and arh.AcptSrc=247 let linkid=arh.order
+			if artype=6 and arh.AcptSrc=227 let linkid=arh.Reference
+		endif
+	  Endif
+	 If FndAR ! only do the rest if it's FOUND
+	   If ARType>5 ! credit
+	    Let OrigAmt=0-OrigAmt
+		Let ARBal=0-ARBal
+	   Endif
+	  tmp$=TYPE$[ARTYPE * 3 - 2,ARTYPE * 3]
+	  WebStr$=Cust$+Str$(RefNum)+tmp$ ! start on key - cust#,ref#,type
+	  tmp$=JDate$(TDate[0]) ! julian date to mm/dd/yyyy
+	  If TDate[0]<=0 Let tmp$=""
+	  WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! trans date
+	  Let RefKey$=WebStr$ ! retain key for paydetail section
+	  Let WebStr$=WebStr$,CustKey$,fdel$,RTrim$(Cust.Name$),fdel$
+	  Let Webdl$=RefKey$,CustKey$,fdel$,Str$(RefNum),fdel$ ! droplist
+	  ! build rest of header string
+	  WebStr$=WebStr$,Str$(RefNum),fdel$ ! ref number
+	  ! terms desc
+	  let tmpch=-1
+	  artermd$=""
+	  If Terms let artermd$=getartermd$(tmpch,Terms,intco)
+	  WebStr$=WebStr$,RTrim$(artermd$),fdel$ ! terms
+	  ! TAX CODE
+      let tmpch=-1
+	  taxcoded$=""
+      If TaxCode let taxcoded$=gettaxcdd$(tmpch,TaxCode,intco)
+	  WebStr$=WebStr$,RTrim$(taxcoded$),fdel$ ! tax code desc
+	  WebStr$=WebStr$,RTrim$(CPO$),fdel$ ! cust po
+	  ! ar type
+	  tmp$=TYPE$[ARTYPE * 3 - 2,ARTYPE * 3]
+	  WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! trans type
+	  WebDl$=WebDL$,RTrim$(tmp$),fdel$ ! trans for droplist
+	  tmp$=JDate$(TDate[0]) ! julian date to mm/dd/yyyy
+	  If TDate[0]<=0 Let tmp$=""
+	  WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! trans date
+	  WebDl$=Webdl$,RTrim$(tmp$),fdel$ ! trans date for droplist
+	  If Not(Reftype) ! record droplist
+	    SList$[srow]=Webdl$
+	    let srow=srow+1
+		if srow>stmpcnt let stmpcnt=expandarray(e$,SList$[])
+	  Endif
+	  let tmp$=""
+	  If ARType>5 let TDate[1]=0 ! no due on credits
+	  If TDate[1] let tmp$=PDate$(TDate[1]) 
+	  WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! Due Date
+	  WebStr$=WebStr$,RTrim$(TDesc$),fdel$ ! entry desc
+	  let tmp$="" \ if OType Let tmp$=Str$(OType)
+	  WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! Order type
+	  let tmp$="" \ If Whs Let tmp$=Str$(Whs)
+	  WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! warehouse
+	  let tmp$="" \ If Div Let tmp$=Str$(Div)
+	  WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! division
+	  WebStr$=WebStr$,LTrim$(OrigAmt using PMask$),fdel$ ! orig amount
+	  WebStr$=WebStr$,LTrim$(ARBal using PMask$),fdel$ ! balance
+	  webstr$=webstr$,str$(orderid),fdel$ ! order id #
+	  let tmp$=""
+	  if linkid<>0 let tmp$=str$(linkid)
+	  webstr$=webstr$,tmp$,fdel$
+	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  ! As this section is now variable, do not end section until call complete!
+	  ! List$[row]=esdel$ ! end of section
+	  ! row=row+1
+	  ! if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+	  SARKey$=" ",SARKey$
+	  SARKey$[1,17]=ARKey$[1,17]
+	  mode$=">"
+	  dir=1;TARDChan=0
+	  If FndAR=9 ! current
+	    let TARDChan=SARChan
+	  Endif
+	  If FndAR=1 ! history
+	    let TARDChan=SARHChan
+	  Endif
+	  If TARDChan ! passed channel to use check
+	   Do
+	    If FndAR=9 let SARRec=filegetsardetl(e$,SARChan,mode$,dir,SARKey$,SAR.) ! same layout for both!
+		If FndAR=1 let SARRec=filegetsardetlh(e$,SARHChan,mode$,dir,SARKey$,SAR.)
+		If SARRec<0 exit do
+		If SARKey$[1,17]<>ARKey$[1,17] Exit do
+		CustKey$=SAR.AppliedToCust Using "######"
+		If SAR.AppliedToCust<=0 Let CustKey$=Cust$
+		Cmode$="="
+		CDir=1
+		ACRec=filegetcust(e$,CustChan,Cmode$,Cdir,CustKey$,ACust.)
+		If ACRec<0 Clear ACust.
+		WebStr$=RefKey$ ! include key from above ref detail
+		WebStr$=WebStr$,CustKey$,fdel$,RTrim$(ACust.Name$),fdel$ ! appl cust & name
+		tmp$=""
+		If SAR.Source=305 let tmp$="C/R"+SAR.EntryJournal Using "######"
+		IF SAR.Source=247 Let tmp$="C/M"+SAR.EntryJournal Using "######"
+		WebStr$=WebStr$,tmp$,fdel$ ! reference
+		tmp$=""
+		If SAR.TransactionDate let tmp$=PDate$(SAR.TransactionDate)
+		WebStr$=WebStr$,tmp$,fdel$ ! ref date
+		If SAR.AmountApplied ! applied somewhere - get data
+		  WebStr$=WebStr$,Str$(SAR.AppliedTrans),fdel$ ! applied to ref
+		  tmp$="";tmp1=SAR.AppliedType
+		  If tmp1 let tmp$= TYPE$[tmp1 * 3 - 2,tmp1 * 3]
+		  WebStr$=WebStr$,tmp$,fdel$ ! applied type
+		  tmp2=SAR.AppliedToCust
+		  If tmp2<=0 Let tmp2=Custid
+		  TARKey$=" ",TARKey$;TARKey$[1,6]=tmp2 using "######"
+		  TARKey$[7,16]=SAR.AppliedTrans Using "##########"
+		  TARKey$[17,17]=SAR.AppliedType Using "#"
+		  TARKey$[19]="" ! cut it at length
+		  Cmode$="=";CDir=1;FndAR1=1
+		  TARCRec=filegetsaract(e$,ARCChan,Cmode$,Cdir,TARKey$,TARC.)
+		  If TARCREC>=-2 AND TARCRec<0 ! not found
+		   TARCRec=filegetsaracth(e$,ARHChan,Cmode$,Cdir,TARKey$,TARH.) ! uses diff than current!
+		   If TARCRec>0 let FndAR1=2
+		  Endif
+		  If TARCRec>0 ! found applied trans
+		    tmp$=""
+			If FndAR1=1 let tmp2=TARC.DATE
+			If FndAR1=2 let tmp2=TARH.Date
+			If tmp2 let tmp$=JDate$(tmp2) ! julian date to mm/dd/yyyy
+			WebStr$=WebStr$,tmp$,fdel$ ! applyto trans date
+			If FndAR1=1 let tmp3=TARC.OrigAmt
+			If FndAR1=2 let tmp3=TARH.OrigAmt
+			If SAR.AppliedType>5 let tmp3=0-tmp3
+			WebStr$=WebStr$,LTrim$(tmp3 using PMask$),fdel$ ! applyto trans amt
+		  Else ! not found - send nulls
+		    tmp$=""
+		    WebStr$=WebStr$,tmp$,fdel$,tmp$,fdel$ ! date & trans amt
+		  Endif
+		  WebStr$=WebStr$,LTrim$(SAR.AmountApplied using PMask$),fdel$ ! applied amount
+		Else ! not - sent nulls / other
+		  tmp$="";tmp3=0
+		  If SAR.DiscountApplied
+		    If SAR.DiscountType=0 let tmp$="DISCOUNT"
+			If SAR.DiscountType<0 let tmp$="FREIGHT"
+			If SAR.DiscountType > 0
+              Read Record #CSHOChan,SAR.DiscountType,0;CSHO.;
+			  tmp$ = CSHO.Description$
+		    End If
+			tmp3=SAR.DiscountApplied
+		  Endif
+		  WebStr$=WebStr$,tmp$,fdel$ ! appref (poss disc ref)
+		  tmp$=""
+		  WebStr$=WebStr$,tmp$,fdel$ ! apptype
+		  WebStr$=WebStr$,tmp$,fdel$,tmp$,fdel$ ! appdate,transamt
+		  if tmp3 let tmp$=Str$(tmp3)
+		  WebStr$=WebStr$,tmp$,fdel$ ! applied amount
+		Endif
+	    DList$[drow]=WebStr$
+	    drow=drow+1
+	    if drow>dtmpcnt let dtmpcnt=expandarray(e$,DList$[])
+	   Loop
+	  Endif ! of ardetail section
+	 Endif ! of found a reference
+	 If Not(Reftype) and FndAR=9 goto ARCLoop: ! look for more current
+	 If Not(Reftype) And FndAR=1 goto ARHLoop: ! look for more history
+	endif ! valid cust rec
+	Close #CustChan
+	If SARChan>0 Close #SARChan
+	If SARHChan>0 Close #SARHChan
+	Close #CSHOChan
+	Close #CTLChan
+	Close #ARCChan
+	Close #ARHChan
+	If not(reftype) and FndanyAR>=0
+		   If FndanyAR<=1 ! found one or none
+		     Let SList$[2]="N",fdel$
+		   Else ! more than 1 so it's a droplist
+		     Let SList$[2]="Y",fdel$
+		   Endif
+	Endif ! 
+	!
+	SList$[srow]=esdel$ ! end of droplist section
+	DList$[drow]=esdel$ ! end of pay detail section
+	List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetCustRefDtl
+! --------------------------------------------------------------------------------------

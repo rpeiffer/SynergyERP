@@ -1,0 +1,2230 @@
+! "ubscrload" - create cash receipts entry from synergy erp to paper master (from sfcr)
+!
+! loadsave -w -n 100,10 -o prog/dxport/ubscrload.dl4 src/ubscrload.src
+
+Declare External sub crload
+! need to send the userid,rectype,ReturnStatus,Message$
+Declare Intrinsic Function FindChannel
+
+include "src/copyright.inc"
+
+dim userid$[8],rectype$[1],message$[200],doc$[10],2%,returnstatus
+
+Call Crload(userid$,rectype$,doc$,returnstatus,message$)
+
+Print returnstatus
+Stop
+
+!Chain ""
+
+External Sub Crload(userid$,rectype$,doc$,returnstatus,message$)
+ Try ! #1
+include "src/inc/filecust.inc" ! customer
+include "src/inc/filesaract.inc" ! a/r file
+include "src/inc/filecashfle.inc" ! cash receipts
+include "src/inc/filecashother.inc" ! other discounts
+include "src/inc/filecashacc.inc" ! bank
+include "src/inc/filecashrecf.inc" ! misc a/r cash
+include "src/inc/filearproof.inc" ! a/r cross check
+include "src/inc/fileartermcode.inc" ! a/r term codes
+include "src/inc/fileinvh.inc" ! invoice history
+include "src/inc/filesaracth.inc" ! a/r invoice history
+include "src/inc/filesfcashfle.inc" ! temp cash receipts
+include "src/inc/filecurrency.inc" ! currency file
+!
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "libgeneralcode.lib"
+Declare External Function ConvertDate
+!
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,PDate$
+!
+Declare Intrinsic Sub DateToJulian,JulianToDate,VerifyDate,CheckNumber
+!
+Declare sub OpenFiles
+Declare Sub CurrConvUP,CurrConvDown
+!
+!--------------------------------------------------------------------
+!
+!
+! ** main procedure
+!
+!
+
+  !
+  dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! error handling variables
+  dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[500]
+  dim Section$[30],Field$[20,30]
+  dim mergedir$[60],action$[20],action1$[20],options$[20]
+  dim Company$[2],UserID$[8]
+  !
+  dim 1%,tmp1,intCo,intSls,CTLC,BankRec,errflag,WH,Div
+  dim 2%,tmp2,maxcnt \ maxcnt=50 ! max records in arrays
+  dim 2%,entnum,dcode
+  dim 3%,tmp3,JDepositDate,DocNo,custid
+  !
+  dim OtherCashList$[maxcnt,100],JECashList$[maxcnt,100],BankList$[maxcnt,100]
+  dim List$[maxcnt,300]
+  dim BankID$[3],DepositDate$[10]
+  dim CustNo$[6],SearKey$[64],BegKey$[64],mode$[3]
+  dim Desc$[50],PayFlag$[1],RecType$[1],DocNo$[10],arinvKey$[64],InvType$[3]
+  dim tmp$[200],tmp1$[200],WebStr$[400],Message$[200]
+  dim keycr$[50],keysf$[50],p60$[50],P9$[50],logfname$[50],work$[50]
+  dim blank$[200] \ blank$=" ",blank$
+  dim 1%,age,type
+! dim for files
+  dim 1%,ch_ar,ch_arh,ch_bank,ch_cust,ch_cr,ch_sf
+  dim 3%,rec_ar,rec_arh,rec_bank,rec_cust,rec_cr,rec_sf
+  dim 3%,arpamt,aramt
+  
+  dim keypcr$[50],3%,rec_pcr,rec_fsar,1%,lastrecflag
+  dim keyar1$[50],keyar2$[50],keyar3$[50],keyar4$[50],keyar5$[50]
+  dim keycust$[50]
+  !!! new variables !!!
+dim 1%,artype,recpass
+dim 3%,applyarbal, applyadjamt,transref,transtype,orgrefno
+DIM 2%,R[23],R1,L,F9[1]
+dim 3%,bankamt,bankcheck,bankdesc$[16],bankdiv,bankwh
+dim 3%,bankcust,bankdate,banknum,applyamt,bnkodiscamt
+DIM 2%,ENTRY,ardate
+DIM 3%,R9[1]
+DIM 3%,D3[1],D4[1],I9
+DIM J$[40]
+DIM 1%,E,I,X1,2%,X2,3%
+DIM 2%,J8
+DIM X$[10]
+  dim M3$[3] \ M3$="###"
+  dim M6$[6] \ M6$="######"
+  dim M10$[10] \ M10$="##########"
+  LET DOC$=DOC$+"          " ! MAKE SURE IT HAS SPACES
+  !
+  dim Cust. as cust ! customer
+  dim AR. as saract ! a/r file
+  dim CR. as cashfle ! cash receipts
+  dim pcr. as cashfle ! prev cash receipts 
+  dim CO. as cashother ! other discounts
+  dim Bank. as cashacc ! bank
+  dim MC. as cashrecf ! misc a/r cash
+  dim ARP. as arproof ! a/r cross check
+  dim Term. as artermcode ! a/r term codes
+  dim InvHist. as invh ! invoice history
+  dim ARH. as saracth ! a/r invoice history
+  dim SF. as sfcashfle ! temp cash receipts
+  dim sftmp. as sfcashfle
+  dim curr. as currency 
+
+  dim p61$[256]
+  dim 1%,ch_curr,keycurr$[50],3%,rec_curr
+  Dim 1%,cnvcu[10],3%,cnvca[10]
+  dim 1%,currid,3%,currfact
+  dim 3%,cbankamt, cd3[1],cd4[1],creditamt,carbalamt, carpayamt,cbankdisc
+  dim 3%
+
+
+   Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+  Def FNS(H) = Int(Abs(H) * 100) * .01 * Sgn(H) ! rounding to nearest penny
+  !
+  !call dxopen()
+  !
+  call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$)
+  !
+  call dxget("s_view.mergedir",mergedir$)
+  Call DXGet("S_USER.ID",userid$) \ userid$ = UCase$(userid$)
+  let userid$=userid$+"        "
+  let logfname$="/tmp/crlog"+trim$(userid$)+".txt!"
+  call OpenFiles()
+	read #ch_cntrl,19,50;P9$;
+	Mat Read #ch_cntrl,61,0;P61$; ! rest of flags
+	read #ch_cntrl,60,50;p60$;
+	READ #ch_cntrl,0,108;ARDATE;
+  !
+  let recpass=0
+  let entnum=0
+  LET Returnstatus=1 ! ok
+  !! start here !!
+  let keysf$=" ",keysf$;keysf$[1,8]=userid$[1,8]
+  let keysf$[9,9]=rectype$[1,1]
+  !let keysf$[10,19]=doc$[1,10]
+  srchsf: ! search for users transactions
+  search #ch_sf,3,1;keysf$,rec_sf,e\if e=2 goto endrecchk:
+  if (e)
+	gosub err_search_log:
+  	goto endrecchk:
+  endif
+  if keysf$[1,8]<>userid$[1,8] goto endrecchk:
+  if rectype$[1,1]<>keysf$[9,9] goto endrecchk:
+ ! if keysf$[10,19]<>doc$[1,10] goto endrecchk:
+  read record #ch_sf,rec_sf;sf.;
+  if not (sf.bank)
+	ReturnStatus=0 ! not ok
+	Message$="No bank has been entered"
+	goto endrecchk:
+  endif
+  bank.currid=0;curr.excrate=0
+  IF P61$[136,136]="Y"
+		Read record #ch_bank,sf.bank;Bank.;
+		if bank.currid<>0
+			ch_curr=findchannel()
+			tmp$="2/CURRENCY"+str$(Intco)
+			ROpen #ch_curr,tmp$
+			let keycurr$=bank.currid using "####"
+			search #ch_curr,2,1;keycurr$,rec_curr,e
+			if e<>0
+				let curr.desc$="Currency ID is not on File "
+			else
+				read record #ch_curr,rec_curr;curr.;
+			endif
+			try
+				close #ch_curr
+			else
+				rem
+			end try
+	    endif
+	endif
+ ! select case sf.RecType$
+ ! case "I" ! apply to invoice
+ if sf.rectype$="I" or sf.rectype$="U" ! ****** start the i
+ lastrecflag=0
+if recpass=0
+	entnum=0
+	call dxget ("u_crbankid",tmp$) \let banknum=tmp$
+	if not(banknum)
+		let returnstatus=0
+		let message$="Bank Has Not Been Entered"
+		goto endrecchk:
+	endif
+       let tmp$=sf.paymentdate using "&&&&&&&&"
+       let bankdate=tmp$[3,8]
+       if not(bankdate)
+		let returnstatus=0                        
+		let message$="Deposit Date Not Been Entered"  
+		goto endrecchk:                           
+	endif
+	call dxget("bankamt",tmp$)\let bankamt=tmp$
+	call dxget("bankdiscamt",tmp$)\let bankdisc=tmp$
+	if bankdisc<>0 and bankamt=0
+		let returnstatus=0
+		!let message$="Discount Entered Without Bank Amount"
+		let message$="Discount not Allowed with Zero Check Amount" 
+		goto endrecchk:
+	endif
+	call dxget("bankdiv",tmp$)\let bankdiv=tmp$
+	call dxget("bankwh",tmp$)\let bankwh=tmp$
+        call dxget("bankdesc",tmp$)\let bankdesc$=tmp$
+	let bankdesc$=bankdesc$+"            "
+	call dxget("bankcheck",tmp$)\let bankcheck=tmp$
+	call dxget("u_crcust",tmp$) \let bankcust=tmp$
+	let sf.customercode=bankcust
+	gosub get_cust:
+	if not (returnstatus)
+		goto endrecchk:
+	endif
+	if bankamt<>0
+		if not (bankdiv)
+			let returnstatus=0
+			let message$="Division has not been entered"
+			goto endrecchk:
+		endif
+		if not (bankwh)
+			let returnstatus=0
+			let message$="Warehouse has not been entered"
+			goto endrecchk:
+		endif
+		if not (bankcheck)
+			let message$="Check Number has not been entered"
+			if rectype$="I"
+				call dxget("verifychknum",tmp$)
+				if rtrim$(ucase$(tmp$))<>"Y"
+					let returnstatus=2
+					goto endrecchk:
+				else
+					goto endbankchk:
+				endif
+			endif
+			let returnstatus=0
+			goto endrecchk:
+		endif
+		! verify if ar transaction already exists
+		endbankchk: !
+		if not(bankcheck)
+			if not (entnum)
+				gosub get_crentrynum:
+			endif
+			LET tmp$=ARDATE USING "&&&&&&" ! yymmdd
+			if not(entnum) 
+				let tmp$[5,8]="9999"
+				let ar.referenceno=tmp$[1,8]
+			else
+				if entnum <10000
+					let tmp$[5,8]=entnum using "&&&&"
+					let ar.referenceno=tmp$[1,8]
+					let bankcheck=ar.referenceno
+				else
+					LET tmp$=ARDATE USING "&&&&&&" 
+					let ar.referenceno=tmp$[3,4]
+					let tmp$[1,2]=ar.referenceno using "&&"
+					let tmp$[3,8]=entnum using "&&&&&&"
+					LET ar.referenceno=tmp$[1,8]
+					let bankcheck=ar.referenceno
+				endif
+			endif
+		else
+			let ar.referenceno=bankcheck
+		endif
+		let type=9 ! payment
+		if bankamt<0 let type=4  ! debit adjust ment
+		LET KEYAR1$=" ",KEYAR1$
+		LET KEYAR1$[1,6]=sf.customercode using "######"
+		LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+		LET KEYAR1$[17,17]=type USING "#"
+		SEARCH #CH_ARH,2,1;KEYAR1$,REC_arh,E
+		IF E>1 
+			GOSUB ERR_SEARCH_log:
+			goto endrecchk:
+		endif
+		IF NOT(E)
+			if not(bankcheck) goto duppaykey1: ! create 
+			call dxget("PaymentType",tmp$)
+			If Ucase$(rtrim$(tmp$))="CC" goto duppaykey1: ! credit card
+			ReturnStatus=0
+      		let Message$="Already in Use A/R Transaction ",+str$(ar.referenceno)
+			goto endrecchk:
+		ENDIF 
+		SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+		IF E>1 GOSUB ERR_SEARCH_LOG:
+		if not(e)
+			call dxget("PaymentType",tmp$)
+			If Ucase$(rtrim$(tmp$))="CC" goto duppaykey1: ! credit card
+			ReturnStatus=0
+      		let Message$="Already in Use A/R Transaction ",+str$(ar.referenceno)
+			goto endrecchk:
+		endif
+		goto addpayrec: 
+		duppaykey1: ! check for duplicate 1st entry number
+		let orgrefno=ar.referenceno
+		if not (entnum)
+			gosub get_crentrynum:
+		endif
+		LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=ar.customercode using "######"
+		let ar.referenceno=entnum
+		if not (ar.referenceno) let ar.referenceno=999999
+		let bankcheck=ar.referenceno
+		LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+		LET type=INT(FRA(ar.agetypecount)*100) 
+		LET KEYAR1$[17,17]=type USING "#"
+		LET rec_ar=cr.saractrecfrom ! C2[3]
+		SEARCH #CH_ARH,2,1;KEYAR1$,REC_arh,E
+		IF E>1 GOSUB ERR_SEARCH_LOG:
+		IF NOT(E)
+			goto duppaykey2:
+		ENDIF 
+		SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+		IF E>1 GOSUB ERR_SEARCH_log:
+		if not(e)
+			goto duppaykey2:
+		endif
+		let bankcheck=ar.referenceno
+		goto addpayrec:
+
+		duppaykey2: ! check for 2nd dup entry number + armonth           
+		LET tmp$=ARDATE USING "&&&&&&" 
+		let ar.referenceno=tmp$[3,4]
+		if entnum<>0                                                      
+			LET ar.referenceno=ar.referenceno*10000+entnum
+		else
+			let ar.referenceno=ar.referenceno*10000+999999
+		endif
+		LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=ar.customercode using "######"
+		LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+		let bankcheck=ar.referenceno
+		LET type=INT(FRA(ar.agetypecount)*100) 
+		LET KEYAR1$[17,17]=type USING "#"
+		LET rec_ar=cr.saractrecfrom ! C2[3]
+		SEARCH #CH_ARH,2,1;KEYAR1$,REC_arh,E
+		IF E>1 GOSUB ERR_SEARCH_LOG:
+		IF NOT(E)
+			goto duppaykey3:
+		ENDIF 
+		SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+		IF E>1 GOSUB ERR_SEARCH_log:
+		if not(e)
+			goto duppaykey3:
+		endif
+		let bankcheck=ar.referenceno
+		goto addpayrec:
+		duppaykey3: ! check for 3rd dup entry number + ar year + armonth           
+		LET tmp$=ARDATE USING "&&&&&&" 
+		let ar.referenceno=tmp$[1,4]
+		if entnum<>0                                                      
+			LET ar.referenceno=ar.referenceno*10000+entnum
+		else
+			let ar.referenceno=ar.referenceno*10000+999999
+		endif
+		LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=ar.customercode using "######"
+		LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+		let bankcheck=ar.referenceno
+		LET type=INT(FRA(ar.agetypecount)*100) 
+		LET KEYAR1$[17,17]=type USING "#"
+		LET rec_ar=cr.saractrecfrom ! C2[3]
+		SEARCH #CH_ARH,2,1;KEYAR1$,REC_arh,E
+		IF E>1 GOSUB ERR_SEARCH_LOG:
+		IF NOT(E)
+			goto duppaykey4:
+		ENDIF 
+		SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+		IF E>1 GOSUB ERR_SEARCH_log:
+		if not(e)
+			goto duppaykey4:
+		endif
+		let bankcheck=ar.referenceno
+		goto addpayrec:                                          
+		duppaykey4: ! check ar year + armonth+arday+ 0 to 99
+		for ctr=0 to 99
+			LET tmp$=ARDATE USING "&&&&&&" 
+			let ar.referenceno=tmp$[1,6]                                                    
+			LET ar.referenceno=ar.referenceno*100+ctr
+			LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=ar.customercode using "######"
+			LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+			let bankcheck=ar.referenceno
+			LET type=INT(FRA(ar.agetypecount)*100) 
+			LET KEYAR1$[17,17]=type USING "#"
+			LET rec_ar=cr.saractrecfrom ! C2[3]
+			SEARCH #CH_ARH,2,1;KEYAR1$,REC_arh,E
+			IF E>1 GOSUB ERR_SEARCH_LOG:
+			IF E<>0	
+				SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+				IF E>1 GOSUB ERR_SEARCH_log:
+				if e<>0
+					goto addpayrec:
+					let bankcheck=ar.referenceno
+				endif
+			endif
+		next ctr
+		! duplicate payment info
+		ReturnStatus=0
+      	let Message$="Already in Use A/R Transaction ",+str$(orgrefno)
+		goto endrecchk:
+		
+		addpayrec: ! 
+		gosub createpayment: ! l_4000: ! create cash receipt payment
+		if bankdisc<>0
+			let dcode=0
+			let d4[1]=bankdisc
+			let cbankdisc=bankdisc
+
+			gosub creatediscount: ! 
+		endif
+	else
+		let lastrecflag=99 ! flag to update scashfle file with last rec#
+	endif ! bank amount is 0
+	for ctr=1 to 10		
+		call dxget("bankdiscamt"+str$(ctr),tmp$)
+		let bnkodiscamt=tmp$
+		if bnkodiscamt<>0
+			call dxget("bankdisccode"+str$(ctr),tmp$)
+			let tmp3=tmp$
+			if tmp3<0 or tmp3>(chf(COChan)-1)
+				let message$="Invalid Other Discount Code For Payment "
+				let returnstatus=0
+			else
+				If tmp3<>0
+					read record #COChan,tmp3;co.;
+					if rtrim$(co.Description$)=""
+						let message$="Invalid Other Discount Code For Payment "
+						let returnstatus=0
+					else
+						let dcode=tmp3
+						let d4[1]=bnkodiscamt
+						gosub creatediscount:
+					endif	
+				else ! freight charge other disc
+					let d4[1]=bnkodiscamt
+					let dcode=0
+					gosub createfreight:
+				endif
+			endif
+		endif
+	next ctr
+	read record #ch_sf,rec_sf;sf.;
+endif
+if not (recpass) read record #ch_sf,rec_sf;sf.;
+let recpass=99
+if rectype$<>"U"
+	gosub createapplied: ! l_4300: ! apply payment to transaction
+	if not(returnstatus) goto endrecchk: ! something happen
+	if lastrecflag=99
+		gosub updtoarrec: ! update prev cash receipts record with from ar
+	endif
+	clear sf.
+	call dxget("u_crcust",tmp$) \let bankcust=tmp$
+	sf.customercode=bankcust
+	call dxget ("u_crbankid",tmp$) \let banknum=tmp$
+	sf.bank=banknum
+else
+	goto endrecchk:
+endif
+goto srchsf:
+
+
+
+
+ endif ! ! ****** end of the i
+  !case "J" ! journal entry 
+  if sf.rectype$="J"
+	! verify amount entered
+	if not (sf.PayAmt)
+		ReturnStatus=0 ! 0 = not ok
+  		Message$="Not Dollar Amount Entered"
+		goto endrecchk:
+	endif
+	! verify other receivable amt
+	if not (sf.journal)
+		 ReturnStatus=0 ! 0 = not ok          
+ 		 Message$="Not Account Entered" 
+		 goto endrecchk:
+	endif
+	clear cr. ! gosub init_crvars: !  cashfle ! CASH RECEIPTS FILE  09/21/07
+	gosub get_crentrynum:! get entry number
+ 	cr.EntryType = 6
+	let tmp$=sf.paymentdate using "&&&&&&&&"
+ 	cr.PaymentDate=tmp$[3,8]
+ 	cr.JournalEntryType =sf.journal
+ 	cr.EntryNumber=entnum         ! C2[8]         GEN BY SYSTEM
+ 	
+	cr.currvar=0
+	cr.currid=0
+	cr.currfact=0
+	let amount=sf.payamt
+	if p61$[136,136]="Y"
+		let cr.currid=bank.currid
+		if bank.currid<>0 let cr.currfact=curr.excrate
+		if cr.currfact<>0 and amount<>0
+			call currconvdown(amount,cr.currfact)
+			amount=fnr(amount)
+		endif
+	endif
+	cr.BankAmount=amount ! Sf.payamt          ! C3[1]         TYPE 1,2&5
+	if amount <0 ! sf.payamt
+		let cr.DebitAmount= (amount *(-1)) ! (sf.payamt*(-1))
+	else
+ 		cr.CreditAmount=amount ! sf.payamt        ! C3[3]         TYPE 1&3
+	endif
+ 	cr.JeDescription$=sf.Desc$     ! C$[41,70]
+ 	cr.Journal=0 ! C5[0]         ADDED 5/22/95
+	cr.EntryDate=0 ! C5[1]
+	cr.bank =sf.bank ! C5[2]
+ 	cr.DetailNo=tiebreak ! C5[3]
+	gosub createcrrec:
+	returnstatus =1
+	message$="OK"
+	goto srchsf: !  endrecchk:
+endif
+  !case "A" ! adjustment
+  if rectype$="A" ! adjustment
+	! verify transactions
+	 if not (sf.PayAmt)                            
+       		ReturnStatus=0 ! 0 = not ok           
+         	Message$="No Dollar Amount Entered"  
+        	goto endrecchk:                             
+	endif                                         
+	if not (sf.wh) or sf.wh>99
+       		ReturnStatus=0 ! 0 = not ok           
+         	Message$="Incorrect Warehouse Assigned"  
+        	goto endrecchk:                            
+	endif
+	if not (sf.div) or sf.div>99
+		ReturnStatus=0 ! 
+		Message$="Incorrect Division Assigned"
+		goto endrecchk:
+	endif
+	! verify if refernce number has been entered
+	let ar.referenceno=sf.doc$
+	if not (ar.referenceno) or ar.referenceno >99999999
+		ReturnStatus=0
+		Message$="Incorrect Reference Number assigned"
+		goto endrecchk:
+	endif
+	! find customer
+	gosub get_cust: ! read customer record
+	if not(returnstatus)
+		goto endrecchk:
+	endif
+	! verify if ar transaction already exists
+	let ar.referenceno=sf.doc$
+	let type=4
+	if sf.payamt<0 let type=8
+	LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=sf.customercode using "######"
+	LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+	LET KEYAR1$[17,17]=type USING "#"
+	SEARCH #CH_ARH,2,1;KEYAR1$,REC_arh,E
+	IF E>1 
+		GOSUB ERR_SEARCH_log:
+	endif
+	IF NOT(E)
+		ReturnStatus=0
+      		let Message$="Already in Use A/R Transaction ",+str$(ar.referenceno)
+		goto endrecchk:
+	ENDIF 
+	SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+	IF E>1 GOSUB ERR_SEARCH_LOG:
+	if not(e)
+		ReturnStatus=0
+      		let Message$="Already in Use A/R Transaction ",+str$(ar.referenceno)
+		goto endrecchk:
+	endif
+	clear ar. ! gosub init_arvars:
+ 	ar.Salesman=cust.SalesmanCode           
+ 	let tmp$=sf.paymentdate using "&&&&&&&&" ! yyyymmdd
+ 	ar.lastpaydate=tmp$[3,8]
+	ar.CustomerCode=sf.customercode
+ 	let age=0
+ 	let type=8
+ 	if sf.payamt>0 let type=4
+	let age=0
+ 	if type>5 and p9$[17,17]="N" let age=1 ! unapplied credit aging
+	ar.AgeTypeCount=age+(type/100)
+	let tmp$=sf.paymentdate using "&&&&&&&&"
+	let work$=tmp$[3,8]
+	Call DateToJulian(1,work$,work$,E)
+	If E
+		let returnstatus=0
+		let message$="Invalid Date"
+		goto endrecchk:
+	Else 
+  		ar.Date  = work$
+	End If 
+	let payamt=sf.payamt
+	cr.currvar=0
+	cr.currid=0
+	cr.currfact=0
+	ar.currfact=0
+	ar.currid=0
+	let payamt=sf.payamt
+	if p61$[136,136]="Y" and bank.currid<>0 
+		let cr.currid=bank.currid
+		let ar.currid=bank.currid
+		if bank.currid<>0 
+			let cr.currfact=curr.excrate
+			let ar.currfact=curr.excrate
+		endif
+		if cr.currfact<>0 and payamt<>0
+			call currconvdown(payamt,cr.currfact)
+			payamt=fnr(payamt)
+		endif
+	endif
+	ar.OrigAmt=abs(payamt)        ! sf.Payamt           
+	ar.EntryDescription$=sf.desc$
+
+	If rtrim$(ar.EntryDescription$)="" 
+		IF entnum=0             
+			 Gosub get_crentrynum ! mtg
+		 End If
+		let ar.EntryDescription$="C/R ENT #"              
+		LET ar.EntryDescription$[10]=entnum USING "######" 
+	endif
+	let ar.EntryDescription$=ar.EntryDescription$+blank$
+ 	ar.Whse = sf.wh                  
+ 	ar.Division=sf.div
+ 	ar.PostingCust=cust.arpostcust
+ 	ar.ReferenceNo=sf.doc$  !ar.ARREF[0]      KEY FIELD
+	ar.AcptSrc=305! mark accept source 305 for cash receipts
+ 	gosub createartran: ! create the ar transaction
+	let aramt=ar.origamt
+	if type>5 and p9$[17,17]="Y" let aramt=-(ar.origamt) ! credit item and aging credit
+	gosub updateagebuck: ! update customer age buckets
+	clear cr. ! gosub  init_crvars: 
+
+	if not(entnum)
+		gosub get_crentrynum:
+	endif
+	if p61$[136,136]="Y"
+		let cr.currid=ar.currid
+		let cr.currfact=ar.currfact
+	endif
+	! load cr varible here
+	cr.EntryType =3   ! C1[0] 0 THRU 6
+	cr.Warehouse = sf.wh  ! C1[1]
+ 	cr.CustomerCode=sf.customercode ! C2[0]         TYPE 1-6
+ 	cr.CustomerFileRec=rec_cust ! C2[1]         TYPE 1-6
+	cr.SaractRecTo=0     ! C2[2]         TYPE 1
+ 	cr.SaractRecFrom =rec_ar  ! C2[3]         TYPE 1-5
+	let tmp$=sf.paymentdate using "&&&&&&&&"
+ 	cr.PaymentDate=tmp$[3,8]     ! C2[4]         TYPE 1&2
+	if sf.payflag$="W"
+ 		cr.OthrCrAdjType =1     ! write off ! C2[6]
+	else
+ 		cr.OthrCrAdjType =2     ! bad debt  sf.payflag$="B"
+	endif 
+ 	cr.EntryNumber=entnum        ! C2[8]         GEN BY SYSTEM
+	cr.DivisionCode=sf.div       ! C4
+	cr.TransactionNumber=sf.doc$  	! C3[0]         TYPE 1&5
+ 	cr.BankAmount=0          ! C3[1]         TYPE 1,2&5
+	if sf.Payamt>=0
+ 		cr.DebitAmount=payamt ! sf.payamt         ! C3[2]         TYPE 4&5
+	else
+ 		cr.CreditAmount=abs(payamt) ! (sf.payamt)        ! C3[3]         TYPE 1&3
+	endif
+ 	cr.CustomerName$=cust.name$ ! C$[1,30]          TYPE 1-6
+ 	cr.EntryDate=cr.paymentdate ! C5[1]
+	cr.Bank=sf.bank ! C5[2]
+	cr.DetailNo=0 ! C5[3]
+	gosub createcrrec:
+	let arpamt=cr.debitamount-cr.creditamount
+	gosub updatearproof: 
+	clear cr. ! gosub  init_crvars:
+	! load cr varible here
+	cr.EntryType =6   ! C1[0] 0 THRU 6
+	cr.Warehouse = sf.wh  ! C1[1]
+ 	cr.CustomerCode=sf.customercode ! C2[0]         TYPE 1-6
+ 	cr.CustomerFileRec=rec_cust ! C2[1]         TYPE 1-6
+	cr.SaractRecTo=0     ! C2[2]         TYPE 1
+ 	cr.SaractRecFrom =0  ! C2[3]         TYPE 1-5
+	let tmp$=sf.paymentdate using "&&&&&&&&"
+ 	cr.PaymentDate=tmp$[3,8]     ! C2[4]         TYPE 1&2
+ 	cr.OthrCrAdjType =0     ! C2[6] ! 1 for writeoff/2 for bad debt ! **check*
+ 	cr.EntryNumber=entnum        ! C2[8]         GEN BY SYSTEM
+	cr.DivisionCode=sf.div       ! C4
+	cr.TransactionNumber=sf.doc$  	! C3[0]         TYPE 1&5
+ 	cr.BankAmount=payamt ! sf.payamt          ! C3[1]         TYPE 1,2&5
+	if Payamt<=0 ! reverse out sf.payamt
+ 		cr.DebitAmount=abs(payamt)     ! sf.payamt     ! C3[2]         TYPE 4&5
+	else
+ 		cr.CreditAmount=payamt    !sf.payamt    ! C3[3]         TYPE 1&3
+	endif
+ 	cr.CustomerName$=cust.name$ ! C$[1,30]          TYPE 1-6
+ 	cr.EntryDate=cr.paymentdate ! C5[1]
+	cr.Bank=sf.bank ! C5[2]
+	cr.DetailNo=0 ! C5[3]
+	if p61$[136,136]="Y"
+		let cr.currid=ar.currid
+		let cr.currfact=ar.currfact
+	endif
+	!let tiebreak=1
+	gosub createcrrec:
+	let ReturnStatus=1
+	let Message$="OK"
+	goto srchsf: ! goto endrecchk: ! 
+endif
+!!! need return check here
+ ! case "R" ! return check 
+ if rectype$="R"  ! return check
+	! verify transactions
+	 if not (sf.PayAmt)                            
+       		ReturnStatus=0 ! 0 = not ok           
+         	Message$="No Dollar Amount Entered"  
+        	goto endrecchk:                           
+	endif                                         
+	if sf.PayAmt<0                            
+       		ReturnStatus=0 ! 0 = not ok           
+         	Message$="No Dollar Amount Entered"  
+        	goto endrecchk:                            
+	endif
+	if not (sf.wh) or sf.wh>99
+       		ReturnStatus=0 ! 0 = not ok           
+         	Message$="Incorrect Warehouse Assigned"  
+        	goto endrecchk:                            
+	endif
+	if not (sf.div) or sf.div>99
+		ReturnStatus=0 ! 
+		Message$="Incorrect Division Assigned"
+		goto endrecchk:
+	endif
+	! verify if refernce number has been entered
+	let ar.referenceno=sf.doc$
+	if not (ar.referenceno) or ar.referenceno >99999999
+		ReturnStatus=0
+		Message$="Incorrect Reference Number assigned"
+		goto endrecchk:
+	endif
+	! find customer
+	gosub get_cust: ! read customer record
+	if not(returnstatus)
+		goto endrecchk:
+	endif
+	! verify if ar transaction already exists
+	let ar.referenceno=sf.doc$
+	let type=3
+	LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=sf.customercode using "######"
+	LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+	LET KEYAR1$[17,17]=type USING "#"
+	SEARCH #CH_ARH,2,1;KEYAR1$,REC_arh,E
+	IF E>1 
+		GOSUB ERR_SEARCH_log:
+	endif
+	IF NOT(E)
+		ReturnStatus=0
+      		let Message$="Already in Use A/R Transaction ",+str$(ar.referenceno)
+		goto endrecchk:
+	ENDIF 
+	SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+	IF E>1 GOSUB ERR_SEARCH_LOG:
+	if not(e)
+		ReturnStatus=0
+      		let Message$="Already in Use A/R Transaction ",+str$(ar.referenceno)
+		goto endrecchk:
+	endif
+	clear ar. ! gosub init_arvars:
+ 	ar.Salesman=cust.SalesmanCode           
+ 	let tmp$=sf.paymentdate using "&&&&&&&&" ! yyyymmdd
+ 	ar.lastpaydate=tmp$[3,8]
+	ar.CustomerCode=sf.customercode
+ 	let age=0
+ 	let type=3
+	ar.AgeTypeCount=age+(type/100)
+	let tmp$=sf.paymentdate using "&&&&&&&&"
+	let work$=tmp$[3,8]
+	Call DateToJulian(1,work$,work$,E)
+	If E
+		let returnstatus=0
+		let message$="Invalid Date"
+		goto endrecchk:
+	Else 
+  		ar.Date  = work$
+	End If 
+    let payamt=sf.payamt
+	cr.currvar=0
+	cr.currid=0
+	cr.currfact=0
+	ar.currfact=0
+	ar.currid=0
+	let payamt=sf.payamt
+	if p61$[136,136]="Y" and bank.currid<>0 
+		let cr.currid=bank.currid
+		let ar.currid=bank.currid
+		if bank.currid<>0 
+			let cr.currfact=curr.excrate
+			let ar.currfact=curr.excrate
+		endif
+		if cr.currfact<>0 and payamt<>0
+			call currconvdown(payamt,cr.currfact)
+			payamt=fnr(payamt)
+		endif
+	endif
+	ar.OrigAmt=abs(payamt)        ! sf.Payamt                         
+	ar.EntryDescription$=sf.desc$
+	If rtrim$(ar.EntryDescription$)="" 
+		IF entnum=0             
+			 Gosub get_crentrynum ! mtg
+		 End If
+		let ar.EntryDescription$="C/R ENT #"              
+		LET ar.EntryDescription$[10]=entnum USING "######" 
+	endif
+	let ar.EntryDescription$=ar.EntryDescription$+blank$
+ 	ar.Whse = sf.wh                  
+ 	ar.Division=sf.div
+	ar.AcptSrc=305! mark accept source 305 for cash receipts
+ 	ar.PostingCust=cust.arpostcust
+ 	ar.ReferenceNo=sf.doc$  !ar.ARREF[0]      KEY FIELD
+ 	gosub createartran: ! create the ar transaction
+	let aramt=ar.origamt
+	gosub updateagebuck: ! update customer age buckets
+	clear cr. ! gosub  init_crvars: 
+	If not(entnum)
+		gosub get_crentrynum:
+	endif
+	if p61$[136,136]="Y"
+		let cr.currid=ar.currid
+		let cr.currfact=ar.currfact
+	endif
+	! load cr varible here
+	cr.EntryType =5   ! return check  
+	cr.Warehouse = sf.wh  ! C1[1]
+ 	cr.CustomerCode=sf.customercode ! C2[0]         TYPE 1-6
+ 	cr.CustomerFileRec=rec_cust ! C2[1]         TYPE 1-6
+	cr.SaractRecTo=0     ! C2[2]         TYPE 1
+ 	cr.SaractRecFrom =rec_ar  ! C2[3]         TYPE 1-5
+	let tmp$=sf.paymentdate using "&&&&&&&&"
+ 	cr.PaymentDate=tmp$[3,8]     ! C2[4]         TYPE 1&2
+ 	cr.EntryNumber=entnum        ! C2[8]         GEN BY SYSTEM
+	cr.DivisionCode=sf.div       ! C4
+	cr.TransactionNumber=sf.doc$  	! C3[0]         TYPE 1&5
+ 	cr.BankAmount=-(abs(payamt)) ! sf.PayAmt))           ! C3[1]         TYPE 1,2&5
+ 	cr.DebitAmount=(abs(payamt)) !sf.payamt))         ! C3[2]         TYPE 4&5
+ 	cr.CustomerName$=cust.name$ ! C$[1,30]          TYPE 1-6
+ 	cr.EntryDate=cr.paymentdate ! C5[1]
+	cr.Bank=sf.bank ! C5[2]
+	cr.DetailNo=0 ! C5[3]
+	! let tiebreak=1
+	gosub createcrrec:
+	let arpamt=cr.debitamount-cr.creditamount
+	gosub updatearproof: 
+	let ReturnStatus=1
+	let Message$="OK"
+	goto srchsf: !  goto endrecchk:
+endif
+!end select
+!!! check this out !!! end this here
+Endrecchk: ! we are out of here
+if (recpass)
+	if not(returnstatus) or returnstatus=2 
+		gosub delcrentry:
+	else
+		gosub createunapplied:
+	endif
+endif
+if lastrecflag=99
+		let returnstatus=0
+		let message$="Discount(s) Need to Be Applied to Transactions"
+		gosub delcrentry:
+endif
+gosub fileclose:
+else
+  returnstatus=0
+  message$="Can not Process this Transaction"
+  dim msc4$[100] \ msc4$=msc$(4) 
+  if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+  call env(2,"PROGNAME",msc4$)
+  call programdump()
+
+  ! subroutine - need to include suberr
+  ! include "src/callsuberr.inc
+  ! include "src/callmainerr.inc"
+  !  call dxclose()
+end try ! #1
+exit sub ! end
+
+! 
+!--------------------------------------------------------------------
+sub OpenFiles()
+  !
+  ! Open files for cash receipts
+    Try
+ ! #2
+    !
+    Ch_cntrl = OpenFile(9999,intCo) \ If ch_cntrl = -1 Error 42 !control
+    Ch_cust = OpenFile(1808,intCo) \ If Ch_cust = -1 Error 42  ! customer
+    Ch_ar  = OpenFile(1504,intCo) \ If Ch_ar = -1 Error 42  ! a/r invoice
+    Ch_cr = OpenFile(1536,intCo) \ If ch_cr = -1 Error 42  ! cash receipt
+    COChan = OpenFile(1488,intCo) \ If COChan = -1 Error 42  ! cash other
+    ch_bank = OpenFile(1456,intCo) \ If Ch_bank = -1 Error 42  ! bank
+    MCChan = OpenFile(1440,intCo) \ If MCChan = -1 Error 42  ! misc a/r cash
+    ch_arp = OpenFile(400,intCo) \ If Ch_arp = -1 Error 42  ! a/r cross check
+    ch_arh = OpenFile(1408,intCo) \ If Ch_arh = -1 Error 42  ! a/r inv history
+    ch_sf = OpenFile(10015,intCo) \ If ch_sf = -1 Error 42  ! temp cash receipts
+    !
+  else
+    include "src/callsuberr.inc"
+  end try ! #2
+  
+end sub ! openfiles
+! 
+
+! ---- begin createpayment ---- 
+createpayment: ! L_4000: ! CREATE LCKCASHFLE - PAYMENT TRANSACTION
+clear cr. ! gosub init_crvars:
+if not (sf.bank)
+	call dxget ("u_crbankid",tmp$) \let banknum=tmp$
+	let sf.bank=banknum
+endif
+cr.Bank=sf.bank 
+LET cr.customercode=bankcust
+LET cr.CustomerFileRec=rec_cust
+let cr.customername$=cust.name$ 
+LET cr.EntryType=1
+LET cr.warehouse=bankwh ! DEFAULT WAREHOUSE
+LET cr.TypeOfActivity=9
+if bankamt<0 let cr.TypeOfActivity=4 ! negative payment
+LET cr.CustomerFileRec=rec_cust
+LET cr.paymentdate=bankdate ! DEPOSIT DATE
+if not(entnum)
+	gosub get_crentrynum:
+endif
+let cr.entrynumber=entnum
+LET cr.divisioncode=bankdiv ! DIVISION
+LET cr.transactionnumber=bankcheck 
+let cbankamt=bankamt
+LET D3=bankamt ! CHECK AMT
+
+let cr.currid=0
+let cr.currfact=0
+if p61$[136,136]="Y" and bank.currid<>0 and curr.excrate>0
+	let cr.currid=bank.currid
+	let cr.currfact=curr.excrate
+	let cbankamt=bankamt
+	if cbankamt<>0 
+		call currconvdown(cbankamt,cr.currfact)
+		cbankamt=fnr(cbankamt)
+	endif
+endif
+LET cr.bankamount=cbankamt
+LET D3[1]=D3
+let cd3[0]=cr.bankamount
+let cd3[1]=cr.bankamount
+GOSUB createcrrec:
+LET R9=rec_cr ! RECORD FOR PAYMENT TRANSACTION CASHFLE
+! NOW CREATE AR FILE
+clear ar. ! GOSUB init_arvars:
+LET ar.salesman=cust.salesmancode ! SLSM CODE
+LET ar.lastpaydate=0
+LET ar.CustomerCode=cr.customercode
+let age=0
+if bankamt>0 and p9$[19,19]="N" let age=1 ! 
+! if p9$[25,25]="Y" let age=0 else let age=1 
+LET ar.Agetypecount=age+.09
+if bankamt<0 let ar.agetypecount=age+.04 ! negative payment
+let work$=cr.paymentdate using "&&&&&&"
+call datetojulian(1,work$,work$,e)
+if e
+	!!1 date error
+endif
+LET ar.Date=work$ ! JULIAN DEPOSIT DATE 
+LET ar.referenceno=cr.transactionnumber ! REFERENCE #
+LET ar.origamt=abs(cbankamt) ! BANK AMOUNT
+LET ar.currentcredit=abs(cbankamt) ! SET APPLIED CREDIT
+!!LET ar.EntryDescription$="C/R ENT #";ar.EntryDescription$[10]=cr.entrynumber USING "######"
+let ar.EntryDescription$=" ",ar.EntryDescription$
+let ar.EntryDescription$[1,6]=cr.transactionnumber using "######" ! put in refnum
+LET ar.whse=bankwh\ if not(ar.whse) let ar.whse=cr.warehouse! 1 ! cr.warehouse ! WAREHOUSE #
+if not(ar.whse) let ar.whse=sf.wh
+if not(ar.whse) let ar.whse=1
+LET ar.division=cr.divisioncode ! DIVISION
+ar.AcptSrc=305! mark accept source 305 for cash receipts
+LET ar.purchaseorder$=" ",ar.purchaseorder$ ! purchase order number
+let ar.EntryDescription$=bankdesc$
+If rtrim$(ar.EntryDescription$)="" 
+		IF entnum=0             
+			 Gosub get_crentrynum ! mtg
+		 End If
+		let ar.EntryDescription$="C/R ENT #"              
+		LET ar.EntryDescription$[10]=entnum USING "######" 
+	endif
+let ar.EntryDescription$=ar.EntryDescription$+blank$
+let ar.currid=0
+let ar.currfact=0
+if p61$[136,136]="Y" and cr.currid<>0 
+	let ar.currid=cr.currid
+	let ar.currfact=cr.currfact
+endif
+gosub createartran: !
+LET R9[1]=rec_ar ! SET A/R RECORD#
+LET cr.saractrecfrom=rec_ar ! SET A/R RECORD #
+WRITE #ch_cr,rec_cr,18;cr.saractrecfrom;
+RETURN 
+! ---- end createpayment ----- 
+
+! ----- begin createapplied ----
+createapplied: ! L_4300: ! CREATE INFO FOR APPLIED TRANSACTIONS RECORD TYPE 4
+gosub get_cust:
+if not (returnstatus) goto endrecchk:
+let cr.customercode=sf.customercode
+let i9=sf.doc$
+if not(i9)
+	let returnstatus=0
+	let message$="Invalid Invoice #"+str$(i9)
+	return
+endif
+let artype=0
+if sf.invtype$="INV" let artype=1
+if sf.invtype$="SVC" let artype=2
+if sf.invtype$="NSF" let artype=3
+if sf.invtype$="D/A" let artype=4
+if sf.invtype$="LAT" let artype=5
+if sf.invtype$="C/M" let artype=6
+if sf.invtype$="UN." let artype=7
+if sf.invtype$="C/A" let artype=8
+if sf.invtype$="PAY" let artype=9
+let applyarbal=0
+let applyadjamt=0
+let cr.saractrecto=0
+let custid=0
+if sf.billcustomer>0
+	let custid=sf.billcustomer
+else
+	let custid=sf.customercode
+endif
+LET Keyar1$=" ",keyar1$;keyar1$[1,6]=custid USING "######"! keyar1$[1,6]=cr.customercode USING "######"
+let keyar1$[7,16]=I9 USING "##########"
+let keyar1$[17,17]=artype using "#"
+SEARCH #ch_ar,2,1;Keyar1$,rec_ar,E
+if e>1 gosub err_search_log:
+IF E=1 !!! transaction is not found
+	let returnstatus=0
+	let message$="Transaction "+str$(i9)+" not found"
+	return
+endif
+read record #ch_ar,rec_ar;ar.  ! READ AR
+LET artype=INT(FRA(ar.Agetypecount)*100) 
+LET D4=ar.origamt-ar.priorcredit-ar.currentcredit ! already paid
+if (ar.origamt-ar.priorcredit-ar.currentcredit) <=0
+	let returnstatus=0
+	let message$="Transaction "+str$(i9)+" has already been applied"
+	return
+endif
+let applyamt=sf.discamt+sf.payamt+sf.otherdisctotal
+let carbalamt=ar.origamt-ar.priorcredit-ar.currentcredit ! in base upon
+let carpayamt=applyamt
+if p61$[136,136]="Y" and bank.currid<>0
+	if ar.currfact<>0
+		if carpayamt<>0 
+			call currconvdown(carpayamt,ar.currfact)
+			carpayamt=fnr(carpayamt)
+		endif
+	endif
+endif
+if artype>5
+	if applyamt>0
+		let returnstatus=0
+		let message$="Credit Transaction "+str$(i9)+" has positive payment applied"
+		return
+	else
+		if -(ar.origamt-ar.priorcredit-ar.currentcredit)<=carapplyamt
+			let d4=-applyamt
+			let cd4=-carpayamt
+		else
+			let returnstatus=0
+			let message$="Transaction "+str$(i9)+" has been overapplied"
+			return
+		endif
+	endif
+else
+	if applyamt<0
+		returnstatus=0
+		let message$="Transaction "+str$(i9)+" has a negative payment"
+	else
+		if (ar.origamt-ar.priorcredit-ar.currentcredit)>=carpayamt
+			let d4=applyamt
+			let cd4=carpayamt
+		else
+			let returnstatus=0
+			let message$="Transaction "+str$(i9)+" has been overapplied"
+			return
+		endif
+	endif
+	
+endif
+if d4
+	if artype>5 
+		let d4=-abs(d4) 
+		let cd4=-abs(cd4)
+	endif
+	gosub applytran: !  apply ar amount to transaction
+endif
+applydisc: !!! apply discounts to tranactions
+let applyadjamt=0
+!!! now get all the discounts
+!! discount amount -- 
+if sf.discamt ! discount amoun
+	let d4[1]=sf.discamt
+	let dcode=0
+	gosub creatediscount: ! 
+endif
+applyotherdisc: ! apply the other discounts
+if sf.otherdisc1<>0 and sf.disccode1>-1 !
+	let d4[1]=sf.otherdisc1
+	if sf.disccode1<0
+		let returnstatus=0
+		let message$="Transaction "+str$(i9)+" has invalid other discount code"
+		return
+	endif
+	if sf.disccode1>0
+		let d4[1]=sf.otherdisc1
+		let dcode=sf.disccode1
+		gosub creatediscount:
+	endif
+	if not (sf.disccode1)
+		let d4[1]=sf.otherdisc1
+		let dcode=0
+		gosub createfreight:
+	endif
+endif
+if sf.otherdisc2<>0 and sf.disccode2>-1 ! !
+	let d4[1]=sf.otherdisc2
+	if sf.disccode2<0
+		let returnstatus=0
+		let message$="Transaction "+str$(i9)+" has invalid other discount code"
+		return
+	endif
+	if sf.disccode2>0
+		let d4[1]=sf.otherdisc2
+		let dcode=sf.disccode2
+		gosub creatediscount:
+	endif
+	if not (sf.disccode2)
+		let d4[1]=sf.otherdisc2
+		let dcode=0
+		gosub createfreight:
+	endif
+endif
+if sf.otherdisc3<>0 and sf.disccode3>-1 ! !
+	let d4[1]=sf.otherdisc3
+	if sf.disccode3<0
+		let returnstatus=0
+		let message$="Transaction "+str$(i9)+" has invalid other discount code"
+		return
+	endif
+	if sf.disccode3>0
+		let d4[1]=sf.otherdisc3
+		let dcode=sf.disccode3
+		gosub creatediscount:
+	endif
+	if not (sf.disccode3)
+		let d4[1]=sf.otherdisc3
+		let dcode=0
+		gosub createfreight:
+	endif
+endif
+if sf.otherdisc4<>0 and sf.disccode4>-1 ! !
+	let d4[1]=sf.otherdisc4
+	if sf.disccode4<0
+		let returnstatus=0
+		let message$="Transaction "+str$(i9)+" has invalid other discount code"
+		return
+	endif
+	if sf.disccode4>0
+		let d4[1]=sf.otherdisc4
+		let dcode=sf.disccode4
+		gosub creatediscount:
+	endif
+	if not (sf.disccode4)
+		let d4[1]=sf.otherdisc4
+		let dcode=0
+		gosub createfreight:
+	endif
+endif
+if sf.otherdisc5<>0 and sf.disccode5>-1 ! !
+	let d4[1]=sf.otherdisc5
+	if sf.disccode5<0
+		let returnstatus=0
+		let message$="Transaction "+str$(i9)+" has invalid other discount code"
+		return
+	endif
+	if sf.disccode5>0
+		let d4[1]=sf.otherdisc5
+		let dcode=sf.disccode5
+		gosub creatediscount:
+	endif
+	if not (sf.disccode5)
+		let d4[1]=sf.otherdisc5
+		let dcode=0
+		gosub createfreight:
+	endif
+endif
+if sf.otherdisc6<>0 and sf.disccode6>-1 ! !
+	let d4[1]=sf.otherdisc6
+	if sf.disccode6<0
+		let returnstatus=0
+		let message$="Transaction "+str$(i9)+" has invalid other discount code"
+		return
+	endif
+	if sf.disccode6>0
+		let d4[1]=sf.otherdisc6
+		let dcode=sf.disccode6
+		gosub creatediscount:
+	endif
+	if not (sf.disccode6)
+		let d4[1]=sf.otherdisc6
+		let dcode=0
+		gosub createfreight:
+	endif
+endif
+if sf.otherdisc7<>0 and sf.disccode7>-1 ! !
+	let d4[1]=sf.otherdisc7
+	if sf.disccode7<0
+		let returnstatus=0
+		let message$="Transaction "+str$(i9)+" has invalid other discount code"
+		return
+	endif
+	if sf.disccode7>0
+		let d4[1]=sf.otherdisc7
+		let dcode=sf.disccode7
+		gosub creatediscount:
+	endif
+	if not (sf.disccode7)
+		let d4[1]=sf.otherdisc7
+		let dcode=0
+		gosub createfreight:
+	endif
+endif
+if sf.otherdisc8<>0 and sf.disccode8>-1 ! !
+	let d4[1]=sf.otherdisc8
+	if sf.disccode8<0
+		let returnstatus=0
+		let message$="Transaction "+str$(i9)+" has invalid other discount code"
+		return
+	endif
+	if sf.disccode8>0
+		let d4[1]=sf.otherdisc8
+		let dcode=sf.disccode8
+		gosub creatediscount:
+	endif
+	if not (sf.disccode8)
+		let d4[1]=sf.otherdisc8
+		let dcode=0
+		gosub createfreight:
+	endif
+endif
+if sf.otherdisc9<>0 and sf.disccode9>-1 ! !
+	let d4[1]=sf.otherdisc9
+	if sf.disccode9<0
+		let returnstatus=0
+		let message$="Transaction "+str$(i9)+" has invalid other discount code"
+		return
+	endif
+	if sf.disccode9>0
+		let d4[1]=sf.otherdisc9
+		let dcode=sf.disccode9
+		gosub creatediscount:
+	endif
+	if not (sf.disccode9)
+		let d4[1]=sf.otherdisc9
+		let dcode=0
+		gosub createfreight:
+	endif
+endif
+if sf.otherdisc10<>0 and sf.disccode10>-1 ! !
+	let d4[1]=sf.otherdisc10
+	if sf.disccode10<0
+		let returnstatus=0
+		let message$="Transaction "+str$(i9)+" has invalid other discount code"
+		return
+	endif
+	if sf.disccode10>0
+		let d4[1]=sf.otherdisc10
+		let dcode=sf.disccode10
+		gosub creatediscount:
+	endif
+	if not (sf.disccode10)
+		let d4[1]=sf.otherdisc10
+		let dcode=0
+		gosub createfreight:
+	endif
+endif
+IF rec_ar READ record#ch_ar,rec_ar;ar.; ! UNLOCK IT
+RETURN 
+!! ---- end createapplied ---
+
+!! -- begin createunapplied ---
+createunapplied: !  ! UNAPPLIED AMT
+LET D4=0 \ LET D4[1]=0 
+IF NOT (D3[1])
+	if p61$[136,136]="Y"
+		if cd3[1]<>0 gosub createcurrvar: ! create currency variance
+	endif
+	RETURN 
+ENDIF
+!!IF D3[0]<>D3[1] GOSUB delcrentry: ! LEFT UNAPPLIED DELETE IT 
+if abs(d3)<abs(d3[1])
+	let returnstatus=0
+	let message$="Unapplied Amount Greater Than Original Payment"
+	gosub delcrentry:
+	return
+endif
+if sgn(d3)<>sgn(d3[1])
+	let returnstatus=0
+	let message$="Transaction Out Of Balance."
+	gosub delcrentry:
+	return
+endif	
+clear cr. ! GOSUB init_crvars: 
+LET cr.transactionnumber=bankcheck
+LET cr.EntryType=2 \ LET cr.TypeOfActivity=7
+if d3[1]<0  cr.TypeOfActivity=4
+let creditamt=d3[1]
+let cr.currid=0
+let cr.currfact=0
+if p61$[136,136]="Y" and bank.currid<>0
+	let cr.currid=bank.currid
+	let cr.currfact=curr.excrate
+	if creditamt<>0 
+		call currconvdown(creditamt,cr.currfact)
+		creditamt=fnr(amount)
+	endif
+endif
+LET cr.creditamount=creditamt
+LET cr.saractrecto=R9[1]  !\ LET cr.saractrecto=R9[1]
+let cr.saractrecto=0
+let cr.warehouse=bankwh
+let cr.divisioncode=bankdiv
+if sf.customercode<=0 or sf.customercode>999999
+	call dxget("u_crcust",tmp$) \let bankcust=tmp$
+	sf.customercode=bankcust
+endif
+cr.CustomerCode=sf.customercode ! C2[0]         TYPE 1-6
+cr.CustomerFileRec=rec_cust ! C2[1]         TYPE 1-6
+let tmp$=sf.paymentdate using "&&&&&&&&"
+cr.PaymentDate=tmp$[3,8]     ! C2[4]         TYPE 1&2
+cr.EntryNumber=entnum        ! C2[8]         GEN BY SYSTEM
+cr.CustomerName$=cust.name$ ! C$[1,30]          TYPE 1-6
+cr.EntryDate=cr.paymentdate ! C5[1]
+if not(sf.bank)
+	call dxget ("u_crbankid",tmp$) \let banknum=tmp$
+	let sf.bank=banknum
+endif
+cr.Bank=sf.bank ! C5[2]
+cr.DetailNo=0 ! C5[3]
+GOSUB createcrrec:
+LET rec_ar=R9[1]  ! READ AR
+read record #ch_ar,rec_ar;ar.  ! READ AR
+LET ar.currentcredit=ar.origamt-abs(creditamt)
+write record #ch_ar,rec_ar;ar.;
+LET age=INT(ar.Agetypecount) ! AGE BUCKET
+if age<0 let age=0
+IF age>0 LET age=age+1
+IF age>0 and age<2 LET age=2
+IF age>5 LET age=5
+let type=int(fra(ar.agetypecount)*100)
+if type>5
+	IF P9$[19,19]="N" LET age=1 !DO CREDITS AGE
+endif
+!if age<>1 let aramt=-d3[1] else let aramt=d3[1]
+if age<>1 let aramt=-creditamt else let aramt=creditamt
+gosub updateagebuck: ! being update here 
+LET arpamt=arpamt+(cr.debitamount-cr.creditamount)
+gosub updatearproof:
+!LET D3[1]=D3[1]-cr.creditamount
+!IF D3[1]
+!	gosub delcrentry: !  have a balance left unapply the transaction
+!endif
+let cd3[1]=cd3[1]-creditamt
+if cd3[1]<>0
+	gosub createcurrvar:
+endif
+if lastrecflag=99
+	gosub updtoarrec: ! update prev cash receipts record with from ar
+endif
+RETURN 
+! ---- end  createunapplied ----
+
+! ----- begin apply tran -----
+applytran: ! ! APPLIED TRANSACTION
+clear cr. ! GOSUB init_crvars:
+LET cr.warehouse=ar.whse \ LET cr.divisioncode=ar.division
+LET cr.TypeOfActivity=INT(FRA(ar.Agetypecount)*100) \ LET cr.otherdiscnttype=0
+LET cr.saractrecto=rec_ar !\ LET cr.saractrecto=R9[1] !AR RECORD #
+LET cr.transactionnumber=ar.referenceno
+let cr.Customercode=cust.customercode
+let cr.customerfilerec=rec_cust
+if cd4>=0
+	LET cr.creditamount=CD4
+else
+	let cr.debitamount=abs(Cd4) 
+endif
+LET cr.entrytype=1
+let cr.saractrecfrom=0
+cr.EntryNumber=entnum        ! C2[8]         GEN BY SYSTEM
+let tmp$=sf.paymentdate using "&&&&&&&&"
+cr.PaymentDate=tmp$[3,8]     ! C2[4]         TYPE 1&2
+cr.CustomerName$=cust.name$ ! C$[1,30]          TYPE 1-6
+cr.EntryDate=cr.paymentdate ! C5[1]
+cr.Bank=sf.bank ! C5[2]
+let cr.currid=0
+let cr.currfact=0
+if p61$[136,136]="Y" 
+	let cr.currid=ar.currid
+	let cr.currfact=ar.currfact
+endif
+GOSUB createcrrec: 
+LET D3[1]=D3[1]-D4 ! DECREASE AMT APPLIED BY AR AMOUNT
+LET CD3[1]=CD3[1]-CD4
+WRITE #ch_cr,R9,2;cr.entrytype; \ WRITE #ch_cr,R9,42;cr.divisioncode; ! WRITE TO PAYMENT TRANSACTION
+read record #ch_ar,rec_ar;ar. ! READ AR
+let type=int(fra(ar.agetypecount)*100)
+LET ar.lastpaydate=bankdate ! SET DEPOSIT DATE
+if type<6
+	LET ar.currentcredit=ar.currentcredit+cD4
+else
+	let ar.currentcredit=ar.currentcredit+abs(cd4)
+endif
+let tmp=int(fra(ar.agetypecount)*1000)
+if tmp<9
+	LET TYPE=int(fra(ar.AgeTypeCount)*100)
+	Let age=int(ar.AgeTypeCount)							
+	LET ar.Agetypecount=ar.Agetypecount+.001 ! INCREASE # OF PAYMENT TIMES
+	let tmp3=int(fra(ar.AgeTypeCount)*100)
+	if tmp3<>type
+		ar.AgeTypeCount=age+(type/100)+.001
+	endif
+endif
+write record #ch_ar,rec_ar;ar.;
+LET TYPE=INT(FRA(ar.Agetypecount)*100) !TYPE BEING APPLIED
+LET age=INT(ar.Agetypecount) ! AGE BUCKET
+LET arpamt=(cr.debitamount-cr.creditamount)
+gosub updatearproof:
+!!! need to update customer file too !!!
+let aramt=(cr.debitamount-cr.creditamount)
+if type>5 and p9$[19,19]="N" and age=1
+	let aramt=-aramt
+endif
+gosub updateagebuck: 
+
+RETURN 
+! ----- end applytran -----
+!--------- begin create discount -----
+creatediscount: ! ! CREATE DISCOUNT
+clear cr. ! gosub init_crvars: 
+LET cr.warehouse=ar.whse \ LET cr.divisioncode=ar.division
+LET cr.TypeOfActivity=INT(FRA(ar.Agetypecount)*100)
+LET cr.saractrecto=rec_ar  !\ LET cr.saractrecfrom=R9[1] \ LET cr.otherdiscnttype=dcode
+if rec_ar>0 and lastrecflag=99 let lastrecflag=0 
+LET cr.transactionnumber=ar.referenceno
+let cd4[1]=d4[1]
+let cr.currid=0
+let cr.currfact=0
+if p61$[136,136]="Y" and bank.currid<>0 and curr.excrate>0
+	let cr.currid=bank.currid
+	let cr.currfact=curr.excrate
+	if cd4[1]<>0 
+		call currconvdown(cd4[1],cr.currfact)
+		cd4[1]=fnr(amount)
+	endif
+endif
+LET cr.bankamount=0 ! cbankamt
+LET cr.discountamount=cd4[1] 
+let cr.OtherDiscntType=dcode
+LET cr.entrytype=1
+let cr.saractrecfrom=0
+cr.CustomerCode=sf.customercode ! C2[0]         TYPE 1-6
+cr.CustomerFileRec=rec_cust ! C2[1]         TYPE 1-6
+let tmp$=sf.paymentdate using "&&&&&&&&"
+cr.PaymentDate=tmp$[3,8]     ! C2[4]         TYPE 1&2
+cr.EntryNumber=entnum        ! C2[8]         GEN BY SYSTEM
+cr.CustomerName$=cust.name$ ! C$[1,30]          TYPE 1-6
+cr.EntryDate=cr.paymentdate ! C5[1]
+cr.Bank=sf.bank ! C5[2]
+cr.DetailNo=0 ! C5[3]
+gosub createcrrec: 
+LET D3[1]=D3[1]+D4[1] ! INCREASE APPLIED AMT BY THE AMT OF DISC
+let cd3[1]=cd3[1]+cd4[1]
+If not(dcode) and rec_ar<>0 
+	read record #ch_ar,rec_ar;ar. ! READ AR
+	let tmp3=d4[1]
+	if p61$[136,136]="Y" and cr.currfact<>0
+		if ar.currfact<>cr.currfact
+			if not(ar.currfact)
+				let tmp3=cd4[1]
+			else
+				call currconvdown(d4[1],ar.currfact)
+				tmp3=fnr(amount)
+			endif
+		endif
+	endif
+	LET ar.crdiscamount=ar.crdiscamount+tmp3 ! UPDATE DISC TAKEN
+	write record #ch_ar,rec_ar;ar.;
+endif
+RETURN 
+! ----- end creatediscount -----
+! ----- begin createfreight -----
+createfreight: ! ! CREATE freight
+clear cr. ! gosub init_crvars: 
+LET cr.warehouse=ar.whse \ LET cr.divisioncode=ar.division
+LET cr.TypeOfActivity=INT(FRA(ar.Agetypecount)*100)
+LET cr.saractrecto=rec_ar! \! LET cr.saractrecfrom=R9[1] \ LET cr.otherdiscnttype=dcode
+LET cr.transactionnumber=ar.referenceno
+let cd4[1]=d4[1]
+let cr.currid=0
+let cr.currfact=0
+if p61$[136,136]="Y" and bank.currid<>0 and curr.excrate>0
+	let cr.currid=bank.currid
+	let cr.currfact=curr.excrate
+	if cd4[1]<>0 
+		call currconvdown(cd4[1],cr.currfact)
+		cd4[1]=fnr(cd4[1])
+	endif
+endif
+LET cr.bankamount=cbankamt
+LET cr.freightallowance=cD4[1]
+LET cr.entrytype=1
+let cr.saractrecfrom=0
+cr.CustomerCode=sf.customercode ! C2[0]         TYPE 1-6
+cr.CustomerFileRec=rec_cust ! C2[1]         TYPE 1-6
+let tmp$=sf.paymentdate using "&&&&&&&&"
+cr.PaymentDate=tmp$[3,8]     ! C2[4]         TYPE 1&2
+cr.EntryNumber=entnum        ! C2[8]         GEN BY SYSTEM
+cr.CustomerName$=cust.name$ ! C$[1,30]          TYPE 1-6
+cr.EntryDate=cr.paymentdate ! C5[1]
+cr.Bank=sf.bank ! C5[2]
+cr.DetailNo=0 ! C5[3]
+gosub createcrrec: 
+LET D3[1]=D3[1]+D4[1] ! INCREASE APPLIED AMT BY THE AMT OF DISC
+let cd3[1]=cd3[1]+cd4[1]
+RETURN 
+
+! ----- begin createcurrency variance -----
+createcurrvar: ! ! CREATE currency variance
+clear cr. ! gosub init_crvars: 
+LET cr.warehouse=ar.whse \ LET cr.divisioncode=ar.division
+LET cr.TypeOfActivity=INT(FRA(ar.Agetypecount)*100)
+LET cr.saractrecto=rec_ar! \! LET cr.saractrecfrom=R9[1] \ LET cr.otherdiscnttype=dcode
+LET cr.transactionnumber=ar.referenceno
+let cd4[1]=-cd3[1]
+let cr.currid=bank.currid
+let cr.currfact=curr.excrate
+LET cr.bankamount=0
+LET cr.freightallowance=0 ! cD4[1]
+LET cr.entrytype=1
+let cr.saractrecfrom=0
+cr.CustomerCode=sf.customercode ! C2[0]         TYPE 1-6
+cr.CustomerFileRec=rec_cust ! C2[1]         TYPE 1-6
+let tmp$=sf.paymentdate using "&&&&&&&&"
+cr.PaymentDate=tmp$[3,8]     ! C2[4]         TYPE 1&2
+cr.EntryNumber=entnum        ! C2[8]         GEN BY SYSTEM
+cr.CustomerName$=cust.name$ ! C$[1,30]          TYPE 1-6
+cr.EntryDate=cr.paymentdate ! C5[1]
+cr.Bank=sf.bank ! C5[2]
+cr.DetailNo=0 ! C5[3]
+cr.currvar=cd4[1] 
+gosub createcrrec: 
+! LET D3[1]=D3[1]+D4[1] ! INCREASE APPLIED AMT BY THE AMT OF DISC
+let cd3[1]=cd3[1]+cd4[1]
+RETURN 
+
+
+
+
+! ----- end create freight ----- 
+! ----- delcrentry --- delete the cash receipts entry
+delcrentry: ! delete entry number transactions
+LET ENTRY=cr.entrynumber
+LET keycr$=" ",keycr$ \ LET keycr$[1,2]=sf.bank USING "##" \ LET keycr$[3,7]=cr.entrynumber USING "#####"
+srchdelcr: ! Houston we have a problem
+SEARCH #ch_cr,3,1;keycr$,rec_cr,E \ IF E=2 GOTO enddelpay: 
+IF E GOSUB Err_Search_log:
+READ record #ch_cr,rec_cr;cr.;
+IF cr.entrynumber<>ENTRY LET cr.entrynumber=ENTRY \ GOTO enddelpay: ! 
+LET D4=0 \ LET D4[1]=0
+let cd4[0]=0\let cd4[1]=0
+LET cr.debitamount=-(cr.debitamount) \ LET cr.creditamount=-(cr.creditamount) \ LET cr.discountamount=-(cr.discountamount)
+LET D4=-(cr.debitamount-cr.creditamount) !A/R/ AMOUNT 
+LET D4[1]=cr.discountamount ! DISCOUNT 
+LET rec_ar=cr.saractrecto
+IF rec_ar  ! ! applied amount  *** check here 4 da and pay **GOTO 
+read record #ch_ar,rec_ar;ar. ! READ AR
+if d4<>0 ! applied amount
+	LET ar.lastpaydate=0
+	LET ar.currentcredit=ar.currentcredit-ABS(D4)
+	LET TYPE=int(fra(ar.AgeTypeCount)*100)
+	Let age=int(ar.AgeTypeCount)							
+	let tmp=int(fra(ar.agetypecount)*1000)
+	if tmp>0
+		LET ar.Agetypecount=ar.Agetypecount-.001 ! INCREASE # OF PAYMENT TIMES 
+		let tmp3=int(fra(ar.AgeTypeCount)*100)
+		if tmp3<>type
+			ar.AgeTypeCount=age+(type/100)
+		endif
+	endif
+	write record #ch_ar,rec_ar;ar.; 
+	LET TYPE=INT(FRA(ar.Agetypecount)*100) !TYPE BEING APPLIED
+	LET age=INT(ar.Agetypecount) ! AGE BUCKET 
+	IF age>0 LET age=age+1
+	IF P9$[19,19]="N" IF TYPE>5 ! credits are not aged
+		let age=1
+		let aramt=-abs(d4)
+	else
+		IF age IF age<2 LET age=2
+		IF age>5 LET age=5
+		let aramt=-D4
+	endif
+	gosub updateagebuck: 
+	LET arpamt=arpamt+(cr.debitamount-cr.creditamount)
+	gosub updatearproof:
+	LET D3[1]=D3[1]-D4
+endif
+if d4[1] ! discount amount
+	LET ar.crdiscamount=ar.crdiscamount+D4[1]
+	LET D3[1]=D3[1]+D4[1]
+	write record #ch_ar,rec_ar;ar.; !WRITE A/R
+endif
+if p61$[136,136]="Y" and cr.currvar<>0
+	let d3[1]=d3[1]+cr.currvar
+endif
+endif
+let rec_ar = cr.saractrecfrom
+if rec_ar
+	read record #ch_ar,rec_ar;ar.;
+	LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=ar.customercode using "######"
+	LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+	LET type=INT(FRA(ar.agetypecount)*100) 
+	LET KEYAR1$[17,17]=type USING "#"
+	SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+	IF E>1 GOSUB ERR_SEARCH_log:
+	if not(e)
+		SEARCH #ch_ar,5,1;KEYAR1$,rec_ar,E
+		if e gosub err_search_log:
+		LET KEYAR2$=" ",KEYAR2$
+		LET KEYAR2$[1,6]=ar.customercode using "######"
+		LET KEYAR2$[7,12]=ar.date USING "######"
+		LET KEYAR2$[13,22]=AR.REFerenceno USING "##########"
+		LET KEYAR2$[23,23]=type USING "#"
+
+		SEARCH #ch_ar,5,2;KEYAR2$,rec_ar,E
+		IF E>1 GOSUB ERR_SEARCH_log:
+		LET KEYAR3$=" ",KEYAR3$
+		let KEYAR3$[1,6]=ar.postingcust USING "######"
+		LET KEYAR3$[7]=KEYAR2$
+		SEARCH #ch_ar,5,3;KEYAR3$,rec_ar,E 
+		IF E>1 gosub err_search_log: 
+		LET KEYAR4$=" ",KEYAR4$;KEYAR4$[1,6]=KEYAR3$[1,6]
+		LET KEYAR4$[7,16]=KEYAR2$[13,22];KEYAR4$[17,22]=KEYAR1$[1,6]
+		LET KEYAR4$[23,23]=KEYAR2$[23,23]
+		SEARCH #ch_ar,5,4;KEYAR4$,rec_ar,E 
+		IF E>1 gosub err_search_log:
+		LET KEYAR5$=" ",KEYAR5$;KEYAR5$[1,6]=KEYAR3$[1,6]
+		LET KEYAR5$[7,12]=KEYAR2$[7,12]
+		let keyar5$[13,22]=keyar2$[13,22]
+ 		let  KEYAR5$[23,28]=KEYAR1$[1,6]
+		LET KEYAR5$[29,29]=KEYAR2$[23,23]
+		SEARCH #ch_ar,5,5;KEYAR5$,rec_ar,E
+		IF E>1 gosub err_search_log:
+		let e=3\search #ch_ar,1,0;keyar1$,rec_ar,e\if e gosub err_search_log:
+	endif 
+endif
+delcrrecord: ! delete the cr reord
+let tiebreaker=keycr$[8]
+if tiebreaker=1 ! first record
+	let cr.entrytype=0
+	let cr.bankamount=0;cr.debitamount=0;cr.creditamount=0
+	write record #ch_cr,rec_cr;cr.; ! 
+	goto srchdelcr:
+endif
+SEARCH #ch_cr,5,1;keycr$,rec_cr,E \ IF E GOSUB Err_Search_log:
+LET E=3 \ SEARCH #ch_cr,1,0;keycr$,rec_cr,E \ IF E GOSUB Err_Search_log:
+GOTO srchdelcr:
+
+enddelpay: !
+IF D3<>D3[1]
+	let returnstatus=0
+	let message$="Error in deleting this entry"
+endif
+RETURN 
+! ------- end delcrentry ------
+! ------------- begin createadj ---------
+! currently not used 
+createadj: ! create a debit adjustment 
+!!! verify duplicate a/r
+clear cr. ! gosub init_crvars:
+if d4[1]<0 let transtype=4 else let transtype=8
+LET cr.divisioncode=0
+LET cr.customercode=sf.customercode 
+GOSUB get_cust:
+LET cr.CustomerFileRec=rec_cust
+let cr.customername$=cust.name$
+LET cr.EntryType=2
+LET cr.warehouse=bankwh ! DEFAULT WAREHOUSE
+LET cr.TypeOfActivity=transtype !4
+LET cr.CustomerFileRec=rec_cust
+LET cr.divisioncode=bankdiv ! DIVISION
+LET cr.paymentdate=bankdate ! DEPOSIT DATE
+let cr.transactionnumber=bankcheck
+if transtype=4
+	let cr.debitamount=0
+	LET cr.creditamount=-abs(d4[1])
+else
+	LET cr.debitamount=0
+	let cr.creditamount=abs(d4[1])
+endif
+let cr.entrynumber=entnum
+GOSUB createcrrec:
+LET R9=rec_cr ! RECORD FOR PAYMENT TRANSACTION CASHFLE
+! NOW CREATE AR FILE
+clear ar. ! GOSUB init_arvars:
+LET ar.salesman=cust.salesmancode ! SLSM CODE
+LET ar.lastpaydate=0
+LET ar.CustomerCode=cr.customercode
+let age=0 
+if transtype=4
+	let ar.agetypecount=age+.04 ! negative payment
+else
+	let ar.agetypecount=age+.08 
+endif
+let work$=cr.paymentdate using "&&&&&&"
+call datetojulian(1,work$,work$,e)
+if e 
+	!!! error !!!
+	stop
+endif
+LET ar.Date=work$ ! JULIAN DEPOSIT DATE 
+LET ar.referenceno=cr.transactionnumber ! REFERENCE #
+LET ar.origamt=abs(d4[1]) ! BANK AMOUNT
+LET ar.currentcredit=0 ! SET APPLIED CREDIT
+let ar.EntryDescription$=" ",ar.EntryDescription$
+let ar.EntryDescription$=bankdesc$+"          "
+If rtrim$(ar.EntryDescription$)="" 
+	IF entnum=0             
+		 Gosub get_crentrynum ! mtg
+	 End If
+	let ar.EntryDescription$="C/R ENT #"              
+	LET ar.EntryDescription$[10]=entnum USING "######" 
+endif
+let ar.EntryDescription$=ar.EntryDescription$+blank$
+LET ar.whse=bankwh ! cr.warehouse ! WAREHOUSE #
+LET ar.division=cr.divisioncode ! DIVISIO
+LET ar.purchaseorder$=" ",ar.purchaseorder$ ! purchase order number
+gosub createartran: ! 
+let r9[1]=rec_ar
+LET arpamt=arpamt+(cr.debitamount-cr.creditamount)
+gosub updatearproof: 
+let age=0
+let aramt=(cr.debitamount-cr.creditamount)
+gosub updateagebuck:
+LET cr.saractrecfrom=rec_ar ! SET A/R RECORD #
+LET cr.saractrecto=R9[1] ! SET A/R RECORD#
+WRITE #ch_cr,rec_cr,18;cr.saractrecto;
+let d3[1]=d3[1]+d4[1]
+RETURN 
+!------- end createadj ----------
+
+!--------------------------------------------------------------------
+createcrrec: ! create cashfle record
+if not(cr.entrynumber)
+	if not(entnum)
+		gosub get_crentrynum: ! mtg
+	endif
+	cr.entrynumber=entnum
+endif
+LET keycr$=" ",keycr$ \ LET keycr$[1,2]=cr.bank USING "##"
+LET keycr$[3,7]=cr.entrynumber USING "#####" \ LET keycr$[8]=""
+!LET tiebreak=1
+chkcrrec: LET keycr$[8,10]=tiebreak USING "###"
+SEARCH #ch_cr,2,1;keycr$,rec_cr,E
+if e=1
+	let cr.detailno=tiebreak
+	LET E=2 \ SEARCH #ch_cr,1,0;keycr$,rec_cr,E
+	IF E 
+		gosub err_search_log:
+		goto endrecchk:
+	endif
+	write record #ch_cr,rec_cr;cr.;
+	search #ch_cr,4,1;keycr$,rec_cr,e
+	if e
+		gosub err_search_log:
+		! delete previous cr entries
+		goto endrecchk:
+	endif
+	return
+else
+	IF E>1 GOSUB Err_Search_log:
+	LET tiebreak=tiebreak+1
+	GOTO chkcrrec:
+endif
+
+!--------------------------------------------------------------------
+get_crentrynum: ! get cash receipts entry #
+read #ch_cntrl,20,38;entnum
+let entnum=entnum+1
+write #ch_cntrl,20,38;entnum;
+if entnum> 99998
+	let returnstatus=0 ! error
+	let message$="Cash Receipts Entries Have Exceeded Limit"
+	goto endrecchk: 
+endif
+if p60$[6,6]="Y" ! cash receipts by bank
+	write #ch_bank,sf.bank,44;entnum;
+endif
+let tiebreak=1
+return
+!--------------------------------------------------------------------
+createartran: ! CREATEARTRAN: ! VERIFY FILE - CREATE AR TRANSACTION
+returnstatus=1
+message$="OK"
+if not(ar.postingcust)
+	if cust.arpostcust
+		let ar.postingcust=cust.arpostcust
+	else
+		let ar.postingcust=ar.customercode
+	endif
+endif
+LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=ar.customercode using "######"
+LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+LET type=INT(FRA(ar.agetypecount)*100) 
+LET KEYAR1$[17,17]=type USING "#"
+LET rec_ar=cr.saractrecfrom ! C2[3]
+SEARCH #CH_ARH,2,1;KEYAR1$,REC_arh,E
+IF E>1 GOSUB ERR_SEARCH_LOG:
+IF NOT(E)
+	call dxget("PaymentType",tmp$)
+	If Ucase$(rtrim$(tmp$))="CC" goto duparkey1: ! credit card
+	ReturnStatus=0
+    let Message$="Already in Use A/R Transaction ",+str$(ar.referenceno)
+	goto endrecchk:
+ENDIF 
+SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+IF E>1 GOSUB ERR_SEARCH_log:
+if not(e)
+	call dxget("PaymentType",tmp$)
+	If Ucase$(rtrim$(tmp$))="CC" goto duparkey1: ! credit card
+	ReturnStatus=0
+    let Message$="Already in Use A/R Transaction ",+str$(ar.referenceno)
+	goto endrecchk:
+endif
+goto addarrec:
+duparkey1: ! check for duplicate 1st entry number
+let orgrefno=ar.referenceno
+LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=ar.customercode using "######"
+let ar.referenceno=entnum
+if not (ar.referenceno) let ar.referenceno=999999
+LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+LET type=INT(FRA(ar.agetypecount)*100) 
+LET KEYAR1$[17,17]=type USING "#"
+LET rec_ar=cr.saractrecfrom ! C2[3]
+SEARCH #CH_ARH,2,1;KEYAR1$,REC_arh,E
+IF E>1 GOSUB ERR_SEARCH_LOG:
+IF NOT(E)
+	goto duparkey2:
+ENDIF 
+SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+IF E>1 GOSUB ERR_SEARCH_log:
+if not(e)
+	goto duparkey2:
+endif
+goto addarrec:
+
+duparkey2: ! check for 2nd dup entry number + armonth           
+LET tmp$=ARDATE USING "&&&&&&" 
+let ar.referenceno=tmp$[3,4]
+if entnum<>0                                                      
+	LET ar.referenceno=ar.referenceno*10000+entnum
+else
+	let ar.referenceno=ar.referenceno*10000+999999
+endif
+LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=ar.customercode using "######"
+LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+LET type=INT(FRA(ar.agetypecount)*100) 
+LET KEYAR1$[17,17]=type USING "#"
+LET rec_ar=cr.saractrecfrom ! C2[3]
+SEARCH #CH_ARH,2,1;KEYAR1$,REC_arh,E
+IF E>1 GOSUB ERR_SEARCH_LOG:
+IF NOT(E)
+	goto duparkey3:
+ENDIF 
+SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+IF E>1 GOSUB ERR_SEARCH_log:
+if not(e)
+	goto duparkey3:
+endif
+goto addarrec:
+duparkey3: ! check for 3rd dup entry number + ar year + armonth           
+LET tmp$=ARDATE USING "&&&&&&" 
+let ar.referenceno=tmp$[1,4]
+if entnum<>0                                                      
+	LET ar.referenceno=ar.referenceno*10000+entnum
+else
+	let ar.referenceno=ar.referenceno*10000+999999
+endif
+LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=ar.customercode using "######"
+LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+LET type=INT(FRA(ar.agetypecount)*100) 
+LET KEYAR1$[17,17]=type USING "#"
+LET rec_ar=cr.saractrecfrom ! C2[3]
+SEARCH #CH_ARH,2,1;KEYAR1$,REC_arh,E
+IF E>1 GOSUB ERR_SEARCH_LOG:
+IF NOT(E)
+	goto duparkey4:
+ENDIF 
+SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+IF E>1 GOSUB ERR_SEARCH_log:
+if not(e)
+	goto duparkey4:
+endif
+goto addarrec:                                          
+duparkey4: ! check ar year + armonth+arday+ 0 to 99
+for ctr=0 to 99
+	LET tmp$=ARDATE USING "&&&&&&" 
+	let ar.referenceno=tmp$[1,6]                                                    
+	LET ar.referenceno=ar.referenceno*100+ctr
+	LET KEYAR1$=" ",KEYAR1$ \ LET KEYAR1$[1,6]=ar.customercode using "######"
+	LET KEYAR1$[7,16]=AR.referenceno USING "##########"
+	LET type=INT(FRA(ar.agetypecount)*100) 
+	LET KEYAR1$[17,17]=type USING "#"
+	LET rec_ar=cr.saractrecfrom ! C2[3]
+	SEARCH #CH_ARH,2,1;KEYAR1$,REC_arh,E
+	IF E>1 GOSUB ERR_SEARCH_LOG:
+	IF E<>0	
+		SEARCH #CH_AR,2,1;KEYAR1$,REC_AR,E
+		IF E>1 GOSUB ERR_SEARCH_log:
+		if e<>0
+			goto addarrec:
+		endif
+	endif
+next ctr
+ReturnStatus=0
+let Message$="Already in Use A/R Transaction ",+str$(orgrefno)                  
+goto endrecchk:
+
+addarrec: ! add a/r rec
+let e=2\search #ch_ar,1,0;keyar1$,rec_ar,e
+if e
+	gosub err_search_log:
+	goto endrecchk:
+endif
+
+write record #ch_ar,rec_ar;ar.;
+SEARCH #ch_ar,4,1;KEYAR1$,rec_ar,E
+if e
+	gosub err_search_log:
+	goto endrecchk:
+endif
+LET KEYAR2$=" ",KEYAR2$ \ LET KEYAR2$[1,6]=ar.customercode using "######"
+LET KEYAR2$[7,12]=ar.date USING "######"
+LET KEYAR2$[13,22]=AR.REFerenceno USING "##########"
+LET KEYAR2$[23,23]=type USING "#"
+
+SEARCH #ch_ar,4,2;KEYAR2$,rec_ar,E
+IF E GOSUB ERR_SEARCH_log:
+LET KEYAR3$=" ",KEYAR3$;KEYAR3$[1,6]=ar.postingcust USING "######"
+LET KEYAR3$[7]=KEYAR2$
+
+SEARCH #ch_ar,4,3;KEYAR3$,rec_ar,E 
+IF E 
+	GOSUB ERR_SEARCH_log:
+endif
+LET KEYAR4$=" ",KEYAR4$;KEYAR4$[1,6]=KEYAR3$[1,6]
+LET KEYAR4$[7,16]=KEYAR2$[13,22];KEYAR4$[17,22]=KEYAR1$[1,6]
+LET KEYAR4$[23,23]=KEYAR2$[23,23]
+SEARCH #ch_ar,4,4;KEYAR4$,rec_ar,E 
+IF E
+	 GOSUB ERR_SEARCH_log:
+endif
+LET KEYAR5$=" ",KEYAR5$;KEYAR5$[1,6]=KEYAR3$[1,6]
+LET KEYAR5$[7,12]=KEYAR2$[7,12]
+let keyar5$[13,22]=keyar2$[13,22]
+ let  KEYAR5$[23,28]=KEYAR1$[1,6]
+LET KEYAR5$[29,29]=KEYAR2$[23,23]
+SEARCH #ch_ar,4,5;KEYAR5$,rec_ar,E
+IF E
+	 GOSUB ERR_SEARCH_log:
+endif
+return
+!--------------------------------------------------------------------
+
+updatearproof:  ! AR PROOF
+! arpamt needs to be set prior to routine
+let arpamt=cr.debitamount-cr.creditamount
+READ #ch_arp,0,6;arp.netcrdaily
+LET arp.netcrdaily=arp.netcrdaily+arpamt
+WRITE #ch_arp,0,6;arp.netcrdaily;
+LET arpamt=0
+RETURN 
+
+!--------------------------------------------------------------------
+get_cust: ! get customer file record
+let ReturnStatus=1
+let Message$="OK"
+let keycust$=" ",keycust$
+let keycust$[1,6]=sf.customercode using "######"
+search #ch_cust,2,1;keycust$,rec_cust,e
+if e>1 
+	gosub err_search_log:
+	goto endrecchk: 
+endif
+if e=1
+	let ReturnStatus=0
+	let Message$="Customer ",str$(sf.customercode)," Not On File " 
+	return
+endif
+read record #ch_cust,rec_cust;cust.;
+if not(sf.billcustomer)
+	let sf.billcustomer=cust.arpostcust
+endif
+if sf.customername$="" or sf.customername$[1,3]="   "
+	let sf.customername$=cust.name$
+endif
+return
+!--------------------------------------------------------------------
+updateagebuck: ! update the ar age buckets
+!! need age and aramt
+read record #ch_cust,rec_cust;cust.
+if age<0 let age=0
+if age>5 let age=5
+if age=0 ! current
+	cust.CurrentArAgeBal=cust.CurrentArAgeBal+aramt
+else
+	if age=1 ! unapplied
+		cust.UnappliedCredit=cust.unappliedCredit+(aramt)
+	else
+		if age=2 ! over 
+			cust.AgeArAmt1=cust.AgeArAmt1+aramt
+		else
+			if age=3
+				cust.AgeArAmt2=cust.AgeArAmt2+aramt 
+			else
+				if age=4
+					cust.AgeArAmt3=cust.AgeArAmt3+aramt
+				else
+					if age=5
+						cust.AgeArAmt4=cust.AgeArAmt4+aramt
+					endif
+				endif
+			endif
+		endif
+	endif
+endif 
+write record #ch_cust,rec_cust;cust.;
+return
+!--------------------------------------------------------------------
+init_arvars: ! initialize ar variables
+ ar.Salesman                   =0  !ar.A2[0]
+ ar.LastPayDate                =0  !ar.A2[1]         yymmdd
+ ar.CustomerCode               =0  !ar.A2[2]
+ ar.AgeTypeCount               =0  !ar.A2[3]        ar.AA.TTC
+ ar.Date                       =0  !ar.A2[4]        ar.Julian ddddd
+ ar.NumberOld                  =0  !ar.A2[5]        ar.MVar.TOar.D316
+ ar.OrigAmt                    =0  !ar.A3[0]
+ ar.PriorCredit                =0  !ar.A3[1]
+ ar.CurrentCredit              =0  !ar.A3[2]
+ ar.UsedByCashRcpts            =0  !ar.A3[3]
+ ar.Freight                    =0  !ar.A3[4]
+ ar.MerchAmt                   =0  !ar.A3[5]
+ ar.GPLoadCost                 =0  !ar.A3[6]
+ ar.TaxAmount                  =0  !ar.A3[7]
+ ar.GPAvgCost                  =0  !ar.A3[8]
+ ar.CRDiscAmount               =0  !ar.A3[9]         FROMar.CASHar.RECEIP
+ ar.MiscHndlgChg               =0  !ar.A3[10]
+ ar.GPBaseCost                 =0  !ar.A3[11]
+ ar.TermsDisc                  =0  !ar.A3[12]       ar.CALC IN INVar.ACCE
+ ar.Weight                     =0  !ar.A3[13]
+ ar.EntryDescription$=" ",ar.EntryDescription$ !ar.A3$           from cr
+ ar.Terms                      =0  !ar.A0[0]         99=YES, 4/95
+ ar.TaxCode                    =0  !ar.A0[1]
+ ar.MmyyAccepted               =0  !ar.A0[2]         see below
+ ar.Whse                       =0  !ar.A0[3]
+ ar.DeptMoved                  =0  !ar.A0[4]         to d 198
+ ar.Division                   =0  !ar.A0[5]
+ ar.OrderType                  =0  !ar.A0[6]
+ ar.Source                     =0  !ar.A0[7]
+ ar.EnteredBy                  =0  !ar.A0[8]
+ ar.ShipCmType                 =0  !ar.A0[9]
+ ar.AgeFlag                    =0  !ar.A0[10]        0=YES, 1=NO
+ ar.DirectArFlag               =0  !ar.A0[11]        99=YES,4/95
+ ar.AcptSrc                    =0  !ar.a0[12] 
+ ar.currid                     =0  ! 
+ ar.NU2                        =0  ! 
+ ar.DiscDateTerms              =0  !ar.A4[0]         yymmdd
+ ar.OrderingCust               =0  !ar.A4[1]
+ ar.Journal                    =0  !ar.A4[2]         INV/CM
+ ar.DueDate1                   =0  !ar.A4[3]         yymmdd
+ ar.DueDate2                   =0  !ar.A4[4]         IFar.NEEDED
+ ar.DueDate3                   =0  !ar.A4[5]         IFar.NEEDED
+ ar.DueDate4                   =0  !ar.A4[6]         IFar.NEEDED
+ ar.DueDate5=0  !ar.A4[7]
+ ar.LastCREntry=0  !ar.A4[8]         added 6/11/93
+ ar.Order=0  !ar.A1[0]         H0[7]
+ ar.PostingCust=0!ar.A1[1]         add 12/14/01
+ ar.Department=0 !ar.A1[2]        ar.ROHar.DEPT
+ ar.Taxable=0  !ar.A5[0]
+ ar.Due1=0 !ar.A5[1]
+ ar.Due2=0 !ar.A5[2]
+ ar.Due3=0 !ar.A5[3]
+ ar.Due4=0 !ar.A5[4]
+ ar.Due5=0  !ar.A5[5]
+ ar.OrderDiscountTotal=0  !ar.A5[6]         from sordflet fi
+ ar.CommissionPaidToD=0  !ar.A5[7]         for awm
+ ar.DateToHold =0 ! hdate         for burke
+ ar.NU$=" ",ar.NU$ ! 
+ ar.PurchaseOrder$=" ",ar.PurchaseOrder$ !ar.A4$[1,20]     fromar.P0$
+ ar.DisputeReason$=" ",ar.DisputeReason$  !ar.A4$]21,40]    for burke
+ ! ar.NU1$=" ",ar.NU1$ !ar.A4$[41,60]
+ ar.ReferenceNo=0 !ar.ARREF[0]      KEY FIELD
+ ar.NotUsed=0  !ar.ARREF[1]
+ ar.BlankForKey$=" ",ar.BlankForKey$ ! 
+ ar.currfact=0
+ ar.SpareNu$=" ",ar.SpareNu$ 
+return
+!--------------------------------------------------------------------
+init_crvars: !  cashfle ! CASH RECEIPTS FILE  09/21/07
+ cr.EntryType =0   ! C1[0] 0 THRU 6
+ cr.Warehouse = 0  ! C1[1]
+ cr.TypeOfActivity =0  ! C1[2] USED TYPE #1
+ cr.CustomerCode=0 ! C2[0]         TYPE 1-6
+ cr.CustomerFileRec=0 ! C2[1]         TYPE 1-6
+ cr.SaractRecTo=0     ! C2[2]         TYPE 1
+ cr.SaractRecFrom =0  ! C2[3]         TYPE 1-5
+ cr.PaymentDate=0     ! C2[4]         TYPE 1&2
+ cr.JournalEntryType =0 ! C2[5]         TYPE 6
+ cr.OthrCrAdjType =0    ! C2[6]
+ cr.OtherDiscntType =0  ! C2[7]
+ cr.EntryNumber=0        ! C2[8]         GEN BY SYSTEM
+ cr.DivisionCode=0       ! C4
+ cr.TransactionNumber=0  	! C3[0]         TYPE 1&5
+ cr.BankAmount=0          ! C3[1]         TYPE 1,2&5
+ cr.DebitAmount=0         ! C3[2]         TYPE 4&5
+ cr.CreditAmount=0        ! C3[3]         TYPE 1&3
+ cr.DiscountAmount=0      ! C3[4]         TYPE 1
+ cr.LastPayment=0        ! C3[5]         TYPE 1&2
+ cr.FreightAllowance=0    ! C3[6]         TYPE 1
+ cr.CustomerName$=" ",cr.CustomerName$ ! C$[1,30]          TYPE 1-6
+ cr.Reference$=" ",cr.Reference$            ! C$[31,40]     TYPE 3,4,6
+ cr.JeDescription$=" ",cr.JeDescription$    ! C$[41,70]
+ cr.Journal=0 ! C5[0]         ADDED 5/22/95
+ cr.EntryDate=0 ! C5[1]
+ cr.Bank=0 ! C5[2]
+ cr.DetailNo=0 ! C5[3]
+ let cr.customername$=sf.customername$
+return
+!--------------------------------------------------------------------
+updtoarrec: ! update to ar record# for 0 bank amt with discounts
+if not(cr.entrynumber) return
+if not (rec_ar) return
+if not (lastrecflag) return
+LET keypcr$=" ",keycr$ \ LET keypcr$[1,2]=cr.bank USING "##"
+LET keypcr$[3,7]=cr.entrynumber USING "#####" \ LET keypcr$[8]=""
+Do
+	SEARCH #ch_cr,3,1;keypcr$,rec_pcr,E
+	if e=2 exit do
+	if e<>0
+		gosub err_search_log:
+		goto endrecchk:
+	endif
+	LET tmp3=keypcr$[1,2]\if tmp3<>cr.bank exit do
+	let tmp3=keypcr$[3,7]\if tmp3<>cr.entrynumber exit do
+	read record #ch_cr,rec_pcr;pcr.;
+	if  pcr.SaractRecTo=0  and pcr.saractRecFrom =0  ! C2[3]         TYPE 1-5
+		let pcr.saractrecto=rec_ar
+		write record #ch_cr,rec_pcr;pcr.;
+		let lastrecflag=0
+	endif
+LOOP
+return
+
+!--------------------------------------------------------------------------------
+Sub currconvdown(amount,factor)
+! 
+  try
+	if p61$[136,136]="Y" and factor<>0 and amount<>0! going from currency to base             
+		cnvcu[1] = 1 ! no rounding 
+		let cnvcu[0]=2
+		let cnvca[0]=amount
+		let cnvca[1]=factor
+		call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$
+		let amount=cnvca[0]
+	endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end Sub ! 
+
+
+
+
+! ----------------------------------------
+fileclose: ! closes the file
+
+ Try ! #3
+ If Ch_cust <>0 close #Ch_cust
+    if Ch_ar  <>0 close #ch_ar
+    if Ch_cr  <>0 close #ch_cr
+    if COChan <>0 close # cochan
+    if ch_bank <> 0 close #ch_bank 
+    if MCChan <>0 close #mcchan
+    if ch_arp <> 0 close #ch_arp
+    if ch_arh <> 0 close #ch_arh
+    if ch_sf <> 0 close #ch_sf
+else
+    include "src/callsuberr.inc"
+end try !#3
+
+return
+! ----------------------------------------
+ERR_SEARCH_LOG: Rem                                                    
+returnstatus=0
+message$="*** SE# "+Str$(E)+" at line "+Str$(Spc(16))+" in "+Msc$(4)
+!Gosub UPDATE_LOG                                                          
+return
+! ----------------------------------------
+! end of subroutine
+End Sub
+
+Outend: ! end of subroutine
+
+stop

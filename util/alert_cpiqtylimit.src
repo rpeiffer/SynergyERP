@@ -1,0 +1,242 @@
+! cpi contract quantity limit alert
+!
+! 1.0 mm/dd/yyyy change??
+!
+! loadsave -w -n 100,10 -o prog/util/alert_cpiqtylimit.dl4 src/alert_cpiqtylimit.src
+!
+
+include "src/utilcopyright.inc"
+External Lib "utillib.lib"
+Declare External Function ParseArguments,UtilOpenMySQLChan
+
+include "src/inc/mysql_lib.inc"
+
+include "src/inc/fileprod.inc"
+include "src/inc/filespecprice.inc"
+include "src/inc/filecpidet.inc"
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,Pdate$
+Declare Intrinsic Sub DateToJulian,FormatDate,InpBuf,JulianToDate,String,VerifyDate
+Declare Intrinsic Sub programdump
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+! local subroutines
+Declare Sub GetCommandParameters,OpenFilesReadCntrl,SetReportParamenters
+Declare Sub ProcessContracts,DeleteAlerts
+Declare Sub SendAlert
+
+
+try
+dim sd. as specprice
+dim cpid. as cpidet
+dim pr. as prod
+
+dim k_cpid$[60],x$[20],k_prod$[12],k_prwh$[14],passinfoStr$[1,10]
+dim 1%,ch[99],cnvtu[2]
+dim 2%,jdate[9]
+dim 3%,passinfo[99],tolerance,cnvta,amount
+dim args$[5,80],sql$[1000],ExpireDate$[10]
+
+
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp$[800],tmp1$[200],msg$[100],Message$[400],WebStr$[600]
+Dim action$[30],options$[30],userid$[8],b$[200],3%,fdel$[10],rstr$[1000],bsdel$[10],esdel$[10],rdel$[10]
+
+!*----------------
+!* M A I N   L O G I C
+!*----------------
+call GetCommandParameters()
+if not(intCo) goto OutEnd:
+if not(tolerance) goto OutEnd:
+call SetUtilSession(e$,intCo)
+call OpenFilesReadCntrl()
+
+call SetReportParamenters()
+
+call ProcessContracts()
+Goto OUTEND ! PROMPT_ACTION
+
+OUTEND: Rem"========= exit
+chain ""
+End
+else ! MAIN try statment
+	include "src/utilcallmainerr.inc"
+end try
+
+!-----------------------------------------------------------------------
+! subroutines and functions
+!-----------------------------------------------------------------------
+
+Sub GetCommandParameters()
+try
+	argc = ParseArguments(e$,args$[], msc$(4))
+	! First arg is company
+	intCo = args$[1]
+	if intCo < 1 or intCo > 99
+		print "Invalid company number.  Exiting."
+		intCo = 0
+		exit sub
+	end if
+	tolerance = args$[2]
+	if not(tolerance)
+		print "Invalid tolerance %.  Exiting."
+		exit sub
+	end if
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+
+Sub OpenFilesReadCntrl()
+try
+	CH_CNTRL = 1 ! done in SetUtilSession
+	ch_prod = OpenFile(-1792,intCo) \ if ch_prod<0 error 42
+	ch_prwh = OpenFile(-1744,intCo) \ if ch_prwh<0 error 42
+	ch_vend = OpenFile(-2400,intCo) \ if ch_vend<0 error 42
+	ch_cond = OpenFile(-1936,intCo) \ if ch_specprice<0 error 42
+	ch_cpih = OpenFile(-9929,intco) \ if ch_cpih<0 error 42
+	ch_cpid = OpenFile(-9928,intco) \ if ch_cpid<0 error 42
+	ch_cpic = OpenFile(-9927,intco) \ if ch_cpic<0 error 42
+	ch_slsm = OpenFile(-1824,intCo) \ if ch_slsm<0 error 42
+	ch_cust = OpenFile(-1808,intCo) \ if ch_cust<0 error 42
+	ch_conh = OpenFile(-2880,intCo) \ if ch_contracth<0 error 42
+	ch_sql = UtilOpenMySQLChan(e$, "BatchUser", "!BaTcHuSeR8899", 1) \ if ch_sql < 0 error 42
+	! for libalertproc call
+	ch[1] = ch_cntrl
+	ch[2] = ch_prod
+	ch[3] = ch_prwh
+	ch[4] = ch_vend
+	ch[5] = ch_cond
+	ch[6] = ch_cpih
+	ch[7] = ch_cpid
+	ch[8] = ch_cpic
+	ch[9] = ch_slsm
+	ch[10] = ch_cust
+	ch[11] = ch_conh
+	ch[12] = ch_sql
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+Sub SetReportParamenters()
+try
+	! set tolerance limit (how close to the sell limit we
+	! need to be to generate an alert).
+	!
+	tolerance = tolerance / 100
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+
+
+sub ProcessContracts()
+try
+	! set window to be looking for expired contracts in
+	Jdate[0]=Tim(6)
+	k_cpid$=" ",k_cpid$
+	do ! loop thru cpi detail by product code (will only be cpi)
+		gotOne = 0
+		Search #ch_cpid,3,2;k_cpid$,R_cpid,E \ if e>2 error 11000
+		if e exit do
+		read record #ch_cpid,R_cpid,0;cpid.;
+		tmp$=k_cpid$[13,18] ! contract #
+		Search #ch_conh,2,1;tmp$,r_conh,e
+		if e goto skipCPI ! not found - no header
+		tmp$=" ",tmp$;tmp$=k_cpid$
+		SEARCH #ch_cond,2,2;tmp$,r_cond,E \ if e>1 error 11000
+		IF e goto skipCPI: ! no spcprice - no cpi
+		! got a valid product / contract
+		read record #ch_cond,r_cond,0;sd.;
+		if not(sd.QtyLimit) goto skipCPI: ! no limits
+		x$=sd.StartDate using "&&&&&&"
+		Call DateToJulian(1,X$,tmp$,f)                              
+		If f Let tmp$ = ""                                            
+		JDATE[2] = tmp$;f = 0 ! julian sys start
+		x$=sd.CancelDate using "&&&&&&"
+		Call DateToJulian(1,X$,tmp$,f)                              
+		If f Let tmp$ = "99999"                                            
+		JDATE[3] = tmp$;f = 0 ! julian sys cancel
+		! see if contract expired in window we are
+		! looking for
+		if jdate[0]>=jdate[2] and jdate[0]<=jdate[3] ! make sure contract active
+			if jdate[3]<> 99999
+				call JulianToDate(5,str$(jdate[3]),ExpireDate$)
+			else
+				ExpireDate$="12/31/2038" !Y2K38 issue
+			end if
+			k_prod$ = k_cpid$[1,12]
+			search #ch_prod,2,1;k_prod$,r_prod,e \ if e>1 error 11000
+			if e goto skipCPI ! no product record???
+			k_prwh$ = k_prod$,cpid.PurWhse using "##"
+			search #ch_prwh,2,1;k_prwh$,r_prwh,e \ if e>1 error 11000
+			if e goto skipCPI ! no product whse
+			cnvtu[0]=0;cnvtu[1]=pr.UMSellDefault;cnvtu[2]=1
+			cnvta=sd.QtySinceStart
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			if Amount>=(sd.QtyLimit * tolerance)
+				call SendAlert()
+			else
+				call DeleteAlerts()
+			end if
+		else
+			call DeleteAlerts()
+		end if
+		skipCPI: !
+	loop ! all done
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+Sub DeleteAlerts()
+try
+	! delete any prior - for this salesrep, this contract / product
+	! this is the result of the stock no longer being at alert levels
+	! or the contract is no longer active
+	sql$ = "DELETE FROM alertheader WHERE AlertType = 54 and AlertID IN "
+	sql$ = sql$+"(SELECT D.AlertID FROM alertdata D "
+	sql$ = sql$+"INNER JOIN alerttrailer T ON D.AlertID = T.AlertID "
+	sql$ = sql$+"WHERE  "
+	sql$ = sql$+"`AlertInt1` = " + SQLDT$(sd.custnum) + " AND "
+	sql$ = sql$+"`ProdID` = " + SQLDT$(rtrim$(k_prod$)) + ")"
+	SEARCH #ch_sql;sql$
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+sub SendAlert()
+try
+	! see if this alert has already been sent, if so, don't do it again
+	sql$ = "SELECT AlertInt1, ProdID "
+	sql$ = sql$+"FROM alertheader H "
+	sql$ = sql$+"INNER JOIN alertdata D ON D.AlertID = H.AlertID "
+	sql$ = sql$+"INNER JOIN alerttrailer T ON D.AlertID = T.AlertID "
+	sql$ = sql$+"WHERE `AlertType` = 54 AND "
+	sql$ = sql$+"`AlertInt1` = " + SQLDT$(sd.custnum) + " AND "
+	sql$ = sql$+"`ProdID` = " + SQLDT$(rtrim$(k_prod$)) + " "
+	SEARCH #ch_sql;sql$
+	if (chf(ch_sql) >= 1) ! at least 1 result - already out there
+		exit sub
+	end if
+	clear passinfo[]
+	clear msg$
+	passinfo[0] = 54 ! alert number
+	passinfo[1] = r_prod ! product record
+	passinfo[2] = r_prwh ! product wh rec
+	passinfo[3] = r_cond ! contract detail record #
+	passinfoStr$[1] = ExpireDate$ ! how long to keep this alert rec to avoid duplicate alerts
+	call "libalertproc.lib",passinfo[],ch[],msg$,1,passinfoStr$[]
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+

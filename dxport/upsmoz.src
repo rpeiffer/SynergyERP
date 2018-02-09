@@ -1,0 +1,785 @@
+! --- upsmoz
+! description Interface for UPS/Mozula
+!
+! 1.0 mm/dd/yyyy change??
+!
+! loadsave -w -n 100,10 -o prog/dxport/upsmoz.dl4 src/upsmoz.src
+!
+include "src/copyright.inc"
+!
+! the interface for Mozula & ups calls
+!
+!  PRODDTLSMOZ - send product details for osco/mozula
+!  ORDERSMOZ - send details for an order
+!  SUBMITMOZ - update order from osco/mozula
+!
+include "src/inc/fileprod.inc" ! product
+include "src/inc/filea80vm.inc" ! vendor
+include "src/inc/fileprodwhse.inc" ! product warehouse
+include "src/inc/fileproduda.inc" ! product user define
+include "src/inc/fileroh.inc" ! order header
+include "src/inc/fileros.inc" ! order ship
+include "src/inc/filerot.inc" ! order totals
+include "src/inc/filerolnew.inc" ! order line
+include "src/inc/filesproddesc.inc" ! non-stocks
+include "src/inc/fileroltag.inc" ! line notes
+include "src/inc/filerom.inc" ! order sp messg
+
+External Lib "libgeneral.lib" !general routines
+Declare External Sub suberr,mainerr,getsession,setoutput,addtostr,CreateNetStatus
+Declare External Function getmsg$,expandarray,openprinter
+
+External lib "ubsfunc.dl4"
+Declare external sub GetPortDefault
+Declare external function OpenFile,chkaltitem$,PDate$
+Declare external function chkDteFrmt$,Formatdate2$,clrtxtc$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+!
+External Lib "libprod.lib"
+Declare External Function getumrec,ChkPrdUM
+!
+External lib "libprodwh.lib"
+Declare external function getmillflg
+!
+External Lib "ubsprconv.dl4"
+Declare External Function Xunit$
+!
+!
+Declare Intrinsic function findchannel
+!
+Declare sub sndosco,sndordosco,UpdtOrderosco,crtespmsg
+Declare sub crteoscosum,delpsspmsg
+!
+Try
+	Dim 1%,Cnvtu[2]
+	Dim 3%,CNVTA,Amount
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	Dim CUSTOM_CUSTOMER$[30],List$[1000,2000],tmp$[2000],tmp1$[500]
+	dim action$[30],options$[30],userid$[8],action1$[30],msg$[100]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[5000]
+	Dim Message$[500],WebStr$[1000],Prod$[12],blank$[80],work$[2000]
+	DIM OSKEY1$[60],OSKEY2$[60]
+	DIM BOXID$[24]
+	DIM 1%,BOXNP[2]
+	DIM 2%,OSSSUM[5]
+	Dim 3%
+
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! opened in the whmenu
+	! call dxopen()
+	!
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$)
+	!
+	!if UCase$(UserID$[1,4])="JIMS"
+	!	CALL dxsave(0,"tmp/upsmozin.txt!") 
+	!endif
+	blank$=" ",Blank$
+	action1$=UCase$(RTrim$(action1$))
+	returnstatus=0;message$="Action 1 not found"
+	select case action1$
+		Case "PRODDTLSMOZ" ! details for api call		doc=MIDA-Proddtlsmoz.doc
+			returnstatus=1;message$="OK"
+			call sndosco()
+		! end of proddtls
+		Case "ORDERSMOZ" ! "details for api from order	doc=OrdH.GetDtlsmoz.doc
+			returnstatus=1;message$="OK"
+			call sndordosco()
+			!if UCase$(UserID$[1,4])="JIMS"
+			!	CALL programdump("tmp/upsmozout.txt!","") 
+			!endif
+		! end of orders for mozula
+		Case "SUBMITMOZ" ! update the order w/data		doc=OrdH.Sendordermoz.doc
+			returnstatus=1;message$="OK"
+			call UpdtOrderosco()
+		! end of update orders for mozula
+	End Select
+	UPSMDone: ! 
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+		!
+	call SetOutPut(e$,rstr$)
+	! close
+Else
+	include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+Sub sndosco()
+! send the product details needed for osco/mozula
+!Web will send ERP:
+!Customer Id, order id, order type, Product Id, unit of measure and quantity. 
+!ERP will send back:
+!Customer Id, Order Id, Product Id, Quantity, U/M, Qty, Length, 
+!Height, Width, Weight, Packing Class (UDA 15), Banded (UDA 16), 
+!Foldable (UDA 17), Mill (Y/N), (if mill) vendor address, 
+!Published or Negotiated, Markup. 
+  Try
+	Dim upsflg$[1],SUM$[4],STKUM$[4],M2$[72]
+	Dim 1%,unm,upm,ch_prod,ch_prwh,ch_vend,ch_uda,ccc
+	Dim 1%,Ordtype,Warehouse
+	Dim 2%,custid,orderid,Vend
+	Dim 3%,QtyOrd,Weight,qtystk,R[99]
+	Dim 3%,ProdRec,UDARec,VMRec
+	! need product/prodwhse/vendor/uda
+	dim PR. as prod ! product
+	dim VM. as a80vm ! vendor
+	dim PRW. as prodwhse ! product warehouse
+	dim UDA. as produda ! product user define
+	
+	Read #ctlc,188,128;upsflg$; ! ups type
+	read #ctlc,188,10;upm;
+	read #ctlc,188,12;unm;
+	if rtrim$(UCase$(upsflg$))<>"P" let upsflg$="N" ! negotiated is default
+	ch_prod=OpenFile(-1792,Intco) \ if ch_prod=-1 error 42
+	ch_prwh=OpenFile(-1744,Intco) \ if ch_prwh=-1 error 42
+	ch_vend=OpenFile(-2400,Intco) \ if ch_vend=-1 error 42
+	ch_UDA = OpenFile(-9967,intCo) \ if ch_UDA = -1 error 42 ! product user define fields
+	ccc=OpenFile(-1728,Intco) \ if ccc=-1 error 42
+	ch_vtg=OpenFile(-1120,Intco) \ if ch_vtg=-1 error 42
+	! now get info from the web
+	clear list$[0]
+	list$[0]=bsdel$,"OSPDATA",fdel$
+	TMP$="CUSTID",FDEL$,"ORDERID",FDEL$,"PRODID",FDEL$
+	TMP$=TMP$,"QTYORD",FDEL$,"UOMSELL",FDEL$,"QTYSTK",FDEL$,"UOMSTK",fdel$,"LENGTH",FDEL$
+	TMP$=TMP$,"HEIGHT",FDEL$,"WIDTH",FDEL$,"WEIGHT",FDEL$,"PACKINGID",FDEL$
+	TMP$=TMP$,"BANDED",FDEL$,"FOLDABLE",FDEL$,"MILLITEM",FDEL$
+	TMP$=TMP$,"VENDORZIP",FDEL$,"UPORN",FDEL$,"MARKUP",FDEL$
+	! added - whole vendor detail
+	tmp$=tmp$,"VENDNAME",FDEL$,"VENDADDR1",FDEL$,"VENDADDR2",FDEL$
+	TMP$=TMP$,"VENDCITY",FDEL$,"VENDSTATE",FDEL$,"VENDCNTRY",FDEL$
+	list$[1]=tmp$
+	row=2
+	call dxget("CUSTID",tmp$)
+	let custid=tmp$
+	! if custid<=0 or custid>999999 or fra(custid) let custid=999999 ! use cash cust
+	call dxget("ORDERID",tmp$)
+	let orderid=tmp$
+	call dxget("ORDTYPE",tmp$)
+	let ordtype=tmp$
+	if ordtype<=0 or ordtype>38 let ordtype=1
+	call dxget("WHSE",tmp$)
+	let warehouse=tmp$
+	if warehouse<1 or warehouse>99 let warehouse=1
+	call dxget("NUMPRODS",tmp$) ! could be >1
+	numprods=tmp$
+	if numprods>0
+		for npr=1 to numprods
+			call dxget("PRODID"+Str$(NPR),tmp$)
+			let Prod$=UCase$(RTrim$(tmp$))+Blank$
+			call dxget("QTYORD"+Str$(NPR),tmp$)
+			let qtyord=tmp$
+			call dxget("UOMSELL"+Str$(NPR),tmp$)
+			let SUM$=tmp$
+			Prodrec = filegetprod(e$,ch_prod,"=",1,Prod$,PR.)
+			if prodrec<=0 or rtrim$(prod$)=""
+				returnstatus=0;Message$="PRODUCT "+prod$+" NOT FOUND"
+				goto GOSDONE
+			Endif
+			tmp$=SUM$
+			R = getumrec(e$,ccc,tmp$,IntCo,PR.)           
+			If R > 0 Let tmp$ = Str$(R) 
+			umrec=tmp$
+			R=ChkPrdUM(e$,umrec,IntCo,Pr.)
+			if r=0 ! not found
+			  returnstatus=0
+			  message$="Sell UM "+SUM$+" not defined"
+			  Goto GOSDone
+			Endif
+			UDARec=filegetproduda(e$,ch_uda,"=",1,prod$,UDA.)
+			if udarec<=0 clear uda.
+			vend=getmillflg(e$,intco,ch_prwh,prod$,warehouse,ordtype)
+			if vend>0
+				tmp$=" ",tmp$
+				tmp$=vend using "######"
+				VMRec=filegeta80vm(e$,ch_vend,"=",1,tmp$,VM.)
+				search #ch_vtg,2,1;tmp$,R[6],E
+				if not(e)
+					mat read #ch_vtg,r[6],314;m2$;
+				else
+					m2$=" ",m2$
+				endif
+			endif
+			if vend=0 or vmrec<=0 
+				clear vm.
+				vend=0 ! so not millitem
+			endif
+			! need stock UOM Qty - as length,width,height are STK
+			cnvtu[0]=pr.UMStkDefault;cnvtu[1]=0;cnvtu[2]=1
+			cnvta=1 ! (weight of one stk um  to osco!!)
+			baseord=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			cnvtu[0]=umrec;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+			cnvta=qtyord
+			qtystk=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			if pr.LbsFact<=0 let pr.LbsFact=1
+			weight=FNR(Abs((baseord*pr.LbsUnit)/pr.LbsFact))
+			STKUM$=xunit$(PR.UMStkDefault,ccc) ! u/m
+			! all data gathered
+			
+			tmp$=Str$(custid),fdel$,Str$(orderid),fdel$,RTrim$(prod$),fdel$
+			tmp$=tmp$,Str$(QTYORD),fdel$,SUM$,fdel$,Str$(QTYSTK),fdel$,STKUM$,fdel$
+			tmp$=tmp$,Str$(pr.LengthOfStkUM),fdel$,Str$(Pr.HeightOfStkUM),fdel$
+			tmp$=tmp$,Str$(pr.WidthOfStkUM),fdel$,Str$(Weight),fdel$
+			tmp$=tmp$,RTrim$(uda.ANUda11$),fdel$,RTrim$(uda.ANUda12$),fdel$
+			tmp$=tmp$,RTrim$(uda.ANUda13$),fdel$
+			if vend ! mill item
+				let tmp$=tmp$,"Y",fdel$,VM.Zip$,fdel$
+			Else 
+				let tmp$=tmp$,"N",fdel$,fdel$
+			endif
+			tmp$=tmp$,upsflg$,fdel$
+			if upsflg$="P" let tmp$=tmp$,Str$(upm),fdel$
+			if upsflg$="N" let tmp$=tmp$,str$(unm),fdel$
+			if vend ! new additional fields
+				tmp$=tmp$,RTrim$(VM.Name$),FDEL$,RTRIM$(VM.Address$),FDEL$
+				TMP$=TMP$,RTRIM$(VM.OptAddress$),FDEL$,RTRIM$(VM.City$),FDEL$
+				TMP$=TMP$,RTRIM$(VM.State$),FDEL$,RTRIM$(M2$[13,27]),FDEL$
+			else
+				tmp$=tmp$,fdel$,fdel$,fdel$,fdel$,fdel$,fdel$ ! 6 flds
+			endif
+			let list$[row]=tmp$
+			row=row+1
+			GOSDONE: ! finished/skip
+		next npr
+	endif ! sent numprods
+	let list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndosco
+! 
+!--------------------------------------------------------------------
+Sub sndordosco()
+! send the product details needed for osco/mozula
+!Web will send ERP:
+!Customer Id, order id      based on the customer/order 
+!  back end will get Product Id, unit of measure and quantity. 
+!ERP will send back:
+!Customer Id, Order Id, OrdLine, Product Id, Quantity, U/M, Qty, Length, 
+!Height, Width, Weight, Packing Class (UDA 15), Banded (UDA 16), 
+!Foldable (UDA 17), Mill (Y/N), (if mill) vendor address, 
+!Published or Negotiated, Markup. 
+  Try
+	Dim upsflg$[1],SUM$[4],STKUM$[4]
+	Dim ROHKey$[60],ROLKey$[60],M2$[72]
+	Dim 1%,unm,upm,ch_prod,ch_prwh,ch_vend,ch_uda,ccc
+	Dim 1%,Ordtype,Warehouse
+	Dim 2%,custid,orderid,Vend
+	Dim 3%,QtyOrd,Weight,qtystk,R[99]
+	Dim 3%,ProdRec,UDARec,VMRec
+	! need product/prodwhse/vendor/uda
+	dim roh. as roh
+	dim rol. as rolnew
+	dim PR. as prod ! product
+	dim VM. as a80vm ! vendor
+	dim PRW. as prodwhse ! product warehouse
+	dim UDA. as produda ! product user define
+	
+	Read #ctlc,188,128;upsflg$; ! ups type
+	read #ctlc,188,10;upm;
+	read #ctlc,188,12;unm;
+	if rtrim$(UCase$(upsflg$))<>"P" let upsflg$="N" ! negotiated is default
+	ch_roh=OpenFile(-1840,IntCo) \ if ch_roh=-1 error 42
+	ch_rol=OpenFile(-1888,Intco) \ if ch_rol=-1 error 42
+	ch_prod=OpenFile(-1792,Intco) \ if ch_prod=-1 error 42
+	ch_prwh=OpenFile(-1744,Intco) \ if ch_prwh=-1 error 42
+	ch_vend=OpenFile(-2400,Intco) \ if ch_vend=-1 error 42
+	ch_UDA = OpenFile(-9967,intCo) \ if ch_UDA = -1 error 42 ! product user define fields
+	ccc=OpenFile(-1728,Intco) \ if ccc=-1 error 42
+	CH_vtg=OpenFile(-1120,Intco) \ if ch_vtg=-1 error 42
+	! now get info from the web
+	clear list$[]
+	list$[0]=bsdel$,"OSPDATA",fdel$
+	TMP$="CUSTID",FDEL$,"ORDERID",FDEL$,"LINENO",fdel$,"PRODID",FDEL$
+	TMP$=TMP$,"QTYORD",FDEL$,"UOMSELL",FDEL$,"QTYSTK",FDEL$,"UOMSTK",fdel$,"LENGTH",FDEL$
+	TMP$=TMP$,"HEIGHT",FDEL$,"WIDTH",FDEL$,"WEIGHT",FDEL$,"PACKINGID",FDEL$
+	TMP$=TMP$,"BANDED",FDEL$,"FOLDABLE",FDEL$,"MILLITEM",FDEL$
+	TMP$=TMP$,"VENDORZIP",FDEL$,"UPORN",FDEL$,"MARKUP",FDEL$
+	! added - whole vendor detail
+	tmp$=tmp$,"VENDNAME",FDEL$,"VENDADDR1",FDEL$,"VENDADDR2",FDEL$
+	TMP$=TMP$,"VENDCITY",FDEL$,"VENDSTATE",FDEL$,"VENDCNTRY",FDEL$
+	list$[1]=tmp$
+	row=2
+	call dxget("CUSTID",tmp$)
+	let custid=tmp$
+	! if custid<=0 or custid>999999 or fra(custid) let custid=999999 ! use cash cust
+	call dxget("ORDERID",tmp$)
+	let orderid=tmp$
+	rohkey$=" ",rohkey$
+	rohkey$[1,6]=Custid using "######"
+	rohkey$[7]=orderid using "######"
+	Search #ch_roh,2,2;rohkey$,R[8],E
+	if e
+		returnstatus=0;message$="ORDER NOT FOUND"
+		goto GOODONE
+	Endif
+	read record #ch_roh,r[8],0;roh.;
+	let ordtype=roh.OrdType
+	if ordtype<=0 or ordtype>38 let ordtype=1
+	
+	rolkey$=" ",rolkey$
+	rolkey$[1,6]=Orderid using "######" ! rohkey$[7,12]
+	LineLoop: ! line loop
+		search #ch_rol,3,1;rolkey$,r[9],E
+		if e goto GOODone
+		x2=rolkey$[1,6] \ if x2<>ORDERID goto GOODONE
+		read record #ch_rol,R[9],0;rol.;
+		if rol.NStkItem goto NotGoodone ! a future release
+		if rol.QtyOrd<=0 goto NotGoodone ! need qty! Z?
+			let Prod$=rol.ProdCode$
+			umrec=rol.UMSell
+			let SUM$=XUnit$(umrec,ccc)
+			let warehouse=rol.Whse
+			if warehouse<1 or warehouse>99 let warehouse=roh.Wh
+			if warehouse<1 or warehouse>99 let warehouse=1
+			Prodrec = filegetprod(e$,ch_prod,"=",1,Prod$,PR.)
+			if prodrec<=0 or rtrim$(prod$)=""
+				returnstatus=0;Message$="PRODUCT "+prod$+" NOT FOUND"
+				goto NotGoodone
+			Endif
+			! change to order weight units
+			! PM: LET A[6]=L6[4];A[5]=UNF[5]
+			if rol.LbsUnit>0 let pr.LbsUnit=rol.LbsUnit
+			if rol.WgtFactor>0 let pr.LbsFact=rol.WgtFactor
+			cnvtu[0]=pr.UMStkDefault;cnvtu[1]=0;cnvtu[2]=1
+			cnvta=1 ! weight of one stk um to osco!!)
+			baseord=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			! get ordered in sell units
+			cnvtu[0]=0;cnvtu[1]=umrec;cnvtu[2]=1
+			cnvta=rol.QtyOrd ! ordered? shipped?
+			qtyord=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			UDARec=filegetproduda(e$,ch_uda,"=",1,prod$,UDA.)
+			if udarec<=0 clear uda.
+			vend=getmillflg(e$,intco,ch_prwh,prod$,warehouse,ordtype)
+			if vend>0
+				tmp$=" ",tmp$
+				tmp$=vend using "######"
+				VMRec=filegeta80vm(e$,ch_vend,"=",1,tmp$,VM.)
+				search #ch_vtg,2,1;tmp$,R[6],E
+				if not(e)
+					mat read #ch_vtg,r[6],314;m2$;
+				else
+					m2$=" ",m2$
+				endif
+			endif
+			if vend=0 or vmrec<=0 
+				clear vm.
+				vend=0 ! so not millitem
+			endif
+			! need stock UOM Qty - as length,width,height are STK
+			cnvtu[0]=umrec;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+			cnvta=qtyord
+			qtystk=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			if pr.LbsFact<=0 let pr.LbsFact=1
+			weight=FNR(Abs((baseord*pr.LbsUnit)/pr.LbsFact))
+			STKUM$=xunit$(PR.UMStkDefault,ccc) ! u/m
+			! all data gathered
+			
+			tmp$=Str$(custid),fdel$,Str$(orderid),fdel$,rolkey$[7,9],fdel$,RTrim$(prod$),fdel$
+			tmp$=tmp$,Str$(QTYORD),fdel$,SUM$,fdel$,Str$(QTYSTK),fdel$,STKUM$,fdel$
+			tmp$=tmp$,Str$(pr.LengthOfStkUM),fdel$,Str$(Pr.HeightOfStkUM),fdel$
+			tmp$=tmp$,Str$(pr.WidthOfStkUM),fdel$,Str$(Weight),fdel$
+			tmp$=tmp$,RTrim$(uda.ANUda11$),fdel$,RTrim$(uda.ANUda12$),fdel$
+			tmp$=tmp$,RTrim$(uda.ANUda13$),fdel$
+			if vend ! mill item
+				let tmp$=tmp$,"Y",fdel$,VM.Zip$,fdel$
+			Else 
+				let tmp$=tmp$,"N",fdel$,fdel$
+			endif
+			tmp$=tmp$,upsflg$,fdel$
+			if upsflg$="P" let tmp$=tmp$,Str$(upm),fdel$
+			if upsflg$="N" let tmp$=tmp$,str$(unm),fdel$
+			if vend ! new additional fields
+				tmp$=tmp$,RTrim$(VM.Name$),FDEL$,RTRIM$(VM.Address$),FDEL$
+				TMP$=TMP$,RTRIM$(VM.OptAddress$),FDEL$,RTRIM$(VM.City$),FDEL$
+				TMP$=TMP$,RTRIM$(VM.State$),FDEL$,RTRIM$(M2$[13,27]),FDEL$
+			else
+				tmp$=tmp$,fdel$,fdel$,fdel$,fdel$,fdel$,fdel$ ! 6 flds
+			endif
+			let list$[row]=tmp$
+			row=row+1
+	NotGoodone: ! bypass
+	goto LineLoop
+	GOODONE: ! finished/skip
+	let list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	! Close
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndordosco
+! 
+!--------------------------------------------------------------------
+Sub UpdtOrderosco()
+! update order / lines with osco data
+ Try
+	Dim Notes$[600],SUM$[4],STKUM$[4]
+	Dim ROHKey$[60],ROLKey$[60],sp1$[40]
+	Dim 1%,unm,upm,ch_prod,ch_prwh,ch_vend,ch_uda,ccc
+	Dim 1%,Ordtype,Warehouse
+	Dim 2%,custid,orderid,Vend
+	Dim 3%,QtyOrd,Weight,qtystk,R[99]
+	Dim 3%,ProdRec,UDARec,VMRec
+	! need product/prodwhse/vendor/uda
+	dim roh. as roh
+	dim ros. as ros
+	dim rot. as rot
+	dim rol. as rolnew
+	dim PR. as prod ! product
+	dim PRW. as prodwhse ! product warehouse
+	dim rtc. as roltag
+	dim rom. as rom
+	ch_roh=OpenFile(1840,IntCo) \ if ch_roh=-1 error 42
+	ch_ros=OpenFile(1856,Intco) \ if ch_ros=-1 error 42
+	ch_rot=OpenFile(1872,Intco) \ if ch_rot=-1 error 42
+	ch_rol=OpenFile(-1888,Intco) \ if ch_rol=-1 error 42
+	ch_prod=OpenFile(-1792,Intco) \ if ch_prod=-1 error 42
+	ch_prwh=OpenFile(-1744,Intco) \ if ch_prwh=-1 error 42
+	ch_RTC=OpenFile(9950,IntCo) \ if CH_RTC = -1 Error 42
+	ch_rom=OpenFile(1968,intCo) \ If Ch_Rom = -1 Error 42 
+	ccc=OpenFile(-1728,Intco) \ if ccc=-1 error 42
+	CH_OSS=FINDCHANNEL()
+	TMP$="3/OSCOSUM"+str$(Intco)
+	open #ch_oss,tmp$
+	!
+	call dxget("CUSTID",tmp$)
+	let custid=tmp$
+	! if custid<=0 or custid>999999 or fra(custid) let custid=999999 ! use cash cust
+	call dxget("ORDERID",tmp$)
+	let orderid=tmp$
+	rohkey$=" ",rohkey$
+	rohkey$[1,6]=Custid using "######"
+	rohkey$[7]=orderid using "######"
+	Search #ch_roh,2,2;rohkey$,R[8],E
+	if e
+		returnstatus=0;message$="ORDER NOT FOUND"
+		goto SODONE
+	Endif
+	read record #ch_roh,r[8],0;roh.;
+	R[9]=roh.ShipRec;r[10]=roh.TotRec
+	read record #ch_ros,r[9],0;ros.;
+	read record #ch_rot,r[10],0;rot.;
+	! rest of header/notes/etc
+	call dxget("SHIPVIA",work$) ! ups nda, ups ground, etc
+	tmp$=clrtxtc$(e$,work$)
+	if RTrim$(tmp$)<>""
+		roh.ShipVia$=tmp$+Blank$
+		ros.Zone$="99" ! per erg/group
+	endif
+	call dxget("FRGTCOST",tmp$) ! actual UPS
+	if RTrim$(tmp$)<>""
+		rot.FrgtCost=tmp$
+	endif
+	call dxget("FRGTCHRG",tmp$) ! to customer UPS
+	if RTrim$(tmp$)<>""
+		rot.FrgtChrg=tmp$
+	endif
+	!call dxget("OTHRCHRG",TMP$) ! small ord?
+	!rot.OthChrg=tmp$
+	!call dxget("MISCCHRG",tmp$) ! COD?
+	!rot.MiscChrg=tmp$
+	! discounts, promos? (let tot screen handle it)
+	write record #ch_roh,r[8],0;roh.;
+	write record #ch_ros,r[9],0;ros.;
+	write record #ch_rot,r[10],0;rot.;
+	! messages ! always start at 201 and add on from there
+	call crteoscosum() ! osco packing summary for UPS, etc?
+	! first clear any old summary messages
+	call delpsspmsg() ! system gen summary delete
+	! Message is set up below "Carton xx"
+	oskey1$=" ",oskey1$
+	oskey1$=orderid using "######"
+	OSSMSG: ! loop for all "S"
+	Search #ch_oss,3,1;oskey1$,r[20],E
+	x2=oskey1$[1,6] \ if x2<>orderid let e=2
+	if not(e)
+		if oskey1$[7,7]<>"S" goto ossmsg ! not shipsumm
+		mat read #ch_oss,r[20],0;osssum;
+		mat read #ch_oss,r[20],24;boxid$;
+		mat read #ch_oss,r[20],48;boxnp;
+		SP1$=" ",sp1$
+		sp1$="Carton "+str$(BOXNP[1])+"  "+boxid$[1,12]+Blank$ ! box # and boxname
+		call crtespmsg() ! add to file
+		goto ossmsg
+	endif
+	! line messages from osco/mozula (will replace existing!)
+	call dxget("NUMLINES",tmp$)
+	numlines=tmp$
+	if numlines=0 goto SODone ! could be no lines on order!!
+	if numlines<1 or numlines>999 or fra(numlines)
+		returnstatus=0
+		message$="Invalid number of lines"
+		goto SODone
+	endif
+	! each product/line has packing notes
+	for x9=1 to numlines
+		call dxget("LINENO"+Str$(X9),tmp$)
+		lineno=tmp$
+		if lineno<1 or lineno>999 or fra(lineno) goto ULineLoop ! no such line
+		rolkey$=" ",rolkey$
+		rolkey$[1,6]=rohkey$[7,12]
+		rolkey$[7]=lineno using "###"
+		search #ch_rol,2,1;rolkey$,r[2],E
+		if e goto ULineLoop ! Not found - no update!
+		READ RECORD #CH_ROL,R[2],0;ROL.;
+		CALL DXGET("PRODID"+STR$(X9),TMP$)
+		PROD$=UCASE$(RTRIM$(TMP$))+BLANK$
+		IF RTRIM$(PROD$)<>RTRIM$(ROL.PRODCODE$) GOTO ULINELOOP ! DIFF PROD? IGNORE?
+		IF ROLKEY$[10,10]="" LET ROLKEY$[10,10]=" " ! always space at end
+		SEARCH #CH_RTC,2,1;ROLKEY$,R[3],E
+		IF E=1 ! ADD IT
+			LET E=2;R=0
+			SEARCH #CH_RTC,1,0;ROLKEY$,R,E
+			IF E ERROR 11000
+			R[3]=R
+			SEARCH #CH_RTC,4,1;ROLKEY$,R,E \ IF E ERROR 11000
+			rtc.Status=rol.status
+			rtc.OrdNum=orderid
+			rtc.LineNum=lineno
+			rtc.PONum$=" ",rtc.PONum$
+			rtc.JobNum$=" ",rtc.JobNum$
+			rtc.PressNum$=" ",rtc.PressNum$
+			rtc.MSGLine1$=" ",rtc.MSGLine1$
+			rtc.MSGLine2$=" ",rtc.MSGLine2$
+			rtc.MSGS$=" ",rtc.MSGS$
+		ELSE ! EXISTING?
+			IF E=0 ! yes
+				read record #ch_rtc,r[3],0;rtc.;
+			ELSE
+				ERROR 11000
+			ENDIF
+		ENDIF
+		rtc.Blankforkey$=" " ! always set & send
+		! ok rec exists - now get and add osco packing line notes
+		!call dxget("LNOTES"+Str$(X9),work$)
+		!tmp$=clrtxtc$(e$,work$) ! single large string
+		! we now get from oscofile
+		clear tmp$
+		x=0
+		oskey2$=" ",oskey2$
+		oskey2$=orderid using "######"
+		OSPMSG: ! loop for all "P"
+		Search #ch_oss,3,1;oskey2$,r[20],E
+		x2=oskey2$[1,6] \ if x2<>orderid let e=2
+		if not(e)
+			if oskey2$[7,7]<>"P" goto ospmsg ! not prod detail
+			if oskey2$[11,22]<>Prod$ goto ospmsg ! not correct product
+			mat read #ch_oss,r[20],0;osssum;
+			mat read #ch_oss,r[20],24;boxid$;
+			mat read #ch_oss,r[20],48;boxnp;
+			if x>0 let tmp$=tmp$,", " ! comma separate after 1st
+			tmp$=tmp$,str$(boxnp[1]),"-",Str$(boxnp[0]) ! box# - qty in box
+			x=x+1
+			goto osPmsg
+		endif
+		Notes$=RTrim$(tmp$)
+		if notes$="" goto GetLNotes ! no pack summary
+		if len(Notes$)<30 ! make multiples of 30 char long
+			Notes$=Notes$+Blank$
+			Notes$[31]=""
+		else ! >30
+			if len(Notes$)<60
+				Notes$=Notes$+Blank$
+				Notes$[61]=""
+			endif
+		endif ! should be <30 normally per customer 
+		GetLNotes: ! check for exceptions, etc
+		Call dxget("NOTES"+Str$(X9),work$)
+		tmp$=clrtxtc$(e$,work$) ! check for bad chars
+		clear work$ ! clear orig stuff
+		Notes$=Notes$+tmp$ ! add line notes after packing summary
+		if RTrim$(notes$)="" goto wrtroltag ! no notes sent!
+		! per erg - osco notes start at message 16 (which is 11 in variable)
+		let emno=13;noos=10 
+		for x2 = 1 to emno ! 1 to 16
+			varnum=x2+Noos ! for rt_msg$
+			BNTIDX=((x2-1)*30)+1;ENTIDX=x2*30 ! for notes$
+			if ENTIDX>len(notes$) let ENTIDX=Len(Notes$)
+			begIdx = ((varnum-1)*30)+1
+			endIdx = varnum*30 ! within roltag/rt_msg$
+			if BNTIDX > len(notes$)
+				x2 = 99 ! 17 ! (end loop)
+			else
+				rtc.msgs$[begIdx,endIdx] = notes$[BNTIDX,ENTIDX]+Blank$
+			end if
+		next x2
+		Wrtroltag: ! 
+		Write record #ch_rtc,r[3],0;rtc.;
+		! done with lines? just add messages?
+	ULineLoop: ! line loop
+	next x9
+	returnstatus=1;message$="OK"
+	SODone: ! finito
+	! just return with status
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! UpdtOrderosco
+! 
+!--------------------------------------------------------------------
+Sub crtespmsg()
+! add special messages to the file
+Try
+	dim spkey$[60]
+	MLine=201 ! per erg/group - in 201+ lines
+	AddNewSPM: ! 
+	if mline>999 exit sub ! limit it please
+	SPKey$=" ",spkey$;spkey$[1,6]=orderid using "######"
+	SPKey$[7]=MLine Using "###"
+	Search #ch_rom,2,1;SPKey$,R,E
+	if Not(E) ! already one there
+		MLine=MLine+1
+		goto AddNewSPM
+	Endif
+	If E<>1 error 11000 ! 
+	if spkey$[10,10]="" let spkey$[10,10]=" "  ! always space at end
+	Let E=2;R=0
+	Search #ch_rom,1,0;spkey$,R,E
+	if e error 11000
+	let r[20]=R
+	Search #ch_rom,4,1;spkey$,R,E
+	if e error 11000
+	rom.Message$=SP1$
+	rom.MessageLine=mline
+	rom.OrdNum=orderid
+	rom.Space$=blank$
+	write record #ch_rom,r[20],0;rom.;
+	SP1$=" ",SP1$ ! clear for next use
+else
+	include "src/callsuberr.inc"
+end try
+End sub
+! 
+!--------------------------------------------------------------------
+Sub crteoscosum()
+! add shipping summary to the file
+! have the product rec and summary (1 per box)
+Try
+	Dim 3%
+	
+	
+	! first clear previous entries for order!
+	oskey1$=" ",oskey1$
+	oskey1$[1,6]=orderid using "######"
+	cosloop: ! 
+	search #ch_oss,3,1;oskey1$,R,e
+	x2=oskey1$[1,6] \ if x2<>orderid let e=2
+	if not(e)
+		search #ch_oss,5,1;oskey1$,R9,E \ if e error 11000
+		let e=3;r9=r
+		search #ch_oss,1,0;oskey1$,R9,E \ if e error 11000
+		goto cosloop:
+	Endif
+	!! get all data
+	
+	clear osssum[]
+	osssum[0]=orderid
+	call dxget("OSCOLineCount",tmp$) ! one each prod in every box on order?
+	numbox=tmp$
+	if numbox<=0 goto OSSDone
+	for x8=1 to numbox
+		call dxget("BOXORDID"+Str$(X8),tmp$) ! already know this!
+		call dxget("BOXNUM"+Str$(X8),tmp$)
+		BOXNP[1]=tmp$ ! BOX NUMBER (KEY)
+		call dxget("BoxName"+Str$(X8),work$)
+		tmp$=clrtxtc$(e$,work$)
+		boxid$[1,12]=tmp$+Blank$
+		call dxget("BOXSKU"+Str$(X8),tmp$)
+		boxid$[13,24]=tmp$+blank$ ! nested id??
+		call dxget("BoxWeight"+Str$(X8),tmp$)
+		osssum[1]=tmp$
+		CALL dxget("BoxCube"+Str$(X8),tmp$) ! or BoxSkuVolume?
+		osssum[2]=tmp$
+		call dxget("BoxHeight"+Str$(X8),tmp$)
+		osssum[3]=tmp$
+		call dxget("BoxWidth"+Str$(X8),tmp$)
+		osssum[4]=tmp$
+		call dxget("BoxLength"+Str$(X8),tmp$)
+		osssum[5]=tmp$
+		call dxget("BoxSkuCount"+Str$(X8),tmp$)
+		boxnp[0]=tmp$
+		! now write the file (SUMMARY FIRST)
+		oskey1$=" ",oskey1$
+		oskey1$=osssum[0] using "######"
+		OSKEY1$[7]="S"+BOXNP[1] USING "###"
+		oskey1$[11]=boxid$[1,12] ! box id
+		search #ch_oss,2,1;oskey1$,r,e
+		if e>1 error 11000
+		if e=1
+			let e=2;r=0
+			search #ch_oss,1,0;oskey1$,r,e
+			if e error 11000
+			search #ch_oss,4,1;oskey1$,r,e \ if e error 11000
+			
+			let r[90]=r
+		else
+			let r[90]=r
+		endif
+		! should pass same box data on each product
+		mat write #ch_oss,r[90],0;osssum;
+		mat write #ch_oss,r[90],24;boxid$;
+		mat write #ch_oss,r[90],48;boxnp;
+		! now write the file PRODUCT\
+		! every line has product data - we need for box-qty
+		oskey2$=" ",oskey2$
+		oskey2$=osssum[0] using "######"
+		OSKEY2$[7]="P"+BOXNP[1] USING "###"
+		oskey2$[11]=boxid$[13,24] ! box id
+		search #ch_oss,2,1;oskey2$,r,e
+		if e>1 error 11000
+		if e=1
+			let e=2;r=0
+			search #ch_oss,1,0;oskey2$,r,e
+			if e error 11000
+			search #ch_oss,4,1;oskey2$,r,e \ if e error 11000
+			
+			let r[90]=r
+		else
+			let r[90]=r
+		endif
+		mat write #ch_oss,r[90],0;osssum;
+		mat write #ch_oss,r[90],24;boxid$;
+		mat write #ch_oss,r[90],48;boxnp;
+	next x8
+	OSSDone: !! done
+	!try close #ch_oss Else Rem
+else
+	include "src/callsuberr.inc"
+end try
+End sub
+! 
+!--------------------------------------------------------------------
+Sub delpsspmsg()
+! delete previous system generated summary special messages in the file
+Try
+	dim spkey$[60]
+	MLine=201 ! per erg/group - in 201+ lines
+
+	SPKey$=" ",spkey$;spkey$[1,6]=orderid using "######"
+	SPKey$[7]="200" ! start 1 lower
+	DelpsLoop: ! loop it
+	Search #ch_rom,3,1;SPKey$,R[20],E
+	x2=spkey$[1,6] \ if x2<>orderid let E=2 ! diff order
+	x2=spkey$[7,9] \ if x2>400 LET E=2 ! always in 201-400
+	IF E GOTO DELPSDONE
+	read record #ch_rom,r[20],0;rom.;
+	IF rom.message$[1,7]="Carton " ! old one - delete it
+		R=r[20]
+		Search #ch_rom,5,1;spkey$,R,E
+		if e error 11000
+		Let E=3;R=R[20]
+		Search #ch_rom,1,0;spkey$,R,E
+		if e error 11000
+	Endif
+	goto Delpsloop 
+	DELPSDONE: ! finished
+else
+	include "src/callsuberr.inc"
+end try
+End sub
+! 
+!--------------------------------------------------------------------

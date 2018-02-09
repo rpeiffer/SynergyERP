@@ -1,0 +1,771 @@
+! --- serp941.dl4
+! Assign inventory classes - ut939 swaps directly to mxclass (mxclass is what got
+! converted here)
+!
+! 1.0 11/11/2009 - initial conversion
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp939.dl4 src/serp939.src
+!
+! From the original code:
+Rem BEDIT Version: 2.1 OBJECT CODE     Created: JUL 19, 2000  16:36:53
+Rem /usr/acct/r97//usr/acct/judy/work/r97/misc/mxclass.src (univ2) [judy] {43609}
+Rem  Copyright (c) 2000 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+Rem MXCLASS  ASSIGN INVENTORY CLASSES
+! NOT DONE IN 401 ANY MORE - STRICTLY A MANUAL RUN FROM 939.
+! ORIGINALLY 401 SWAPPED OFF HERE(AFTER MXREV), IT WAS AFTER ROLLING TO NEW ARMONTH 
+! IT HAD JUST TRANSFERRED VALUES IN ROLLING MONTHS SO LOOKS FOR THE NOW CURR MONTH IN LAST YEAR. 
+! THIS YEAR CURRENT AR MONTH HAS BEEN ZEROED! 
+! THAT LOGIC IS STILL IN HERE - THE FULL ARMONTH (THE 12TH MONTH) IS LAST YEAR!
+!
+! REVISION NOTES: TASK 49939
+! Completely revamp the whole structure:
+! 1. Main product now has 2 class fields
+! 2. Prodwhse has 2 class fields
+! 3. We have a prodwhstat file (from task 44166) that holds the data we need here
+!     IT ONLY UPDATES WHEN A SALE AFFECTS USAGE! NO DIRECTS, ETC
+! 4. Warehouse 0 is the Main product record.
+! 5. Go through the Prod file, then the prodwhse to get records, check prodwhstat for data.
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+Declare External Function AddToMYReports
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+! include "src/inc/file?.inc"
+!
+Declare Intrinsic Sub DateToJulian,FindF
+Declare Intrinsic Function DateUsing$,FindChannel
+! Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function buildsort
+!Declare External Function openfile,pdate$,jdate$,Formatdate2$
+
+Declare sub DoCountWeekAssignment
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200]
+b$=" ",b$
+dim message$[150],webstr$[200]
+!
+! call dxopen()
+!
+! call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+! If Err 0 Gosub ERR_TRAP
+Dim C$[16],2%,C2
+C2 = Intco ! Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64)
+C$ = "cntrl/CNTRL"+Str$(C2) !  \ If intCO > 9 Let C$ = C2 Using "cntrl/CNTRL##"
+Try Close #1 Else Rem
+Open #1,C$
+
+dim 1%,countWeek
+dim countDays$[7]
+
+Dim 1%,W1[2],W0[3],ARMONTH,BOYMONTH,I,X7,CURCLASS,WH,WHNO,FOUND
+dim 1%,CT[5],trec,whprd1[1],PRD1[4],MTBl,hd[5],countFreq[11],cntWeek
+Dim 2%,WH7[3],C0,E,JDATE,JPCDATE,REC,KSIZE,COUNT,J1
+Dim 2%,W2[9],W7[14],CLASS[12],WHCOUNT[99],CWH,B[24],C4[10],PCDATE
+Dim 3%,W3[24],W5[25],W8[12],WH9[25],X3[9]
+Dim 3%,COST,EXCOST,T9,CCOUNT,UU[11],CTR,SORTCHAN,StatChan
+DIM 3%,USG_TY[12],SLS_TY[12],LDCOST_TY[12],AVGCOST_TY[12],HITS_TY[12]
+DIM 3%,USG_LY[12],SLS_LY[12],LDCOST_LY[12],AVGCOST_LY[12],HITS_LY[12]
+Dim k1$[50],K2$[50],K3$[50],F$[16],F2$[60],PORT_$[26],KEY0$[130],R4$[14]
+DIM K4$[50]
+Dim P9$[50],K9$[50],D$[20],StatusFile$[150],ReportDir$[75],BaseName$[75]
+Dim 3%,Grandtotal[99,5],currtotal[99,5],prcttotal[99,5]
+Dim 3%,HLDGTTL[5],HLDCTTL[5],HLDPTTL[5]
+
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 1 + .5) * 1)
+Let C2=IntCo
+! open #2=prodwhse, #3=product
+For X = 2 To 3
+	Read J1 \ If J1 = -1 Goto L_850
+	Mat Read #1,88,J1;F$;
+	Open #X,F$
+Next X
+
+Data "1744","1792"
+! #2 2/SPRODWHSEx  #3 2/SPRODx  #4 2/SPRODRANKx  #5 2/prodwhstat#
+clear tmp$
+! Call dxget("MTABLE",tmp$) ! future use - user selects class table to update
+let x2=tmp$
+if x2<0 or x2>2 or fra(x2)
+	e$="Please select a valid option (0-2)"
+	error 10000
+endif
+mtbl=x2
+F$="2/PRODWHSTAT"+STR$(C2)
+CALL FINDF(F$,FOUND)
+IF FOUND
+	OPEN #5,F$
+ELSE ! NO FILE - NO WAY TO RUN THIS!!
+	e$="Table Sales File "+F$+" is Missing"
+	Error 42
+ENDIF
+DEBUG=1 ! add additional messages to log
+! set up status log file
+ReportDir$ = "REPORTDIR" \ System 28,ReportDir$
+BaseName$ = "inventory_class_assign_"+dateusing$(Tim#(0),"YYMMDDHHNNSS")
+StatusFile$ = ReportDir$ + "/"+BaseName$
+Call FindF(StatusFile$,tmp)
+If tmp Kill StatusFile$
+StatChan = FindChannel() ! channel to build text file
+Build #StatChan,StatusFile$ As "TEXT"
+Close #StatChan
+Open #StatChan,StatusFile$
+Print #StatChan;"Assigning Inventory Classes..."
+X3 = AddToMYReports(BaseName$) \ if x3<0 e$="Error adding to my reports!" \ error 10000
+
+! OK - gone as far as we can go while we are still hooked to the
+! web - send a status back to free it up and keep processing.
+ReturnStatus=1
+Message$="Inventory Class Assignment proceeding.  Check back later in My Reports."
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call addToStr(e$,rstr$,webstr$)
+call setoutput(e$,rstr$)
+
+!
+! create product rank file on #4
+!
+F$ = " ",F$
+F$ = "2/SPRODRANK"+Str$(C2)
+tmp$="files/"+f$ ! let's try sending full path
+try
+	if mtbl=0 ! doing both - can kill/rebuild
+		Kill tmp$
+	endif
+else
+	rem just the one table - overwrites what is there?
+end try
+! If Err 0 Gosub ERR_TRAP
+if mtbl=0
+	F2$ = "[1:64] ",tmp$ ! F$ (NEW LARGER SIZE)
+	Build #4,F2$
+	KSIZE = 7 \ Search #4,0,1;KEY0$,KSIZE,E
+	L_850: If E Error 11000
+	REC = 1000 \ Search #4,0,0;KEY0$,REC,E
+	If E Error 11000
+	Close #4 ! close new file
+	tmp$="chmod go+rw files/"+LCase$(f$)+"*" ! dl4 builds files with/no permissions
+	system tmp$
+endif
+Open #4,F$
+
+Gosub L_6000 ! create the sortfile
+
+Mat Read #1,3,172;PCDATE;
+Mat Read #1,0,120;ARMONTH; \ If Not(ARMONTH) Let E = 0 \ Error 42
+Mat Read #1,0,120;ARMONTH; \ If Not(ARMONTH) Let E = 0 \ Error 42
+Mat Read #1,51,74;BOYMONTH; \ If Not(BOYMONTH) Let E = 0 \ Error 42
+Mat Read #1,3,184;C0;
+! Mat Read #1,69,0;CLASS; ! inventory class definitions
+Mat read #1,70,52;ct; ! method/days - read once a run!
+mat read #1,70,160;countFreq;
+! mtbl - passed from ut939 - 0=both, 1=table 1 only, 2=table 2 only
+! so - start off with table 1 if 0 OR 1 unless it is 2 only
+
+Rnd2here: ! start on table 2 if needed
+trec=69 \ if mtbl=2 let trec=70
+MAT  READ #1,trec,0;CLASS;
+Read #1,60,16;CWH; \ If CWH <= 1 Let CWH = 99 ! first consignment warehouse
+Mat Read #1,19,50;P9$;
+
+if trec=69 let Hd[0]=ct[0];hd[1]=ct[2];hd[2]=ct[4] ! method/days
+if trec=70 let hd[0]=ct[1];hd[1]=ct[3];hd[2]=ct[5]
+for i=0 to 99 \ whcount[i]=0 \ next i ! make sure counter is ZERO at start of every runthrough
+ctr=0;x9=0 ! check if class % is loaded
+for i=1 to 12 \ let x9=x9+class[i] \ next i
+if x9<=0 goto L_9000: ! bypass as no table data is there!
+x1=mtbl \ if x1=0 let x1=mtbl+1
+Print #StatChan;"Table ";Str$(x1);" in process" ! no semi at the end
+if debug
+	print #statchan;" Method: ";str$(hd[0]);" Min Days: ";Str$(Hd[1]);" Rank on: ";str$(hd[2])
+endif
+!
+! loop through product THEN warehouse records
+!
+LET key0$=" ",key0$
+L_2000: ! we now have a prodwhstat file holding data! but that only holds active prods!!!!
+	SEARCH #3,3,1;key0$,R3,E \ IF E>2 error 11000 ! GOSUB Err_Search:
+	if e goto L_6500: ! now start ranking
+	Gosub L_4500 ! \ Goto L_3190 ! read product, if fail, skip
+	if mtbl = 2 and cntWeek = -1 goto L_2000: ! -1 in product indicates a skip for whole product
+	k1$=" ",k1$;k1$=key0$;k1$[13]=" 0" ! FIRST WHSE ZERO (MAIN PROD!)
+	Search #5,2,1;k1$,R5,e \ if e>1 error 11000 ! gosub err_search:
+	if not(e)
+		MAT READ #5,R5,14;USG_TY;
+		MAT READ #5,R5,92;USG_LY;
+		MAT READ #5,R5,170;SLS_TY;
+		MAT READ #5,R5,248;SLS_LY;
+		MAT READ #5,R5,326;LDCOST_TY;
+		MAT READ #5,R5,404;LDCOST_LY;
+		MAT READ #5,R5,482;AVGCOST_TY;
+		MAT READ #5,R5,560;AVGCOST_LY;
+		MAT READ #5,R5,638;HITS_TY;
+		MAT READ #5,R5,716;HITS_LY;
+	else
+		for x=0 to 12
+			usg_ty[x]=0;usg_ly[x]=0
+			SLS_TY[x]=0;SLS_LY[x]=0 
+			LDCOST_TY[x]=0;LDCOST_LY[x]=0
+			AVGCOST_TY[x]=0;AVGCOST_LY[x]=0
+			HITS_TY[x]=0;HITS_LY[x]=0
+		NEXT X
+	ENDIF
+	WH=K1$[13,14]
+	let k2$=k1$ ! for the L_4500 routine
+	IF WH=0 ! MAIN PROD RECORD - STILL VALID
+		LET W0[1]=0;w1[0]=0 ! NOT SEASONAL?
+		goto skpwhse: ! no whse rec on these!!
+	ENDIF
+	STARTPWHSE: ! START AFTER PROD!
+	K2$=" ",K2$;K2$[1,12]=key0$[1,12]
+	LOOPPW: ! NOW THRU REST OF SET UP PRODWHSE
+		SEARCH #2,3,1;K2$,R2,E \ IF E>2 error 11000 ! GOSUB Err_Search:
+		IF E GOTO L_2000: ! NOT IN PRODWHSE 
+		IF K2$[1,12]<>key0$[1,12] GOTO L_2000: ! NEXT PROD!
+		CTR = CTR + 1 \ If Not(Fra(CTR / 500)) Print #StatChan;CTR;" Records Processed "
+		LET WH=K2$[13,14] \ if wh=0 goto looppw: ! wh 0 no good
+		MAT  READ #2,R2,32;W1
+		MAT  READ #2,R2,38;W2
+		MAT  READ #2,R2,78;W3
+		MAT  READ #2,R2,228;W5
+		MAT  READ #2,R2,420;W0
+		MAT  READ #2,R2,428;WH7
+		MAT  READ #2,R2,540;WH9
+		MAT  READ #2,R2,696;W7
+		mat read #2,r2,1038;whprd1
+		if mtbl=2 and whprd1[1]=-1 goto LOOPPW: ! -1 indicates skip this one
+		if mtbl<=1 let incls=w7[6] ! table 1
+		if mtbl=2 let incls=whprd1[0] ! table 2
+		k1$=" ",k1$;k1$=K2$ ! SAME KEY
+		Search #5,2,1;k1$,R5,e \ if e>1 Error 11000 ! gosub err_search:
+		if not(e)
+			MAT READ #5,R5,14;USG_TY;
+			MAT READ #5,R5,92;USG_LY;
+			MAT READ #5,R5,170;SLS_TY;
+			MAT READ #5,R5,248;SLS_LY;
+			MAT READ #5,R5,326;LDCOST_TY;
+			MAT READ #5,R5,404;LDCOST_LY;
+			MAT READ #5,R5,482;AVGCOST_TY;
+			MAT READ #5,R5,560;AVGCOST_LY;
+			MAT READ #5,R5,638;HITS_TY;
+			MAT READ #5,R5,716;HITS_LY;
+		else
+			for x=0 to 12
+				usg_ty[x]=0;usg_ly[x]=0
+				SLS_TY[x]=0;SLS_LY[x]=0 
+				LDCOST_TY[x]=0;LDCOST_LY[x]=0
+				AVGCOST_TY[x]=0;AVGCOST_LY[x]=0
+				HITS_TY[x]=0;HITS_LY[x]=0
+			NEXT X
+		ENDIF
+		EXCOST = 0;JDATE = 0;JPCDATE = 0
+		For I = 0 To 11
+			UU[I] = 0
+		Next I
+		If W1[0] <> WH Let InCls = 0 \ Goto L_3040 ! WH key mismatch - no inventory class
+		If W1[0] >= CWH Goto L_3190 ! skip consignment WH
+	SKPWHSE: ! main product start here
+	LET EXCOST=0;JDATE=0;JPCDATE=0
+	FOR I=0 TO 11
+		LET UU[I]=0
+	NEXT I
+	If C4[7]
+		D$ = " ",D$ \ D$ = C4[7] Using "&&&&&&"
+		try
+			Call DateToJulian(1,D$)
+		else
+			Print #StatChan;"BAD DATE ON FILE FOR ";K2$
+		end try
+		JDATE = D$
+	End If
+	If PCDATE
+		D$ = " ",D$ \ D$ = PCDATE Using "&&&&&&"
+		try
+			Call DateToJulian(1,D$)
+		else
+			let d$=Str$(Tim(6)) ! rem ! current date in julian
+		end try
+		JPCDATE = D$
+	End If
+	! If Err 0 Gosub ERR_TRAP
+	If W0[1] Let INCLS = 0 \ Goto L_3040 ! if season - no inventory class
+	! if product has not been established for at least 6 months - no inventory class
+	If JPCDATE - JDATE < HD[1] Let INCLS = 0 \ Goto L_3040 ! now user defined days!
+	Gosub L_4000 ! calculate usage
+	If EXCOST < CLASS[0] Let INCLS = 13 ! if ext. cost < stock deadpoint (includes negatives!)
+	IF DEBUG
+		!IF KEY0$[1,7]="GOLD005"
+		!	PRINT #STATCHAN;KEY0$;" EXCOST ";STR$(EXCOST)
+		!ENDIF
+	ENDIF
+	!L_3040: Mat Write #2,R2,696;W7; ! write inventory class out (for dead or no class items)
+	L_3040: ! write back initial class
+	if wh ! using whse file
+		if mtbl<=1
+			let w7[6]=incls
+			MAT  WRITE #2,R2,696;W7;
+		endif
+		if mtbl=2
+			let whprd1[0]=incls
+			mat write #2,r2,1038;whprd1;
+		endif
+	endif
+	if not(wh) ! its a product
+		if mtbl<=1
+			let c4[8]=incls
+			MAT WRITE #3,R3,894;C4;
+		Endif
+		if mtbl=2
+			let PRD1[4]=INCLS
+			MAT WRITE #3,R3,1294;PRD1;
+		ENDIF
+	endif
+	If W1[0] <> WH Or W0[1] Goto L_3050 ! skip key mismatch or seasonal items
+	!
+	! add record for this item to the product ranking file
+	!
+	R4$ = " ",R4$;K4$=" ",K4$
+	R4$[1,2] = K2$[13,14];R4$[3,14] = K2$[1,12]
+	K4$=R4$
+	Search #4,2,1;K4$,R4,E \ IF NOT(E) GOTO SPRFOUND
+	E = 2 \ Search #4,1,0;K4$,R4,E
+	If E Error 11000
+	Search #4,4,1;K4$,R4,E
+	If E Error 11000
+	Write #4,R4;R4$ ! only write on new??! if written again, changes table 1 data to a fraction??
+	SPRFOUND: ! in case already there?
+	IF MTBL<=1 Write #4,R4,14;EXCOST
+	Mat Write #4,R4,20;UU;
+	IF MTBL=2 WRITE #4,R4,92;EXCOST; ! TABLE 2 VALUE
+	!if needed get grand total
+	if hd[2] ! is ranking on extension - wh=0 is also valid!
+		if mtbl<=1 let grandtotal[WH,1]=grandtotal[WH,1]+excost
+		if mtbl=2 let grandtotal[WH,2]=grandtotal[WH,2]+excost
+	endif
+	L_3050: Rem PRINT R4$;" ";EXCOST;" ";UU[0];" ";UU[1];" ";UU[2];" ";UU[3];" ";UU[4];" ";UU[5];" ";UU[6];" ";UU[7];" ";UU[8];" ";UU[9];" ";UU[10];" ";UU[11]; \ INPUT K9$
+	If EXCOST < CLASS[0] Goto L_3190 ! skip dead items or negatives
+	!
+	! add record to sort file for purposes of ranking
+	!
+	!K9$ = " ",K9$
+	!K9$[1,2] = K2$[13,14]
+	!WH = K2$[13,14]
+	!K9$[3,15] = EXCOST Using "##########.##"
+	!K9$[16,27] = K2$[1,12]
+	! for this new 2 table scheme - char 1 is which table 1 or 2
+	let k9$=" ",k9$
+	if mtbl<=1 let k9$[1,1]="1"
+	if mtbl=2 let k9$[1,1]="2"
+	LET K9$[2,3]=K2$[13,14]
+	LET WH=K2$[13,14] ! REGET WHSE - COULD BE 0 FOR MAIN PRODUCT
+	LET K9$[4,17]=EXCOST USING "###########.##" ! OVER MAX = 100 BILLION (Negs are skipped as dead)
+	LET K9$[18,29]=K2$[1,12]
+	r9=r2 \ if wh=0 let r9=r3
+	Search #sortchan,4,1;K9$,R9,E
+	If E Error 11000
+	WHCOUNT[WH] = WHCOUNT[WH] + 1
+L_3190: ! done
+	!if debug and excost
+	!	Print #StatChan;"PRODUCT ";k2$;" EXCOST: ";str$(excost)
+	!endif
+If Not(Fra(CTR / 500)) and Debug
+	Print #StatChan;"PRODUCT ";k2$;" EXCOST: ";str$(excost);
+	if hd[2] ! dollar rank
+		print #StatChan;" Total so far: ";
+		if mtbl<=1 print #StatChan;Str$(grandtotal[WH,1]) !
+		if mtbl=2 print #StatChan;Str$(grandtotal[WH,2]) ! 
+	Else
+		Print #StatChan;" "
+	endif
+endif
+IF WH>0 GOTO LOOPPW ! we are in looppw 
+Goto STARTPWHSE ! L_2000 ! did main prod now start prodwhse
+
+L_4000: Rem ===================== NON-SEASONAL USAGE/DEMAND RATE
+	T9 = 0
+	X7 = ARMONTH - 1 \ If Not(X7) Let X7 = 12
+	For I = 12 To 1 Step -1
+		If I > 1 !"the last 11 months are stored in this year (w5[1-12])
+			IF WH ! can only do the whse usage on the whse rec
+				If WH9[X7] !"check for adjustments
+					!T9 = T9 + WH9[X7];UU[12 - I] = WH9[X7]
+					UU[12-I]=WH9[X7]
+				Else
+					!T9 = T9 + W5[X7];UU[12 - I] = W5[X7]
+					UU[12 - I] = W5[X7]
+				End If
+			Else ! Main prod
+				uu[12-i]=usg_ty[x7]
+			endif
+			! the following always use the prodwhstat values
+			if hd[0]=0 let t9=t9+avgcost_ty[x7]
+			if hd[0]=1 let t9=t9+sls_ty[x7]
+			if hd[0]=2 let t9=t9+(sls_ty[x7]-ldcost_ty[x7])
+			if hd[0]=3 let t9=t9+hits_ty[x7]
+		Else !"the last month (armonth last year) is in the last year (w5[13+)
+			if wh
+				If WH9[X7 + 13] !"check for adjustments
+					!T9 = T9 + WH9[X7 + 13];UU[12 - I] = WH9[X7 + 13]
+					UU[12 - I] = WH9[X7 + 13]
+				Else
+					!T9 = T9 + W5[X7 + 13];UU[12 - I] = W5[X7 + 13]
+					UU[12 - I] = W5[X7 + 13]
+				End If
+			else
+				uu[12-i]=usg_ly[x7]
+			endif
+			! the following always use the prodwhstat values
+			if hd[0]=0 let t9=t9+avgcost_ly[x7]
+			if hd[0]=1 let t9=t9+sls_ly[x7]
+			if hd[0]=2 let t9=t9+(sls_ly[x7]-ldcost_ly[x7])
+			if hd[0]=3 let t9=t9+hits_ly[x7]
+		End If
+		X7 = X7 - 1 \ If Not(X7) Let X7 = 12
+	Next I
+	!EXCOST = T9 * COST
+	EXCOST=T9 ! use cost,sales,etc from time accepted!
+Return
+
+L_4500: Rem ===================== READ PRODUCT
+	! now looping on product - no need for search!
+	!K3$ = " ",K3$
+	!K3$[1,12] = K2$[1,12]
+	!Search #3,2,1;K3$,R3,E
+	!If E Return
+	Mat Read #3,R3,156;B;
+	Mat Read #3,R3,894;C4;
+	mat read #3,R3,1268;cntWeek;
+	MAT READ #3,R3,1294;PRD1;
+	If P9$[32,32] = "Y" Let COST = W3[15] Else Let COST = B[21]
+	If P9$[32,32] = "Y" And COST <= 0 Let COST = B[21]
+	IF WH=0 ! working on main product - SET INV CLASS
+		if mtbl<=1 let incls=c4[8]
+		if mtbl=2 let incls=prd1[4]
+	endif
+Return ! ! 1
+
+L_6000: Rem ===================== CREATE SORT FILE
+! 	PORT_$ = Spc(6);PORT_$ = PORT_$[2,Len(PORT_$) - 1]
+! 	Read #1,88,912;F$;
+! 	L_6030: If F$[Len(F$)] = " " Let F$ = F$[1,Len(F$) - 1] \ Goto L_6030
+! 	COUNT = 0 \ Search F$,"*",COUNT \ If Not(COUNT) Gosub ERR_SEARCH
+	KSIZE = 25
+	sortchan = buildsort(e$,KSIZE,0) \ if sortchan<0 Error abs(sortchan)
+! 	F$[COUNT] = PORT_$
+! 	Call FindF(F$,FOUND)
+! 	If Err 0 Rem
+! 	Close #9 \ If Err 0 Gosub ERR_TRAP
+! 	If FOUND Kill F$
+! 	F2$ = "[1:256] ",F$
+! 	Build #9,F2$
+! 	Search #9,0,1;KEY0$,KSIZE,E \ If E Gosub ERR_SEARCH
+! 	REC = 1000 \ Search #9,0,0;KEY0$,REC,E \ If E Gosub ERR_SEARCH
+Return
+
+L_6500: Rem ===================== SET ITEM CLASS
+! sort set to hold 2 class values - check 1st char - 1=table 1, 2=table 2
+! it ends when eof or table different - then does 2nd table if selected
+if debug ! let em know
+	Print #StatChan;"Start on Table assignment"
+endif
+	CTR = 0
+	For WH = CWH - 1 To 0 Step -1  !"backward scan all the way to whse zero!
+		if wh<0 goto L_9000: ! all done! NO NEGATIVE WHSE EVER!
+		K9$ = " ",K9$
+		CURCLASS = 1;CCOUNT = 0;HLDCTTl=0;HldPttl=0
+		if hd[2] ! using extensions - set total for the new whse
+			if mtbl<=1 let hldGttl[1]=grandtotal[wh,1]
+			if mtbl=2 let hldGttl[2]=grandtotal[wh,2]
+			for x=0 to 5 \ let currtotal[WH,x]=0;prcttotal[WH,x]=0 \ next x
+			if debug
+				Print #StatChan;" WH: ";Str$(WH);" WH total: ";
+				if mtbl<=1 Print #StatChan;Str$(hldGttl[1])
+				if mtbl=2 Print #StatChan;Str$(hldGttl[2])
+			endif
+		else
+			if debug
+				Print #StatChan;" WH: ";Str$(WH);" Using Item Count"
+			endif
+		endif
+		!K9$ = "9",K9$
+		!K9$[1,2] = WH Using "##"
+		!L_6550: Search #sortchan,6,1;K9$,R2,E
+			!If E Goto OUTEND
+		LET K9$="}",K9$ ! prod codes could have letters!!
+		IF MTBL<=1 LET K9$[1,1]="1"
+		IF MTBL=2 LET K9$[1,1]="2"
+		LET K9$[2,3]=WH USING "##"  ! 4-17 are value- get highest first (lowest=more spaces at beginning)
+		L_6550: ! Loops here thru sort file
+			SEARCH #sortchan,6,1;K9$,R9,E
+			IF E GOTO L_9000: ! OutEnd:
+			CTR = CTR + 1 \ If Not(Fra(CTR / 500)) Print #StatChan;CTR;"Records Assigned"
+			!WHNO = K9$[1,2]
+			!If WHNO <> WH Goto L_6670
+			!Mat Read #2,R2,696;W7
+			!CCOUNT = CCOUNT + 1
+			!If CCOUNT > FNR((WHCOUNT[WH] * (CLASS[CURCLASS] / 100)))
+			!	CCOUNT = 1
+			!	CURCLASS = CURCLASS + 1
+			!	If CURCLASS > 12 Let CURCLASS = 12
+			!End If
+			!W7[6] = CURCLASS
+			!Mat Write #2,R2,696;W7;
+			X2=K9$[1,1] ! check the table 
+			IF MTBL<=1 AND X2<>1 GOTO L_9000: ! INTO CLASS 2
+			IF MTBL=2 AND X2<>2 GOTO L_9000: ! INTO CLASS 1
+			LET WHNO=K9$[2,3]
+			IF WHNO<>WH GOTO L_6670: ! diff whse
+			r2=r9 \ if whno=0 let r3=r9 ! prodwhse or prod record
+			IF WHNO
+				IF MTBL<=1
+					MAT  READ #2,R2,696;W7
+					LET INCLS=W7[6]
+				ENDIF
+				IF MTBL=2 
+					MAT READ #2,R2,1038;WHPRD1
+					LET INCLS=WHPRD1[0]
+				ENDIF
+			ELSE ! whse zero = main prod
+				IF MTBL<=1 
+					MAT  READ #3,R3,894;C4
+					LET INCLS=C4[8]
+				ENDIF
+				IF MTBL=2
+					MAT READ #3,R3,1294;PRD1
+					LET INCLS=PRD1[4]
+				ENDIF
+			ENDIF ! whse or main
+			! INCLS = CURR INV CLASS TABLE 1 OR 2
+			! assign class, then check if next one should be in new class
+			! who knows 1st product could be in it's own class as it's over the percent!
+			IF WHNO
+				IF MTBL<=1
+					LET W7[6]=CURCLASS
+					MAT  WRITE #2,R2,696;W7;
+				ENDIF
+				IF MTBL=2
+					LET WHPRD1[0]=CURCLASS
+					MAT WRITE #2,R2,1038;WHPRD1;
+				ENDIF
+			ELSE ! WHSE 0 = PRODUCT
+				IF MTBL<=1
+					LET C4[8]=CURCLASS
+					MAT WRITE #3,R3,894;C4;
+				ENDIF
+				IF MTBL=2
+					LET PRD1[4]=CURCLASS
+					MAT WRITE #3,R3,1294;PRD1;
+				ENDIF
+			ENDIF ! ALL DONE?
+			if hd[2]=0 ! using item count (original way)
+				LET CCOUNT=CCOUNT+1 ! COUNT ITEMS IN CLASS - starts highest value first
+				if debug
+					If Not(Fra(CTR / 500)) 
+						Print #StatChan;" KEY: ";k9$[2,3];" ";k9$[18];
+						print #StatChan;" Count: ";Str$(CCount);" CLASS: ";STR$(CURCLASS)
+					ENDIF
+				ENDIF
+				IF CCOUNT>FNR((WHCOUNT[WH]*(CLASS[CURCLASS]/100)))
+					LET CCOUNT=1
+					LET CURCLASS=CURCLASS+1
+					IF CURCLASS>12 LET CURCLASS=12
+				ENDIF 
+			else ! using extension rank
+				LET EXCOST=K9$[4,17] ! extension this prodwhse record
+				IF MTBL<=1 ! class table 1
+					IF CURCLASS=1 ! just starting whse - initialize percent totals
+						LET HldPTTL=CLASS[CURCLASS] ! PERCENT FOR CURRENT CLASS
+						Let PRCTTOTAL[wh,1]=HldPTTL
+					Else ! have done >1 class
+						HldPttl=PRCTTOTAL[wh,1] ! total percent so far
+					endif
+					LET hldGttl=hldGttl[1] ! set at beggining of for/next
+					LET CURRTOTAL[wh,1]=CURRTOTAL[wh,1]+EXCOST ! TOTAL FOR TABLE 1 this whse
+					LET HldCttl=CURRTOTAL[wh,1] ! THIS WHSE
+				ENDIF
+				IF MTBL=2 ! class table 2
+					IF CURCLASS=1 ! just starting whse - initialize percent totals
+						LET HldPTTL=CLASS[CURCLASS] ! PERCENT FOR CURRENT CLASS
+						Let PRCTTOTAL[wh,2]=HldPTTL
+					else
+						HldPttl=prcttotal[wh,2]
+					endif
+					LET hldGttl=hldgttl[2] ! set at beginning
+					LET CURRTOTAL[wh,2]=CURRTOTAL[wh,2]+EXCOST ! TOTAL TABLE 2 this whse
+					LET HldCttl=CURRTOTAL[wh,2] ! THIS WHSE
+				ENDIF
+				if debug ! record all current stats
+					If Not(Fra(CTR / 500)) 
+						Print #StatChan;" KEY: ";k9$[2,3];" ";k9$[18];
+						print #StatChan;" CLASS: ";STR$(CURCLASS);" CURRTTL: ";STR$(HLDCTTL);
+						print #StatChan;" PRCTTTL: ";STR$(HLDPTTL);" GRANDTTL: ";STR$(HLDGTTL)
+					ENDIF
+				ENDIF
+				! now calc using percent - logic from 442b
+				! we use the "Hld"s so there is just the one calculation!
+				! if current whse total>=grand total * current percent total so far
+				if HldPTtl>=100 goto ECDone: ! rest are class 12?
+				if HldCttl>=(HldGttl * (HldPTtl / 100)) ! OK-WE ARE PAST PRCT - INCREMENT STUFF
+					LET CURCLASS=CURCLASS+1
+					IF CURCLASS>12 LET CURCLASS=12 \ goto ECDone ! cannot increment any more!! 12 is MAX
+					LET HldPTtl[1]=CLASS[CURCLASS] ! PERCENT FOR NEW CLASS
+					IF MTBL<=1 LET PRCTTOTAL[wh,1]=PRCTTOTAL[wh,1]+HldPTtl[1]
+					IF MTBL=2 LET PRCTTOTAL[wh,2]=PRCTTOTAL[wh,2]+HldPTtl[1] ! PERCENT USED SO FAR
+				ENDIF
+				LET X3=0 \ IF HLDGTTL>0 LET x3=HLDCTTL*100/HLDGTTL ! to curr prod
+				if x3>=100 ! all sales are made!!
+					let curclass=12
+					hldpttl=100 ! x3
+					goto ecdone ! ignore the rest
+				endif
+				IF MTBL<=1 
+					IF PRCTTOTAL[wh,1]<X3 ! PRODUCT SPANS A COUPLE RANK %s
+						x2=curclass
+						HLDPTTL=PRCTTOTAL[wh,1]
+					  getanotherclass1: ! 
+						X2=x2+1 \ if x2>12 goto gacdone1
+						LET HldPTtl[1]=CLASS[X2]
+						let HLDPTTL=HLDPTTL+HldPTtl[1]
+						IF HLDPTTL<x3 goto getanotherclass1 ! still not enough
+						! if here we have reached it!
+						curclass=x2 ! class
+						LET PRCTTOTAL[wh,1]=HLDPTTL
+					gacdone1: ! 
+					ENDIF
+				ENDIF
+				IF MTBL=2 
+					IF PRCTTOTAL[wh,2]<X3 ! PRODUCT SPANS A COUPLE RANKS %s
+						x2=curclass
+						HLDPTTL=PRCTTOTAL[wh,2]
+					  getanotherclass2: ! 
+						X2=x2+1 \ if x2>12 goto gacdone2
+						LET HldPTtl[1]=CLASS[X2]
+						let HLDPTTL=HLDPTTL+HldPTtl[1]
+						IF HLDPTTL<x3 goto getanotherclass2 ! still not enough
+						! if here we have reached it!
+						curclass=x2 ! class
+						LET PRCTTOTAL[wh,2]=HLDPTTL
+					gacdone2: ! 
+					ENDIF
+				ENDIF
+				IF CURCLASS>12
+					let curclass=12;hldpttl=100
+				endif
+				! as near as I figure, after class 1 we add the percent for class 2 to get ranking
+				! ie: cls1=7.5, cls2=8 - once whse total is >= 15.5% of grand we move to class 3
+				! we would reach 100 % at class 12 - all remaining goes there!
+				! as we are going thru the index in reverse order (highest ext first)
+				ECDONE: ! 
+			ENDIF ! of item count or extensions
+			! move class assign to before calcs are made!
+		Goto L_6550
+	L_6670: Next WH
+Goto L_9000: ! Needs another class calc?  OUTEND
+
+! OUTEND: Rem ===================== EXIT ROUTINE
+! Print 'CS'
+! Close 
+! Chain ""
+! Stop 
+! Stop 
+L_9000: ! DO NEXT OR EXIT
+IF MTBL=0 ! if it's set to 1 they wanted just that one
+	Print #StatChan;"Table completed!"
+	LET MTBL=2
+	GOTO RND2HERE:
+ENDIF ! fall thru if single whse selected
+! at this point, all inventory classified:
+! see if we need to assign count weeks
+call DoCountWeekAssignment()
+OUTEND: Rem EXIT ROUTINE
+Print #StatChan;"Successfully completed!"
+! Close
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end
+
+sub DoCountWeekAssignment()
+try
+	! CURRENTLY SUPPORTS PRODUCT LEVEL
+	! COUNT WEEK ASSIGNMENTS ONLY
+	! 
+	! clear out sort
+	k9$ = " ",k9$
+	do
+		search #sortchan,3,1;k9$,r9,e
+		if e exit do
+		search #sortchan,5,1;k9$,r9,e
+		if e error 11000
+	loop
+	! sort by inventory class 2
+	LET key0$=" ",key0$
+	do
+		SEARCH #3,3,1;key0$,R3,E \ IF E>2 error 11000
+		if e exit do
+		mat read #3,R3,1268;cntWeek;
+		MAT READ #3,R3,1294;PRD1;
+		if cntWeek = -1 goto SkipProd
+		k9$ = " ",k9$
+		k9$[1,2] = PRD1[4] using "##"
+		k9$[3,14] = key0$[1,12]
+		search #sortchan,4,1;k9$,r3,e \ if e error 11000
+	SkipProd: !
+	loop
+	! assign count week information
+	k9$ = " ",k9$
+	let currClass = 0
+	do
+		search #sortchan,3,1;k9$,r3,e \ if e>2 error 11000
+		if e exit do
+		if currClass <> val(k9$[1,2])
+			! figure out how many weeks we have to
+			! count all items so that we can be sure
+			! that everything gets counted the specificied
+			! number of times a year (countFreq)
+			countWeeks = 0 ! number of weeks to count all items
+			currClass = val(k9$[1,2])
+			if currClass>0 and currClass<13
+				if countFreq[currClass-1] > 0
+					countYear = countFreq[currClass-1] ! number of times per year to count
+					countWeeks = INT(52 / countYear)
+					! not evenly divisible, fault on side of more counts
+					! per year
+					if 52 MOD countYear <> 0 countWeeks = countWeeks - 1
+				end if
+			end if
+			currWeek = 1
+		end if
+		if countWeeks = 0
+			cntWeek = 0
+		else
+			cntWeek = currWeek 
+			currWeek = currWeek + 1
+			if currWeek > countWeeks currWeek = 1
+		end if
+		mat write #3,R3,1268;cntWeek;
+	loop
+	! reset control record information
+	! reset which days we will be counting
+	countDays$ = "NNNNNNN"
+	countWeek = 1
+	mat write #1,70,184;countWeek
+	mat write #1,70,186;countDays$;
+else
+	include "src/callsuberr.inc"
+end try
+end sub

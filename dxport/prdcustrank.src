@@ -1,0 +1,278 @@
+! prdcustrank
+!
+! description product / customer sales unit rank
+!
+! loadsave -w -n 100,10 -o prog/dxport/prdcustrank.dl4 src/prdcustrank.src
+!
+! 1.0 10/01/2013
+!
+! get the sales for 1 product ranked by customer sls units
+!
+include "src/copyright.inc" ! dx
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,CreateNetStatus
+!
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,PDate$
+! system declares
+Declare Intrinsic Function FindChannel
+Declare Intrinsic Sub Logic,DateToJulian, programdump, env, FindF
+!
+! program declares
+Declare sub Conv_mths
+! pass in the product code, whse, product rec, um rec, and string
+Try
+!
+  dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+Enter CRCHan[],prod$,whselst[],prodrec,umrec,intco,CALEND,t2data$[]
+
+Dim a1$[30],fle$[20],K$[100],Hprod$[12],X$[20]
+Dim k1$[50],k2$[60],K9$[60],Blank$[100],rstr$[500]
+Dim tmp$[1000],filename1$[200],filename2$[200],rstr$[500]
+Dim filename$[100]
+Dim 1%,PFU1[20],ARMTH,BOYMONTH,x1[9],cnvtu[2]
+Dim 2%,B[24],C3[1],x2[9],SDATE,LPC1[2]
+Dim 4%,X4
+Dim 3%,A[33],A1[7],pfu2[6],s1[12,2],s2[12,2]
+Dim 3%,R[99],x3[9],cnvta
+!
+Blank$=" ",Blank$
+DEF FNR(X)=SGN(X)*(Int(Abs(X)*100+.5)*.01)
+! first time only prodchan sent, after first call - rest of channels already open & set
+Let ProdChan=CRChan[0]
+Let CustChan=CRChan[1]
+let SlsChan=CRChan[2]
+Let SortChan=CRChan[3]
+Let LPRChan=CRChan[4]
+!open files needed
+If CustChan<=0
+	Custchan=Openfile(-1808,Intco) \ if custchan=-1 error 42
+	CRChan[1]=CustChan ! retain for next time
+Endif
+If SlsChan<=0
+	slschan=Openfile(-2016,Intco) \ if slschan=-1 error 42
+	Let CRChan[2]=SlsChan ! retain for next time
+Endif
+If LPRChan<=0
+	lprchan=Openfile(-1376,Intco) \ if lprchan=-1 error 42
+	let CRChan[4]=lprchan
+Endif
+If SortChan<=0 
+sortchan=findchannel()
+tmp$="files/6/sortrank"+Str$(spc(6))
+filename$=tmp$
+filename2$ = "<666> [10:256] ",tmp$,"!"
+   Build #sortchan,filename2$ As "Universal Indexed-Contiguous"
+   Rem key lengths in words
+   r = 20 ! keylen
+   Search #sortchan,0,1;k$,r,e
+   If e  
+    Close #sortchan
+    sortchan = e * -1
+   Else
+    k$=""\r=0\e=0
+    Search #sortchan,0,0;k$,r,e
+    If e
+     Close #sortchan
+     sortchan = e * -1
+    End If
+   End If
+   If e=0
+    Close #sortchan
+    Open #sortchan,filename$
+   End If
+!
+  if sortchan<0 error 11000
+  let CRCHan[3]=sortchan
+Else ! already open - clear it
+	K9$=" ",k9$
+	do
+		search #sortchan,3,1;k9$,R,E
+		if e exit do
+		Search #sortchan,5,1;k9$,R,E
+		if e error 11000
+	loop
+Endif
+  ! got the sort - 
+  Read #1,0,120;ARMTH;
+  Read #1,51,74;BOYMONTH;
+  READ #1,3,172;SDATE; ! SYSTEM DATE
+  LET TMP$=SDATE USING "&&&&&&"  ! yymmdd format                        
+  Call DateToJulian(1,tmp$,tmp$,e) \ if e let tmp$=" ",tmp$
+  LET X3=TMP$[1,5] 
+  IF X3<=0 LET X3=TIM(6) ! USE TODAY
+  LET YAGO3=X3-(365*3)
+  WHSUBT=0 \ if WHSELST[0]<0 LET WHSUBT=1
+  ! get product conversion values
+  Hprod$=Prod$+Blank$
+  mat read #prodchan,prodrec,156;B;
+  mat read #prodchan,prodrec,256;A;
+  mat read #prodchan,prodrec,460;a1;
+  mat read #prodchan,prodrec,512;pfu1;
+  mat read #prodchan,prodrec,554;pfu2;
+  IF UMREC LET RPTUMREC=PFU1[umrec] ! 
+  if rptumrec=0 let rptumrec=pfu1[8] !STK DEFAULT
+  ! finally, sort salescurr
+	K1$=" ",k1$;k1$[1,12]=Prod$+blank$
+	GT12M=0;wcust=-1
+  SlsSort: ! 
+	Search #slschan,3,2;k1$,r[2],e \ if e=2 goto srtdone
+	IF K1$[1,12]<>HProd$[1,12] goto srtdone
+	let scust=k1$[13,18] ! customer
+	LET X2=K1$[19,20] ! currwhse
+	if not(WHSUBT) and X2<>WHSElst[0] GOTO SLSSORT ! DIFF WHSE!
+	if WHSUBT ! the subtotal of multi-warehouses
+		if whselst[x2]=0 goto slssort ! whse not on list
+		if wcust=-1 let wcust=scust ! first time in
+		if wcust<>scust gosub getcustwhsedone ! onto next
+		! it will return with wcust set and c12mos=0
+	endif
+	t12mos=0
+	mat read #slschan,r[2],16;s1;
+	mat read #slschan,r[2],256;s2;
+	! I see no difference between fiscal/calendar
+	! in the specs it says "12mo units sold" and that the field name printed
+	!if not(calend) ! past 12 months
+		for x=1 to 12
+			let t12mos=t12mos+S1[x,0]
+		next x
+	c12mos=c12mos+t12mos ! customer total
+	GT12M=GT12M+T12MOS ! GRAND TOTAL
+	if WHSUBT and wcust=scust goto SlsSort ! try another whse for customer
+	!Else ! fall on through - customer done
+	getcustwhsedone: ! finished with all whses on list for customer
+	! need last sold date - from customer file
+	if wcust<1 let Pcust=k1$[13,18] ! normal not total
+	IF wcust>0 let pcust=wcust
+	Let k2$=" ",k2$
+	K2$[1,6] = pcust using "######" ! K1$[13,18]
+	Search #Custchan,2,1;K2$,R[10],E 
+	If E 
+		let a1$=" ",a1$;A1$="CUSTOMER NOT FOUND"
+		Let c3[0] =0  ! last invoice date
+	Else
+		MAT READ #CUSTCHAN,R[10],30;A1$;
+		Mat Read #Custchan,R[10],200;c3;
+	Endif
+	! try for date from lastprice
+	let C3[0]=0 ! always last price (it's by cust/prod!)
+	let k$=" ",k$
+	for x1=0 to 30
+		let k$[1,6]=k2$
+		let k$[7,10]=X1 using "####"
+		let k$[11,30]=HProd$+blank$
+		let k$[31]="" ! cut it at vendor
+		Search #lprchan,2,1;k$,R[11],E
+		if not(E)
+			mat read #lprchan,r[11],16;lpc1;
+			if lpc1[2] let c3[0]=lpc1[2];x1=100
+		endif
+	next x1
+	! use julian and newest first
+	tmp3=0
+	if c3[0]
+		LET TMP$=C3[0] USING "&&&&&&"  ! yymmdd format                        
+		Call DateToJulian(1,tmp$,tmp$,e) \ if e let tmp$=" ",tmp$
+		LET TMP3=TMP$[1,5] 
+	Endif ! no data=0
+	let x3=999999-tmp3 ! newest first
+	if WHSUBT let t12mos=c12mos ! move in the customers total
+	if not(WHSUBT)
+		IF T12MOS=0 AND TMP3<YAGO3 GOTO SLSSORT ! NO SALES IN 3 YRS - IGNORE!
+	Else
+		IF T12MOS=0 AND TMP3<YAGO3 goto BPSADD ! NO SALES IN 3 YRS - IGNORE!
+	Endif
+	! IF C3[0]=0 LET X3=99999 ! SO IS LAST
+	LET K9$=" ",K9$
+	LET K9$=(9999999999-T12MOS) USING "&&&&&&&&&&&" ! 99TRILLION MAX
+	LET K9$[12]=X3 USING "&&&&&&" ! DATE (2ND - TIEBREAKER)
+	LET K9$[18]=K2$ ! CUSTOMER
+	search #sortchan,4,1;k9$,r[10],E
+	if e>1 error 11000
+	BPSADD: ! 
+	let c12mos=0
+	! note if subtotal (whselst[0]<0) current index is NEXT CUSTOMER - just return
+	if WHSUBT ! totalling prod/cust/whse list - on to next
+		wcust=k1$[13,18] ! done!
+		return ! continue and start customer total again (already next cust in index)
+	Endif
+	GOTO SLSSORT
+
+	SrtDone: ! now get data on 1st 2
+	K9$=" ",k9$;X=0
+	SRLOOP: ! 
+	Search #sortchan,3,1;k9$,R,E
+	IF E GOTO CRSDONE
+	LET X=X+1
+	IF X>2 GOTO CRSDONE ! TOP 2!
+	LET X4=K9$[1,11]
+	let bsqty=9999999999-x4 ! to return to actual qty <0 = >9999999999
+	LET cnvtu[0]=0;cnvtu[1]=rptumrec;cnvtu[2]=1
+	let cnvta=bsqty
+	Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+	let UQty=cnvta
+	! GET CUST NAME / LAST INV DATE
+	Let k2$=" ",k2$
+	K2$[1,6] = K9$[18,23]
+	Search #Custchan,2,1;K2$,R[10],E 
+	If E 
+		let a1$=" ",a1$;A1$="CUSTOMER NOT FOUND"
+		Let c3[0] =0  ! last invoice date
+	Else
+		MAT READ #CUSTCHAN,R[10],30;A1$;
+		Mat Read #Custchan,R[10],200;c3;
+	Endif
+	! try for date from lastprice
+	let C3[0]=0 ! use last price as it's by cust/prod
+	let k$=" ",k$
+	for x1=0 to 30
+		let k$[1,6]=k2$
+		let k$[7,10]=X1 using "####"
+		let k$[11,30]=HProd$+blank$
+		let k$[31]="" ! cut it at vendor
+		Search #lprchan,2,1;k$,R[11],E
+		if not(E)
+			mat read #lprchan,r[11],16;lpc1;
+			if lpc1[2] let c3[0]=lpc1[2];x1=100
+		endif
+	next x1
+	LET X2=C3[0] ! DATE
+	IF X2 LET X$=PDATE$(X2) ELSE LET X$="00/00/0000"
+	x3=0;POTTL=0
+	!if GT12M let X3=FNR(((GT12M-bsqty)/GT12M)*100)
+	if gt12m let x3=FNR((BSQTY*100)/GT12M)
+	IF BSQTY>0 LET POTTL=X3 ! NEGS = 0?
+	!IF bsqty LET POTTL=100-X3 ! ends up reversed?
+	! OK - LOAD 'ER UP
+	CLEAR TMP$
+	LET TMP$[1,10]=K9$[18,23]+BLANK$
+	LET TMP$[11,40]=A1$[1,30]+BLANK$
+	LET	TMP$[41,60]=UQTY USING "----------------#.##" 
+	LET TMP$[61,69]=POTTL USING "-----#.##"
+	LET TMP$[70]=X$
+	LET T2DATA$[X]=TMP$
+	GOTO SRLOOP
+
+	CRSDONE: ! OUT AND CLOSE ANY FILE
+	! NOTE: to save open/close every time - open first time and then just use it again
+	!TRY CLOSE #CUSTCHAN ELSE REM
+	!TRY CLOSE #SLSCHAN ELSE REM
+	!TRY CLOSE #SORTCHAN ELSE REM
+
+else
+ include "src/callmainerrnet_call.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+Sub Conv_mths()
+! if calander instead of fiscal sales
+Try
+
+else
+    include "src/callsuberr.inc"
+end try
+end sub ! Conv_mths
+! 
+!--------------------------------------------------------------------

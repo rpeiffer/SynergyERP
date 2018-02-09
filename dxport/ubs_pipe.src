@@ -1,0 +1,666 @@
+! -- ubs_pipe.lib
+! supporting library for UBS bidirectional pipe routines
+!
+! loadsave -w -n 100,10 -o prog/dxport/ubs_pipe.lib src/ubs_pipe.src
+!
+!
+include "src/copyright.inc"
+include "src/ubs_pipe.inc"
+!
+!
+! List of Subs and functions for Library (details in comments for routines)
+!
+!   F   UBS_OpenPipe      Open a bidirectional pipe
+!   F   UBS_ReadPipe      Read from a pipe
+!   F   UBS_WritePipe     Write to a pipe
+!   F   UBS_ClosePipe     Close a pipe
+!   F   UBS_Expect        Search input from a pipe for a specific string
+!   F   UBS_Send          Send a string to a pipe (pretty much UBS_WritePipe)
+!   F   UBS_ReadPipeBinary Internal routine - all user code should call UBS_ReadPipe
+!   F   UBS_ExpectBinary   Internal routine - all user code should call UBS_Expect
+
+! Declare functions and subs that are not for use outside of
+! this module (don't make them part of ubs_pipe.inc)
+
+Declare external Sub UBS_PipeLastLineShift
+
+
+
+!****************************************************************
+!- UBS_OpenPipe
+!- 
+!- Open channel bidirectional pipe.
+!- On success returns 1 and initializes UBS_Pipe structure
+!- On failure returns 0
+!- 
+!- Optional parameters:
+!-
+!- BinaryMode - if 1, open in binary mode (needed if all line input is not new line
+!-              terminated.  Input is gotten in chunks 1 char at a time in binary
+!-              put is gotten line by line in text mode.
+!-
+!- IgnoreBlanks - if "1", ignore blank lines on read (valid in text mode only)
+!-
+!- IgnoreUnibasic - if "1", try to ignore Unibasic startup messages on read.
+!- NOTE: Can interfere with data you might actually want.  Typically used
+!- when pipe is to a Unibasic program.  (valid in text mode only)
+!-
+!- ReadTimeout - tenths of a second to wait for an individual read
+!- before timing out.
+!-
+!- MaxReadFails - number of "ReadTimeout"s before giving up as the process
+!- might be hung up.
+!-
+!****************************************************************
+External Function UBS_OpenPipe(e$,UBSPipe. as UBS_Pipe, command$,...)
+try
+	dim OpenMode$[100]
+	
+	try enter BinaryMode,... else dim 1%,BinaryMode
+	try enter IgnoreBlanks,... else dim 1%,IgnoreBlanks
+	try enter IgnoreUnibasic,... else dim 1%,IgnoreUnibasic
+	try
+		enter ReadTimeout,...
+	else
+		dim 2%,ReadTimeout
+		ReadTimeout = 30
+	end try
+	try
+		enter MaxReadFails
+	else
+		dim 2%,MaxReadFails
+		MaxReadFails = 5
+	end try
+	if BinaryMode
+		IgnoreBlanks = 0
+		IgnoreUnibasic = 0
+	end if
+	UBSPipe.Chan = 0
+	UBSPipe.Status = 0
+	mychan = findchannel()
+	if BinaryMode
+		OpenMode$ = "(closewait=0,binary=true)"
+	else
+		OpenMode$ = "(closewait=0)"
+	end if
+	try
+		Open #mychan,OpenMode$+command$ As "Bidirectional pipe command"
+	else
+		exit function 0
+	end try
+	UBSPipe.Chan = mychan ! channel we have opened pipe on
+	UBSPipe.Status = 1 ! open
+	UBSPipe.Binary = BinaryMode
+	UBSPipe.IgnoreBlanks = IgnoreBlanks
+	UBSPipe.IgnoreUnibasic = IgnoreUnibasic
+	UBSPipe.ReadTimeout = ReadTimeout
+	UBSPipe.RTBeforeFailure = MaxReadFails
+	UBSPipe.BufferEnd = 0
+	UBSPipe.EBufferEnd = 0
+	UBSPipe.LastFullLine = -1
+	UBSPipe.LastFullLineCompleted = 1
+else
+   include "src/callsuberr.inc"
+end try
+end function 1
+
+!****************************************************************
+!- UBS_ClosePipe
+!- 
+!- Close and cleanup
+!- On success returns 1 and resets UBS_Pipe structure
+!- On failure returns 0
+!- 
+!- Optional parameters:
+!-
+!- Flush - if pipe open, try to flush the pipe
+!-
+!-
+!****************************************************************
+External Function UBS_ClosePipe(e$,UBSPipe. as UBS_Pipe,...)
+try
+	try enter Flush else dim %1,Flush
+	
+	if UBSPipe.Status ! if open
+		! flush, but I really don't care if successful
+		if Flush i = UBS_FlushPipe(e$,UBSPipe.)
+		if UBSPipe.Status
+			try close #UBSPipe.Chan else exit function 0 ! error closing
+		end if
+	end if
+	UBSPipe.Status = 0
+else
+   include "src/callsuberr.inc"
+end try
+end function 1
+
+!****************************************************************
+!- UBS_FlushPipe
+!- 
+!- Usually done on close.  Attempt to read all the input left before
+!- closing out the pipe.  This is done to get the last of the output
+!- before closing.  It will still need to time out as the program
+!- may be hung up or on an input statement we don't expect.
+!-
+!- On success returns 1
+!- On failure, returns 0.  Check UBSPipe.RWStatus for more details
+!- (although failure would usually be a timeout).
+!- 
+!- Optional parameters:
+!-
+!- MaxRetries - number of read timeouts hit to stop processing.
+!-              Default is 3
+!-
+!****************************************************************
+External Function UBS_FlushPipe(e$,UBSPipe. as UBS_Pipe,...)
+	try
+		enter MaxRetries
+	else
+		dim %1,MaxRetries
+		MaxRetries = 3
+	end try
+	
+	dim %1,retries
+	
+	if not(UBSPipe.Status) exit function 0 ! not open
+	do
+		if not(UBS_ReadPipe(e$,UBSPipe.)) ! got nothing
+			if UBSPipe.RWError = 2 exit do ! pipe closed
+			retries = retries + 1
+			if retries > MaxRetries exit function 0 ! failed to flush
+			
+		end if
+	loop
+End Function 1
+
+
+!****************************************************************
+!- UBS_ReadPipe
+!- 
+!- Read from an opened pipe - sets RWError
+!- On success returns 1 and and ".buffer$" contains data
+!- On failure, ".buffer$" will be empty.  Will occur if maximum number
+!- of read attempts all time out or if the pipe is deemed to be closed.
+!- If pipe is deemed to be closed will also attempt to physically close
+!- the channel.  If this pipe is opened in binary mode, it will call
+!- UBS_ReadPipeBinary
+!- 
+!- Parameters effecting read set by UBS_OpenPipe
+!-
+!- IgnoreBlanks - if set, empty lines (line feed only) are ignored and
+!- will try to read the next line (text only).
+!-
+!- IgnoreUnibasic - if set, attempt to ignore Unibasic startup
+!- messages by reading the next line.  NOTE: This can intefere with
+!- processing of data you might want and need.  It need only be used
+!- when trying to execute an unibasic program (text only).
+!-
+!****************************************************************
+External Function UBS_ReadPipe(e$,UBSPipe. as UBS_Pipe)
+try
+	dim 1%,PipeClosed,IgnoreLine,maxLast
+	dim 2%,ConsecutiveTimeouts,ConsecutiveNoReads
+	
+	! Binary reads are quite different, execute a different read
+	if UBSPipe.Binary exit function UBS_ReadPipeBinary(e$,UBSPipe.)
+
+	UBSPipe.buffer$ = "" ! always clear out buffer
+	UBSPipe.RWError = 0 ! no error
+
+	if UBSPipe.Status = 0 ! Pipe not open
+		UBSPipe.RWError = 99 ! general failure
+		exit function 0
+	end if
+	
+	maxLast = ubound(UBSPipe.LastLines$[],1)
+	PipeClosed = 0
+	ConsecutiveTimeouts = 0
+	ConsecutiveNoReads = 0
+	! Here's how it works
+	! Read will terminate as the result of 1 of the following:
+	! 1. get good read before timeout (buffer <> "")
+	! 2. hit timeout (buffer will be null) try again if not max tries
+	! 3. did not hit timeout and buffer is still "", pipe is closed
+	do
+		TimeoutHit = 0
+		try
+			Read #UBSPipe.Chan,-1,-1,UBSPipe.ReadTimeout;UBSPipe.Buffer$
+		else
+			TimeoutHit = spc(8)
+			if TimeoutHit <> 123 error TimeoutHit
+		end try
+		if UBSPipe.Buffer$ <> ""
+			! good result (maybe)
+			ignoringLine = 0
+			if UBSPipe.IgnoreBlanks and UBSPipe.Buffer$ = "\15\" ignoringLine = 1
+			if UBSPipe.IgnoreUnibasic
+				if UBSPipe.Buffer$[1,15] = "UniBasic Level " ignoringLine = 1
+				if UBSPipe.Buffer$[1,36] = "All Rights Reserved.  Copyright (C) " ignoringLine = 1
+				if UBSPipe.Buffer$[1,50] = "Dynamic Concepts Inc.  Aliso Viejo, California USA" ignoringLine = 1
+				if UBSPipe.Buffer$[1,13] = "License #:   " ignoringLine = 1
+				if UBSPipe.Buffer$[1,13] = "Platform:    " ignoringLine = 1
+				if UBSPipe.Buffer$[1,13] = "Licensed to: " ignoringLine = 1
+			end if
+			if not(IgnoringLine) exit do ! not a line we are ignoring
+			ConsecutiveTimeouts = 0 ! reset count as we got one
+			ConsecutiveNoReads = 0 ! reset count as we got one
+		else
+			! if we get here, either it was a timeout
+			! OR the pipe has possibly closed
+			If not(TimeoutHit)
+				ConsecutiveNoReads = ConsecutiveNoReads + 1
+				if ConsecutiveNoReads >= UBSPipe.RTBeforeFailure
+					PipeClosed = 1
+				else
+					signal 3,UBSPipe.ReadTimeout
+				end if
+			else
+				ConsecutiveTimeouts = ConsecutiveTimeouts + 1
+			end if
+		end if
+	loop until ConsecutiveTimeouts >= UBSPipe.RTBeforeFailure or PipeClosed
+	if UBSPipe.Buffer$ <> ""
+		UBSPipe.LastFullLine = UBSPipe.LastFullLine + 1
+		if UBSPipe.LastFullLine > maxLast ! shift
+			call UBS_PipeLastLineShift(e$,UBSPipe.)
+			UBSPipe.LastFullLine = maxLast
+		end if
+		! store if we actually got something more than just
+		! a line terminator
+		if len(UBSPipe.Buffer$) > 1 ! not an empty line
+			UBSPipe.LastLines$[UBSPipe.LastFullLine] = UBSPipe.Buffer$[1,len(UBSPipe.Buffer$) - 1]
+		end if
+		exit function 1 ! got data
+	end if
+	if PipeClosed
+		UBSPipe.RWError = 2
+		try close #UBSPipe.Chan else rem
+		UBSPipe.Status = 0 ! show pipe as now closed
+	else ! read timeout - might be hung up, but don't close it
+		UBSPipe.RWError = 1
+	end if
+else
+   include "src/callsuberr.inc"
+end try
+End Function 0
+
+
+!****************************************************************
+!- UBS_ReadPipeBinary
+!- 
+!- Read from an opened pipe - sets RWError
+!- postive = buffer contains return value bytes of data, but we need to 
+!-           to check RWError as we may have hit a timeout or the pipe may be closed
+!- 0 = no data contained in buffer, need to check RWError as to why, maybe
+!-     timeout, maybe pipe closed
+!- 
+!- NOTE: This function need not be called directly, but through
+!-       UBS_ReadPipe which will determine the mode of the pipe
+!-       and thus what method to use.
+!-
+!****************************************************************
+External Function UBS_ReadPipeBinary(e$,UBSPipe. as UBS_Pipe)
+try
+	dim 1%,PipeClosed,maxLast
+	dim 2%,ConsecutiveTimeouts, ConsecutiveNoReads
+	dim InChar$[1]
+	
+	UBSPipe.buffer$ = "" ! always clear out buffer
+	UBSPipe.BufferEnd = 0
+	UBSPipe.RWError = 0 ! no error
+
+	if not(UBSPipe.Binary)
+		UBSPipe.RWError = 99
+		exit function 0
+	end if
+
+	if UBSPipe.Status = 0 ! Pipe not open
+		UBSPipe.RWError = 99 ! general failure
+		exit function 0
+	end if
+
+	maxLast = ubound(UBSPipe.LastLines$[], 1)
+	PipeClosed = 0
+	ConsecutiveTimeouts = 0
+	ConsecutiveNoReads = 0
+	! Here's how it works
+	! Read will terminate as the result of 1 of the following:
+	! 1. get good read before timeout (inchar$ <> "")
+	! 2. hit timeout (inchar will be null) try again if not max tries
+	! 3. didn't hit timeout, inchar is null, pipe is closed
+	do
+		TimeoutHit = 0
+		try
+			InChar$ = ""
+			INPUT #UBSPipe.Chan; TIM UBSPipe.ReadTimeout; LEN 1; InChar$ 
+		else
+			TimeoutHit = spc(8)
+			if TimeoutHit <> 123 error TimeoutHit
+ 		end try
+		if InChar$ <> ""
+			! good result - add to buffer
+			UBSPipe.BufferEnd = UBSPipe.BufferEnd + 1
+			UBSPipe.Buffer$[UBSPipe.BufferEnd] = InChar$
+			! add this character to last line buffers
+			! if current line is completed, need to start
+			! a new line
+			if UBSPipe.LastFullLineCompleted
+				UBSPipe.LastFullLine = UBSPipe.LastFullLine + 1
+				UBSPipe.LastFullLineCompleted = 0
+				if UBSPipe.LastFullLine > maxLast ! need to shift lines
+					call UBS_PipeLastLineShift(e$,UBSPipe.)
+					UBSPipe.LastFullLine = maxLast
+				end if
+			end if
+			! add character, but only if it's not a line terminator
+			! if end of line this line is completed
+			if inChar$ = "\12\"
+				UBSPipe.LastFullLineCompleted = 1
+			else
+				UBSPipe.LastLines$[UBSPipe.LastFullLine] = UBSPipe.LastLines$[UBSPipe.LastFullLine]+inChar$
+			end if
+			if UBSPipe.BufferEnd = fmtof(UBSPipe.Buffer$) exit function UBSPipe.BufferEnd ! buffer full
+			ConsecutiveTimeouts = 0 ! reset count as we got one
+			ConsecutiveNoReads = 0
+		else
+			! if we get here, either it was a timeout
+			! OR the pipe has possibly closed
+			If not(TimeoutHit)
+				ConsecutiveNoReads = ConsecutiveNoReads + 1
+				if ConsecutiveNoReads >= UBSPipe.RTBeforeFailure
+					PipeClosed = 1
+				else
+					signal 3,UBSPipe.ReadTimeout
+				end if
+			else
+				ConsecutiveTimeouts = ConsecutiveTimeouts + 1
+			end if
+		end if
+	loop until ConsecutiveTimeouts >= UBSPipe.RTBeforeFailure or PipeClosed
+	! if we get here, buffer did not get fully filled, why?
+	if PipeClosed
+		UBSPipe.RWError = 2
+		try close #UBSPipe.Chan else rem
+		UBSPipe.Status = 0 ! show pipe as now closed
+	else ! read timeout - might be hung up or waiting for input, don't close it
+		UBSPipe.RWError = 1
+	end if
+else
+   include "src/callsuberr.inc"
+end try
+end function UBSPipe.BufferEnd ! index of last byte read in
+
+!* shift last lines buffer for pipe
+External Sub UBS_PipeLastLineShift(e$,UBSPipe. as UBS_pipe)
+try
+	dim %1,i,maxLast
+	dim %3
+	
+	maxLast = ubound(UBSPipe.LastLines$[],1)
+	for i = 0 to maxLast - 1
+		UBSPipe.LastLines$[i] = UBSPipe.LastLines$[i+1]
+	next i
+	UBSPipe.LastLines$[maxLast] = "" ! clear out last line as we are adding it
+else
+   include "src/callsuberr.inc"
+end try
+end sub
+
+
+!****************************************************************
+!- UBS_WritePipe
+!- 
+!- Write from an opened pipe - sets RWError
+!- On success returns 1 and passed string written out
+!- On failure, returns 0
+!- 
+!- Optional parameters:
+!-
+!-
+!****************************************************************
+External Function UBS_WritePipe(e$,UBSPipe. as UBS_Pipe,outString$)
+try
+	UBSPipe.RWError = 99 ! default general error
+	if UBSPipe.Status = 0 ! Pipe not open
+		exit function 0
+	end if
+
+	print #UBSPipe.Chan;outString$
+	UBSPipe.RWError = 0 ! good write
+else
+   include "src/callsuberr.inc"
+end try
+end function 1 ! default good write.  bad write already exited status 0
+
+!****************************************************************
+!- UBS_Expect
+!- 
+!- Read from an opened pipe until we find an occurrence of the
+!- string.  If found, quit reading and return.
+!- *** NOTE: For Text Pipes: String MUST be found entirely on one input line and
+!-           next call to "UBS_Expect" will start search with the NEXT
+!-           line read in (not continue on from where this call
+!-           left off on the current line).
+!-
+!- On success returns 1, full line that matched will be in UBSPipe.Buffer$
+!- On failure, returns 0.  Check UBSPipe.RWStatus for more details.  Failure
+!- will either be a timeout or pipe closed
+!- 
+!- Optional parameters:
+!-
+!- IgnoreCase - ignore case when doing comparisons.
+!-
+!****************************************************************
+External Function UBS_Expect(e$,UBSPipe. as UBS_Pipe,Expect$,...)
+try
+	try enter IgnoreCase else dim 1%,IgnoreCase
+	dim compareStr$[fmtof(UBSPipe.Buffer$)]
+	dim compareBuffer$[fmtof(UBSPipe.Buffer$)]
+	dim %1,i
+	dim %3
+
+	! Expects for binary pipes function differently
+	exit function UBS_ExpectBinary(e$,UBSPipe.,Expect$,IgnoreCase)
+	compareStr$ = Expect$
+	if IgnoreCase compareStr$ = ucase$(Expect$)
+	do
+		if UBS_ReadPipe(e$,UBSPipe.)
+			compareBuffer$ = UBSPipe.Buffer$
+			if IgnoreCase compareBuffer$ = ucase$(UBSPipe.Buffer$)
+			! search for string
+			search compareBuffer$,compareStr$,i
+			if i exit function 1
+		else
+			exit do ! didn't find it and we can't read anymore
+		end if
+	loop
+else
+   include "src/callsuberr.inc"
+end try
+End Function 0 ! default no find as the find has been taken care of
+
+!****************************************************************
+!- UBS_ExpectBinary
+!- 
+!- Read from last "unprocessed" expect buffer and then opened pipe until
+!- we find an occurrence of the string.  If found, quit reading and return.
+!-
+!- On success returns 1
+!- On failure, returns 0.  Check UBSPipe.RWStatus for more details.  Failure
+!- will either be a timeout or pipe closed
+!-
+!- In success or failure, unreviewed buffer or buffer that may be part of a match
+!- on the next Expect call will be placed in the pipes "ExpectBuffer$" for next
+!- call
+!- 
+!- Optional parameters:
+!-
+!- IgnoreCase - ignore case when doing comparisons.
+!-
+!- NOTE - you need not call this function directly.  UBS_Expect will call if pipe
+!- is a binary pipe.
+!-
+!****************************************************************
+External Function UBS_ExpectBinary(e$,UBSPipe. as UBS_Pipe,Expect$,...)
+try
+	try enter IgnoreCase else dim 1%,IgnoreCase
+	dim compareStr$[fmtof(UBSPipe.Buffer$)]
+	dim compareBuffer$[fmtof(UBSPipe.Buffer$)+fmtof(UBSPipe.ExpectBuffer$)]
+	dim %1,begIdx,endIdx,compareMax
+	dim %3
+
+	! Expects for binary pipes function differently
+	if not(UBSPipe.Binary) exit function 1
+	
+	compareStr$ = Expect$
+	if IgnoreCase compareStr$ = ucase$(Expect$)
+	
+	! see if there is something left over from last read that we can
+	! match on
+	if UBSPipe.EBufferEnd ! yes
+		compareBuffer$ = UBSPipe.ExpectBuffer$[1,UBSPipe.EBufferEnd]
+		if IgnoreCase compareBuffer$ = ucase$(compareBuffer$)
+		compareMax = UBSPipe.EBufferEnd
+		search compareBuffer$[1,compareMax],compareStr$,begIdx
+		if begIdx ! found an instance
+			! move everything after the found occurrence
+			! to the expect buffer for next search
+			begIdx = begIdx + len(compareStr$)
+			if begIdx > compareMax ! found at end of string
+				UBSPipe.EBufferEnd = 0 ! buffer completely exhausted
+			else
+				UBSPipe.ExpectBuffer$ = UBSPipe.ExpectBuffer$[begIdx,CompareMax]
+				UBSPipe.EBufferEnd = compareMax - begIdx + 1
+			end if
+			UBSPipe.RWError = 0 ! didn't even read - no error
+			exit function 1 ! found it
+		else ! didn't find in Expect Buffer
+			! need to save the very end of the expect buffer as it may
+			! be the beginning of a match which gets completed by
+			! next read.  to be safe, save the entire length of
+			! the string we are searching for less 1 (as if string we are
+			! searching for is contained in it's entirety at the end we
+			! would have had a match)
+			begIdx = compareMax - len(compareStr$) + 1
+			if begIdx < 1 let begIdx = 1
+			UBSPipe.ExpectBuffer$ = UBSPipe.ExpectBuffer$[begIdx,compareMax]
+			UBSPipe.EBufferEnd = compareMax - begIdx + 1
+		end if
+	end if ! if there was an existing buffer to search
+	!
+	! if we get here, we didn't find the string in the existing buffer and that
+	! buffer has been adjusted if it existed.  Time to get some new data
+	!
+	do
+		if not(UBS_ReadPipe(e$,UBSPipe.)) exit do ! nothing more to read
+		! got something
+		if UBSPipe.EBufferEnd
+			compareMax = UBSPipe.EBufferEnd + UBSPipe.BufferEnd
+			compareBuffer$ = UBSPipe.ExpectBuffer$[1,UBSPipe.EBufferEnd] + UBSPipe.Buffer$[1,UBSPipe.BufferEnd]
+		else
+			compareMax = UBSPipe.BufferEnd
+			compareBuffer$ = UBSPipe.Buffer$[1,UBSPipe.BufferEnd]
+		end if
+		if IgnoreCase compareBuffer$[1,compareMax] = ucase$(compareBuffer$)
+		! search for string
+		search compareBuffer$[1,compareMax],compareStr$,begIdx
+		! restore case of compare before for possible storage in
+		! ExpectBuffer$
+		if IngoreCase
+			if UBSPipe.EBufferEnd
+				compareBuffer$ = UBSPipe.ExpectBuffer$[1,UBSPipe.EBufferEnd] + UBSPipe.Buffer$[1,UBSPipe.BufferEnd]
+			else
+				compareBuffer$ = UBSPipe.Buffer$[1,UBSPipe.BufferEnd]
+			end if
+		end if
+		if begIdx ! found something
+			! move everything after the found occurrence
+			! to the expect buffer for next search
+			begIdx = begIdx + len(compareStr$)
+			if begIdx > compareMax ! found at end of string
+				UBSPipe.EBufferEnd = 0 ! nothing to save
+			else
+				UBSPipe.ExpectBuffer$ = compareBuffer$[begIdx,compareMax]
+				UBSPipe.EBufferEnd = compareMax - begIdx + 1
+			end if
+			exit function 1 ! found it
+		else ! didn't find it
+			! if the pipe closed out, no more to do
+			if UBSPipe.RWError = 2 exit do
+			! need to save the very end of the buffer as it may
+			! be the beginning of a match which gets completed by
+			! next read.  to be safe, save of the entire length of
+			! the string we are searching for less 1 (as if string we are
+			! searching for is contained in it's entirety at the end we
+			! would have had a match
+			begIdx = compareMax - len(compareStr$) + 1
+			if begIdx < 1 let begIdx = 1
+			UBSPipe.ExpectBuffer$ = compareBuffer$[begIdx,compareMax]
+			UBSPipe.EBufferEnd = compareMax - begIdx + 1
+		end if
+	loop
+else
+   include "src/callsuberr.inc"
+end try
+End Function 0 ! default no find as if found, it has already returned
+
+
+!****************************************************************
+!- UBS_Send
+!- 
+!- Send string to open pipe.  Really the same as UBS_WritePipe, but
+!- done so we can do "EXPECT", "SEND", "EXPECT",....
+!-
+!- On success returns 1
+!- On failure, returns 0.  Check UBSPipe.RWStatus for more details.
+!- 
+!- Optional parameters:
+!-
+!****************************************************************
+External Function UBS_Send(e$,UBSPipe. as UBS_Pipe,outString$)
+End Function UBS_WritePipe(e$,UBSPipe., outString$)
+
+
+!****************************************************************
+!- Process_Expect_Send
+!- 
+!- Process an expect send file
+!-
+!- On success returns 1
+!- On failure, returns 0.
+!- 
+!- Optional parameters:
+!-
+!****************************************************************
+External Function Process_Expect_Send(e$,scriptName$)
+try
+	try enter IgnoreCase else dim 1%,IgnoreCase
+	dim UBSPipe. as UBS_Pipe
+	dim 1%,script,gotProgram,retVal
+	dim scriptBuffer$[512]
+	dim %3
+	
+	call findf(scriptName$,estatus)
+	if not(estatus)
+		e$="Script file not found!"
+		exit function 0
+	end if
+	script=findchannel()
+	try
+		open #script,scriptName$ as "Text"
+	else
+		e$="Error opening script file - "+str$(spc(8))
+		exit function 0
+	end try
+	! Process actual script file
+	retVal = 0
+	do
+		read #script;scriptBuffer$
+		if scriptBuffer$ = "" exit do
+		! print scriptBuffer$;
+		! not completed yet!
+	loop
+else
+   include "src/callsuberr.inc"
+end try
+End Function retVal

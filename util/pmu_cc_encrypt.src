@@ -1,0 +1,298 @@
+! pmu_cc_encrypt - encrypt credit card files (and those files info written into)
+!
+! loadsave -w -n 100,10 -o prog/util/pmu_cc_encrypt.dl4 src/pmu_cc_encrypt.src
+!
+! PMUPGRADER ROUTINE
+
+external lib "ubsfunc.dl4"
+declare intrinsic sub programdump,datetojulian
+Declare Intrinsic Sub InpBuf,String,Time
+Declare Intrinsic Function findchannel
+Declare Intrinsic Sub env,findf
+! Option Default Dialect IRIS1
+include "src/utilcopyright.inc"
+dim e$[300],i$[200]
+
+ENTER COID,GROUPID,DBAK$,CH_LOG,COREDUMP,E,...
+! if "fromUpgrade" don't send print statements with
+! control strings as this is being executed via
+! a job not attached to terminal.  Be sure to send
+! all output to ch_log as this will be reviewed and
+! sent back to software repository
+try
+	enter fromUpgrade
+else
+	dim 1%,fromUpgrade
+end try
+try ! main try
+LET E=99
+!
+include "src/dim.pmupgrade.i"
+
+! fields for conversion of ccctype
+dim 1%,cctype
+dim 2%,custno,ccexp
+dim ccnum$[20],ccname$[30],ccaddr$[20],cczip$[10]
+dim ccscode$[4],cccity$[15],ccstate$[2]
+
+! fields for conversion of sordcash and sordcashh
+dim 1%,bnk[1]
+dim 2%,csh0[4],ch_ccn[9]
+dim 3%,csh1[2],csinvno
+dim csh0$[156],ch_cca$[120],cc_tt$[4]
+dim transid2$[30],authcode1$[10],authcode2$[10]
+
+dim k2$[100]
+dim 3%,r2,r3
+dim key_file$[100],data_file$[100]
+DIM tmp$[200],p61$[256]
+
+DIM 3%
+
+try close #1 else rem
+Open #1,"cntrl/cntrl"+Str$(COID)
+Mat Read #1,61,0;p61$;
+Let COL=0;Row=23
+
+gosub VerifyEncryptionKey:
+if not(canUpgrade) goto OUTEND: ! fatal error
+gosub UpgradeCCCType:
+doingHistory = 0 \ gosub UpgradeSordcash:
+doingHistory = 1 \ gosub UpgradeSordcash:
+
+goto do_exit:
+
+!************************************************************************
+! S U B R O U T I N E   A N D   E X I T   C O D E
+!************************************************************************
+
+VerifyEncryptionKey:
+	canUpgrade = 1
+	call env(1,"DL4KEYFILE",key_file$)
+	if key_file$ = ""
+		LOGMSG$ = "DL4KEYFILE variable not defined - exiting!"
+		GOSUB DO_WRITE_LOG:
+		canUpgrade = 0
+		return
+	end if
+	call findf(key_file$,found)
+	if not(found)
+		gosub CreateKeyFile
+	end if
+Return
+
+CreateKeyFile: !
+	SYSTEM 100,"","",""
+	SYSTEM 100,"LegacyCreditCard","!ubs88999988sbu!","AES-256"
+	I$ = "UBS Private Keys"
+	SYSTEM 101,I$
+	BUILD #2,key_file$+"!" AS "Text"
+	PRINT #2;"UBS Private Keys"
+	PRINT #2;I$
+	CLOSE #2
+Return
+
+UpgradeCCCType: !
+	data_file$ = coid using "3/ccctype#"
+
+	ropen #2,data_file$
+	GET #2,-495;X
+	close #2
+	If X
+		LOGMSG$ = "CCCTYPE file already encrypted - skipping"
+		GOSUB DO_WRITE_LOG:
+		return
+	end if
+	Let FCode$="CCCTYPE"
+	LET OWRITE$="ne 'cc_encrypt'"
+	LET MODE=1 ! "move file as we are rebuilding
+	GOSUB DO_BACKUP: ! "ALWAYS BACKUP EXISTING!!!
+	ROPEN #2,DFILE$
+	! Create an indexed file with a encrypted 26 character index 1 and
+	Build #3,"<n=''LegacyCreditCard''>(key=e26)[1:128] "+data_file$+"!"
+	Close #3
+	system "chmod g+rw files/"+data_file$
+	system "chmod g+rw files/"+data_file$+".idx"
+	open #3,data_file$
+	gosub ConvertFileCCC:
+	close #2,#3
+return
+
+ConvertFileCCC: !
+	LET LOGMSG$="ENCRYPT records for CCCTYPE file."
+	GOSUB DO_WRITE_LOG:
+	LET CH=2 \ GOSUB GET_ACTIVE_RECS:
+	LET LOGMSG$="Estimated number of records to process: "+STR$(ACTRECS)
+	GOSUB DO_WRITE_LOG:
+	k2$ = " ",k2$
+	do
+		search #2,3,1;k2$,r2,e
+		if e>2 error 11000
+		if e exit do
+		LET REC=REC+1
+		IF NOT(FRA(REC/100)) GOSUB DISPLAY_PROGRESS: ! to screen or log
+		gosub ReadCCC:
+		LET E=2;R3=0
+		SEARCH #3,1,0;k2$,R3,E \ IF E error 11000
+		gosub WriteCCC:
+		SEARCH #3,4,1;k2$,r3,e \ if e error 11000
+	loop
+return
+
+ReadCCC: !
+	mat read #2,r2,0;custno
+	mat read #2,r2,4;cctype
+	mat read #2,r2,6;ccexp
+	mat read #2,r2,10;ccnum$
+	mat read #2,r2,30;ccname$
+	mat read #2,r2,60;ccaddr$
+	mat read #2,r2,80;cczip$
+	mat read #2,r2,90;ccscode$
+	mat read #2,r2,94;cccity$
+	mat read #2,r2,110;ccstate$
+return
+
+WriteCCC: !
+	mat write #3,r3,0;custno
+	mat write #3,r3,4;cctype
+	mat write #3,r3,6;ccexp
+	mat write #3,r3,10;ccnum$
+	mat write #3,r3,30;ccname$
+	mat write #3,r3,60;ccaddr$
+	mat write #3,r3,80;cczip$
+	mat write #3,r3,90;ccscode$
+	mat write #3,r3,94;cccity$
+	mat write #3,r3,110;ccstate$
+return
+
+UpgradeSordcash: !
+	if doingHistory
+		data_file$ = coid using "4/sordcashh#"
+		Fcode$ = "SORDCASHH"
+	else
+		data_file$ = coid using "3/sordcash#"
+		Fcode$ = "SORDCASH"
+	end if
+	ropen #2,data_file$
+	GET #2,-495;X
+	close #2
+	If X
+		LOGMSG$ = fcode$+" file already encrypted - skipping"
+		GOSUB DO_WRITE_LOG:
+		return
+	end if
+	LET OWRITE$="ne 'cc_encrypt'"
+	LET MODE=1 ! "move file as we are rebuilding
+	GOSUB DO_BACKUP: ! "ALWAYS BACKUP EXISTING!!!
+	ROPEN #2,DFILE$
+	! Create an indexed file with a encrypted 6 character index 1 and
+	if doingHistory
+		tmp$ = "e10"
+	else
+		tmp$ = "e6"
+	end if
+	Build #3,"<n=''LegacyCreditCard''>(key="+tmp$+")[1:250] "+data_file$+"!"
+	Close #3
+	system "chmod g+rw files/"+data_file$
+	system "chmod g+rw files/"+data_file$+".idx"
+	open #3,data_file$
+	gosub ConvertFileSordcash:
+	close #2,#3
+return
+
+ConvertFileSordcash: !
+	LET LOGMSG$="ENCRYPT records for "+fcode$+" file."
+	GOSUB DO_WRITE_LOG:
+	LET CH=2 \ GOSUB GET_ACTIVE_RECS:
+	LET LOGMSG$="Estimated number of records to process: "+STR$(ACTRECS)
+	GOSUB DO_WRITE_LOG:
+	k2$ = " ",k2$
+	do
+		search #2,3,1;k2$,r2,e
+		if e>2 error 11000
+		if e exit do
+		LET REC=REC+1
+		IF NOT(FRA(REC/100)) GOSUB DISPLAY_PROGRESS: ! to screen or log
+		gosub ReadSordcash:
+		LET E=2;R3=0
+		SEARCH #3,1,0;k2$,R3,E \ IF E error 11000
+		gosub WriteSordcash:
+		SEARCH #3,4,1;k2$,r3,e \ if e error 11000
+	loop
+return
+
+ReadSordcash: !
+	mat read #2,r2,0;csh0
+	mat read #2,r2,20;csh1
+	mat read #2,r2,38;csh0$
+	mat read #2,r2,194;bnk
+	mat read #2,r2,198;ch_ccn
+	mat read #2,r2,238;ch_cca$
+	mat read #2,r2,358;csinvno
+	mat read #2,r2,364;cc_tt$
+	mat read #2,r2,384;transid2$
+	mat read #2,r2,414;authcode1$
+	mat read #2,r2,424;authcode2$
+return
+
+
+WriteSordcash: !
+	mat write #3,r3,0;csh0
+	mat write #3,r3,20;csh1
+	mat write #3,r3,38;csh0$
+	mat write #3,r3,194;bnk
+	mat write #3,r3,198;ch_ccn
+	mat write #3,r3,238;ch_cca$
+	mat write #3,r3,358;csinvno
+	mat write #3,r3,364;cc_tt$
+	mat write #3,r3,384;transid2$
+	mat write #3,r3,414;authcode1$
+	mat write #3,r3,424;authcode2$;
+return
+
+
+
+DO_EXIT: REM---------------- Exit the upgrade -----------------------------------
+LET E=0
+GOTO OUTEND:
+
+DO_BACKUP: REM"Backup the given file
+CALL "sysfbackup",FCODE$,COID,GROUPID,ORIG$,DBAK$,OWRITE$,MODE,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+IF E GOTO OUTEND:
+RETURN 
+
+DO_BUILD: REM"Build the given file
+CALL "Sysfbuild",FCODE$,COID,GROUPID,PTH$,OWRITE$,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+IF E GOTO OUTEND:
+RETURN 
+
+include "src/rtn.pmupgrade.i"
+
+
+OUTEND: REM"Final exit (be sure to set e=0 if successful before branching here)
+try CLOSE #1 Else Rem
+try Close #2 Else Rem
+try Close #3 Else Rem
+try close #4 Else Rem
+try close #5 Else Rem
+try close #6 Else Rem
+try close #7 Else Rem
+END 
+else ! main try
+	e = spc(8)
+	If Spc(8) <> 10000
+		dim msc4$[100] \ msc4$=msc$(4)
+		if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+		call env(2,"PROGNAME",msc4$)
+		if spc(8) = 11000
+			call utilsearcherr(e$, e, Spc(10))
+		else
+			Call utilsuberr(e$,Spc(8),Spc(10),Msc$(2))
+		end if
+		call programdump()
+	End If
+	Call utilmainerr(e$,Spc(8))
+	If ch_log <> -1
+		Print #ch_log;e$
+	End If
+end try

@@ -1,0 +1,1750 @@
+! --- rfpick
+!
+! From whmenu->ACTION$=RFPICK
+!
+! loadsave -w -n 100,10 -o prog/dxport/rfpick.dl4 src/rfpick.src
+!
+!include copyright, common libs, common intrinsics
+Include "src/copyright.inc"
+!
+!
+! *declare additional dl4 intrinsic subs & functions
+!
+! *declare additional external libs & subs & functions
+
+Declare Intrinsic Sub FormatDate
+
+External Lib "libgeneral.lib"
+Declare External Sub getsession,AddToStr,SetOutPut,CreateNetStatus
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,buildsort,formatdate2$
+
+External Lib "ubsprconv.dl4"
+Declare External Function Xunit$
+
+
+include "src/inc/filerfpickq.inc"
+include "src/inc/filepickedby.inc"
+include "src/inc/filewhinfo.inc"
+include "src/inc/filezonefle.inc"
+
+! Internal Subroutines / Functions
+Declare sub OpenFilesReadControl,WarehouseTotals,LoadProdFromNonStock
+Declare Sub WarehousePickerBreakdown,GetWarehousePickerQueue
+Declare Sub WarehouseTruckAssign,SortQueueByZone,WarehouseTruckZoneBreakdown
+Declare Sub GetWarehousesWithPicks,GetWarehouseZoneWithPicks,GetWarehouseTrucksWithPicks
+Declare Sub ClearEstimatedSort,GetPickedByDroplist,GetPickedByRecord,WarehouseShortPicks
+Declare Sub UnassignPicks,WarehouseTruckSummary,WarehouseTruckPickerSummary,SortQueueByTruckPicker
+Declare Sub DeleteOrderFromQueue
+Declare Function ReadOrderLine,LoadProduct,UnitConversion,GetShipDate
+Declare Function AssignPick,EstimatePallets,StatusDescription$,ReadOrderHeader
+
+
+!*********************
+!* M A I N   L O G I C
+!*********************
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+Try 
+
+! ERP stuff
+Dim action$[30],options$[30],userid$[8],b$[200]
+Dim action1$[30],action2$[30],action3$[30] ! actions for programs
+Dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1000] ! .net delimiters
+Dim WebStr$[1000],Message$[200],tmp$[100]
+b$ = " ",b$
+
+! Local variables
+dim rfpq. as rfpickq
+dim rfpq2. as rfpickq
+dim pb. as pickedby
+dim wh. as whinfo
+dim zone. as zonefle
+
+Dim 1%,sortType,PFU1[20],CNVTU[2],EUN[2],UN[2],L3[3],reverseStop
+Dim 2%,L6[5],cubesPerPallet,poundsPerPallet,L4[3],H0[12]
+Dim 3%,accums[10,10],PFU2[6],CNVTA,A[33],AMOUNT,UNF[6],OREF[5]
+Dim k_rfpq$[100],k_rol$[100],k_prod$[100],k_sort$[100],k_pb$[100]
+Dim k_zone$[100],k_est$[100],startBin$[6],endBin$[6],k_roh$[100]
+Dim currZone$[2],p61$[256],uom$[4],pickStatus$[50],s1$[118]
+dim 3%,maxcnt
+maxcnt = 100
+Dim List$[maxcnt,1000]
+Dim TypeDescription$[10,40],xdate$[10]
+
+Dim 3%
+
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+
+call OpenFilesReadControl()
+
+!* Main function dispatcher
+ReturnStatus = 1
+Message$ = "OK"
+select case action1$
+	case "WHTOTALS"
+		call WarehouseTotals()
+	case "WHTRUCKBREAKDOWN"
+		call WarehouseTruckZoneBreakdown()
+	case "WHTRUCKASSIGN"
+		call WarehouseTruckAssign()
+	case "WHTRUCKSUMMARY"
+		call WarehouseTruckSummary()
+	case "WHTRUCKPICKSUMMARY"
+		call WarehouseTruckPickerSummary()
+	case "WHPICKERBREAKDOWN"
+		call WarehousePickerBreakdown()
+	case "WHSHORTPICKS"
+		call WarehouseShortPicks()
+	case "GETWHPICKQUEUE"
+		call GetWarehousePickerQueue()
+	case "GETWHWITHPICKS"
+		call GetWarehousesWithPicks()
+	case "GETWHTRUCKSWITHPICKS"
+		call GetWarehouseTrucksWithPicks()
+	case "GETPICKEDBYDROPLIST"
+		call GetPickedByDroplist()
+	case "MOVETOUNASSIGNED"
+		call UnassignPicks()
+	case "DELETEORDER"
+		call DeleteOrderFromQueue()
+	case else
+		ReturnStatus = 0
+		Message$ = "ACTION1 NOT FOUND: "+action1$
+end select
+
+Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+Call AddToStr(e$,rstr$,WebStr$)
+Call SetOutPut(e$,rstr$)
+
+Else ! MAIN TRY 
+	Include "src/callmainerrnet.inc"
+End Try 
+End 
+
+!*******************************************************************
+! INTERNAL SUBROUTINES / FUNCTIONS
+!*******************************************************************
+
+sub OpenFilesReadControl()
+try
+	Mat Read #1,61,0;P61$;
+	if p61$[135,135] <> "Y"
+		e$ = "RF Picking is not enabled on this system."
+		error 10000
+	end if
+	ch_sort = buildsort(e$, 25, 0)
+	if ch_sort<0 e$="Error build sortwork!" \ error 10000
+	ch_est = buildsort(e$, 25, 0,-1,"2") ! 2nd sort file needs extension to make it unique
+	if ch_est<0 e$="Error build estimated sortwork!" \ error 10000
+	ch_rfpctl = openfile(-9602) \ if ch_rfpctl<0 error 42 ! RF PICK CONTROL FILE
+	ch_rfpq = openfile(9603) \ if ch_rfpq<0 error 42 ! RF PICK QUEUE FILE
+	ch_rol = openfile(-1888) \ if ch_rol<0 error 42 ! order line
+	ch_prod = openfile(-1792) \ if ch_prod<0 error 42 ! product file
+	ch_pb = openfile(-10104) \ if ch_pb<0 error 42 ! picked by codes
+	ch_wh = openfile(-2768) \ if ch_wh<0 error 42 ! whinfo
+	ch_zone = openfile(-1920) \ if ch_zone<0 error 42 ! zone
+	ch_ccodes = openfile(-1728) \ if ch_ccodes<0 error 42 ! uom
+	ch_roh = openfile(-1840) \ if ch_roh<0 error 42 ! order header
+	ch_ros = openfile(1856) \ if ch_ros<0 error 42 ! order ship
+	! READ RF PICK CONTROLS
+	mat read #ch_rfpctl,1,0;sortType;
+	mat read #ch_rfpctl,1,2;reverseStop;
+	mat read #ch_rfpctl,1,8;cubesPerPallet;
+	mat read #ch_rfpctl,1,12;poundsPerPallet;
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+sub GetPickedByDroplist()
+try
+	clear list$[]
+	k_pb$ = " ",k_pb$
+	list$[0] = bsdel$+"PickedByDroplist"+fdel$
+	list$[1] = "ID"+fdel$+"Description"+fdel$
+	list$[2] = " "+fdel$+" "+fdel$
+	listIdx = 3
+	tmpcnt = maxcnt
+	do
+		r_pb = filegetpickedby(e$,ch_pb,">",1,k_pb$,pb.)
+		if r_pb<0 exit do
+		list$[listIdx] = str$(pb.PickedByCode)+fdel$
+		list$[listIdx] = list$[listIdx]+str$(pb.PickedByCode)+" - "
+		list$[listIdx] = list$[listIdx]+rtrim$(pb.FirstName$)+" "
+		list$[listIdx] = list$[listIdx]+rtrim$(pb.LastName$)+fdel$
+		listIdx = listIdx + 1
+		if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	loop
+	list$[listIdx] = esdel$
+	Call AddToStr(e$,rstr$,list$[])
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+sub GetWarehousesWithPicks()
+try
+	clear list$[]
+	list$[0] = bsdel$,"WarehouseWithPicks",fdel$
+	list$[1] = "Warehouse",fdel$,"Name",fdel$
+	listIdx = 2
+	tmpcnt = maxcnt
+	k_rfpq$ = " ",k_rfpq$
+	currWhse = 0
+	do
+		r_rfpq = filegetrfpickq(e$,ch_rfpq,">",1,k_rfpq$,rfpq.)
+		if r_rfpq<0 exit do
+		if rfpq.Whse <> currWhse
+			if currWhse <> 0
+				read record #ch_wh,currWhse-1,0;wh.;
+				list$[listIdx] = str$(currWhse)+fdel$+str$(currWhse)+" - "
+				list$[listIdx] = list$[listIdx]+rtrim$(wh.WhName$)+fdel$
+				listIdx = listIdx + 1
+				if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			end if
+			currWhse = rfpq.Whse
+		end if
+	loop
+	if currWhse = 0
+		ReturnStatus = 0
+		message$ = "No warehouses with RF pick records on file."
+	else
+		read record #ch_wh,currWhse-1,0;wh.;
+		list$[listIdx] = str$(currWhse)+fdel$+str$(currWhse)+" - "
+		list$[listIdx] = list$[listIdx]+rtrim$(wh.WhName$)+fdel$
+		listIdx = listIdx + 1
+		if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		list$[listIdx] = esdel$
+		Call AddToStr(e$,rstr$,list$[])
+	end if
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+
+Sub GetWarehouseTrucksWithPicks()
+try
+	wh = GetParameter$("WHSE")
+	if wh<1 or wh>99
+		message$ = "Invalid warehouse selected!"
+		ReturnStatus=0
+		exit sub
+	end if
+	clear list$[]
+	list$[0] = bsdel$,"WHTrucksDroplist",fdel$
+	list$[1] = "ID",fdel$,"Description",fdel$
+	listIdx = 2
+	currTruck = 999999
+	k_rfpq$ = " ",k_rfpq$
+	k_rfpq$[1,2] = wh using "##"
+	tmpcnt = maxcnt
+	do
+		r_rfpq = filegetrfpickq(e$,ch_rfpq,">",1,k_rfpq$,rfpq.)
+		if r_rfpq<0 exit do
+		if rfpq.Whse <> wh exit do
+		if rfpq.Truck <> currTruck
+			if currTruck <> 999999
+				list$[listIdx] = str$(currTruck)+fdel$+str$(currTruck)+fdel$
+				listIdx = listIdx + 1
+				if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			end if
+			currTruck = rfpq.Truck
+		end if
+
+	loop
+	if currTruck = 999999
+		ReturnStatus = 0
+		message$ = "No RF pick records on file for this warehouse."
+	else
+		list$[listIdx] = str$(currTruck)+fdel$+str$(currTruck)+fdel$
+		listIdx = listIdx + 1
+		if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		list$[listIdx] = esdel$
+		Call AddToStr(e$,rstr$,list$[])
+	end if
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+function GetShipDate()
+try
+	xdate$ = GetParameter$("SHIPDATE")
+	if xdate$<>""
+		xdate$=rtrim$(formatdate2$(xdate$)) ! from MM/DD/YYYY to yyyymmdd 
+		if xdate$ = ""
+			e$ = "Invalid ship date entered!"
+			error 10000
+		else
+			xdate = xdate$[3] ! yymmdd
+		end if
+	end if
+	exactMatch = GetParameter$("SHIPEXACTMATCH")
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end function xdate
+
+sub WarehouseTotals()
+try
+	shipDate = GetShipDate() ! yymmdd or 0
+
+	clear list$[]
+	list$[0] = bsdel$,"WarehouseTotals",fdel$
+	list$[1] = "Warehouse"+fdel$+"WarehouseName"+fdel$+"Type"+fdel$+"Picks"+fdel$
+	list$[1] = list$[1]+"Units"+fdel$
+	list$[1] = list$[1]+"Cubes"+fdel$+"Pounds"+fdel$+"Pallets"+fdel$
+	listIdx = 2
+	! TO BE ACCUMULATED PER WAREHOUSE
+	! accums[0,Y] = Unassigned
+	TypeDescription$[0] = "Unassigned"
+	! accums[1,Y] = Assigned / Not Picked
+	TypeDescription$[1] = "Assigned / Not Picked"
+	! accums[2,Y] = Assigned / Picked
+	TypeDescription$[2] = "Assigned / Pick Complete"
+	! accums[X,0] = Number of Picks
+	! accums[X,1] = Stocking Units
+	! accums[X,2] = Cubes
+	! accums[X,3] = Pounds
+	! accums[X,4] = Estimated Pallets
+	! can use first index, sorted by warehouse
+	k_rfpq$ = " ",k_rfpq$
+	currWhse = 0
+	tmpcnt = maxcnt
+	do
+		r_rfpq = filegetrfpickq(e$,ch_rfpq,">",1,k_rfpq$,rfpq.)
+		if r_rfpq<0 exit do
+		if not(ReadOrderLine(rfpq.)) goto SkipQueueItem1
+		if shipDate
+			if exactMatch and shipDate <> H0[10] goto SkipQueueItem1
+			if not(exactMatch) and shipDate < H0[10] goto SkipQueueItem1
+		end if
+		if not(LoadProduct()) goto SkipQueueItem1
+		if rfpq.Whse <> currWhse
+			if currWhse <> 0
+				! add to string going back to web
+				for x = 0 to 2
+					if accums[x,0]>0 ! don't send 0 picks items
+						select case x
+							case 0
+								estPicker = 0
+								estFlag = -1
+							case 1
+								estPicker = -1
+								estFlag = 0
+							case 2
+								estPicker = -1
+								estFlag = 1
+						end select
+						accums[x,4] = EstimatePallets(currWhse,0,estPicker,estFlag)
+						read record #ch_wh,currWhse-1,0;wh.;
+						list$[listIdx] = str$(currWhse)+fdel$+rtrim$(wh.WhName$)+fdel$
+						list$[listIdx] = list$[listIdx]+TypeDescription$[x]+fdel$
+						for y = 0 to 4
+							list$[listIdx] = list$[listIdx]+str$(accums[x,y])+fdel$
+						next y
+						listIdx = listIdx + 1
+						if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+					end if ! don't send 0 pick items
+				next x
+			end if
+			clear accums[]
+			currWhse = rfpq.Whse
+		end if
+		cnvtu[0] = 0 \ cnvtu[1] = UN[0] \ cnvtu[2] =1
+		! check status, if status is that this
+		! pick is not complete yet, stock quantity
+		! is "To Pick", otherwise use "Picked
+		! status: 0-10 reserved for not completely picked,
+		! 10-19 for pick completed
+		if rfpq.PickStat < 10
+			PickBase = rfpq.Qty2Pick
+		else
+			PickBase = rfpq.QtyPicked
+		end if
+		cnvta = PickBase
+		SellQuantity = UnitConversion()
+		PickCubes = (PickBase*L6[2])/UNF[4]
+		PickWeight = (PickBase*L6[4])/UNF[5]
+		if rfpq.PickedBy = 0 ! not assigned yet
+			idx = 0
+		else ! assigned
+			idx = 1 ! default to not picked
+			if rfpq.Pickstat>=10 idx = 2 ! picked
+		end if
+		accums[idx,0] = accums[idx,0] + 1 ! number of picks
+		accums[idx,1] = accums[idx,1] + SellQuantity ! quantity for pick
+		accums[idx,2] = accums[idx,2] + PickCubes
+		accums[idx,3] = accums[idx,3] + PickWeight
+	SkipQueueItem1: !
+	loop
+	if currWhse=0
+		ReturnStatus = 0
+		message$ = "No RF pick records on file."
+		exit sub
+	else
+		! add to string going back to web
+		for x = 0 to 2
+			if accums[x,0]>0 ! don't send 0 pick items
+				select case x
+					case 0
+						estPicker = 0
+						estFlag = -1
+					case 1
+						estPicker = -1
+						estFlag = 0
+					case 2
+						estPicker = -1
+						estFlag = 1
+				end select
+				accums[x,4] = EstimatePallets(currWhse,0,estPicker,estFlag)
+				read record #ch_wh,currWhse-1,0;wh.;
+				list$[listIdx] = str$(currWhse)+fdel$+rtrim$(wh.WhName$)+fdel$
+				list$[listIdx] = list$[listIdx]+TypeDescription$[x]+fdel$
+				for y = 0 to 4
+					list$[listIdx] = list$[listIdx]+str$(accums[x,y])+fdel$
+				next y
+				listIdx = listIdx + 1
+				if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			end if ! don't send 0 pick items
+		next x
+		list$[listIdx] = esdel$
+		Call AddToStr(e$,rstr$,list$[])
+	end if
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+! Estimate the number of pallets for a given type
+! of breakdown.  Arguments:
+!
+! estWh - mandatory warehouse
+! estTruck - if non-zero, limit the calculation to that truck
+! estPicker - -2 = all pickers including unassigned
+!             -1 = only assigned picks (excludes pick code 0) 
+!              0 = unassigned picks
+!             >0 = for that pick code only
+! estFlag - -1 = lump both picked and unpicked
+!            0 = not yet picked only
+!            1 = pick completed only
+!
+! Returns Estimate or 0 if couldn't estimate
+!
+Function EstimatePallets(estWh,estTruck,estPicker,estFlag)
+try
+	estPallets = 0
+	if cubesPerPallet = 0 and poundsPerPallet = 0 exit function estPallets
+	! sort queue file by truck and picker
+	call ClearEstimatedSort()
+	k_est$ = " ",k_est$
+	k_est$[1,2] = estWh using "##"
+	if estTruck
+		k_est$[3,8] = estTruck using "######"
+	end if
+	do
+		r_est = filegetrfpickq(e$,ch_rfpq,">",1,k_est$,rfpq2.)
+		if r_est<0 exit do
+		if rfpq2.Whse <> estWh exit do
+		if estTruck and rfpq2.Truck <> estTruck exit do
+		if estPicker=-1 and rfpq2.PickedBy=0 goto SkipEstimateRec ! no unassigned
+		if estPicker>=0 and rfpq2.PickedBy<>estPicker goto SkipEstimateRec
+		if estFlag=0 and rfpq2.PickStat>9 goto SkipEstimateRec
+		if estFlag=1 and rfpq2.PickStat<10 goto SkipEstimateRec
+		if shipDate
+			if not(ReadOrderLine(rfpq2.)) goto SkipEstimateRec
+			if shipDate
+				if exactMatch and shipDate <> H0[10] goto SkipEstimateRec
+				if not(exactMatch) and shipDate < H0[10] goto SkipEstimateRec
+			end if
+		end if
+		! OK, this is one we want
+		!
+		! 1-2: WH
+		! 3-8: TRUCK
+		! 9-12: PICKER
+		! 13-22: SEQUENCE #
+		k_sort$ = " ",k_sort$
+		k_sort$[1,8] = k_est$[1,8]
+		k_sort$[9,22] = k_est$[43,56]
+		search #ch_est,4,1;k_sort$,r_est,e
+		if e error 11000
+	SkipEstimateRec: !
+	loop
+	currPalletCubes = 0
+	currPalletPounds = 0
+	currEstTruck = 0
+	currEstPickedBy = -1
+	k_est$ = " ",k_est$
+	do
+		search #ch_est,3,1;k_est$,r_est,e
+		if e>2 error 11000
+		if e exit do
+		read record #ch_rfpq,r_est,0;rfpq2.;
+		if currEstTruck <> rfpq2.Truck
+			! if the truck changes, need a new pallet
+			if currEstTruck <> 0
+				estPallets = estPallets + 1
+			end if
+			currEstTruck = rfpq2.Truck
+			currEstPickedBy = rfpq2.PickedBy
+			currPalletCubes = 0
+			currPalletPounds = 0
+		else
+			if currEstPickedBy <> rfpq2.PickedBy
+				! if picked by changes, need a new pallet
+				estPallets = estPallets + 1
+				currEstPickedBy = rfpq2.PickedBy
+				currPalletCubes = 0
+				currPalletPounds = 0
+			end if
+		end if
+		if not(ReadOrderLine(rfpq2.)) goto SkipEstimateRec2
+		if not(LoadProduct()) goto SkipEstimateRec2
+		cnvtu[0] = 0 \ cnvtu[1] = UN[0] \ cnvtu[2] =1
+		! check status, if status is that this
+		! pick is not complete yet, stock quantity
+		! is "To Pick", otherwise use "Picked
+		! status: 0-10 reserved for not completely picked,
+		! 10-19 for pick completed
+		if rfpq2.PickStat < 10
+			PickBase = rfpq2.Qty2Pick
+		else
+			PickBase = rfpq2.QtyPicked
+		end if
+		cnvta = PickBase
+		SellQuantity = UnitConversion()
+		PickCubes = (PickBase*L6[2])/UNF[4]
+		PickWeight = (PickBase*L6[4])/UNF[5]
+		palletOver = 0
+		if cubesPerPallet and currPalletCubes + PickCubes > cubesPerPallet let palletOver = 1
+		if poundsPerPallet and currPalletPounds + PickWeight > poundsPerPallet let palletOver = 1
+		if palletOver and (currPalletCubes or currPalletPounds)
+			! we had something already on the pallet
+			! at this point, regardless of number of
+			! stock units we are trying add, we are
+			! going to force a new pallet
+			estPallets = estPallets + 1
+			currPalletCubes = 0
+			currPalletPounds = 0
+			! check to see if this pick will fit now
+			palletOver = 0
+			if cubesPerPallet and currPalletCubes + PickCubes > cubesPerPallet let palletOver = 1
+			if poundsPerPallet and currPalletPounds + PickWeight > poundsPerPallet let palletOver = 1
+		end if
+		if palletOver
+			! only gets here if this single pick cannot fit
+			! on a single pallet
+			!
+			! calculate how many selling units can fit on a pallet
+			sellUnitsPerPallet = 0
+			if cubesPerPallet
+				sellUnitCubes = (PickCubes / SellQuantity)
+				sellUnitsPerPallet = int(cubesPerPallet / sellUnitCubes)
+			end if
+			if poundsPerPallet
+				sellUnitPounds = (PickWeight / SellQuantity)
+				sellUnitPalletPounds = int(poundsPerPallet / sellUnitPounds)
+				if sellUnitPalletPounds<sellUnitsPerPallet or not(cubesPerPallet)
+					sellUnitsPerPallet = sellUnitPalletPounds
+				end if
+			end if
+			! if we can't get even one stock unit on,
+			! put one on each pallet....
+			if sellUnitsPerPallet<1 let sellUnitsPerPallet = 1
+			! increase estimated by the number of full pallets
+			fullPallets = int(SellQuantity / sellUnitsPerPallet)
+			estPallets = estPallets + fullPallets
+			! what do we have left?  Convert
+			! what we palletized back to base
+			! subtract from base of original pick
+			! then put what's left on the pallet
+			cnvta = fullPallets * sellUnitsPerPallet
+			cnvtu[0] = UN[0] \ cnvtu[1] = 0 \ cnvtu[2] =1
+			baseLeft = PickBase - UnitConversion()
+			currPalletCubes = (baseLeft*L6[2])/UNF[4]
+			currPalletPounds = (baseLeft*L6[4])/UNF[5]
+		else
+			! add it to the pallet
+			currPalletCubes = currPalletCubes + PickCubes
+			currPalletPounds = currPalletPounds + PickWeight
+		end if
+	SkipEstimateRec2: !
+	loop
+	if currPalletCubes or currPalletPounds estPallets = estPallets + 1
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end Function estPallets
+
+Sub ClearEstimatedSort()
+try
+	k_sort$ = " ",k_sort$
+	do
+		search #ch_est,3,1;k_sort$,r_est,e
+		if e>2 error 11000
+		if e exit do
+		search #ch_est,5,1;k_sort$,r_est,e
+		if e error 11000
+	loop
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+
+Sub WarehouseTruckZoneBreakdown()
+try
+	wh = GetParameter$("WHSE")
+	if wh<1 or wh>99
+		message$ = "Invalid warehouse selected!"
+		ReturnStatus=0
+		exit sub
+	end if
+	doZone = GetParameter$("DOZONE")
+	shipDate = GetShipDate() ! yymmdd or 0
+	clear list$[]
+	list$[0] = bsdel$+"ControlInfo"+fdel$
+	list$[1] = "Warehouse"+fdel$+"DoZone"+fdel$+"HeaderLabel"+fdel$+"Column1Label"+fdel$
+	list$[2] = str$(wh)+fdel$+str$(dozone)+fdel$
+	read record #ch_wh,wh-1,0;wh.;
+	tmp$ = "Warehouse "+str$(wh)+" - "+rtrim$(wh.WhName$)+" organized by "
+	if doZone
+		tmp$ = tmp$ + "ZONE"
+		list$[2] = list$[2]+tmp$+fdel$+"Zone"+fdel$
+		call SortQueueByZone()
+		ch_search = ch_sort
+	else
+		tmp$ = tmp$ + "TRUCK"
+		list$[2] = list$[2]+tmp$+fdel$+"Truck"+fdel$
+		ch_search = ch_rfpq
+		currTruck=999999
+	end if
+	list$[3] = esdel$
+	list$[4] = bsdel$+"Data"+fdel$
+	list$[5] = "TruckOrZone"+fdel$
+	list$[5] = list$[5]+ "Type"+fdel$+"Picks"+fdel$
+	list$[5] = list$[5]+"Units"+fdel$
+	list$[5] = list$[5]+"Cubes"+fdel$+"Pounds"+fdel$
+	list$[5] = list$[5]+"Pallets"+fdel$
+	listIdx = 6
+	! TO BE ACCUMULATED BY Truck or Zone
+	! accums[0,Y] = Unassigned
+	TypeDescription$[0] = "Unassigned"
+	! accums[1,Y] = Assigned / Not Picked
+	TypeDescription$[1] = "Assigned / Not Picked"
+	! accums[2,Y] = Assigned / Picked
+	TypeDescription$[2] = "Assigned / Pick Complete"
+	! accums[X,0] = Number of Picks
+	! accums[X,1] = Stocking Units
+	! accums[X,2] = Cubes
+	! accums[X,3] = Pounds
+	! accums[X,4] = Estimated Pallets
+	! can use first index, sorted by warehouse
+	currZone$ = ""
+	k_rfpq$ = " ",k_rfpq$
+	k_rfpq$[1,2] = wh using "##"
+	tmpcnt = maxcnt
+	do
+		search #ch_search,3,1;k_rfpq$,r_rfpq,e
+		if e>2 error 11000
+		if e exit do
+		read record #ch_rfpq,r_rfpq,0;rfpq.;
+		if rfpq.Whse <> wh exit do
+		if not(ReadOrderLine(rfpq.)) goto SkipQueueItem3
+		if shipDate
+			if exactMatch and shipDate <> H0[10] goto SkipQueueItem3
+			if not(exactMatch) and shipDate < H0[10] goto SkipQueueItem3
+		end if
+		if not(LoadProduct()) goto SkipQueueItem3
+		if (doZone and rfpq.Zone$ <> currZone$) or (not(doZone) and rfpq.Truck <> currTruck)
+			if (doZone and currZone$ <> "") or (not(doZone) and currTruck <> 999999)
+				! add to string going back to web
+				for x = 0 to 2
+					if accums[x,0]>0 ! don't send 0 pick items
+						if doZone
+							accums[x,4] = 0 ! can't do pallet estimate for zone
+							list$[listIdx] = currZone$+fdel$+TypeDescription$[x]+fdel$
+						else
+							select case x
+								case 0
+									estPicker = 0
+									estFlag = -1
+								case 1
+									estPicker = -1
+									estFlag = 0
+								case 2
+									estPicker = -1
+									estFlag = 1
+							end select
+							accums[x,4] = EstimatePallets(wh,currTruck,estPicker,estFlag)
+							list$[listIdx] = str$(currTruck)+fdel$+TypeDescription$[x]+fdel$
+						end if
+						for y = 0 to 4
+							list$[listIdx] = list$[listIdx]+str$(accums[x,y])+fdel$
+						next y
+						listIdx = listIdx + 1
+						if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+					end if ! don't send 0 pick items
+				next x
+			end if
+			clear accums[]
+			if doZone
+				currZone$ = rfpq.Zone$
+			else
+				currTruck = rfpq.Truck
+			end if
+		end if
+
+		cnvtu[0] = 0 \ cnvtu[1] = UN[0] \ cnvtu[2] =1
+		! check status, if status is that this
+		! pick is not complete yet, stock quantity
+		! is "To Pick", otherwise use "Picked
+		! status: 0-10 reserved for not completely picked,
+		! 10-19 for pick completed
+		if rfpq.PickStat < 10
+			PickBase = rfpq.Qty2Pick
+		else
+			PickBase = rfpq.QtyPicked
+		end if
+		cnvta = PickBase
+		SellQuantity = UnitConversion()
+		PickCubes = (PickBase*L6[2])/UNF[4]
+		PickWeight = (PickBase*L6[4])/UNF[5]
+		if rfpq.PickedBy = 0 ! not assigned yet
+			idx = 0
+		else ! assigned
+			idx = 1 ! default to not picked
+			if rfpq.Pickstat>=10 idx = 2 ! picked
+		end if
+		accums[idx,0] = accums[idx,0] + 1 ! number of picks
+		accums[idx,1] = accums[idx,1] + SellQuantity ! quantity for pick
+		accums[idx,2] = accums[idx,2] + PickCubes
+		accums[idx,3] = accums[idx,3] + PickWeight
+	SkipQueueItem3: !
+	loop
+	if (doZone and currZone$ = "") or (not(doZone) and currTruck=999999)
+		ReturnStatus = 0
+		message$ = "No RF pick records on file."
+	else
+		! add to string going back to web
+		for x = 0 to 2
+			if accums[x,0]>0 ! don't send 0 pick items
+				if doZone
+					accums[x,4] = 0 ! can't do pallet estimate for zone
+					list$[listIdx] = currZone$+fdel$+TypeDescription$[x]+fdel$
+				else
+					select case x
+						case 0
+							estPicker = 0
+							estFlag = -1
+						case 1
+							estPicker = -1
+							estFlag = 0
+						case 2
+							estPicker = -1
+							estFlag = 1
+					end select
+					accums[x,4] = EstimatePallets(wh,currTruck,estPicker,estFlag)
+					list$[listIdx] = str$(currTruck)+fdel$+TypeDescription$[x]+fdel$
+				end if
+				for y = 0 to 4
+					list$[listIdx] = list$[listIdx]+str$(accums[x,y])+fdel$
+				next y
+				listIdx = listIdx + 1
+				if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			end if ! don't send 0 pick items
+		next x
+		list$[listIdx] = esdel$
+		Call AddToStr(e$,rstr$,list$[])
+	end if
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+
+Sub WarehouseTruckSummary()
+try
+	wh = GetParameter$("WHSE")
+	if wh<1 or wh>99
+		message$ = "Invalid warehouse selected!"
+		ReturnStatus=0
+		exit sub
+	end if
+	shipDate = GetShipDate() ! yymmdd or 0
+	! TO BE ACCUMULATED PER TRUCK FOR WAREHOUSE
+	! accums[0,0] = Number of Picks
+	! accums[0,1] = Stocking Units
+	! accums[0,2] = Cubes
+	! accums[0,3] = Pounds
+	! accums[0,4] = Estimated Pallets
+	! can use first index, sorted by warehouse
+
+	clear list$[]
+	list$[0] = bsdel$+"Data"+fdel$
+	list$[1] = "Truck"+fdel$
+	list$[1] = list$[1]+ "Picks"+fdel$+"Units"+fdel$
+	list$[1] = list$[1]+"Cubes"+fdel$+"Pounds"+fdel$
+	list$[1] = list$[1]+"Pallets"+fdel$
+	listIdx = 2
+	k_rfpq$ = " ",k_rfpq$
+	k_rfpq$[1,2] = wh using "##"
+	tmpcnt = maxcnt
+	currTruck=999999
+	do
+		search #ch_rfpq,3,1;k_rfpq$,r_rfpq,e
+		if e>2 error 11000
+		if e exit do
+		read record #ch_rfpq,r_rfpq,0;rfpq.;
+		if rfpq.Whse <> wh exit do
+		if not(ReadOrderLine(rfpq.)) goto SkipQueueItem6
+		if shipDate
+			if exactMatch and shipDate <> H0[10] goto SkipQueueItem6
+			if not(exactMatch) and shipDate < H0[10] goto SkipQueueItem6
+		end if
+		if not(LoadProduct()) goto SkipQueueItem6
+		if rfpq.Truck <> currTruck
+			if currTruck <> 999999
+				accums[0,4] = EstimatePallets(wh,currTruck,-2,-1)
+				list$[listIdx] = str$(currTruck)+fdel$
+				for y = 0 to 4
+					list$[listIdx] = list$[listIdx]+str$(accums[0,y])+fdel$
+				next y
+				listIdx = listIdx + 1
+				if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			end if
+			clear accums[]
+			currTruck = rfpq.Truck
+		end if
+
+		cnvtu[0] = 0 \ cnvtu[1] = UN[0] \ cnvtu[2] =1
+		! check status, if status is that this
+		! pick is not complete yet, stock quantity
+		! is "To Pick", otherwise use "Picked
+		! status: 0-10 reserved for not completely picked,
+		! 10-19 for pick completed
+		if rfpq.PickStat < 10
+			PickBase = rfpq.Qty2Pick
+		else
+			PickBase = rfpq.QtyPicked
+		end if
+		cnvta = PickBase
+		SellQuantity = UnitConversion()
+		PickCubes = (PickBase*L6[2])/UNF[4]
+		PickWeight = (PickBase*L6[4])/UNF[5]
+		accums[0,0] = accums[0,0] + 1 ! number of picks
+		accums[0,1] = accums[0,1] + SellQuantity ! quantity for pick
+		accums[0,2] = accums[0,2] + PickCubes
+		accums[0,3] = accums[0,3] + PickWeight
+	SkipQueueItem6: !
+	loop
+	if currTruck=999999
+		ReturnStatus = 0
+		message$ = "No RF pick records on file."
+	else
+		accums[0,4] = EstimatePallets(wh,currTruck,-2,-1)
+		list$[listIdx] = str$(currTruck)+fdel$
+		for y = 0 to 4
+			list$[listIdx] = list$[listIdx]+str$(accums[0,y])+fdel$
+		next y
+		listIdx = listIdx + 1
+		if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		list$[listIdx] = esdel$
+		Call AddToStr(e$,rstr$,list$[])
+	end if
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+
+Sub WarehouseTruckPickerSummary()
+try
+	wh = GetParameter$("WHSE")
+	if wh<1 or wh>99
+		message$ = "Invalid warehouse selected!"
+		ReturnStatus=0
+		exit sub
+	end if
+	shipDate = GetShipDate() ! yymmdd or 0
+	clear list$[]
+	call SortQueueByTruckPicker()
+	ch_search = ch_sort
+	list$[0] = bsdel$+"Data"+fdel$
+	list$[1] = "Truck"+fdel$+"Picker"+fdel$
+	list$[1] = list$[1]+ "Type"+fdel$+"Picks"+fdel$
+	list$[1] = list$[1]+"Units"+fdel$
+	list$[1] = list$[1]+"Cubes"+fdel$+"Pounds"+fdel$
+	list$[1] = list$[1]+"Pallets"+fdel$
+	listIdx = 2
+	! TO BE ACCUMULATED BY Truck / Pick Code for a WAREHOUSE
+	! accums[0,Y] = Unassigned
+	TypeDescription$[0] = "Unassigned"
+	! accums[1,Y] = Assigned / Not Picked
+	TypeDescription$[1] = "Assigned / Not Picked"
+	! accums[2,Y] = Assigned / Picked
+	TypeDescription$[2] = "Assigned / Pick Complete"
+	! accums[X,0] = Number of Picks
+	! accums[X,1] = Stocking Units
+	! accums[X,2] = Cubes
+	! accums[X,3] = Pounds
+	! accums[X,4] = Estimated Pallets
+	! can use first index, sorted by warehouse
+	k_rfpq$ = " ",k_rfpq$
+	k_rfpq$[1,2] = wh using "##"
+	tmpcnt = maxcnt
+	currTruck=999999
+	do
+		search #ch_search,3,1;k_rfpq$,r_rfpq,e
+		if e>2 error 11000
+		if e exit do
+		read record #ch_rfpq,r_rfpq,0;rfpq.;
+		if rfpq.Whse <> wh exit do
+		if not(ReadOrderLine(rfpq.)) goto SkipQueueItem7
+		if shipDate
+			if exactMatch and shipDate <> H0[10] goto SkipQueueItem7
+			if not(exactMatch) and shipDate < H0[10] goto SkipQueueItem7
+		end if
+		if not(LoadProduct()) goto SkipQueueItem7
+		if rfpq.Truck <> currTruck or rfpq.PickedBy <> currPickedBy
+			if currTruck <> 999999
+				! add to string going back to web
+				for x = 0 to 2
+					if accums[x,0]>0 ! don't send 0 pick items
+						select case x
+							case 0
+								estPicker = 0
+								estFlag = -1
+							case 1
+								estPicker = -1
+								estFlag = 0
+							case 2
+								estPicker = -1
+								estFlag = 1
+						end select
+						accums[x,4] = EstimatePallets(wh,currTruck,estPicker,estFlag)
+						list$[listIdx] = str$(currTruck)+fdel$+str$(currPickedBy)+fdel$+TypeDescription$[x]+fdel$
+						for y = 0 to 4
+							list$[listIdx] = list$[listIdx]+str$(accums[x,y])+fdel$
+						next y
+						listIdx = listIdx + 1
+						if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+					end if ! don't send 0 pick items
+				next x
+			end if
+			clear accums[]
+			currTruck = rfpq.Truck
+			currPickedBy = rfpq.PickedBy
+		end if
+
+		cnvtu[0] = 0 \ cnvtu[1] = UN[0] \ cnvtu[2] =1
+		! check status, if status is that this
+		! pick is not complete yet, stock quantity
+		! is "To Pick", otherwise use "Picked
+		! status: 0-10 reserved for not completely picked,
+		! 10-19 for pick completed
+		if rfpq.PickStat < 10
+			PickBase = rfpq.Qty2Pick
+		else
+			PickBase = rfpq.QtyPicked
+		end if
+		cnvta = PickBase
+		SellQuantity = UnitConversion()
+		PickCubes = (PickBase*L6[2])/UNF[4]
+		PickWeight = (PickBase*L6[4])/UNF[5]
+		if rfpq.PickedBy = 0 ! not assigned yet
+			idx = 0
+		else ! assigned
+			idx = 1 ! default to not picked
+			if rfpq.Pickstat>=10 idx = 2 ! picked
+		end if
+		accums[idx,0] = accums[idx,0] + 1 ! number of picks
+		accums[idx,1] = accums[idx,1] + SellQuantity ! quantity for pick
+		accums[idx,2] = accums[idx,2] + PickCubes
+		accums[idx,3] = accums[idx,3] + PickWeight
+	SkipQueueItem7: !
+	loop
+	if currTruck=999999
+		ReturnStatus = 0
+		message$ = "No RF pick records on file."
+	else
+		! add to string going back to web
+		for x = 0 to 2
+			if accums[x,0]>0 ! don't send 0 pick items
+				select case x
+					case 0
+						estPicker = 0
+						estFlag = -1
+					case 1
+						estPicker = -1
+						estFlag = 0
+					case 2
+						estPicker = -1
+						estFlag = 1
+				end select
+				accums[x,4] = EstimatePallets(wh,currTruck,estPicker,estFlag)
+				list$[listIdx] = str$(currTruck)+fdel$+str$(currPickedBy)+fdel$+TypeDescription$[x]+fdel$
+				for y = 0 to 4
+					list$[listIdx] = list$[listIdx]+str$(accums[x,y])+fdel$
+				next y
+				listIdx = listIdx + 1
+				if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			end if ! don't send 0 pick items
+		next x
+		list$[listIdx] = esdel$
+		Call AddToStr(e$,rstr$,list$[])
+	end if
+
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+
+
+Sub WarehouseTruckAssign()
+try
+	wh = GetParameter$("WHSE")
+	if wh<1 or wh>99
+		message$ = "Invalid warehouse selected!"
+		ReturnStatus=0
+		exit sub
+	end if
+	currTruck = GetParameter$("TRUCK")
+	startStop = GetParameter$("STARTSTOP")
+	endStop = GetParameter$("ENDSTOP")
+	if endStop = 0 let endStop = 9000
+	startBin$ = GetParameter$("STARTBIN")+b$
+	endBin$ = GetParameter$("ENDBIN")
+	if endBin$ = ""
+		endBin$ = "~",endBin$
+	else
+		endBin$ = endBin$+b$
+	end if
+	shipDate = GetShipDate() ! yymmdd or 0
+	pickCode = GetParameter$("PICKCODE")
+	picksAssigned = 0
+	k_pb$ = " ",k_pb$
+	k_pb$[1,3] = pickCode using "###"
+	r_pb = filegetpickedby(e$,ch_pb,"=",1,k_pb$,pb.)
+	if r_pb<0
+		message$ = "Picker to assign to not on file!"
+		ReturnStatus = 0
+		exit sub
+	end if
+	k_rfpq$ = " ",k_rfpq$
+	k_rfpq$[1,2] = wh using "##"
+	! first part of variable sort key is always
+	! truck
+	k_rfpq$[3,8] = currTruck using "######"
+	do
+		r_rfpq = filegetrfpickq(e$,ch_rfpq,">",1,k_rfpq$,rfpq.)
+		if r_rfpq<=0 exit do
+		if val(k_rfpq$[1,2]) <> wh exit do
+		if val(k_rfpq$[3,8]) <> currTruck exit do
+		if rfpq.PickedBy <> 0 goto SkipAssign ! already assigned to someone
+		myTruckStop = rfpq.TruckStop
+		if reverseStop myTruckStop = 9000 - rfpq.TruckStop
+		if myTruckStop < startStop goto SkipAssign
+		if myTruckStop > endStop goto SkipAssign
+		if rfpq.Bin$ < startBin$ goto SkipAssign
+		if rfpq.Bin$ > endBin$ goto SkipAssign
+		if shipDate			
+			if not(ReadOrderLine(rfpq.)) goto SkipAssign
+			if shipDate
+				if exactMatch and shipDate <> H0[10] goto SkipAssign
+				if not(exactMatch) and shipDate < H0[10] goto SkipAssign
+			end if
+		end if
+		! cannot directly unassign as it messes with directory 1
+		! causing assigned records to show back up in the sort loop
+		picksAssigned = picksAssigned + 1
+		! we can use the estimate sort file as it is not
+		! being used in this call
+		k_est$ = " ",k_est$
+		k_est$ = picksAssigned using "######" ! keep them in right order
+		search #ch_est,4,1;k_est$,r_rfpq,e \ if e error 11000
+	SkipAssign: !
+	loop
+	picksAssigned = 0
+	k_est$ = " ",k_est$
+	do
+		search #ch_est,3,1;k_est$,r_rfpq,e 
+		if e>2 error 11000
+		if e exit do
+		read record #ch_rfpq,r_rfpq,0;rfpq.
+		if rfpq.PickedBy <> 0 goto SkipAssign2 ! already assigned to someone
+		if not(AssignPick(r_rfpq, rfpq.,pickCode))
+			ReturnStatus = 0
+			Message$ = "Pick assign failed!"
+			exit sub ! fatal
+		end if
+		picksAssigned = picksAssigned + 1
+	SkipAssign2: !
+	loop
+	if not(picksAssigned)
+		ReturnStatus = 0
+		Message$ = "No unassigned picks matching your criteria found!"
+	else
+		Message$ = str$(picksAssigned)+" pick(s) have been assigned."
+	end if
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+Function AssignPick(queueRec, rfpqUnassign. as rfpickq, pickCode)
+try
+	! re-read queue record with lock
+	read record #ch_rfpq,queueRec,0,100000;rfpq2.
+	! find largest pick number for wh / picker
+	tmp$ = " ",tmp$
+	tmp$[1,2] = rfpq.Whse using "##"
+	tmp$[3,6] = pickCode using "####"
+	tmp$[7,16] = "9999999999"
+	search #ch_rfpq,2,3;tmp$,r_rfpq2,e
+	if not(e) ! no more room!
+		Message$ = "Out of sequence numbers in queue for: "+str$(pickCode)+"!"
+		ReturnStatus = 0
+	else
+		! set up new assigned record
+		rfpq2.PickedBy = pickCode
+		search #ch_rfpq,6,3;tmp$,r_rfpq2,e
+		if e or val(tmp$[1,2]) <> rfpq.Whse or val(tmp$[3,6]) <> pickCode
+			rfpq2.Sequence = 10 ! leave room
+		else
+			rfpq2.Sequence = val(tmp$[7,16]) + 10
+			if rfpq2.Sequence > 9999999999
+				rfpq2.Sequence = val(tmp$[7,16]) + 1
+			end if
+		end if
+		r_rfpq2 = fileupdaterfpickq(e$,ch_rfpq,"a",0, rfpq2.)
+		if r_rfpq2<=0
+			Message$ = e$
+			ReturnStatus = 0
+		else
+			! added new assigned record,
+			! delete the unassigned record
+			r_rfpq = fileupdaterfpickq(e$,ch_rfpq,"d",queueRec, rfpqUnassign.)
+			if r_rfpq<0
+				Message$ = e$
+				ReturnStatus = 0
+			end if
+		end if
+	end if
+	ExitAssign: !
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end Function ReturnStatus
+
+
+Sub UnassignPicks()
+try
+	wh = GetParameter$("WHSE")
+	if wh<1 or wh>99
+		message$ = "Invalid warehouse for unassign."
+		ReturnStatus=0
+		exit sub
+	end if
+	pickCode = GetParameter$("PICKER")
+	if pickCode<1
+		message$ = "Picks are already unassigned, nothing to do."
+		ReturnStatus=0
+		exit sub
+	end if
+	numPicks = GetParameter$("NUMBERPICKS")
+	if numPicks<=0
+		message$ = "No picks selected to unassign."
+		ReturnStatus=0
+		exit sub
+	end if
+	picksAssigned = 0
+	for pickIdx = 1 to numPicks
+		sequence = GetParameter$("SEQ"+str$(pickIdx))
+		k_rfpq$ = " ",k_rfpq$
+		k_rfpq$[1,2] = wh using "##"
+		k_rfpq$[3,6] = pickCode using "####"
+		k_rfpq$[7,16] = sequence using "##########"
+		r_rfpq = filegetrfpickq(e$,ch_rfpq,"=",3,k_rfpq$,rfpq.)
+		if r_rfpq<0 goto SkipUnAssign
+		if rfpq.PickStat <> 0 goto SkipUnAssign ! only can work with not picked
+		! OK - we can do this
+		if not(AssignPick(r_rfpq, rfpq.,0)) exit sub ! fatal
+		picksAssigned = picksAssigned + 1
+		SkipUnAssign: !
+	next pickIdx
+	Message$ = str$(picksAssigned)+" pick(s) have been unassigned."
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+Sub SortQueueByZone()
+try
+	! sort, for a particular whse,
+	! the queue by zone (tag in pick code and sequence to make it unique)
+	k_rfpq$ = " ",k_rfpq$
+	k_rfpq$[1,2] = wh using "##"
+	do
+		r_rfpq = filegetrfpickq(e$,ch_rfpq,">",3,k_rfpq$,rfpq.)
+		if r_rfpq<0 exit do
+		if val(k_rfpq$[1,2]) <> wh exit do
+		! 1-2: warehouse
+		! 3-4: Zone
+		! 5-8: Pick Code
+		! 9-18: Sequence
+		k_sort$ = " ",k_sort$
+		k_sort$[1,2] = k_rfpq$[1,2]
+		k_sort$[3,4] = rfpq.zone$[1,2]
+		k_sort$[5] = k_rfpq$[3]
+		search #ch_sort,4,1;k_sort$,r_rfpq,e
+		if e error 11000
+	loop
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+
+Sub SortQueueByTruckPicker()
+try
+	! sort, for a particular whse,
+	! the queue by truck and picker (tag sequence to make it unique)
+	k_rfpq$ = " ",k_rfpq$
+	k_rfpq$[1,2] = wh using "##"
+	do
+		r_rfpq = filegetrfpickq(e$,ch_rfpq,">",3,k_rfpq$,rfpq.)
+		if r_rfpq<0 exit do
+		if val(k_rfpq$[1,2]) <> wh exit do
+		! 1-2: warehouse
+		! 3-8: Truck Number
+		! 9-12: Pick Code
+		! 13-22: Sequence
+		k_sort$ = " ",k_sort$
+		k_sort$[1,2] = k_rfpq$[1,2]
+		k_sort$[3,8] = rfpq.Truck
+		k_sort$[9] = k_rfpq$[3]
+		search #ch_sort,4,1;k_sort$,r_rfpq,e
+		if e error 11000
+	loop
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+
+Sub WarehousePickerBreakdown()
+try
+	wh = GetParameter$("WHSE")
+	if wh<1 or wh>99
+		message$ = "Invalid warehouse selected!"
+		ReturnStatus=0
+		exit sub
+	end if
+	read record #ch_wh,wh-1,0;wh.;
+	shipDate = GetShipDate() ! yymmdd or 0
+	clear list$[]
+	list$[0] = bsdel$+"ControlInfo"+fdel$
+	list$[1] = "Warehouse"+fdel$+"WarehouseName"+fdel$
+	list$[2] = str$(wh)+fdel$+str$(wh)+" - "
+	list$[2] = list$[2]+rtrim$(wh.WhName$)+fdel$
+	list$[3] = esdel$
+	list$[4] = bsdel$+"Data"+fdel$
+	list$[5] = "PickCode"+fdel$+"PickName"+fdel$+"Type"+fdel$+"Picks"+fdel$
+	list$[5] = list$[5]+"Units"+fdel$
+	list$[5] = list$[5]+"Cubes"+fdel$+"Pounds"+fdel$+"Pallets"+fdel$
+	listIdx = 6
+	! TO BE ACCUMULATED BY "PICKED BY (Picked By 0=Unassigned)"
+	! accums[0,Y] = Not Picked
+	TypeDescription$[0] = "Not Picked"
+	! accums[1,Y] = Picked
+	TypeDescription$[1] = "Picked"
+	! accums[X,0] = Number of Picks
+	! accums[X,1] = Stocking Units
+	! accums[X,2] = Cubes
+	! accums[X,3] = Pounds
+	! accums[X,4] = Pallets
+	! can use the third index, sorted by warehouse, Picked By
+	k_rfpq$ = " ",k_rfpq$
+	k_rfpq$[1,2] = wh using "##"
+	currPickedBy = -1
+	tmpcnt = maxcnt
+	do
+		r_rfpq = filegetrfpickq(e$,ch_rfpq,">",3,k_rfpq$,rfpq.)
+		if r_rfpq<0 exit do
+		if rfpq.Whse <> wh exit do
+		if not(ReadOrderLine(rfpq.)) goto SkipQueueItem2:
+		if shipDate
+			if exactMatch and shipDate <> H0[10] goto SkipQueueItem2
+			if not(exactMatch) and shipDate < H0[10] goto SkipQueueItem2
+		end if
+		if not(LoadProduct()) goto SkipQueueItem2:
+		if rfpq.PickedBy <> currPickedBy
+			if currPickedBy <> -1
+				call GetPickedByRecord(currPickedBy)
+				! add to string going back to web
+				for x = 0 to 1
+					if accums[x,0]>0 ! don't send 0 pick items
+						select case x
+							case 0
+								estFlag = 0
+							case 1
+								estFlag = 1
+						end select
+						accums[x,4] = EstimatePallets(wh,0,currPickedBy,estFlag)
+						list$[listIdx] = str$(currPickedBy)+fdel$+rtrim$(pb.FirstName$)
+						list$[listIdx] = list$[listIdx]+" "+rtrim$(pb.LastName$)+fdel$
+						list$[listIdx] = list$[listIdx]+TypeDescription$[x]+fdel$
+						for y = 0 to 4
+							list$[listIdx] = list$[listIdx]+str$(accums[x,y])+fdel$
+						next y
+						listIdx = listIdx + 1
+						if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+					end if
+				next x
+			end if
+			clear accums[]
+			currPickedBy = rfpq.PickedBy
+		end if
+		cnvtu[0] = 0 \ cnvtu[1] = UN[0] \ cnvtu[2] =1
+		! check status, if status is that this
+		! pick is not complete yet, stock quantity
+		! is "To Pick", otherwise use "Picked
+		! status: 0-10 reserved for not completely picked,
+		! 10-19 for pick completed
+		if rfpq.PickStat < 10
+			PickBase = rfpq.Qty2Pick
+		else
+			PickBase = rfpq.QtyPicked
+		end if
+		cnvta = PickBase
+		SellQuantity = UnitConversion()
+		PickCubes = (PickBase*L6[2])/UNF[4]
+		PickWeight = (PickBase*L6[4])/UNF[5]
+		idx = 0 ! default to not picked
+		if rfpq.Pickstat>=10 idx = 1 ! picked
+		accums[idx,0] = accums[idx,0] + 1 ! number of picks
+		accums[idx,1] = accums[idx,1] + SellQuantity ! quantity for pick
+		accums[idx,2] = accums[idx,2] + PickCubes
+		accums[idx,3] = accums[idx,3] + PickWeight
+	SkipQueueItem2: !
+	loop
+	if currPickedBy=-1
+		ReturnStatus = 0
+		message$ = "No RF pick records on file."
+	else
+		call GetPickedByRecord(currPickedBy)
+		! add to string going back to web
+		for x = 0 to 1
+			if accums[x,0]>0 ! don't send 0 pick items
+				select case x
+					case 0
+						estFlag = 0
+					case 1
+						estFlag = 1
+				end select
+				accums[x,4] = EstimatePallets(wh,0,currPickedBy,estFlag)
+				list$[listIdx] = str$(currPickedBy)+fdel$+rtrim$(pb.FirstName$)
+				list$[listIdx] = list$[listIdx]+" "+rtrim$(pb.LastName$)+fdel$
+				list$[listIdx] = list$[listIdx]+TypeDescription$[x]+fdel$
+				for y = 0 to 4
+					list$[listIdx] = list$[listIdx]+str$(accums[x,y])+fdel$
+				next y
+				listIdx = listIdx + 1
+				if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			end if
+		next x
+		list$[listIdx] = esdel$
+		Call AddToStr(e$,rstr$,list$[])
+	end if
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+sub GetPickedByRecord(pickedBy)
+try
+	clear pb.
+	pb.FirstName$ = "NOT ASSIGNED"
+	if pickedBy>0
+		k_pb$ = " ",k_pb$
+		k_pb$[1,3] = pickedBy using "###"
+		r_pb = filegetpickedby(e$,ch_pb,"=",1,k_pb$,pb.)
+		if r_pb<0
+			pb.FirstName$ = "NOT ON FILE!"
+		end if
+	end if
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+Sub GetWarehousePickerQueue()
+try
+	wh = GetParameter$("WHSE")
+	if wh<1 or wh>99
+		message$ = "Invalid warehouse selected!"
+		ReturnStatus=0
+		exit sub
+	end if
+	read record #ch_wh,wh-1,0;wh.;
+	pickCode = GetParameter$("PICKCODE") ! 0 = unassigned
+	call GetPickedByRecord(pickCode)
+	shipDate = GetShipDate() ! yymmdd or 0
+	pickStatus$ = ucase$(GetParameter$("STATUS"))
+	if pickStatus$ <> "PICKED" and pickStatus$ <> "NOT PICKED"
+		message$ = "Invalid status!"
+		ReturnStatus=0
+		exit sub
+	end if
+	clear list$[]
+	list$[0] = bsdel$+"ControlInfo"+fdel$
+	list$[1] = "Warehouse"+fdel$+"WarehouseName"+fdel$
+	list$[1] = list$[1] + "PickCode"+fdel$+"PickName"+fdel$
+	list$[2] = str$(wh)+fdel$+str$(wh)+" - "
+	list$[2] = list$[2]+rtrim$(wh.WhName$)+fdel$
+	list$[2] = list$[2] + str$(pickCode)+fdel$+rtrim$(pb.FirstName$)
+	list$[2] = list$[2]+" "+rtrim$(pb.LastName$)+fdel$
+	list$[3] = esdel$
+	list$[4] = bsdel$+"Data"+fdel$
+	list$[5] = "Sequence"+fdel$+"Truck"+fdel$
+	list$[5] = list$[5]+"Order"+fdel$+"Product"+fdel$
+	list$[5] = list$[5]+"Bin"+fdel$+"Units"+fdel$
+	list$[5] = list$[5]+"Cubes"+fdel$+"Pounds"+fdel$
+	list$[5] = list$[5]+"StatusCode"+fdel$+"StatusDescription"+fdel$
+	listIdx = 6
+	! can use the third index, sorted by warehouse, Picked By
+	queueItems = 0
+	k_rfpq$ = " ",k_rfpq$
+	k_rfpq$[1,2] = wh using "##"
+	k_rfpq$[3,6] = pickCode using "####"
+	tmpcnt = maxcnt
+	do
+		r_rfpq = filegetrfpickq(e$,ch_rfpq,">",3,k_rfpq$,rfpq.)
+		if r_rfpq<0 exit do
+		if rfpq.Whse <> wh exit do
+		if rfpq.PickedBy <> pickCode exit do
+		if pickStatus$ = "NOT PICKED" AND rfpq.PickStat > 9 goto SkipQueueItem4
+		if pickStatus$ = "PICKED" AND rfpq.PickStat < 10 goto SkipQueueItem4
+		if not(ReadOrderLine(rfpq.)) goto SkipQueueItem4:
+		if shipDate
+			if exactMatch and shipDate <> H0[10] goto SkipQueueItem4
+			if not(exactMatch) and shipDate < H0[10] goto SkipQueueItem4
+		end if
+		if not(LoadProduct()) goto SkipQueueItem4:
+		if rfpq.PickStat < 10
+			PickBase = rfpq.Qty2Pick
+		else
+			PickBase = rfpq.QtyPicked
+		end if
+		cnvtu[0] = 0 \ cnvtu[1] = UN[0] \ cnvtu[2] =1
+		cnvta = PickBase
+		SellQuantity = UnitConversion()
+		PickCubes = (PickBase*L6[2])/UNF[4]
+		PickWeight = (PickBase*L6[4])/UNF[5]
+		if rfpq.PickedBy = 0 ! not assigned yet
+			idx = 0
+		else ! assigned
+			idx = 1 ! default to not picked
+			if rfpq.Pickstat>=10 idx = 2 ! picked
+		end if
+		list$[listIdx] = str$(rfpq.Sequence)+fdel$+str$(rfpq.Truck)+fdel$
+		list$[listIdx] = list$[listIdx]+str$(rfpq.Order)+fdel$+rtrim$(rfpq.Product$)+fdel$
+		list$[listIdx] = list$[listIdx]+rtrim$(rfpq.Bin$)+fdel$
+		list$[listIdx] = list$[listIdx]+str$(SellQuantity)+fdel$
+		list$[listIdx] = list$[listIdx]+str$(PickCubes)+fdel$+str$(PickWeight)+fdel$
+		list$[listIdx] = list$[listIdx]+str$(rfpq.PickStat)+fdel$
+		list$[listIdx] = list$[listIdx]+StatusDescription$(rfpq.Pickstat)+fdel$
+		queueItems = queueItems + 1
+		listIdx = listIdx + 1
+		if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	SkipQueueItem4: !
+	loop
+	if queueItems = 0
+		ReturnStatus = 0
+		message$ = "No RF pick records match criteria!"
+	else
+		list$[listIdx] = esdel$
+		Call AddToStr(e$,rstr$,list$[])
+	end if
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+Sub WarehouseShortPicks()
+try
+	wh = GetParameter$("WHSE")
+	if wh<0 or wh>99 ! 0=ALL
+		message$ = "Invalid warehouse selected!"
+		ReturnStatus=0
+		exit sub
+	end if
+	shipDate = GetShipDate() ! yymmdd or 0
+	clear list$[]
+	list$[0] = bsdel$+"Data"+fdel$
+	list$[1] = "Warehouse"+fdel$
+	list$[1] = list$[1]+"Order"+fdel$+"Line"+fdel$+"Product"+fdel$
+	list$[1] = list$[1]+"Bin"+fdel$+"ShipDate"+fdel$
+	list$[1] = list$[1]+"PickCode"+fdel$+"PickName"+fdel$
+	list$[1] = list$[1]+"ShipQuantity"+fdel$+"PickQuantity"+fdel$
+	list$[1] = list$[1]+"ShortQuantity"+fdel$
+	list$[1] = list$[1]+"UOM"+fdel$
+	listIdx = 2
+	! use directory 2 - warehouse / order / line
+	k_rfpq$ = " ",k_rfpq$
+	if wh k_rfpq$[1,2] = wh using "##"
+	tmpcnt = maxcnt
+	queueItems = 0
+	do
+		r_rfpq = filegetrfpickq(e$,ch_rfpq,">",2,k_rfpq$,rfpq.)
+		if r_rfpq<0 exit do
+		if wh and rfpq.Whse <> wh exit do
+		if rfpq.PickStat<11 goto SkipQueueItem5 ! not picked short
+		forceHeaderRead = 1
+		if not(ReadOrderLine(rfpq.)) goto SkipQueueItem5
+		forceHeaderRead = 0
+		if shipDate
+			if exactMatch and shipDate <> H0[10] goto SkipQueueItem5
+			if not(exactMatch) and shipDate < H0[10] goto SkipQueueItem5
+		end if
+		if not(LoadProduct()) goto SkipQueueItem5
+		call GetPickedByRecord(rfpq.PickedBy)
+		cnvtu[0] = 0 \ cnvtu[1] = UN[0] \ cnvtu[2] =1
+		cnvta = rfpq.Qty2Pick
+		ShipQuantity = UnitConversion()
+		cnvta = rfpq.QtyPicked
+		PickQuantity = UnitConversion()
+		uom$=rtrim$(xunit$(UN[0],ch_ccodes)) ! u/m
+		list$[listIdx] = str$(rfpq.Whse)+fdel$
+		list$[listIdx] = list$[listIdx]+str$(rfpq.Order)+fdel$+str$(rfpq.OrderLine)+fdel$
+		list$[listIdx] = list$[listIdx]+rtrim$(rfpq.Product$)+fdel$
+		list$[listIdx] = list$[listIdx]+rtrim$(rfpq.Bin$)+fdel$
+		tmp$ = h0[10] using "&&&&&&" \ call FormatDate(tmp$)
+		list$[listIdx] = list$[listIdx]+tmp$+fdel$
+		list$[listIdx] = list$[listIdx]+str$(rfpq.PickedBy)+fdel$+rtrim$(pb.FirstName$)
+		list$[listIdx] = list$[listIdx]+" "+rtrim$(pb.LastName$)+fdel$
+		list$[listIdx] = list$[listIdx]+str$(ShipQuantity)+fdel$
+		list$[listIdx] = list$[listIdx]+str$(PickQuantity)+fdel$
+		list$[listIdx] = list$[listIdx]+str$(ShipQuantity - PickQuantity)+fdel$
+		list$[listIdx] = list$[listIdx]+uom$+fdel$
+		queueItems = queueItems + 1
+		listIdx = listIdx + 1
+		if listIdx>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	SkipQueueItem5: !
+	loop
+	if queueItems = 0
+		ReturnStatus = 0
+		message$ = "No RF short picks exist for selected warehouse(s)."
+	else
+		list$[listIdx] = esdel$
+		Call AddToStr(e$,rstr$,list$[])
+	end if
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+
+Sub DeleteOrderFromQueue()
+try
+	order = GetParameter$("ORDER")
+	if order<=0 or order>999999
+		message$ = "Invalid selected selected!"
+		ReturnStatus=0
+		exit sub
+	end if
+	resetPickFlag = GetParameter$("RESETPICKFLAG")
+
+	! use directory 4 - order / line
+	k_rfpq$ = " ",k_rfpq$
+	delItems = 0
+	k_rfpq$[1,6] = order using "######"
+	do
+		r_rfpq = filegetrfpickq(e$,ch_rfpq,">",4,k_rfpq$,rfpq.)
+		if r_rfpq<0 exit do
+		if rfpq.Order <> order exit do
+		r_rfpq2 = fileupdaterfpickq(e$,ch_rfpq,"d",r_rfpq, rfpq.)
+		delItems = delItems + 1
+		if r_rfpq2<0
+			message$ = "Error deleting queue item: "+e$
+			ReturnStatus=0
+			exit sub
+		end if
+	loop
+	
+	if delItems = 0
+		ReturnStatus = 0
+		message$ = "No RF picks exist for order."
+	else
+		message$ = str$(delItems)+" queue items deleted for order."
+		if resetPickFlag
+			forceHeaderRead = 1
+			if ReadOrderLine(rfpq.)
+				! update pick flick
+				mat read #ch_ros,OREF[4],8;s1$
+				s1$[118,118] = 0
+				mat write #ch_ros,OREF[4],8;s1$;
+			else
+				message$ = message$ + "  Could not find order to reset pick flag!"
+			end if
+		end if
+	end if
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub
+
+
+Function StatusDescription$(statCode)
+try
+	dim statDescription$[40]
+	
+	statDescription$ = "UNKNOWN"
+	select case statCode
+		case 0
+			statDescription$ = "Not Picked"
+		case 1
+			statDescription$ = "Pick In Progress"
+		case 2
+			statDescription$ = "Pick Suspended"
+		case 10
+			statDescription$ = "Pick Completed"
+		case 11
+			statDescription$ = "Pick Completed (Short)"
+		case 12
+			statDescription$ = "Pick Completed (Order On Hold)"
+		case 13
+			statDescription$ = "Pick Completed (Back Ordered)"
+		case 14
+			statDescription$ = "Pick Completed Short (Hold Failed)"
+		case 15
+			statDescription$ = "Pick Completed Short (BO Failed)"
+	end select
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end Function statDescription$
+
+! 1 = read the line, 0 = couldn't find it
+! if shipDate is present, we need the
+! header as well.
+Function ReadOrderLine(ord_rfpq. as rfpickq)
+try
+	if shipDate or forceHeaderRead
+		if not(ReadOrderHeader(ord_rfpq.)) exit function 0
+	end if
+	k_rol$ = " ",k_rol$
+	k_rol$[1,6] = ord_rfpq.Order using "######"
+	k_rol$[7,9] = ord_rfpq.OrderLine using "###"
+	search #ch_rol,2,1;k_rol$,r_rol,e \ if e>1 error 11000
+	if e exit function 0
+	mat read #ch_rol,r_rol,8;L3;
+	mat read #ch_rol,r_rol,16;L4;
+	mat read #ch_rol,r_rol,56;L6;
+	mat read #ch_rol,r_rol,250;UN;
+	mat read #ch_rol,r_rol,446;EUN;
+	mat read #ch_rol,r_rol,452;UNF;
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end Function 1
+
+! 1 = read the header, 0 = couldn't find it
+Function ReadOrderHeader(ord_rfpq. as rfpickq)
+try
+	! see if we already have the right one
+	if ord_rfpq.Order = lastHeaderRead exit function 1
+	k_roh$ = " ",k_roh$
+	k_roh$[3,8] = ord_rfpq.Order using "######"
+	lastHeaderRead = 0
+	for i = 1 to 99
+		if x1 = 20 let x1 = 30
+		k_roh$[1,2] = i using "##"
+		search #ch_roh,2,1;k_roh$,r_roh,e \ if e>1 error 11000
+		if not(e)
+			lastHeaderRead = k_roh$[3]
+			i = 100
+		end if
+	next i
+	if not(lastHeaderRead) exit function 0
+	mat read #ch_roh,r_roh,0;H0;
+	mat read #ch_roh,r_roh,512;OREF;
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end Function 1
+
+
+Function LoadProduct()
+try
+	if L3[0] ! non-stock item
+		clear a[]
+		clear pfu1[]
+		clear pfu2[]
+		call LoadProdFromNonStock()
+	else
+		mat read #ch_prod,L4[0],256;A;
+		mat read #ch_prod,L4[0],512;PFU1;
+		mat read #ch_prod,L4[0],554;PFU2;
+	end if
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end Function 1
+
+Function UnitConversion()
+try
+	! UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)                    
+	AMOUNT = 0
+	If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0]
+		Let AMOUNT = CNVTA
+		goto ConversionDone
+	end if
+	If CNVTU[0] = -2 Or CNVTU[1] = -2 ! lot
+		Let AMOUNT = CNVTA
+		goto ConversionDone
+	end if
+	If Not(CNVTA) ! nothing to convert
+		Let AMOUNT = 0
+		goto ConversionDone
+	end if
+	Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+	If FLAG Let E = FLAG \ error 11000
+	AMOUNT = CNVTA
+ConversionDone:
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end Function AMOUNT
+
+
+sub LoadProdFromNonStock()
+try
+	! ===== set n/s units for conversions                            
+	A[6] = L6[4];A[5] = UNF[5] \ If Not(A[5]) Let A[5] = 1;UNF[5] = 1
+	!
+	PFU1[0] = EUN[0];PFU1[1] = UN[0] ! "base and selling units
+	PFU1[2] = UN[1];PFU1[3] = UN[2] ! "pricing and costing
+	PFU1[4] = EUN[1] ! "purchasing
+	PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+	PFU1[8] = UN[0];PFU1[9] = UN[0];PFU1[10] = EUN[1] ! "stock,sell,purch dflt
+	PFU1[11] = UN[2];PFU1[12] = UN[1];PFU1[13] = UN[0] ! "cost,price,prod dflt
+	PFU1[16] = EUN[0];PFU1[17] = EUN[0];PFU1[18] = UN[0] ! "up,bkn,pack dflt
+	PFU1[19] = UN[0] ! "size default
+	PFU2[0] = UNF[0];PFU2[1] = UNF[1] ! "selling and pricing factor
+	PFU2[2] = UNF[2];PFU2[3] = UNF[3] ! "costing and purchasing
+	PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+	For X1 = 1 To 4
+		For X2 = 0 To X1 - 1
+			If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+		Next X2
+	Next X1
+Else ! main sub/func try
+	Include "src/callsuberr.inc"
+End Try 
+end sub

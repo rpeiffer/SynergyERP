@@ -1,0 +1,1103 @@
+! serp935.dl4
+!
+! G/L - A/R Control File Maintenance (PM program 935)
+! Inquiry & Edit
+!
+! 1.0 03/02/2009
+!
+!
+!loadsave -w -n 100,10 -o prog/dxport/serp935.dl4 src/serp935.src
+!
+!
+include "src/copyright.inc"
+! internal files needed
+Include "src/inc/fileglarcntrlz.inc" ! glarcntrl
+Include "src/inc/filewhinfoz.inc" ! wh info file (rec 0 fix)
+Include "src/inc/filedivifle.inc" ! division
+Include "src/inc/filesprodcatgy.inc" ! product category
+Include "src/inc/fileglglmz.inc" ! glmaster
+include "src/inc/fileglacfz.inc" ! application control file
+
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+Declare External Function formatdate2$,getuidrec
+Declare External Sub UserCntrl
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+
+
+
+! internal subs/functions 
+
+Declare Intrinsic sub programdump,env,Logic,FindF
+Declare Intrinsic Sub DateToJulian,JulianToDate
+Declare Intrinsic Function findchannel
+
+Declare Sub Updatelog,OpenFiles,STARTGLARCNTRL,GETGLARCNTRL,SUBMITGLARCNTRL
+declare Sub GetGLDroplist
+
+OPTION GOSUB NESTING 12  ! Default is 8 (called programs may add several nests)
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim P9$[50],P60$[50],P61$[256],P8$[7],TUID$[10]
+	Dim QMask$[20],PMask$[20],Key1$[60],HKey$[60]
+	Dim Key2$[64],Msgdesc$[150],UCA2$[50],keyglar$[50]
+	dim keyacf$[30],3%,rec_acf
+	Dim keyglm$[50],3%,glmrec
+	dim Blank$[100] \ Blank$=" ",Blank$
+	dim 1%,cost_lev[4],Q0[1],Whse,debug,Cnvtu[2],UCA5[10]
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	Dim RList$[100,100] ! for fixed droplists (libdroplist.lib)
+	dim 1%,X1[9],Chans[20],OT19
+	Dim 2%,x2[9],sysdate
+	Dim 3%,CNVTA,Amount,X3[9],R[99]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/mgl.log" ! fields for DEBUG
+
+	Dim glar. as glarcntrlz ! glarcntrl
+	Dim psc. as  sprodcatgy
+	Dim WH. as whinfo ! wh info file
+	Dim glm. As glglm ! gl master file
+	Dim div. as divifle ! division file
+	dim acf. as glacf ! application control file
+
+	
+	! call dxopen() ! already done in menu
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp935"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action2$=UCase$(Action2$)
+	ACtion2$=RTrim$(Action2$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	GAct=0 ! action not found
+	if debugdetail
+		dmsg$="SERP935 ACTION1 "+action1$
+		If Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	
+
+	MAT  READ #CTLC,3,172;SysDate;
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #ctlc,52,60;P8$;
+	Call OpenFiles() ! open any/all files (after reading flags!)
+	Mat Read #CTLC,115,40;Q0;
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	tmp$=" ",tmp$
+	read #ctlc,62,360;tmp$[1,20];
+	ot19=0 \ if trim$(tmp$[1,20])<>"" let OT19=1
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	TUID$=UserID$+Blank$
+	If Len(TUID$)>10 let TUID$[11]=""
+	Call UserCntrl(TUID$,UCA2$,UCA5[],status,intCo)
+	Let COST_LEV[0]=UCA5[0]
+	Let COST_LEV[1]=UCA5[1]
+	Let COST_LEV[2]=UCA5[2]
+	Let COST_LEV[3]=UCA5[3]
+	Let COMM_LEV=UCA5[4]
+	let rec_uac=GetUIDRec(e$,IntCo,Userid$)
+	
+	ReturnStatus=0
+	Message$="ACTION1 NOT FOUND!"
+	select case action1$
+		
+
+	case "STARTGLARCNTRL" ! send over droplists and flags
+		let returnstatus=1
+		let message$="OK"
+		call StartGlarcntrl()
+		if debugdetail
+			dmsg$="StartGlarcntrl Done "+Message$ \ Call updatelog(debug)
+		Endif
+	case "GETGLARCNTRL" ! get new or default key
+		let returnstatus=1
+		let message$="OK"
+		call GetGlarcntrl()
+		if debugdetail
+			dmsg$="StartGlarcntrl Done "+Message$ \ Call updatelog(debug)
+		Endif
+
+	case "SUBMITGLARCNTRL" ! submit it							
+		ReturnStatus=1
+		Message$="OK"
+		call SubmitGlarcntrl()
+		if debugdetail
+			dmsg$="SubmitGlarcntrl Done "+Message$ \ Call updatelog(debug)
+		Endif
+	case "GLDROPLIST" ! g/l droplist for division							
+		ReturnStatus=1
+		Message$="OK"
+		call GETGLDROPLIST()
+		if debugdetail
+			dmsg$="GETGLDROPLIST Done "+Message$ \ Call updatelog(debug)
+		Endif	
+
+  end select
+ 
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+
+  if debugdetail
+		dmsg$="End of Program serp935" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main processing
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	Ch_WH = OpenFile(-2768,IntCo) \ if ch_wh = -1 Error 42 ! wh info file (rec 0 fix)
+	ch_glar = OpenFile(464,IntCo) \ if ch_glar = -1 Error 42  ! glar controls
+	ch_div = Openfile(-688,IntCo) \ If ch_div = -1 Error 42
+	ch_psc = OpenFile(-1984,IntCo) \ If ch_psc = -1 Error 42 ! prod sales category
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+Userid$+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+!========================================================================================
+Sub StartGLARcntrl()
+! droplists sent here 
+ Try
+	
+	Dim desc$[12]
+	dim keyglm$[50],3%,glmrec
+	Dim keyroh$[50],3%,rohrec
+	if p9$[17,17]="Y" or p9$[17,17]="M"
+		ch_glm = OpenFile(-176,intCo) \ If ch_glm = -1 Error 42 !
+	endif
+	ReturnStatus=1
+	Message$="OK" 
+	! check is gl interface is needed
+	let tmp$="N"
+	if p9$[17,17]="Y" let tmp$="Y"
+	if p9$[17,17]="M" let tmp$="Y"
+	if tmp$="N"
+		let returnstatus=0
+		let message$="General Ledger Interface Is Not Available"
+	endif
+	!if p8$[7,7]="D" or p8$[7,7]="W"
+    if p8$[7,7]="W"
+		let returnstatus=0
+		let message$="G/L - A/R is set by Client Warehouse. Please update in native mode."
+	endif
+	! need to check if invoices are registered
+	if returnstatus<>0
+		ch_roh = Openfile(-1840,IntCo) \ If ch_roh = -1 Error 42 !"order head
+		let keyroh$=" ",keyroh$
+		let keyroh$[1,2]=" 7"
+		search #ch_roh,3,1;keyroh$,rohrec,e
+		if not(e)
+			if keyroh$[1,2]=" 7"
+				let returnstatus=0
+				let message$="Invoices and/or Credit Memos need to be accepted."
+			endif
+		endif
+		let keyroh$=" ",keyroh$
+		let keyroh$[1,2]="11"
+		search #ch_roh,3,1;keyroh$,rohrec,e
+		if not(e)
+			if keyroh$[1,2]="11"
+				let returnstatus=0
+				let message$="Invoices and/or Credit Memos need to be accepted."
+			endif
+		endif
+	endif
+	! need to check if credit memos are registered
+	let tmpcnt=maxcnt 
+	Clear List$[]
+	List$[0]=bsdel$,"General Ledger Account",fdel$
+	WebStr$="GLACCTID",fdel$,"GLDESC",fdel$
+        List$[1]=WebStr$
+	If p9$[17,17]="Y" or p9$[17,17]="M"
+		if returnstatus<>0 
+			let row=2	
+			let keyglm$=" ",keyglm$
+			do
+				search #ch_glm,3,1;keyglm$,glmrec,e
+				if e>0 exit do
+				read record #ch_glm,glmrec;glm.;
+				if glm.rectype$[1,1]="0" ! normal posting account
+					let webstr$=Rtrim$(keyglm$),fdel$
+					let webstr$=webstr$,rtrim$(glm.Desc$),fdel$
+					let list$[row]=webstr$
+					let row=row+1
+					If row > tmpcnt Let tmpcnt = expandarray(e$,List$[]) 
+				endif
+			loop ! for the do
+		endif
+	endif
+      	call AddToStr(e$,rstr$,List$[])          
+	Call AddToStr(e$,rstr$,esdel$) ! end of section  ! gl
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"WHSELIST",fdel$
+	List$[1]="ID",fdel$,"WhName",fdel$
+	row=2
+	if returnstatus<>0
+		
+		List$[row]="0",fdel$,"DEFAULT",FDEL$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		maxwhse=CHF(ch_wh)-1 \ if maxwhse>98 let maxwhse=98
+		For I=0 to maxwhse ! CHF(WHC)-1 (99 is the ALLWHSE record)
+			read record #ch_wh,I,0;wh.;
+			if rtrim$(wh.WhName$)<>"" !indicates active record in non-indexed file
+				WebStr$=Str$(I+1),fdel$,rtrim$(wh.WhName$),fdel$
+				List$[row]=webstr$
+				row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			Endif
+		Next I
+	endif
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+
+	! Division List
+	clear list$[]
+	List$[0]=bsdel$,"DIVLIST",fdel$
+	List$[1]="ID",fdel$,"DivName",fdel$
+	let row=2
+	if returnstatus<>0
+		If p8$[1,1]="N"
+			list$[2]="0",fdel$,"None",fdel$
+		else
+			List$[2]="0",fdel$,"ALL DIVISIONS",fdel$
+		endif
+		row=3
+		if p8$[1,1]="Y"
+			maxrec=CHF(ch_div)-1 \ if maxrec>99 let maxrec=99
+			For I=1 to maxrec ! 
+				read record #ch_div,I,0;div.;
+				if rtrim$(div.desc$)<>"" !indicates active record in non-indexed file
+					WebStr$=Str$(I),fdel$,rtrim$(div.desc$),fdel$
+					List$[row]=webstr$
+					row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+				Endif
+			Next I
+		endif
+	endif
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	
+	! Now Order Type List
+	clear list$[]
+	List$[0]=bsdel$,"ORDTYPELIST",fdel$
+	List$[1]="ID",fdel$,"OrdTypeDesc",fdel$
+	row=2
+	if returnstatus<>0
+		if p8$[2,2]="N"
+			list$[2]="0",fdel$,"None",fdel$
+		else
+			List$[2]="0",fdel$,"All ORDER TYPES",fdel$
+		endif
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		If p8$[2,2]="Y"
+			For cnt = 1 To 38         
+				dsp = (cnt - 1) * 20    
+				Read #ctlc,62,dsp;Desc$;
+				if rtrim$(desc$)<>""
+					Webstr$=str$(cnt),fdel$
+					WebStr$=WEBSTR$,rtrim$(Desc$),fdel$
+					List$[row]=WebStr$
+					row=row+1
+					if row>tmpcnt let tmpcnt=expandarray(E$,List$[])
+				endif
+			next cnt
+		Endif
+	Endif
+	!
+	List$[row]=esdel$ ! end section delimiter
+	call AddToStr(e$,rstr$,List$[])
+	clear list$[]
+	
+	List$[0]=bsdel$,"ControlFlags",fdel$
+	webstr$="GLFLAG",fdel$,"DIVFLAG",fdel$,"ORDTYPEFLAG",fdel$,"PRODCATFLAG",fdel$
+	webstr$=webstr$,"MFGFLAG",fdel$,"DEPOSITFLAG",fdel$,"OT19FLAG",fdel$
+	webstr$=webstr$,"DIVCLIENT",fdel$,"MULTICURRENCY",fdel$
+	List$[1]=webstr$
+	row=2
+	if returnstatus<>0
+		webstr$=""
+		let tmp$="N"
+		if p9$[17,17]="Y" let tmp$="Y"
+		if p9$[17,17]="M" let tmp$="Y"
+		webstr$=tmp$,fdel$! glflag
+		let tmp$="N"
+		if p8$[1,1]="Y" let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$ ! divflag
+		let tmp$="N"
+		if p8$[2,2]="Y" let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$ ! order type flag
+		let tmp$="N"
+		if p8$[3,3]="Y" let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$ ! prod cat flag
+		let tmp$="N"
+		if p9$[2,2]="M" let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$ ! mfg flag
+		tmp$ = "N" 
+		If p61$[94,94] = "Y" Let tmp$ = "Y"
+		webstr$ = webstr$,tmp$,fdel$ ! deposits
+		tmp$="N" \ if ot19 let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$ ! ot19 in use
+		let tmp$="N"
+		if p8$[7,7]="D"
+			if p8$[1,1]="Y" let tmp$="Y"
+		endif
+		
+		webstr$=webstr$,tmp$,fdel$
+		let tmp$="N"
+		if p61$[136,136]="Y" let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$
+		list$[2]=webstr$
+		row=row+1
+	endif
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+!!! need status section	
+	
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! SndDLists
+! -------------------------------------------------------------------------------------
+Sub GetGLARCntrl()
+! droplists sent here 
+ Try
+	dim 3%,glarrec
+	DIM 3%,G2[20],G3[20],G4[20],G5[20],G6[20],G7[20],G8[20] 
+	DIM 3%,G9[20],G0[20],M0[20],M1[20],M2[20]                          
+ ReturnStatus=1
+ Message$="OK" 
+Call Dxget("WAREHOUSE",tmp$)
+let whrec=tmp$
+if whrec<0 or whrec>99
+	let returnstatus=0
+	let message$="Invalid Warehouse Entered "
+	goto endgetglar:
+endif
+if whrec=0
+	let keyglar$=" ",keyglar$
+	let keyglar$[1,6]="DFAULT"
+	If p8$[1,1] = "Y"
+		Call Dxget("DIVISION",tmp$)
+		div = tmp$
+		If div <> 0
+			returnstatus = 0
+			message$ = "Default Record Must be entered for All Divisions "
+			If p8$[3,3] = "Y" Let message$ = message$ + "All Order Types "
+			Goto endgetglar
+		End If
+	End If
+	If p8$[2,2] = "Y"
+		Call Dxget("ORDERTYPE",tmp$)
+		ordtype = tmp$
+		If ordtype <> 0
+			returnstatus = 0
+			message$ = "Default Record Must be entered for All Order Types "
+			Goto endgetglar
+		End If
+	End If                                                                
+	let div=0
+	let ordtype=0
+	goto getglarrec:
+endif
+read record #ch_wh,(whrec-1);wh.;
+If RTrim$(wh.whname$) = ""
+	let returnstatus=0
+	let message$="Warehouse "+str$(whrec)+ " Not On File "
+	goto endgetglar:
+endif
+! check default record is setup first
+keyglar$ = " ",keyglar$
+keyglar$[1,6] = "DFAULT"
+Search #CH_GLAR,2,1;keyglar$,glarrec,e
+If e <> 0
+	returnstatus = 0
+	message$ = "Default Warehouse Record Needs to be first set-up "
+	If p9$[1,1] = "Y"
+		message$ = message$ + " for all Divisions "
+	End If
+	If p9$[2,2] = "Y"
+		message$ = message$ + "For All Order Types "
+	End If
+	Goto endgetglar
+End If
+let div=0
+if p8$[1,1]="Y"
+	Call Dxget("DIVISION",tmp$)
+	let div=tmp$
+	if div<0 or div>99
+		let returnstatus=0
+		let message$="Invalid Division Entered "
+		goto endgetglar:
+	endif
+	if div=0 ! get default for warehouse
+		If p8$[2,2] = "Y"
+			Call Dxget("ORDERTYPE",tmp$)
+			ordtype = tmp$
+			If ordtype <> 0
+				returnstatus = 0
+				message$ = "Entering for All Division, Must be for All Order Types also"
+				Goto endgetglar
+			End If
+		End If
+		let keyglar$=" ",keyglar$
+		let keyglar$[1,2]=whrec using "##"
+		goto getglarrec:
+	endif
+	Read record #ch_div,div,0;div.;
+	if rtrim$(div.desc$)="" 
+		let returnstatus=0
+		let message$="Invalid Division Entered "
+		goto endgetglar: !
+	endif
+	!verfiy if warehouse record exist first
+	keyglar$ = " ",keyglar$
+	keyglar$[1,2] = whrec Using "##"
+	!    if div<>0 let keyglar$[3,4]=div using "##"
+	!    if ordtype<>0 let keyglar$[5,6]=ordtype using "##"
+	Search #CH_GLAR,2,1;keyglar$,glarrec,e
+	If e <> 0
+		returnstatus = 0
+		message$ = "Warehouse Record " + Str$(whrec) + " For all Divisions "
+		If p8$[2,2] = "Y"
+			message$ = message$ + "For All Order Types "
+		End If
+		message$ = message$ + " Need to be added first. "
+		Goto endgetglar
+	End If
+endif
+let ordtype=0
+if p8$[2,2]="Y"
+	Call Dxget("ORDERTYPE",tmp$)
+	let ordtype=tmp$
+	if ordtype<0 or ordtype>38
+		let returnstatus=0
+		let message$="Invalid Order Type Entered "
+		goto endgetglar:
+	endif
+	if ordtype=0
+		let keyglar$=" ",keyglar$
+		let keyglar$[1,2]=whrec using "##"
+		if div<>0 let keyglar$[3,4]=div using "##"
+		goto getglarrec:
+	endif
+	If whrec = 0
+		returnstatus = 0
+		message$ = "Warehouse Needs to be Selected "
+		Goto endgetglar
+	End If                                          
+	If p8$[1,1] = "Y"
+		If div = 0
+			returnstatus = 0
+			message$ = "Division Needs to be Selected "
+			Goto endgetglar
+		Else      
+			keyglar$ = " ",keyglar$
+			keyglar$[1,2] = whrec Using "##"
+			keyglar$[3,4] = div Using "##"
+			Search #CH_GLAR,2,1;keyglar$,glarrec,e
+			If e <> 0
+				returnstatus = 0
+				message$ = "Warehouse Record " + Str$(whrec) + " For Division " + Str$(div)
+				message$ = message$ + " For All Order Types Needs to be added first  "
+				Goto endgetglar 
+			End If
+		End If
+	End If
+endif
+let keyglar$=" ",keyglar$
+let keyglar$[1,2]=whrec using "##"
+if div<>0 let keyglar$[3,4]=div using "##"
+if ordtype<>0 let keyglar$[5,6]=ordtype using "##"
+getglarrec: !  GET GLARCNTRL RECORD
+let recordexist=0
+glarrec=-1
+search #ch_glar,2,1;keyglar$,glarrec,e
+if not(e)
+	recordexist=1
+	read record #ch_glar,glarrec;glar.;
+	goto endgetglar:
+endif
+if not(whrec) ! entering default -- will be new
+	clear glar.
+	goto endgetglar:
+endif
+if ordtype<>0
+	let keyglar$=" ",keyglar$
+	let keyglar$[1,2]=whrec using "##"
+	if div<>0 let keyglar$[3,4]=div using "##"
+	search #ch_glar,2,1;keyglar$,glarrec,e
+	if not(e)
+		read record #ch_glar,glarrec;glar.;
+		goto endgetglar:
+	endif
+	let returnstatus=2
+	let message$="Warehouse "+str$(whrec)
+	if div<>0 let message$=" Division " +str$(div)
+	let message$=" Needs to be setup first"
+	let ordtype=0
+endif
+if div<>0
+	let keyglar$=" ",keyglar$
+	let keyglar$[1,2]=whrec using "##"
+	search #ch_glar,2,1;keyglar$,glarrec,e
+	if not(e)
+		read record #ch_glar,glarrec;glar.;
+		goto endgetglar:
+	endif
+	let returnstatus=2
+	let message$="Warehouse "+str$(whrec)
+	let message$=" Needs to be setup first"
+	let ordtype=0
+	let whrec=0
+endif
+let keyglar$=" ",keyglar$
+let keyglar$[1,6]="DFAULT"
+search #ch_glar,2,1;keyglar$,glarrec,e
+if not(e)
+	read record #ch_glar,glarrec;glar.;
+	goto endgetglar:
+endif
+clear glar.
+let returnstatus=2
+let message$="Default Record needs to be setup first."
+endgetglar: ! 
+clear list$[]
+List$[0]=bsdel$,"GETGLARCNTRL",fdel$
+webstr$="WAREHOUSE",fdel$                       
+webstr$=webstr$,"DIVISION",fdel$                
+webstr$=webstr$,"ORDER TYPE",fdel$              
+webstr$=webstr$,"ACCOUNTS RECEIVABLE",fdel$     
+webstr$=webstr$,"SALES DISCOUNTS",fdel$         
+webstr$=webstr$,"OTHER",fdel$                   
+webstr$=webstr$,"MISCELLANEOUS CHARGES",fdel$   
+webstr$=webstr$,"SALES TAX",fdel$               
+webstr$=webstr$,"FREIGHT CHARGE",fdel$          
+webstr$=webstr$,"CASH",fdel$                    
+webstr$=webstr$,"ALLOW FOR DOUBTFUL ACCTS",fdel$
+webstr$=webstr$,"SERVICE CHARGES",fdel$
+webstr$=webstr$,"NewRecord",fdel$
+webstr$ = webstr$,"DEPOSIT",fdel$
+webstr$=webstr$,"FUEL SURCHARGE",fdel$
+webstr$=webstr$,"CURRENCY EXCHANGE",Fdel$
+lIST$[1]=webstR$
+let row=2
+if returnstatus<>0
+	Webstr$=str$(glar.whse),fdel$        
+	Webstr$=Webstr$,str$(glar.Div),fdel$      
+	Webstr$=Webstr$,str$(glar.OrdType),fdel$                               
+	Webstr$=Webstr$,(glar.AcctRec using "########"),fdel$                           
+	Webstr$=Webstr$,(glar.Disc using "########"),fdel$                       
+	Webstr$=Webstr$,(glar.Other using "########"),fdel$                         
+	Webstr$=Webstr$,(glar.MiscChrg using "########"),fdel$                     
+	Webstr$=Webstr$,(glar.Tax using "########"),fdel$                     
+	Webstr$=Webstr$,(glar.Freight using "########"),fdel$                       
+	Webstr$=Webstr$,(glar.Cash using "########"),fdel$                        
+	Webstr$=Webstr$,(glar.BadDebt using "########"),fdel$                        
+	Webstr$=Webstr$,(glar.SvcChrg using "########"),fdel$ 
+	Tmp$="N"
+	if not(recordExist) let tmp$="Y"
+	webstr$=webstr$,tmp$,fdel$
+	If p61$[94,94] = "Y"
+		webstr$ = webstr$,(glar.Deposit Using "########"),fdel$
+	Else
+		webstr$ = webstr$,"",fdel$
+	End If     
+	webstr$=webstr$,(glar.FuelChrg Using "########"),fdel$
+	if p61$[136,136]="Y"
+		Webstr$=webstr$,(glar.CurrExcVar using "########"),fdel$
+	else
+		webstr$ = webstr$,"",fdel$
+	endif
+	list$[row]=webstr$
+	row=row+1
+endif
+List$[row]=esdel$
+call AddToStr(e$,rstr$,List$[])
+clear list$[]
+List$[0]=bsdel$,"GETGLARPRODCAT",fdel$
+Webstr$=""
+webstr$="PRODCAT",FDEL$
+WEBSTR$=WEBSTR$,"PRODCATDESC",FDEL$
+webstr$=webstr$,"SALES",fdel$                  
+webstr$=webstr$,"SALES RETURNS",fdel$          
+webstr$=webstr$,"INVENTORY",fdel$              
+webstr$=webstr$,"COST OF SALES",fdel$          
+webstr$=webstr$,"LABOR CHARGES",fdel$          
+webstr$=webstr$,"TIME",fdel$                   
+webstr$=webstr$,"MACHINE",fdel$                
+webstr$=webstr$,"RAW MATERIAL INVENTORY",fdel$ 
+webstr$=webstr$,"WIP INVENTORY",fdel$
+webstr$=webstr$,"OT19 COGS ACCRUAL",fdel$
+list$[1]=webstr$
+row=2
+!
+if returnstatus<>0
+	if glarrec>0
+		MAT  READ #CH_GLAR,glarrec,80;G2;  
+		MAT  READ #CH_GLAR,glarrec,206;G3; 
+		MAT  READ #CH_GLAR,glarrec,332;G4; 
+		MAT  READ #CH_GLAR,glarrec,458;G5; 
+		MAT  READ #CH_GLAR,glarrec,584;G6; 
+		MAT  READ #CH_GLAR,glarrec,710;G7; 
+		MAT  READ #CH_GLAR,glarrec,836;G8; 
+		MAT  READ #CH_GLAR,glarrec,962;G9; 
+		MAT  READ #CH_GLAR,glarrec,1088;G0;
+		MAT  READ #CH_GLAR,glarrec,1214;M0;
+		MAT  READ #CH_GLAR,glarrec,1340;M1;
+		Mat read #ch_GLAR,glarrec,1466;M2;
+	else
+		for ctr=0 to 20
+			LET G2[ctr]=0 \ LET G3[ctr]=0 \ LET G4[ctr]=0 \ LET G5[ctr]=0 \ LET G6[ctr]=0 
+			LET G7[ctr]=0 \ LET G8[ctr]=0 \ LET G9[ctr]=0 \ LET G0[ctr]=0               
+			LET M0[ctr]=0 \ LET M1[ctr]=0 \ M2[ctr]=0
+		next ctr
+	endif
+	webstr$=""
+	if p8$[3,3]<>"Y"
+		webstr$="0",fdel$ ! all product categories
+		webstr$=webstr$,"All Product Categories",fdel$ 
+		webstr$=webstr$,(g2[0] using "########"),fdel$ ! sales
+		webstr$=webstr$,(g3[0] using "########"),fdel$ ! sales returns
+		webstr$=webstr$,(g4[0] using "########"),fdel$ ! inventory
+		webstr$=webstr$,(g5[0] using "########"),fdel$ ! cost of sales
+		IF P9$[2,2]="M"
+			webstr$=webstr$,(g8[0] using "########"),fdel$ ! labor 
+			webstr$=webstr$,(g9[0] using "########"),fdel$ ! time
+			webstr$=webstr$,(g0[0] using "########"),fdel$ ! machine
+			webstr$=webstr$,(m0[0] using "########"),fdel$ ! raw material inventory
+			webstr$=webstr$,(m1[0] using "########"),fdel$ ! work in process inventory
+		else
+			webstr$=webstr$,"",fdel$
+			webstr$=webstr$,"",fdel$
+			webstr$=webstr$,"",fdel$
+			webstr$=webstr$,"",fdel$
+			webstr$=webstr$,"",fdel$
+		endif
+		tmp$="" \ if OT19 let tmp$=(m2[0] using "########") ! ot19 - cogs accrual
+		webstr$=webstr$,tmp$,fdel$
+		list$[row]=webstr$
+		row=row+1
+	else
+		for ctr=1 to 20 ! set up by product categories
+			webstr$=str$(ctr),fdel$ ! all product categories
+			Read Record #ch_psc,ctr;psc.;                       
+			WebStr$ = WebStr$,RTrim$(psc.CategoryDesc$),fdel$
+			webstr$=webstr$,(g2[ctr] using "########"),fdel$ ! sales
+			webstr$=webstr$,(g3[ctr] using "########"),fdel$ ! sales returns
+			webstr$=webstr$,(g4[ctr] using "########"),fdel$ ! inventory
+			webstr$=webstr$,(g5[ctr] using "########"),fdel$ ! cost of sales
+			IF P9$[2,2]="M"
+				webstr$=webstr$,(g8[ctr] using "########"),fdel$ ! labor 
+				webstr$=webstr$,(g9[ctr] using "########"),fdel$ ! time
+				webstr$=webstr$,(g0[ctr] using "########"),fdel$ ! machine
+				webstr$=webstr$,(m0[ctr] using "########"),fdel$ ! raw material inventory
+				webstr$=webstr$,(m1[ctr] using "########"),fdel$ ! work in process inventory
+			else
+				webstr$=webstr$,"",fdel$
+				webstr$=webstr$,"",fdel$
+				webstr$=webstr$,"",fdel$
+				webstr$=webstr$,"",fdel$
+				webstr$=webstr$,"",fdel$
+			endif
+			tmp$="" \ if OT19 let tmp$=(m2[ctr] using "########") ! ot19 - cogs accrual
+			webstr$=webstr$,tmp$,fdel$
+			list$[row]=webstr$
+			row=row+1
+		next ctr
+	endif ! prod category check       
+ endif ! returnstatus=0
+ List$[row]=esdel$
+ call AddToStr(e$,rstr$,List$[])
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GETGLARCNTRL
+
+! -------------------------------------------------------------------------------------
+Sub SubmitGLARCntrl()
+
+ Try
+	dim 3%,glarrec
+	DIM 3%,G2[20],G3[20],G4[20],G5[20],G6[20],G7[20],G8[20] 
+	DIM 3%,G9[20],G0[20],M0[20],M1[20],M2[20]                         
+ ReturnStatus=1
+ Message$="OK" 
+Call Dxget("WAREHOUSE",tmp$)
+let whrec=tmp$
+if whrec<0 or whrec>99
+	let returnstatus=0
+	let message$="Invalid Warehouse Entered "
+	goto endsubmitglarcntrl:
+endif
+if whrec=0
+	let keyglar$=" ",keyglar$
+	let keyglar$[1,6]="DFAULT"
+	let div=0
+	let ordtype=0
+	goto getglarrec1:
+endif
+read record #ch_wh,(whrec-1);wh.;
+If RTrim$(wh.whname$) = ""
+	let returnstatus=0
+	let message$="Warehouse "+str$(whrec)+ " Not On File "
+	goto endsubmitglarcntrl:
+endif
+let div=0
+if p8$[1,1]="Y"
+	Call Dxget("DIVISION",tmp$)
+	let div=tmp$
+	if div<0 or div>99
+		let returnstatus=0
+		let message$="Invalid Division Entered "
+		goto endsubmitglarcntrl:
+	endif
+	if div=0 ! get default for warehouse
+		let keyglar$=" ",keyglar$
+		let keyglar$[1,2]=whrec using "##"
+		goto getglarrec1:
+	endif
+	Read record #ch_div,div,0;div.;
+	if rtrim$(div.desc$)="" 
+		let returnstatus=0
+		let message$="Invalid Division Entered "
+		goto endsubmitglarcntrl:
+	endif
+endif
+let ordtype=0
+if p8$[2,2]="Y"
+	Call Dxget("ORDER TYPE",tmp$) ! GET IS ORDERTYPE --- SUBMIT IS ORDER TYPE
+	let ordtype=tmp$
+	if ordtype<0 or ordtype>38
+		let returnstatus=0
+		let message$="Invalid Order Type Entered "
+		goto endsubmitglarcntrl:
+	endif
+	if ordtype=0
+		let keyglar$=" ",keyglar$
+		let keyglar$[1,2]=whrec using "##"
+		if div<>0 let keyglar$[3,4]=div using "##"
+		goto getglarrec1:
+	endif
+endif
+let keyglar$=" ",keyglar$
+let keyglar$[1,2]=whrec using "##"
+if div<>0 let keyglar$[3,4]=div using "##"
+if ordtype<>0 let keyglar$[5,6]=ordtype using "##"
+
+getglarrec1: !  GET GLARCNTRL RECORD
+Call Dxget("TOTREC",tmp$)
+totrec = tmp$
+If totrec < 0 Or totrec > 20
+	message$ = "Invalid Number of Product Categories for Submission"
+	returnstatus = 0
+	Goto EndSubmitGlarCntrl
+End If
+If p8$[3,3] = "N" And totrec > 1
+	message$ = "Invalid Number of Product Categories for Submission"
+	returnstatus = 0
+	Goto EndSubmitGlarCntrl
+End If
+let recordexist=0
+glarrec=-1
+search #ch_glar,2,1;keyglar$,glarrec,e
+if not(e)
+	Call Dxget("UPDATETYPE",tmp$)
+	If ucase$(rtrim$(tmp$))	="D"
+		search #ch_glar,5,1;keyglar$,glarrec,e
+		if e<>0 Error (10000+e)
+		let e=3\search #ch_glar,1,0;keyglar$,glarrec,e
+		if e<>0 Error (10000+e)
+		let message$="Deleted"
+		goto endsubmitglarcntrl:
+	endif
+	read record #ch_glar,glarrec;glar.;
+	MAT  READ #CH_GLAR,glarrec,80;G2;  
+	MAT  READ #CH_GLAR,glarrec,206;G3; 
+	MAT  READ #CH_GLAR,glarrec,332;G4; 
+	MAT  READ #CH_GLAR,glarrec,458;G5; 
+	MAT  READ #CH_GLAR,glarrec,584;G6; 
+	MAT  READ #CH_GLAR,glarrec,710;G7; 
+	MAT  READ #CH_GLAR,glarrec,836;G8; 
+	MAT  READ #CH_GLAR,glarrec,962;G9; 
+	MAT  READ #CH_GLAR,glarrec,1088;G0;
+	MAT  READ #CH_GLAR,glarrec,1214;M0;
+	MAT  READ #CH_GLAR,glarrec,1340;M1;
+	mat read #ch_glar,glarrec,1466;m2;
+else
+	Call Dxget("UPDATETYPE",tmp$)
+	If ucase$(rtrim$(tmp$))	="D"
+		let message$="Not on File. Deleted"
+		goto endsubmitglarcntrl:
+	endif
+	
+	let glarrec=-1
+	clear glar.
+	for ctr=0 to 20
+		LET G2[ctr]=0 \ LET G3[ctr]=0 \ LET G4[ctr]=0 \ LET G5[ctr]=0 \ LET G6[ctr]=0 
+		LET G7[ctr]=0 \ LET G8[ctr]=0 \ LET G9[ctr]=0 \ LET G0[ctr]=0               
+		LET M0[ctr]=0 \ LET M1[ctr]=0 \ m2[ctr]=0
+	next ctr
+endif
+glar.whse=whrec
+glar.div=div
+glar.Ordtype=ordtype
+Call Dxget("ACCOUNTS RECEIVABLE",tmp$) 
+glar.AcctRec=tmp$
+Call Dxget("SALES DISCOUNTS",tmp$)
+glar.Disc=tmp$
+Call Dxget("OTHER",tmp$)
+glar.Other=tmp$
+Call Dxget("MISCELLANEOUS CHARGES",tmp$)
+glar.MiscChrg=tmp$
+Call Dxget("SALES TAX",tmp$)
+glar.Tax=tmp$
+Call Dxget("FREIGHT CHARGE",tmp$)
+glar.Freight=tmp$
+Call Dxget("CASH",tmp$)
+glar.Cash=tmp$
+Call Dxget("ALLOW FOR DOUBTFUL ACCTS",tmp$)
+glar.BadDebt=tmp$
+Call Dxget("SERVICE CHARGES",tmp$) 
+glar.SvcChrg=tmp$
+If p61$[94,94] = "Y"
+	Call Dxget("DEPOSIT",tmp$)
+	glar.Deposit = tmp$
+End If
+Call Dxget("FUEL SURCHARGE",tmp$)
+glar.fuelchrg= tmp$
+If p61$[136,136] = "Y"
+	Call Dxget("CURRENCY EXCHANGE",tmp$)
+	glar.CurrExcVar = tmp$
+End If
+For ctr=1 to totrec
+	Call Dxget("PRODCAT"+str$(ctr),tmp$)
+	let prodcat=tmp$
+	if p8$[3,3]="N" and prodcat<>0
+		let returnstatus=0
+		let message$="Invalid Product Category Submitted"
+		goto endsubmitglarcntrl:
+	endif
+	if p8$[3,3]="Y"
+		if prodcat<1 or prodcat>20
+			let returnstatus=0
+			let message$="Invalid Product Category Submitted"
+			goto endsubmitglarcntrl:
+		endif
+	endif
+	Call Dxget("SALES"+str$(ctr),tmp$) 
+	g2[prodcat]=tmp$
+	Call Dxget("SALES RETURNS"+str$(ctr),tmp$)
+	g3[prodcat]=tmp$
+	Call Dxget("INVENTORY"+str$(ctr),tmp$)
+	g4[prodcat]=tmp$
+	Call Dxget("COST OF SALES"+str$(ctr),tmp$)
+	g5[prodcat]=tmp$
+	if p9$[2,2]="M"
+		Call Dxget("LABOR CHARGES"+str$(ctr),tmp$) 
+		g8[prodcat]=tmp$
+		Call Dxget("TIME"+str$(ctr),tmp$)
+		g9[prodcat]=tmp$
+		Call Dxget("MACHINE"+str$(ctr),tmp$)
+		g0[prodcat]=tmp$
+		Call Dxget("RAW MATERIAL INVENTORY"+str$(ctr),tmp$)
+		m0[prodcat]=tmp$
+		Call Dxget("WIP INVENTORY"+str$(ctr),tmp$)
+		m1[prodcat]=tmp$
+	endif
+	if ot19
+		call Dxget("OT19COGSA"+str$(ctr),tmp$)
+		M2[prodcat]=tmp$
+	Endif
+
+next ctr
+if glarrec<0 ! add new record
+	let e=2\search #ch_glar,1,0;keyglar$,glarrec,e
+	IF e<>0 Error (10000+e)
+	search #ch_glar,4,1;keyglar$,glarrec,e
+	if e<>0 Error (10000+e)
+endif
+write record #ch_glar,glarrec;glar.;
+MAT  WRITE #CH_GLAR,glarrec,80;G2;  
+MAT  Write #CH_GLAR,glarrec,206;G3; 
+MAT  Write #CH_GLAR,glarrec,332;G4; 
+MAT  Write #CH_GLAR,glarrec,458;G5; 
+MAT  Write #CH_GLAR,glarrec,584;G6; 
+MAT  Write #CH_GLAR,glarrec,710;G7; 
+MAT  Write #CH_GLAR,glarrec,836;G8; 
+MAT  Write #CH_GLAR,glarrec,962;G9; 
+MAT  Write #CH_GLAR,glarrec,1088;G0;
+MAT  Write #CH_GLAR,glarrec,1214;M0;
+MAT  Write #CH_GLAR,glarrec,1340;M1;
+mat write #ch_glar,glarrec,1466;m2;
+
+EndSubmitGlarCntrl: !  end of submit 
+
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GETGLARCNTRL
+
+!========================================================================================
+Sub GetGLDroplist()
+! droplists sent here 
+ Try
+	dIm 2%,s1[8]
+	Dim desc$[12]
+	dim filename$[50]
+	ReturnStatus=1
+	Message$="OK" 
+	mat read #ctlc,52,0;s1;
+	let tmp$="N"
+	if p9$[17,17]="Y" let tmp$="Y"
+	if p9$[17,17]="M" let tmp$="Y"
+	if tmp$="N"
+		let returnstatus=0
+		let message$="General Ledger Interface Is Not Available"
+		goto endgetgldroplist:
+	endif
+	if p8$[1,1]="Y"
+		Call Dxget("DIVISION",tmp$)
+		let div=tmp$
+		if div<1 or div>99
+			let returnstatus=0
+			let message$="Invalid Division Entered "
+			goto endgetgldroplist:
+		endif
+		Read record #ch_div,div,0;div.;
+		if rtrim$(div.desc$)="" 
+			let returnstatus=0
+			let message$="Invalid Division Entered "
+			goto endgetgldroplist: !
+		endif
+	else
+		let returnstatus=0
+		let message$="G/L- A/R Not Setup to post by client "
+		goto endgetgldroplist:
+	endif
+	CH_acf=OpenFile(-48,intco)\if ch_acf=-1 Error 42
+	if div.client<1 or div.client>9999 let div.client=1
+	let keyacf$=" ",keyacf$
+	let keyacf$[3,6]=div.client using "####"
+	search #ch_acf,2,1;keyacf$,rec_acf,e
+	if e<>0
+		let returnstatus=0
+		let message$="Division "+str$(div)+" Has Invalid Client "+str$(div.client)+" Please check division. "
+		goto endgetgldroplist:
+	endif
+	read record #ch_acf,rec_acf;acf.;
+	let clientid=keyacf$[3,6]
+	tmp = acf.DirNum$                                                                          
+	filename$ = Str$(tmp) + "/GLM" + Str$(s1[1]) + str$(s1[2])                                       
+	tmp$ = clientid Using "####"                          
+	For ctr = 1 To 4                                      
+		if tmp$[ctr,ctr] = " " Let tmp$[ctr,ctr] = "."      
+	Next ctr                                              
+	filename$ = filename$ + tmp$                          
+	Call FindF(filename$,fileflag)                        
+	If Not(fileflag)
+		let returnstatus=0
+		let message$="General Ledger Master File is Not Available for client "+str$(clientid)
+		goto endgetgldroplist:
+	endif
+	ch_glm= FindChannel() ! need to get a channel #
+	open #ch_glm,filename$				
+	
+	endgetgldroplist: ! 
+	Clear List$[]
+	List$[0]=bsdel$,"ClientInfo",fdel$
+	WebStr$="CLIENTID",fdel$,"CLIENTNAME",fdel$
+        List$[1]=WebStr$
+	let row=2
+	if returnstatus<>0 
+		let WEBStr$=STR$(CLIENTID),Fdel$
+		let webstr$=webstr$,rtrim$(acf.clientname$),fdel$
+		let list$[2]=webstr$
+		let row=3
+	endif
+	list$[row]=esdel$
+      	call AddToStr(e$,rstr$,List$[])
+	
+	let tmpcnt=maxcnt 
+	Clear List$[]
+	List$[0]=bsdel$,"General Ledger Account",fdel$
+	WebStr$="GLACCTID",fdel$,"GLDESC",fdel$
+        List$[1]=WebStr$
+	let row=2
+	if returnstatus<>0 	
+		let keyglm$=" ",keyglm$
+		do
+			search #ch_glm,3,1;keyglm$,glmrec,e
+			if e>0 exit do
+			read record #ch_glm,glmrec;glm.;
+			if glm.rectype$[1,1]="0" ! normal posting account
+				let webstr$=Rtrim$(keyglm$),fdel$
+				let webstr$=webstr$,rtrim$(glm.Desc$),fdel$
+				let list$[row]=webstr$
+				let row=row+1
+				If row > tmpcnt Let tmpcnt = expandarray(e$,List$[]) 
+			endif
+		loop ! for the do
+	endif
+	list$[row]=esdel$
+      	call AddToStr(e$,rstr$,List$[])          
+	
+	
+	
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! getgldroplist

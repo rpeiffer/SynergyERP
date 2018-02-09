@@ -1,0 +1,528 @@
+!"serp109" === description  synergy erp Break Table Maintenance
+! 
+! loadsave -w -n 100,10 -o prog/dxport/serp109.dl4 src/serp109.src
+!  07/15/2009 started
+!
+include "src/copyright.inc"
+!
+include "src/inc/filebrktbl.inc" ! break table
+
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,JDate$,FormatDate2$
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian, JulianToDate
+
+! internal subs/function
+Declare Sub OpenFiles,UpdateLog,sndsys
+Declare Sub SndBTbl,DelBTbl
+Declare Sub SbmtBtbl,NoNeg
+
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],X$[20]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim Prod$[12],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],UA2$[50]
+	Dim Mask34$[10]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,PRC,COMM_LEV,BTC
+	dim 1%,cost_lev[4],Whse,debug,cnvtu[2],2%,Q0[1]
+	Dim 2%,X2[9],UA2[2]
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,PRR,BTRec
+	Dim 3%,R[99],O1,UB0[16],Amount,CNVTA
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim slist$[maxcnt,1000] ! second list
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/btbl.log" ! fields for DEBUG
+
+	Dim bt. as brktbl
+
+	Def FNI(H) = Int(Abs(H) +.5) * Sgn(H)
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! call dxopen() ! done in fmmenu - for standalone run
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp109"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	Action2$=UCase$(action2$)
+	Action2$=RTrim$(action2$) ! UC and trimmed
+	if debugdetail
+		dmsg$="SERP109 ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$ 
+		if Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	call OpenFiles() ! open all needed files
+	call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	! P9$[10,10]="N" ! a test only
+	Mask34$="###.####" ! 3.4 mask
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Let Key1$=UserID$+"          " ! space fill it
+	UCC = OpenFile(-9988, intCo) \ if UCC=-1 Error 42
+	Key1$[11]="" ! cut to length
+	Search #UCC,2,1;Key1$,Rec,E
+	If Not(E)
+	  Let SCR=Rec
+	  Mat Read #ucc,scr,200;UA2;
+	  Mat read #ucc,scr,336;Ua2$;
+	  Read #ucc,scr,394;comm_lev;
+	Else
+	  Let SCR=0;comm_lev=0 ! 
+	  UA2[0]=0;UA2$=" ",UA2$
+	Endif
+	Close #UCC
+	! GET additional user data flags
+	REM UNPACK A2[0] TO B0[]                         
+	FOR X1=0 TO 15                                          
+		LET O1=2^X1 \ LET M1=1
+		! CALL $LOGIC,M1,O1,A2[0],B0[X1] ! ub
+		Call Logic(m1,O1,UA2[0],UB0[X1])
+		LET UB0[X1]=SGN(UB0[X1])
+	NEXT X1   
+	! call dxsave(0,"tmp/btblsv.txt!") ! save web send data
+	ReturnStatus=0
+	Message$="Action 1 not found"
+  select case action1$
+
+    Case "SYSDATA" ! sys flags,droplists					doc=BTBL-GetSysData.doc
+		returnstatus=1
+		message$="OK"
+		Call Sndsys()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent flags & droplists" \ Call updatelog(debug)
+		Endif
+		! end of sysdata
+	Case "GETTABLE" ! BT data								doc=BTBL-GetTable.doc
+		returnstatus=1
+		message$="OK"
+		call SndBtbl()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent BTable "+Str$(BTRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of GETTABLE
+	Case "CLRTABLE" ! BTbl delete							doc=BTBL-ClearTable.doc
+		returnstatus=1
+		message$="OK"
+		call DelBtbl()
+		if debugdetail
+			dmsg$="Clear BTable "+Str$(BTRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of DELTABLE
+	Case "SBMTTBL" ! BTbl changes							doc=BTBL-SubmitTable.doc
+		returnstatus=1
+		message$="OK"
+		Call SbmtBtbl()
+		if debugdetail
+			dmsg$="Submit BTable "+Str$(BTRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of SBMTTBL
+
+		! call programdump("tmp/btbllog1!","")
+  End Select
+  Serp109Done: ! finished
+  ! status section                                                       
+  Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)                 
+  Call AddToStr(e$,rstr$,WebStr$)                                        
+  Call SetOutPut(e$,rstr$)       
+  if debugdetail
+		dmsg$="End of Program SERP109" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	BTC = OpenFile(1952,IntCo) \ if BTC = -1 Error 42
+	BTR = OpenFile(-1952,IntCo) \ if BTR = -1 Error 42
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!
+!------------------------------------------------------------------------------------------
+Sub sndsys()
+! send flags & droplists
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"TABLETYPE",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	List$[2]="0",fdel$,"-- Please Select --",fdel$
+	List$[3]="1",fdel$,"Matrix Quantity",fdel$
+	List$[4]="2",fdel$,"10 Bracket",fdel$
+	List$[5]="3",fdel$,"Matrix Dollar",fdel$
+	List$[6]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	Clear List$[]
+	List$[0]=bsdel$,"BRKCODE",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	List$[2]="K",fdel$,"Percent Discount",fdel$
+	List$[3]="D",fdel$,"Dollar Discount",fdel$
+	List$[4]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	Clear List$[]
+	List$[0]=bsdel$,"CURRTBLS",fdel$
+	List$[1]="ID",fdel$,"TBLDESC",fdel$
+	let X2=chf(btr)-1
+	row=2
+	for R=1 to x2
+		Read Record #BTR,R,0;bt.; ! read only file
+		tmp$=Trim$(bt.Desc$)
+		if tmp$<>"" ! has desc
+			List$[row]=Str$(R),fdel$,tmp$,fdel$
+			row=row+1
+			If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next R
+	List$[row]=esdel$
+	! calling rtn to addtostr
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndsys
+!
+!------------------------------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Sub SndBTbl()
+! send commodity data
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Table Number Passed"
+		goto GTblDone
+	Endif
+	BTRec=tmp$
+	if BTRec<=0 or BTRec>CHF(BTC)-1 or Fra(BTRec)
+		returnstatus=0
+		Message$="Invalid Table Number Passed"
+		goto GTblDone
+	Endif
+	Try
+		Read Record #BTC,BTRec,0;bt.;
+	Else
+		clear bt.
+	End try
+	List$[0]=bsdel$,"BRKTBL",fdel$
+	Webstr$="TBLNO",fdel$,"DESC",fdel$,"TBLTYPE",fdel$
+	for x=1 to 10
+		Webstr$=webstr$,"BDESC"+Str$(X),fdel$,"BAMT"+Str$(X),fdel$
+		Webstr$=Webstr$,"BCODE"+Str$(X),fdel$,"BFACTOR"+Str$(X),fdel$
+	Next x
+	List$[1]=webstr$
+	Webstr$=STR$(BTREC),fdel$,RTrim$(bt.Desc$),fdel$
+	webstr$=webstr$,STR$(bt.TableType),fdel$
+	! no easy way - can't for/next
+	Webstr$=webstr$,RTrim$(bt.BrktDesc1$),fdel$
+	webstr$=webstr$,Str$(bt.Brkt1Min),fdel$
+	tmp$="K" \ if bt.Brkt1Code=1 let tmp$="D"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(bt.Brkt1Fact using QMask$),fdel$
+	Webstr$=webstr$,RTrim$(bt.BrktDesc2$),fdel$
+	webstr$=webstr$,Str$(bt.Brkt2Min),fdel$
+	tmp$="K" \ if bt.Brkt2Code=1 let tmp$="D"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(bt.Brkt2Fact using QMask$),fdel$
+	Webstr$=webstr$,RTrim$(bt.BrktDesc3$),fdel$
+	webstr$=webstr$,Str$(bt.Brkt3Min),fdel$
+	tmp$="K" \ if bt.Brkt3Code=1 let tmp$="D"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(bt.Brkt3Fact using QMask$),fdel$
+	Webstr$=webstr$,RTrim$(bt.BrktDesc4$),fdel$
+	webstr$=webstr$,Str$(bt.Brkt4Min),fdel$
+	tmp$="K" \ if bt.Brkt4Code=1 let tmp$="D"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(bt.Brkt4Fact using QMask$),fdel$
+	Webstr$=webstr$,RTrim$(bt.BrktDesc5$),fdel$
+	webstr$=webstr$,Str$(bt.Brkt5Min),fdel$
+	tmp$="K" \ if bt.Brkt5Code=1 let tmp$="D"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(bt.Brkt5Fact using QMask$),fdel$
+	Webstr$=webstr$,RTrim$(bt.BrktDesc6$),fdel$
+	webstr$=webstr$,Str$(bt.Brkt6Min),fdel$
+	tmp$="K" \ if bt.Brkt6Code=1 let tmp$="D"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(bt.Brkt6Fact using QMask$),fdel$
+	Webstr$=webstr$,RTrim$(bt.BrktDesc7$),fdel$
+	webstr$=webstr$,Str$(bt.Brkt7Min),fdel$
+	tmp$="K" \ if bt.Brkt7Code=1 let tmp$="D"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(bt.Brkt7Fact using QMask$),fdel$
+	Webstr$=webstr$,RTrim$(bt.BrktDesc8$),fdel$
+	webstr$=webstr$,Str$(bt.Brkt8Min),fdel$
+	tmp$="K" \ if bt.Brkt8Code=1 let tmp$="D"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(bt.Brkt8Fact using QMask$),fdel$
+	Webstr$=webstr$,RTrim$(bt.BrktDesc9$),fdel$
+	webstr$=webstr$,Str$(bt.Brkt9Min),fdel$
+	tmp$="K" \ if bt.Brkt9Code=1 let tmp$="D"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(bt.Brkt9Fact using QMask$),fdel$
+	Webstr$=webstr$,RTrim$(bt.BrktDesc10$),fdel$
+	webstr$=webstr$,Str$(bt.Brkt10Min),fdel$
+	tmp$="K" \ if bt.Brkt10Code=1 let tmp$="D"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(bt.Brkt10Fact using QMask$),fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	! caller to addtostr
+	GTblDone: ! done
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndBTbl
+!
+!------------------------------------------------------------------------------------------
+Sub DelBTbl()
+! Delete commodity data
+ Try
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Table Number Passed"
+		goto DTblDone
+	Endif
+	BTRec=tmp$
+	if BTRec<=0 or BTRec>CHF(BTC)-1 or Fra(BTRec)
+		returnstatus=0
+		Message$="Invalid Table Number Passed"
+		goto DTblDone
+	Endif
+	Clear bt.
+	Try
+		Write Record #BTC,BTRec,0;bt.;
+	Else
+		Returnstatus=0
+		Message$="Cannot write to "+Str$(BTRec)
+	End try
+  DTblDone: ! finished
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DelBTbl
+!
+!------------------------------------------------------------------------------------------
+Sub SbmtBtbl()
+! submit data (all fields)
+ Try
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Table Number Passed"
+		goto SBTblDone
+	Endif
+	BTRec=tmp$
+	if BTRec<=0 or BTRec>CHF(BTC)-1 or Fra(BTRec)
+		returnstatus=0
+		Message$="Invalid Table Number Passed"
+		goto SBTblDone
+	Endif
+	!Try
+	!	Read Record #BTC,BTRec,0;bt.;
+	!Else
+		clear bt. ! always loads every field - so start at nothing!
+	!End try
+	! bt.Desc$=blank$
+	bt.sOpen$=blank$
+	call dxget("DESC",tmp$)
+	If RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="MUST HAVE A DESCRIPTION!"
+		goto SBTblDone
+	Endif
+	bt.Desc$=tmp$+Blank$
+	call dxget("TBLTYPE",tmp$)
+	X2=tmp$
+	if x2<1 or x2>3
+		returnstatus=0
+		message$="Invalid Table Type!"
+		goto SBTblDone
+	Endif
+	bt.TableType=x2
+	call dxget("BDESC1",tmp$)
+	bt.BrktDesc1$=tmp$+Blank$
+	call dxget("BDESC2",tmp$)
+	bt.BrktDesc2$=tmp$+Blank$
+	call dxget("BDESC3",tmp$)
+	bt.BrktDesc3$=tmp$+Blank$
+	call dxget("BDESC4",tmp$)
+	bt.BrktDesc4$=tmp$+Blank$
+	call dxget("BDESC5",tmp$)
+	bt.BrktDesc5$=tmp$+Blank$
+	call dxget("BDESC6",tmp$)
+	bt.BrktDesc6$=tmp$+Blank$
+	call dxget("BDESC7",tmp$)
+	bt.BrktDesc7$=tmp$+Blank$
+	call dxget("BDESC8",tmp$)
+	bt.BrktDesc8$=tmp$+Blank$
+	call dxget("BDESC9",tmp$)
+	bt.BrktDesc9$=tmp$+Blank$
+	call dxget("BDESC10",tmp$)
+	bt.BrktDesc10$=tmp$+Blank$
+	Call dxget("BAMT1",tmp$)
+	x2=tmp$ \ if x2<0 and bt.TableType<>2 call NoNeg()
+	bt.Brkt1Min=FNI(X2)
+	Call dxget("BAMT2",tmp$)
+	x2=tmp$ \ if x2<0 and bt.TableType<>2 call NoNeg()
+	bt.Brkt2Min=FNI(X2)
+	Call dxget("BAMT3",tmp$)
+	x2=tmp$ \ if x2<0 and bt.TableType<>2 call NoNeg()
+	bt.Brkt3Min=FNI(X2)
+	Call dxget("BAMT4",tmp$)
+	x2=tmp$ \ if x2<0 and bt.TableType<>2 call NoNeg()
+	bt.Brkt4Min=FNI(X2)
+	Call dxget("BAMT5",tmp$)
+	x2=tmp$ \ if x2<0 and bt.TableType<>2 call NoNeg()
+	bt.Brkt5Min=FNI(X2)
+	Call dxget("BAMT6",tmp$)
+	x2=tmp$ \ if x2<0 and bt.TableType<>2 call NoNeg()
+	bt.Brkt6Min=FNI(X2)
+	Call dxget("BAMT7",tmp$)
+	x2=tmp$ \ if x2<0 and bt.TableType<>2 call NoNeg()
+	bt.Brkt7Min=FNI(X2)
+	Call dxget("BAMT8",tmp$)
+	x2=tmp$ \ if x2<0 and bt.TableType<>2 call NoNeg()
+	bt.Brkt8Min=FNI(X2)
+	Call dxget("BAMT9",tmp$)
+	x2=tmp$ \ if x2<0 and bt.TableType<>2 call NoNeg()
+	bt.Brkt9Min=FNI(X2)
+	Call dxget("BAMT10",tmp$)
+	x2=tmp$ \ if x2<0 and bt.TableType<>2 call NoNeg()
+	bt.Brkt10Min=FNI(X2)
+	if bt.tabletype=2 goto BypTFact
+	call dxget("BCODE1",tmp$)
+	x2=0 \ if tmp$="D" let x2=1
+	bt.Brkt1Code=x2
+	call dxget("BCODE2",tmp$)
+	x2=0 \ if tmp$="D" let x2=1
+	bt.Brkt2Code=x2
+	call dxget("BCODE3",tmp$)
+	x2=0 \ if tmp$="D" let x2=1
+	bt.Brkt3Code=x2
+	call dxget("BCODE4",tmp$)
+	x2=0 \ if tmp$="D" let x2=1
+	bt.Brkt4Code=x2
+	call dxget("BCODE5",tmp$)
+	x2=0 \ if tmp$="D" let x2=1
+	bt.Brkt5Code=x2
+	call dxget("BCODE6",tmp$)
+	x2=0 \ if tmp$="D" let x2=1
+	bt.Brkt6Code=x2
+	call dxget("BCODE7",tmp$)
+	x2=0 \ if tmp$="D" let x2=1
+	bt.Brkt7Code=x2
+	call dxget("BCODE8",tmp$)
+	x2=0 \ if tmp$="D" let x2=1
+	bt.Brkt8Code=x2
+	call dxget("BCODE9",tmp$)
+	x2=0 \ if tmp$="D" let x2=1
+	bt.Brkt9Code=x2
+	call dxget("BCODE10",tmp$)
+	x2=0 \ if tmp$="D" let x2=1
+	bt.Brkt10Code=x2
+	call dxget("BFACTOR1",tmp$)
+	x3=tmp$
+	bt.Brkt1Fact=FNR(X3)
+	call dxget("BFACTOR2",tmp$)
+	x3=tmp$
+	bt.Brkt2Fact=FNR(X3)
+	call dxget("BFACTOR3",tmp$)
+	x3=tmp$
+	bt.Brkt3Fact=FNR(X3)
+	call dxget("BFACTOR4",tmp$)
+	x3=tmp$
+	bt.Brkt4Fact=FNR(X3)
+	call dxget("BFACTOR5",tmp$)
+	x3=tmp$
+	bt.Brkt5Fact=FNR(X3)
+	call dxget("BFACTOR6",tmp$)
+	x3=tmp$
+	bt.Brkt6Fact=FNR(X3)
+	call dxget("BFACTOR7",tmp$)
+	x3=tmp$
+	bt.Brkt7Fact=FNR(X3)
+	call dxget("BFACTOR8",tmp$)
+	x3=tmp$
+	bt.Brkt8Fact=FNR(X3)
+	call dxget("BFACTOR9",tmp$)
+	x3=tmp$
+	bt.Brkt9Fact=FNR(X3)
+	call dxget("BFACTOR10",tmp$)
+	x3=tmp$
+	bt.Brkt10Fact=FNR(X3)
+	! got the info
+	BypTFact: ! on 10 B only desc & Min
+	if returnstatus<>1 goto SBTblDone ! had a problem
+	Try
+		Write Record #BTC,BTRec,0;bt.;
+	Else
+		Returnstatus=0
+		Message$="Cannot write to "+Str$(BTRec)
+	End try
+  SBTblDone: ! finished
+ else
+	include "src/callsuberr.inc"
+  end try
+end sub ! SbmtBtbl
+!
+!------------------------------------------------------------------------------------------
+Sub NoNeg()
+! can only have neg amount (Weight) on 10 B table
+Returnstatus=0
+Message$="Cannot have Negative Minimums"
+End Sub ! noneg

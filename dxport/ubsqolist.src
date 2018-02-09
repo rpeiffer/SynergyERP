@@ -1,0 +1,407 @@
+!Program Name: ubsqolist
+! loadsave -w -s -n 100,10 -o prog/dxport/ubsqolist.dl4 src/ubsqolist.src
+!                                                  
+!Last Updated:                                     
+! change to truck-stop-rte
+!rce 10/10/05  salesgroup
+!
+
+Declare External sub qolist
+Declare Sub updatelog,errTrap
+Declare Function GetOtype$
+
+Include "src/bovars.inc"
+
+Dim bi. as bInfo, oo.[100] as ooInfo
+! Dim 1%, arrSales[999]
+
+Call QOList(1,8,1,"files/6/dx.log",oo.[], bi., ii, ss, 100, arrSales[])
+
+If ss
+	Print "Good!"
+Else
+	Print "Booo!"
+End If
+Print ss
+Stop
+
+!Chain ""
+
+External Sub QOList(intCo, intSalesMan, debug, dlog$, oo.[] as ooInfo, bi. as bInfo, ii, ss, iLimit, cost_lev[], arrSales[], ...)
+Try 
+	Enter custid, ...
+	Try Dim custid$[6] ELSE REM
+	custid$ = custid using "######"
+else
+	Dim custid$[6]
+	rem
+end try
+Try
+	Enter Shipid
+Else
+	Shipid=-1
+End try
+
+Try
+
+External Lib "ubsfunc.dl4"
+Declare External Sub GetCostLevels
+Declare External Function PDate$, OpenFile
+Declare Intrinsic Sub DXGet,DXPut
+Declare Intrinsic Function FindChannel,Trim$
+
+Include "src/ubsorder.inc"
+Include "src/ubscustomer.inc"
+
+Dim ODK$[12],OHK$[30],CUK$[12],SMK$[20],P9$[50],P61$[256]
+
+Dim OH. As OrdH
+Dim OD. As OrdD
+Dim OT. As OrdT
+Dim O2. As OrdS2
+Dim CU. As Customer
+
+Dim 1%,debugDetail
+! Variables for Channel#'s
+Dim 2%,OHC,ODC,OTC,OSC,CUC,CTLC,ENC,SMC,ETC
+! Variables for Search Record#
+Dim 3%,OHR,ODR,OTR,OSR,CUR,CTLR,SMR,ETR
+! Variables for Search Error
+Dim 2%,OHE,ODE,OTE,OSE,CUE,CTLE,SME,ETE
+
+
+Dim QMASK$[20],PMASK$[20],EMASK$[20],DEC$[5]
+Dim Msg$[256],pgmName$[20],S2$[20],E$[500],Userid$[10]
+Dim EN$[10], ST$[80], Status$[10], Sales$[35], Temp$[100]
+Dim SLS$[3],CO$[2],Hold$[30],HLD$[80],U5$[50],EnteredBy$[10]
+
+Dim 1%,t9[11],factor
+Dim 2%, t2
+Dim 2%, Q0[1]
+Dim 3%,X2, tcost, tsell, tgpp,cost_lev[4]
+
+DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01)
+
+debugDetail=0
+pgmName$="ubsqolist"
+msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+ii=0
+
+SLS$=intSalesMan Using "###" ! Passed Salesman
+CO$=Str$(intCo) ! Company
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+
+ST$="OR ENOR PTOR RGOR ACIN ENIN PTIN RG-NOF-CM ENCM PTCM RG"
+
+
+OHC= OpenFile(-1280,intCo)  \ If OHC=-1  Error 42   
+ODC= OpenFile(-1344,intCo)  \ If ODC=-1  Error 42
+OTC= OpenFile(-2656,intCo)  \ If OTC=-1  Error 42
+OSC= OpenFile(-1392,intCo)  \ If OSC=-1  Error 42
+CUC= OpenFile(-1808,intCo)  \ If CUC=-1  Error 42
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42
+ENC= OpenFile(-9995,intCo)  \ If ENC=-1  Error 42
+SMC= OpenFile(-1824,intCo)  \ If SMC=-1  Error 42
+ETC= OpenFile(-1664,intCo)  \ If ETC=-1  Error 42    !entdby
+
+Call DXGet("S_USER.ID",userid$) \ userid$ = Ucase$(userid$) !user id
+Mat Read #CTLC,115,40;Q0; 
+
+If not(Q0[1]) let Q0[1]=2                                                       
+Let Dec$="#",Dec$;Qmask$="---,---,--#"                                         
+If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask      
+If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask        
+Let Emask$="-$$$,$$$,$$$,$$$.##"                         !ext. price mask       
+Call GetCostLevels(e$,cost_lev[],IntCo,Userid$) ! get cost security 
+
+If SLS$<> "999" Then
+	Let OHK$=SLS$
+Else
+	Let OHK$[1,1]=" "
+	let OHK$[2]=custid$
+End If
+
+arrayloop: !
+if arrSales
+	ohk$=arrsales[counter] using "###"
+Endif
+
+BOTOP: Rem Loop Through Ord Header on Salesman directory (default sort)
+
+IF SLS$<>"999"
+	Search #OHC,3,3;OHK$,OHR,OHE
+	if arrsales  ! using salesgroup
+		If val(ohk$[1,3]) <> arrSales[counter]
+			Let OHE=22
+			counter=counter+1
+			if arrSales[counter] and counter<1000 goto arrayloop  ! if more loop
+		endif
+	else
+		If OHK$[1,3]<>SLS$ Let OHE=22
+	endif
+else  ! sls$ = "999"
+	Search #OHC,3,2;OHK$,OHR,OHE
+	If OHK$[2,7]<> custid$ Let OHE=22
+endif
+
+If OHE Goto BOEND:
+
+If debugDetail
+   msg$="doing...Search #OHC: OHK$="+OHK$+" OHR="+OHR \ Call updatelog(debug)
+   If OHE msg$="error...Search error "+OHE  \ Call updatelog(debug)
+Endif
+Read Record #OHC,OHR; OH.;
+
+! Determine Status
+t2 = OH.H0[0]
+Status$=""
+
+if t2>=20 and t2<30 goto BOTOP  ! no delete
+! IF t2>11 Goto BOTop: !include c/m cct183879
+IF t2 = 90 Goto BOTop: ! show all but deletes and 90's
+If t2<1 Goto BOTop:
+If Shipid>0 ! wants for a shiplist
+	OSR=oh.h0[2]
+	Read record #OSC,OSR,0;O2.;
+	IF O2.SRN[3]=1 or O2.SRN[3]=2 ! used 0 or shiplist#
+		if O2.SRN[2]=custid and o2.SRN[1]=shipid Goto OKShip
+	Endif
+	Goto BOTop ! other types ng or diff cust/ship
+	OKShip: ! ok
+Endif
+
+If t2<=11 Let Status$=ST$[t2*5-4,t2*5]
+
+! Scan orddet to see if order has a Backordered item on it.
+ODK$=OH.H0[7] Using "######"
+Temp$=ODK$
+
+ODLoop: Search #ODC,3,1;ODK$,ODR,ODE
+If ODK$[1,6]<>Temp$ Let ODE=22
+
+If ODE Goto BOTop: ! End of items and no Backorder item found.
+
+If debugDetail
+   msg$="doing...Search #ODC: ODK$="+ODK$+" ODR="+ODR \ Call updatelog(debug)
+   If ODE msg$="error...Search error "+ODE  \ Call updatelog(debug)
+Endif
+Read Record #ODC,ODR;OD.;
+
+! If OD.L7[2]-OD.L7[4]-OD.L7[0]<=0 Goto ODLoop:  ! Open Quantity Show this order
+! If OD.L7[3]>0 Then Goto ODLoop: ! Back Order's count here per conference call
+
+
+If OH.H0[0]>=9 and OH.H0[0]<=11 then let factor=-1 else factor=1
+
+
+OTR = OH.H0[3] ! Record Number To Ord Total record.
+
+Read Record #OTC,OTR; OT.;
+
+OSR = OH.H0[2] ! Record Number For Ship to
+
+Read Record #OSC,OSR; O2.;
+mat read #OSC,OSR,126;s2$; ! has problem with nulls
+
+!=================================Get Customer Info.
+CUK$=OH.H0[4] USING "######"
+Temp$=CUK$
+
+Search #CUC,2,1;CUK$,CUR,CUE
+If CUK$[1,6]<>Temp$ Let CUE=22
+
+IF CUE Goto BOTOP:   ! No Customer On File ??
+
+If debugDetail                                                      
+   msg$="doing...Search #CUC: CUK$="+CUK$+" CUR="+CUR \ Call updatelog(debug) 
+   If CUE msg$="error...Search error "+CUE  \ Call updatelog(debug)     
+Endif                                                               
+Read Record #CUC,CUR;CU.;
+
+
+!=====================entered by        
+ETR=OH.H5[0];EnteredBy$=" ",EnteredBy$  
+
+If ETR=0 Then                       
+   EnteredBy$="-NOF-"               
+Else                                
+   Mat Read #ETC,ETR,0;EnteredBy$;  
+End If                              
+If Trim$(EnteredBy$)="" Let EnteredBy$="-null-"
+
+
+!=====================Get SalesMan
+SMK$=OH.H0[11] Using "### "
+Temp$=SMK$
+
+Search #SMC,2,1;SMK$,SMR,SME
+If SMK$[1,4] <> Temp$ Let SME=22
+
+If debugDetail                                                      
+   msg$="doing...Search #SMC: SMK$="+SMK$+" SMR="+SMR \ Call updatelog(debug) 
+   If SME msg$="error...Search error "+SME  \ Call updatelog(debug)     
+Endif                                                               
+If SME=0 Then
+	Mat Read #SMC,SMR;Sales$[1,30];
+Else
+	Sales$="-NF-"
+End If
+
+Temp$=Sales$
+Sales$=""
+For X1=1 to Len(Temp$)
+	If Temp$[X1,X1]="'" Then
+           Sales$=Sales$,"\\"
+        End If
+	Sales$=Sales$,Temp$[X1,X1]
+Next X1
+
+! Get Entered By
+! Mat Read #ENC,OH.H5[0],0;EN$;
+
+! If Trim$(EN$)="" Let EN$="-null-"
+
+If OT.T2[21] Mod 2 Then
+  Hold$="Y"
+Else
+  Hold$="N"
+End If
+
+Hold$=Str$(OT.T2[21]) ! Show Numeric hold code, will expand next.
+if OT.T2[21]=0 let Hold$ = " "
+Hold$=""
+HLD$="! Order Not Held !"
+REM UNPACK T2[21] TO T9[x]
+LET X2=OT.T2[21]
+FOR K=0 TO 11
+  LET T9[K]=SGN(FRA(X2/2))
+  LET X2=INT(X2/2)
+  IF T9[K] THEN
+	HOLD$=HOLD$,sTR$(K+1)," "
+    READ #CTLC,65,K*16;U5$;
+    IF U5$[1,1]<>" " THEN
+	   ! HOLD$=HOLD$,sTR$(K+1)," "
+      IF HLD$[1,1]="!" THEN
+        HLD$=TRIM$(U5$[1,16])
+      ELSE
+        HLD$=HLD$+"; "+TRIM$(U5$[1,16])
+      END IF
+    END IF
+  END IF
+NEXT K
+
+IF HLD$[1,1]<>"!" Then
+   !HLD$=HLD$[1,LEN(HLD$)-1]
+Else
+   HLD$=" "
+End IF
+
+
+! If OH.H5[13] Then 
+  ! GPP=((OH.H5[13]-OH.H5[14])/OH.H5[13])*100*factor
+! Else
+  ! GPP=0
+! End IF
+If OT.T2[1] Then 
+  GPP=FNR(((OT.T2[1]-(OT.T2[17]+OT.T2[20]+OT.tot[0]))/OT.T2[1])*100*factor)
+Else
+  GPP=0
+End IF
+
+If ii<iLimit Then
+  oo.[ii].SalesMan$=Str$(OH.H0[11])+" "+Sales$
+  oo.[ii].CustID$=Str$(OH.H0[4])
+  ! oo.[ii].CustName$=Trim$(CU.A1$[31,60])
+  oo.[ii].CustName$=Trim$(O2.S1$[1,30])
+  oo.[ii].Type$=Str$(OH.H5[7])
+  oo.[ii].TypeDesc$=GetOtype$(OH.H5[7])
+  oo.[ii].Status$=Str$(OH.H0[0])
+  oo.[ii].OrderNo$=Str$(OH.H0[7])
+  oo.[ii].PO$=Trim$(OH.PO$)
+  if oo.[ii].PO$="" let oo.[ii].PO$=" "
+  if OH.H0[0]>=9 and OH.H0[0]<=14 then 
+	 oo.[ii].Ordered$=PDate$(OH.H0[8])
+  else
+	 oo.[ii].Ordered$=PDate$(OH.H0[9]) 
+  endif
+  ! route-truck-stop
+  ! 9/21/05 change to truck-stop-rte
+  ! oo.[ii].RS$ = Str$(OH.H4[1]) + "-" + Str$(O2.S5) + "-" + O2.S2$[19,20]
+  oo.[ii].RS$ = Str$(O2.S5) + "-" + Str$(OH.H4[1]) + "-" + S2$[19,20]
+
+  ! oo.[ii].TCost$=OH.H5[14]*factor Using Emask$    
+  ! oo.[ii].TResale$=OH.H5[13]*factor Using Emask$                              
+  ! oo.[ii].GTM$=(OH.H5[13]-OH.H5[14])*factor Using Emask$ 
+  
+  oo.[ii].TCost$=(OT.T2[17]+OT.T2[20]+OT.tot[0])*factor Using Emask$  	! shipt
+  oo.[ii].TResale$=OT.T2[1]*factor Using Emask$		! shipt
+  oo.[ii].GTM$=(OT.T2[1]-(OT.T2[17]+OT.T2[20]+OT.tot[0]))*factor Using Emask$
+
+  oo.[ii].TGPP$= GPP Using "----#.##%"
+  oo.[ii].ShipDT$=PDate$(OH.H0[10])
+  oo.[ii].Hold$=Hold$
+  oo.[ii].HoldD$=HLD$
+  oo.[ii].EnteredBy$=EnteredBy$
+  tcost=tcost+ (OT.T2[17]+OT.T2[20]+OT.tot[0])*factor
+  tsell=tsell+ OT.T2[1]*factor
+  if cost_lev[1]=0 ! no costsec
+	oo.[ii].TCost$=""
+	oo.[ii].GTM$=""
+	oo.[ii].TGPP$=""
+	tcost=0
+  Endif
+  ii=ii+1
+  Goto BOtop:
+End If
+
+
+BOEnd: !==============================================================
+if ii>0 let ii=ii-1
+
+bi.Count$=str$(ii)
+bi.TCost$[1,20] = tcost using Emask$
+bi.TResale$[1,20] = tsell using Emask$
+TGPP=((tsell-tcost)/tsell)*100*factor
+bi.TGPP$[1,10] = tgpp Using "----#.##%"
+if cost_lev[1]=0 let bi.tgpp$=""
+Close #OHC,#ODC,#OTC,#OSC,#CUC,#CTLC,#ENC,#SMC,#ETC
+msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+ss=0
+Exit Sub
+Else
+  Temp$=""
+  Call errTrap(pgmName$)
+End Try
+
+
+Function GetOtype$(otype)           
+	dim otypedesc$[16]              
+	dim 1%,j1,x,x1,x2               
+	otypedesc$=" ",otypedesc$       
+	Try                             
+		LET J1=otype;X=20;X1=62     
+		LET X2=J1*X-X               
+		IF X2<0 LET X2=0            
+		READ #CTLC,X1,X2;otypedesc$;
+	else                            
+		otypedesc$ = " "            
+	end try                         
+End Function otypedesc$             
+
+Sub updatelog(debug)                                        
+	If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub       
+
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+		
+
+ss=0 !ss=Spc(10)
+End Sub
+

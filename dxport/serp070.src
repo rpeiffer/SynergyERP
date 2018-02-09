@@ -1,0 +1,2177 @@
+! serp070.dl4
+!
+! Perm Price Cost Update/Accept (PM program 70)
+!
+! 1.0 06/01/2009
+! 09/2013 - NEW LASTPRICE FILES AFTER rev1.8.4.0
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp070.dl4 src/serp070.src
+!
+! ERPScheduler Enabled
+!
+include "src/copyright.inc"
+! internal files needed
+
+Declare Intrinsic Sub Date
+
+Include "src/inc/fileccodes.inc" ! u/m file
+Include "src/inc/filelastpricez.inc" ! last price
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+Include "src/inc/filewhinfoz.inc" ! wh info file (rec 0 fix)
+include "src/inc/fileprtdefault.inc" ! port default
+Include "src/inc/filecust.inc" ! customer
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$,Buildsort
+Declare External Function ChkAltItem$,formatdate2$,getuidrec
+Declare External Sub UserCntrl,getportdefault
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Function openprinter
+Declare External Sub ERPCronSuccess
+Declare External Function GetParameter$
+
+
+External Lib "dxblockcustom.lib"
+Declare External Sub blockPrintersDropList
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,UMDList
+Declare External Function getpravail,getumrec,ChkPrdUM
+
+External Lib "libprodwh.lib"
+Declare External Function getWhAvail
+
+External Lib "libcustlist.lib"
+Declare External Sub CustList,getCustSpecN
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "librebates.lib"
+Declare External Sub rebates
+
+External Lib "libprice.lib"
+Declare External Sub SysPriceCalc
+
+External Lib "serpmxload5l.dl4"
+Declare External Sub MXLOAD5L
+
+! internal subs/functions 
+
+Declare Intrinsic sub programdump,env,Logic,FindF
+Declare Intrinsic Sub DateToJulian,JulianToDate
+Declare Intrinsic Function findchannel
+
+Declare Sub Openfiles,updatelog,doupdt,plcprcupdt
+Declare sub PRICEFAC,doprnt,wlcprcupdt
+Declare Sub LOG_70_SETTINGS,LOG_PERMPRICE_BEFORE,LOG_PERMPRICE_AFTER
+Declare Sub SetPend,SetWhse,prntaud,dohdg,FOOT_NOTE
+Declare Function chkdatefrmt$
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[3000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],HKey$[60],RetVal$[512]
+	Dim Key2$[64],KCM$[50],K1$[50],Mode$[2],CDESC$[24]
+	Dim TUID$[10],UCA2$[50],CName$[30],X$[20],Ven_Code$[20]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2],UCA5[10],WH[99]
+	Dim 2%,Q0[1],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim 1%,X1[9],2%,CurDate,JDate[5]
+	Dim 2%,sysdate,Vend,Jsysdate
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR,SHR,SDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99],Chans[20],x2[9]
+		
+	Dim K1$[50],k2$[50],mode$[2],CG$[11],S1$[30]
+	Dim K4$[60],CCD$[14],t2$[5],r3$[4],r4$[4],r1$[12],r2$[12]
+	Dim custom_customer$[30],va$[264],svendname$[30],evendname$[30],k16$[60]
+	Dim Printcost$[1],k9$[60]
+	DIM PPLOG$[60],2%,SEQ70,3%,PASSINFO[20],PERMLOG[35],LOG70[20],LOG70$[50]
+	Dim 1%,WH[99],V9[4],T0[1],Catgy,s0[20]
+	dim 1%,PT[37],AUDONE[4]
+	dim 2%,UDate[5],v0[1]
+	Dim 3%,NumRec[2],C1,PREC[2],PARAMETER[8,3],LQTY
+	dim 3%,hldlbs[1,1],ctmp[1],AUDTHREE[9]
+	DIM 3%,NEWBNUM,NEWBCOST,DCOST,GPP
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/lp.log" ! fields for DEBUG
+	dim EMAILFROM$[48],SLSEMAIL$[50],SYS$[560]
+
+	DEF FNR(H)=INT(ABS(H)*100+.5)*.01*SGN(H)
+	
+	Dim umc. as ccodes ! u/m file
+	Dim PR. as prod ! product file
+	Dim PW. as prodwhse ! prodwhse file
+	Dim WHI. as whinfo ! wh info file
+	Dim lp. as lastprice ! last price
+	dim prt. as prtdefault ! port defaults
+	dim cust. as cust ! customer
+
+	! call dxopen() ! already done in menu
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	clear e$
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp070"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action2$=UCase$(Action2$)
+	ACtion2$=RTrim$(Action2$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	GAct=0 ! action not found
+	if debugdetail
+		dmsg$="SERP070 ACTION1 "+action1$
+		If Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	
+	Read #ctlc,3,0;CName$; ! comp name
+	MAT  READ #CTLC,3,172;SysDate;
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	MAT  READ #1,115,60;CUSTOM_CUSTOMER$;
+	Custom_Customer$=UCase$(Trim$(custom_customer$))
+	Call OpenFiles() ! open any/all files
+	Mat Read #CTLC,115,40;Q0;
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="--------#.",tmp$[1,Q0[1]]     !price mask
+	DEF FNP(X)=SGN(X)*(INT(ABS(X)*10^Q0[1]+.5)/10^Q0[1])
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		tmp$ = GetParameter$("S_USER.ID") ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	TUID$=UserID$+Blank$
+	If Len(TUID$)>10 let TUID$[11]=""
+	Call UserCntrl(TUID$,UCA2$,UCA5[],status,intCo)
+	Let COST_LEV[0]=UCA5[0]
+	Let COST_LEV[1]=UCA5[1]
+	Let COST_LEV[2]=UCA5[2]
+	Let COST_LEV[3]=UCA5[3]
+	Let COMM_LEV=UCA5[4]
+	let rec_uac=GetUIDRec(e$,IntCo,TUID$)
+	call GetPortDefault(e$,IntCO,TUID$,portnum,rec_uac,prt.) ! get port default
+	tmp$=Tim(8) using "&&"
+	tmp$[3]=TIM(9) using "&&"
+	tmp$[5]=TIM(10) using "&&"
+	CurDate=tmp$[1,6] ! yymmdd
+	jdate[0]=Tim(6)
+	jsysdate=jdate[0]
+	ReturnStatus=0
+	Message$="ACTION1 NOT FOUND"
+	if p60$[33,33]<>"Y" ! NO PERM PRICING!
+		Message$="PERMANENT PRICING NOT USED!"
+		Action1$="exitprog" ! SO no match
+	Endif
+	if p61$[30,30]="Y" ! email reports
+		!UCC=FindChannel()
+		!OPEN #UCC,"usercntrl"                   
+		UCC= openfile(-9988, intCo) \ if ucc = -1 error 42
+		PortScr=Rec_uac
+		IF PORTSCR<=0 LET EMAILFROM$=""
+		if custom_Customer$="MORRISETTE" and EMAILFROM$="" let EMailFrom$="pbilal@morrisettepaper.com"    
+		IF PORTSCR>0                                                 
+		  MAT  READ #UCC,PORTSCR,212;EMAILFROM$;                      
+		ENDIF                                                        
+		CLOSE #UCC
+		call "mxvaleaddr.dl4",EMAILFROM$,X1,e$
+		if not(X1) or emailFrom$=""
+			!call "errmsg","Your email address is invalid (set up in 958)!"
+			!call "errmsg","You cannot email perm cost report!"
+			emrep=0
+		Else
+			emrep=1
+		endif
+	Else
+		emrep=0
+	Endif
+	
+	select case action1$
+	
+		
+	case "SYSFLAGS" ! send up flags			doc=PPC-GetSysFlags.doc
+		GAct=1 ! ok
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		List$[0]=bsdel$,"SYSFLAGS",fdel$
+		Webstr$="USEWH",fdel$,"DFDATE",fdel$,"USEEMAIL",fdel$
+		List$[1]=webstr$
+		Tmp$="N" \ if p9$[32,32]="Y" let tmp$="Y"
+		Webstr$=tmp$[1,1],fdel$
+		tmp$=PDATE$(CurDate)
+		webstr$=webstr$,tmp$,fdel$
+		tmp$="N" \ if EMRep let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$ ! ask email ques
+		List$[2]=webstr$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		
+		! send whse List
+		Clear list$[]
+		List$[0]=bsdel$,"WHSELIST",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$
+		List$[2]="0",fdel$,"ALL WHSES",fdel$
+		row=3
+		!if p9$[32,32]="Y" ! just send set up whses
+			for x=0 to 98 ! translate to 1-99
+				Try 
+					read record #WHI,x,0;whi.;
+				Else
+					clear whi.
+				End try
+				! whi.whname$="WHSE "+Str$(X+1)   !!!! WANTED ALL WHSES SENT! REMOVE WHEN COMPLETE!
+				tmp$=RTrim$(whi.WhName$)
+				if tmp$<>""
+					webstr$=Str$(X+1),fdel$,tmp$,fdel$
+					List$[row]=webstr$
+					row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+				Endif
+			Next x
+		!Endif
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		! print section
+		clear list$[]
+		list$[0]=bsdel$,"Printers",fdel$
+		List$[1]="Name",fdel$,"Id",fdel$,"Default",fdel$
+		call AddToStr(e$,rstr$,List$[])
+		pdfoption=1
+		xmloption=0 ! BROWSER NOT OK  (MULTIPLE PRINT FORMATS!)1=except,2=audit,3=update,4=future
+		Call blockPrintersDropList(rstr$,xmloption,pdfoption)
+		Call AddToStr(e$,rstr$,esdel$) ! end of section 
+		! product sls ctgy (NEED A ZERO FOR ALL)
+		Clear List$[]
+		List$[0]=bsdel$,"PRSLSCTGY",fdel$
+		List$[1]="ID",fdel$,"DESC",fdel$
+		List$[2]="0",fdel$,"ALL CATEGORIES",FDEL$
+		row=3
+		let x2=chf(psc)-1
+		for r=1 to x2
+			read #psc,r,0;CDESC$;
+			IF RTrim$(CDesc$)<>""
+				webstr$=Str$(R),fdel$,RTrim$(CDESC$),fdel$
+				List$[row]=webstr$
+				row=row+1 \ if row>maxcnt let maxcnt=expandarray(e$,List$[])
+			Endif
+		Next R ! do it
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[]) ! end of section 
+		! calc options
+		Clear List$[]
+		List$[0]=bsdel$,"CALCOPTION",fdel$
+		List$[1]="ID",fdel$,"DESC",fdel$
+		List$[2]="1",fdel$,"Cost change",fdel$
+		List$[3]="2",fdel$,"Manual factor",fdel$
+		List$[4]="3",fdel$,"Future Cost",fdel$
+		List$[5]=esdel$
+		call AddToStr(e$,rstr$,List$[]) ! end of section 
+		! lower price option
+		Clear List$[]
+		List$[0]=bsdel$,"LOWERPRICE",fdel$
+		List$[1]="ID",fdel$,"DESC",fdel$
+		List$[2]="1",fdel$,"Allow Decrease",fdel$
+		List$[3]="2",fdel$,"Do not Decrease",fdel$
+		List$[4]="3",fdel$,"NO Decrease, Cost Update",fdel$
+		List$[5]="5",fdel$,"Update Cost Only",fdel$
+		List$[6]=esdel$
+		call AddToStr(e$,rstr$,List$[]) ! end of section 
+		! fACTOR TYPE
+		Clear List$[]
+		List$[0]=bsdel$,"FACTORTYPE",fdel$
+		List$[1]="ID",fdel$,"DESC",fdel$
+		List$[2]=" ",fdel$,"AUTO FACTOR",fdel$
+		List$[3]="$",fdel$,"FLAT AMOUNT + or -",FDEL$
+		LIST$[4]="%",fdel$,"PERCENT CHANGE + or -",fdel$
+		List$[5]=esdel$
+		call AddToStr(e$,rstr$,List$[]) ! end of section
+		! I guess the program defaults too
+		tchan=findchannel()
+		call "progdflt","mx070","",tchan,RETVAL$
+		IF RETVAL$[1,5]="@@@@@" ! no prev save
+		  LET RETVAL$=" ",RETVAL$
+		  LET RETVAL$[1,1]="1"
+		  LET RETVAL$[2,2]="3"
+		  LET RETVAL$[3,3]=" "
+		  LET RETVAL$[4,11]="       0"
+		  LET RETVAL$[12,13]=" 0"
+		  LET RETVAL$[14,17]="    "
+		  LET RETVAL$[18,21]="zzzz"
+		  LET RETVAL$[22,33]="            "
+		  LET RETVAL$[34,45]="zzzzzzzzzzzz"
+		  LET RETVAL$[46,51]="     0"
+		  LET RETVAL$[52,57]="999999"
+		  LET RETVAL$[58,60]="  0"
+		  LET RETVAL$[61,63]="999"
+		  LET RETVAL$[64,65]=" 0"
+		  LET RETVAL$[66,66]="Y"
+		  LET RETVAL$[67,72]="     0"
+		  LET RETVAL$[73,78]="999999"
+		  FOR X=1 TO 99
+			LET RETVAL$[100+X,100+X]="1"
+		  NEXT X
+		  
+		ENDIF
+		Clear List$[]
+		List$[0]=bsdel$,"PROMPTVALS",fdel$
+		List$[1]="ID",fdel$,"VALUE",fdel$
+		List$[2]="CALCOPTION",fdel$,RetVal$[1,1],fdel$
+		List$[3]="LOWERPRICE",fdel$,retval$[2,2],fdel$
+		List$[4]="FACTORTYPE",fdel$,retval$[3,3],fdel$
+		List$[5]="FACTOR",fdel$,Trim$(RetVal$[4,11]),fdel$
+		List$[6]="PSCTGY",fdel$,Trim$(RetVal$[12,13]),fdel$
+		List$[7]="SCOMMOD",fdel$,RetVal$[14,17],fdel$
+		List$[8]="ECOMMOD",fdel$,RetVal$[18,21],fdel$
+		List$[9]="SPROD",fdel$,RetVal$[22,33],fdel$
+		List$[10]="EPROD",fdel$,Retval$[34,45],fdel$
+		List$[11]="SVEND",fdel$,Retval$[46,51],fdel$
+		List$[12]="EVEND",fdel$,RetVal$[52,57],fdel$
+		List$[13]="SSLSP",fdel$,Retval$[58,60],fdel$
+		List$[14]="ESLSP",fdel$,Retval$[61,63],fdel$
+		x2=retval$[64,65] \ retval$[64,65]=X2 Using "##"
+		List$[15]="WHSE",fdel$,retval$[64,65],fdel$  ! 00=ALL WHSES - otherwise individual selects
+		List$[16]="PRTCST",fdel$,retval$[66,66],fdel$
+		List$[17]="BCUST",fdel$,Retval$[67,72],fdel$
+		List$[18]="ECUST",fdel$,Retval$[73,78],fdel$
+		tmp$="N" \ if retval$[67,67]="I" let tmp$="Y"
+		List$[19]="INDCUST",fdel$,tmp$,fdel$ ! individual cust's
+		Webstr$="WHSEL",fdel$
+		tmp$="";whse=retval$[64,65]
+		if whse=0
+			let tmp$="0"
+		Else
+			for x=1 to 99
+				if retval$[100+x,100+x]="1" ! send only yes
+				  Try 
+					x1=x-1
+					read record #WHI,x1,0;whi.;
+				  Else
+						clear whi.
+				  End try
+					! whi.whname$="WHSE "+Str$(X+1)   !!!! WANTED ALL WHSES SENT! REMOVE WHEN COMPLETE!
+					tmp1$=RTrim$(whi.WhName$)
+					if tmp1$<>""
+					let tmp$=tmp$,Str$(X),","	 ! send "#,"
+					endif
+				Endif
+			Next x
+		Endif
+		if tmp$[len(tmp$)]="," let tmp$[len(tmp$)]=""
+		webstr$=webstr$,tmp$,fdel$
+		List$[20]=Webstr$
+		! additional fields added from Morrisette (not part of prompts!!)
+		List$[21]=esdel$
+		call AddToStr(e$,rstr$,List$[]) ! end of section
+		Clear list$[] ! droplist for add'l audit sort?
+		List$[0]=bsdel$,"AUDITSORT2",fdel$
+		List$[1]="ID",fdel$,"DESC",fdel$
+		List$[2]="1",fdel$,"VENDOR",fdel$
+		List$[3]="2",fdel$,"CUSTOMER",FDEL$
+		lIST$[4]=esdel$
+		call AddToStr(e$,rstr$,List$[]) ! end of section
+		if debugdetail
+			dmsg$="System Flags & droplists sent "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of sysflags
+	case "SVPROMPTS" ! save prompts							doc=PPC-SavePrompts.doc
+		ReturnStatus=1
+		Message$="OK"
+		retval$=" ",retval$
+		tmp$ =  ucase$(rtrim$(GetParameter$("SVTYPE")))
+		if tmp$[1,1]<>"A" and tmp$[1,1]<>"U"
+			returnstatus=0
+			Message$="PROMPTS NOT SAVED - NO SAVE FOR"
+			goto svpdone
+		Endif
+		Urecflag=0 \ if tmp$[1,1]="U" let urecflag=1
+		! load each and every one
+		tmp$ = GetParameter$("CALCOPTION")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		if x3<1 or x3>3 or fra(x3)
+			returnstatus=0
+			Message$="PROMPTS NOT SAVED - Bad Calculate option"
+			goto svpdone
+		Endif
+		RetVal$[1,1]=tmp$+Blank$
+		tmp$ = GetParameter$("LOWERPRICE")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		if x3<1 or x3>5 or fra(x3) or x3=4
+			returnstatus=0
+			Message$="PROMPTS NOT SAVED - Bad Lower Price option"
+			goto svpdone
+		Endif
+		retval$[2,2]=tmp$+Blank$
+		tmp$ = rtrim$(GetParameter$("FACTORTYPE"))
+		if tmp$<>"" or tmp$<>"%" or tmp$<>"$"
+			returnstatus=0
+			Message$="PROMPTS NOT SAVED - Bad Factor Type"
+			goto svpdone
+		Endif
+		retval$[3,3]=tmp$+Blank$
+		tmp$ = GetParameter$("FACTOR")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		RetVal$[4,11]=tmp$+Blank$
+		tmp$ = GetParameter$("PSCTGY")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		RetVal$[12,13]=tmp$+Blank$
+		tmp$ = GetParameter$("SCOMMOD")
+		RetVal$[14,17]=UCase$(tmp$)+Blank$
+		tmp$ = GetParameter$("ECOMMOD")
+		RetVal$[18,21]=UCase$(tmp$)+Blank$
+		if retval$[18,21]<retval$[14,17]
+			returnstatus=0
+			Message$="PROMPTS NOT SAVED - Bad Commodity range"
+			goto svpdone
+		Endif
+		RetVal$[22,33] = ucase$(GetParameter$("SPROD"))+Blank$
+		RetVal$[34,45] = ucase$(GetParameter$("EPROD"))+Blank$
+		if retval$[34,35]<Retval$[22,33]
+			returnstatus=0
+			Message$="PROMPTS NOT SAVED - Bad Product range"
+			goto svpdone
+		Endif
+		tmp$ = GetParameter$("SVEND")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		x3[1]=x3
+		Retval$[46,51]=tmp$+Blank$
+		tmp$ = GetParameter$("EVEND")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		RetVal$[52,57]=tmp$+Blank$
+		if x3<x3[1]
+			returnstatus=0
+			Message$="PROMPTS NOT SAVED - Bad Vendor Range"
+			goto svpdone
+		Endif
+		tmp$ = GetParameter$("SSLSP")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		x3[1]=x3
+		Retval$[58,60]=tmp$+Blank$
+		tmp$ = GetParameter$("ESLSP")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		Retval$[61,63]=tmp$+Blank$
+		if x3<x3[1]
+			returnstatus=0
+			Message$="PROMPTS NOT SAVED - Bad Salesperson range"
+			goto svpdone
+		Endif
+		tmp$ = GetParameter$("WHSE")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		retval$[64,65]=tmp$+Blank$
+		tmp$ = GetParameter$("PRTCST")
+		retval$[66,66]=tmp$+Blank$
+		tmp$ = GetParameter$("BCUST")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		x3[1]=x3
+		Retval$[67,72]=tmp$+Blank$
+		tmp$ = GetParameter$("ECUST")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		Retval$[73,78]=tmp$+Blank$
+		if x3<x3[1]
+			returnstatus=0
+			Message$="PROMPTS NOT SAVED - Bad Customer range"
+			goto svpdone
+		Endif
+		tmp$ = GetParameter$("INDCUST")
+		If tmp$="Y" ! individual cust's
+			Retval$[67,67]="I"
+		Endif
+		! whse selects
+		Clear WH[]
+		tmp$ = GetParameter$("WHSEL")
+		! sent as comma delimited
+		CPOS=1
+		sploop: ! loop it
+		Search tmp$[CPOS],",",EPOS
+		If EPOS
+			x1 = cpos + epos - 2 ! move to before comma
+			tmp1$=tmp$[CPOS,X1]
+			If tmp1$="0" ! all
+				for x=1 to 99
+					Wh[x]=1
+				Next X
+				Wh[0]=99
+			Endif
+			let x2=tmp1$
+			if x2>0 and x2<100
+				wh[x2]=1
+				wh[0]=wh[0]+1
+			Endif
+			cpos = cpos + epos ! start after comma
+			EPOS=0
+			Goto SPLoop ! look for next
+		Else ! no more commas, was there no comma at end?
+			if cpos>1 and CPOS<=Len(tmp$) ! found one comma
+				tmp1$=tmp$[CPOS]
+				If tmp1$="0" ! all
+					for x=1 to 99
+						Wh[x]=1
+					Next X
+					Wh[0]=99
+				Endif
+				let x2=tmp1$
+				if x2>0 and x2<100
+					wh[x2]=1
+					wh[0]=wh[0]+1
+				Endif
+			Endif
+		Endif
+		for x=1 to 99
+			tmp$="0" \ if wh[x] let tmp$="1"
+			let retval$[100+x,100+x]=tmp$[1,1]
+		Next X
+		! additional prompts from morrisette not saved
+		tchan=findchannel()
+		CALL "progdfltw","mx070","",tchan,RETVAL$,URECFLAG
+			
+		Svpdone: ! finito
+		if debugdetail
+			dmsg$="Save Prompts complete "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of SVPROMPTS
+	case "SUBMITUPD" ! submit / update						doc=PPC-UpdateProduct.doc
+		ReturnStatus=1
+		Message$="OK - Starting Process"
+		Clear List$[]
+		LET UPDTBC=1
+		close #CTLC
+		CTLC=Openfile(9999,IntCo) \ if ctlc = -1 error 42 ! re-open as r/w
+		EMCH=-1 ! don't know email file channel
+		Call doupdt()
+		if returnstatus=1  !' we're still good
+			Message$="UPDATE " \ if PAudit let message$="AUDIT PRINT "
+			message$=message$+Str$(Numrec[0])+" RECORDS READ"
+			let message$=message$+" AND "+STR$(Numrec[1])
+			tmp$=" UPDATED" \ if PAudit let tmp$=" PRINTED"
+			Message$=Message$+" RECORDS"+tmp$
+!-----------------------------------------------------------------------------
+!		Endif  ! moved down because if resturnstatus=0 then there is a problem
+!-----------------------------------------------------------------------------
+			if debugdetail
+				dmsg$="Update complete "+Message$
+				Call updatelog(debug)
+			Endif
+			If PAUDIT and numrec[0]>0 ! want audit
+				call prntaud() ! done in doupdt()
+				if sortSS and emailflag ! now send emails
+				  let EMCh=Findchannel() ! EMCH
+				  PrtCh=EMCh
+				  Call prntAud() ! GOSUB printit:
+			    endif
+			Else ! none - tell 'em so
+				exc=0;printreport=0
+				call dohdg()
+				Print #PrtCh;Message$ ! recs read / updated
+				close #0
+			Endif
+			If xmlprnt ! dx xml
+			  Call addtostr(e$,rstr$,esdel$) !end section
+			  ! Call setoutput(e$,rstr$,1) !1 flag puts 0 status seciton in, puts </page> in
+			End If 
+			! end of SUBMITUPD
+			try call dxclose() Else REM ! as print progs do
+			if returnStatus = 1 call ERPCronSuccess()
+			End ! no need to resend status
+		Endif  ! from returnstatus=1
+	end select
+
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if returnStatus = 1 call ERPCronSuccess()
+
+  if debugdetail
+		dmsg$="End of Program serp070" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	CCC=OpenFile(-1728,IntCo) \ IF CCC=-1 Error 42 ! u/m file
+	LPC=OpenFile(1376,IntCo) \ if LPC=-1 Error 42 ! last price
+	PRC=OpenFile(1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	WHI = OpenFile(-2768,IntCo) \ if whi = -1 Error 42 ! wh info file (rec 0 fix)
+	PTC=OpenFile(-752,IntCo) \ if ptc=-1 Error 42 ! price type
+	CUC=OpenFile(-1808,IntCo) \ if cuc=-1 Error 42 ! customer
+	RDC=OpenFile(-320,IntCo) \ if rdc=-1 Error 42 ! rebate lines
+	RHC=OpenFile(-304,IntCo) \ if rhc=-1 Error 42 ! Rebate Header
+	PMC=OpenFile("SPRICEMARK",IntCo,"R") \ if pmc=-1 Error 42 ! Price Mark
+	VTC=OpenFile(-1120,IntCo) \ if vtc=-1 Error 42 ! vendtag
+	PSC=OpenFile(-1984,IntCo) \ if psc=-1 Error 42 ! Prod Sls Ctgy
+	SLC=OpenFile(-1824,IntCo) \ if slc=-1 Error 42 ! slsm
+	VMC=OpenFile(-2400,IntCo) \ if vmc=-1 Error 42 ! Vendor
+	tmp$="2/prog70log"+Str$(IntCo)
+	PPLOG=findchannel()
+	Try
+		Open #PPLog,tmp$
+		TrackPerm=1
+	Else
+		TrackPerm=0;PPLog=0
+	End try
+	if TrackPerm
+		CH_PERM_LOG=findchannel()
+		tmp$ = "2/permpricelog" + Str$(intco)
+		Open #CH_PERM_LOG,tmp$
+	end if
+ 	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+	Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+Userid$+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Function chkDateFrmt$(DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY
+! if not make it MM/DD/YYYY
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE" or DIn$="0"
+	  Let DOut$=UCase$(DIn$)
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function DOut$ ! chkDateFrmt$
+! 
+!--------------------------------------------------------------------
+Sub doupdt()
+! single routine to update or cancel update
+  Try
+
+	NumRec=0;Numrec[1]=0;numrec[2]=0
+	! call dxsave(0,"tmp/bcu070.txt!")
+	SRC=Buildsort(e$,30,0)
+	clear e$
+	! SET UP print vars
+	v9[0]=0;v9[1]=100;v9[4]=62 ! page,line,maxline
+	RETVAL$=" ",RETVAL$
+	if not(erpCron)
+		tmp$ = GetParameter$("UPDTTYPE")
+	else
+		tmp$ = ""
+		tmp = GetParameter$("UPDTTYPE")
+		if tmp = 1 tmp$ = "AUDIT" 
+		if tmp = 2 tmp$ = "CLEAR" 
+		if tmp = 3 tmp$ = "RECORD" 
+	end if
+	PAudit=0 \ if UCase$(RTrim$(tmp$))="AUDIT" let PAudit=9
+	ClrPendpp=0 \ if UCase$(RTrim$(tmp$))="CLEAR" let clrpendpp=1
+	UpdateF=0 \ if UCase$(RTrim$(tmp$))="RECORD" let updateF=1
+	if not(paudit) and not(clrpendpp) and not(updatef)
+		ReturnStatus=0
+		Message$="NO UPDATE - No Update Type passed"
+		Goto fldinvalid
+	Endif
+	tmp$ = GetParameter$("CALCOPTION")
+	x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+	if x3<1 or x3>3
+		ReturnStatus=0
+		Message$="NO UPDATE - Bad Calculate Option"
+		Goto fldinvalid
+	Endif
+	RetVal$[1,1]=tmp$+Blank$
+	futurePP=0 \ if retval$[1,1]="3" let futurepp=1
+	if not(futurepp) and clrpendpp ! only works for future!
+		returnstatus=0
+		message$="You can only clear/cancel future prices!"
+		Goto fldinvalid
+	Endif
+	tmp$ = GetParameter$("LOWERPRICE")
+	x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+	if x3<1 or x3>5 or x3=4
+		ReturnStatus=0
+		Message$="NO UPDATE - Bad Lower price option"
+		Goto fldinvalid
+	Endif
+	retval$[2,2]=tmp$+Blank$
+	if not(erpCron)
+		tmp$ = rtrim$(GetParameter$("FACTORTYPE"))
+	else
+		tmp$ = "BAD"
+		tmp = GetParameter$("FACTORTYPE")
+		if tmp = 1 tmp$ = "" 
+		if tmp = 2 tmp$ = "$" 
+		if tmp = 3 tmp$ = "%" 
+	end if
+	if tmp$<>"" and tmp$<>"%" and tmp$<>"$"
+		ReturnStatus=0
+		Message$="NO UPDATE - Bad Factor Type passed"
+		Goto fldinvalid
+	Endif
+	retval$[3,3]=tmp$+Blank$
+	tmp$ = GetParameter$("FACTOR")
+	x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+	RetVal$[4,11]=tmp$+Blank$
+	tmp$ = GetParameter$("PSCTGY")
+	x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+	RetVal$[12,13]=tmp$+Blank$
+	RetVal$[14,17]=GetParameter$("SCOMMOD")+Blank$
+	RetVal$[18,21]=GetParameter$("ECOMMOD")+Blank$
+	if retval$[18,21]<retval$[14,17]
+		ReturnStatus=0
+		Message$="NO UPDATE - Bad Commodity Range"
+		Goto fldinvalid
+	Endif
+	RetVal$[22,33]=GetParameter$("SPROD")+Blank$
+	Retval$[34,45]=GetParameter$("EPROD")+Blank$
+	if retval$[34,45]<retval$[22,33]
+		ReturnStatus=0
+		Message$="NO UPDATE - Bad Product Range"
+		Goto fldinvalid
+	Endif
+	tmp$ = GetParameter$("SVEND")
+	x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+	x3[1]=x3
+	Retval$[46,51]=tmp$+Blank$
+	tmp$ = GetParameter$("EVEND")
+	x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+	if x3<x3[1]
+		ReturnStatus=0
+		Message$="NO UPDATE - Bad Vendor Range"
+		Goto fldinvalid
+	Endif
+	RetVal$[52,57]=tmp$+Blank$
+	! morrisette - get start/end vendor names
+	let k16$=" ",k16$
+	let svendname$="VENDOR NOT ON FILE"
+	let evendname$="VENDOR NOT ON FILE"
+	let k16$[1,6]=X3[1] using "######"
+	search #VMC,2,1;K16$,R16,E   
+	if not(e)
+	   mat read #VMC,r16,0;VA$;
+	   let svendname$=VA$[1,30]
+	   let minvend=k16$[1,6]
+	endif
+	let k16$=" ",k16$                      
+	let k16$[1,6]=X3[0] using "######"     
+	search #VMC,2,1;K16$,R16,E              
+	if not(e)                               
+	   mat read #VMC,r16,0;VA$;             
+	   let evendname$=VA$[1,30]            
+	   let maxvend=k16$[1,6]               
+	Endif
+	tmp$ = GetParameter$("SSLSP")
+	x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+	x3[1]=x3
+	Retval$[58,60]=tmp$+Blank$
+	tmp$ = GetParameter$("ESLSP")
+	x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+	if x3<x3[1]
+		ReturnStatus=0
+		Message$="NO UPDATE - Bad Salesperson Range"
+		Goto fldinvalid
+	Endif
+	Retval$[61,63]=tmp$+Blank$
+	cg$ = rtrim$(GetParameter$("COSTGRP"))
+
+	tmp$ = ucase$(rtrim$(GetParameter$("PRTCST")))
+	Printcost=0 \ if tmp$ = "Y" let printcost=1
+	retval$[66,66]="N" \ if printcost let retval$[66,66]="Y"
+	tmp$ = GetParameter$("INDCUST")
+	Ivselect=0;x2=tmp$
+	if x2>=1 ! get list - save to sortfile
+		retval$[67,72]="I"+Blank$
+		for x=1 to x2
+			tmp$ = GetParameter$("CUST"+Str$(x))
+			Cust=tmp$
+			If Cust>0
+				k1$=" ",k1$
+				K1$="}",cust using "######"
+				Search #src,4,1;k1$,R,E
+			Endif
+		Next x
+		ivselect=1
+	Else ! not list
+		tmp$ = GetParameter$("BCUST")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		x3[1]=x3
+		Retval$[67,72]=tmp$+Blank$
+		tmp$ = GetParameter$("ECUST")
+		x3=tmp$ \ tmp$=Str$(x3) ! convert to numeric
+		if x3<x3[1]
+			ReturnStatus=0
+			Message$="NO UPDATE - Bad Customer Range"
+			Goto fldinvalid
+		Endif
+		Retval$[73,78]=tmp$+Blank$
+		ivselect=0
+	Endif
+	if clrpendpp
+		tmp$ = ucase$(rtrim$(GetParameter$("CANTYPE"))) ! cancel type A=all upto, O=Only for
+		if tmp$<>"A" and tmp$<>"O"
+			ReturnStatus=0
+			Message$="NO UPDATE - Bad Cancel type passed"
+			Goto fldinvalid
+		Endif
+		LET UDOPT=0 \ IF tmp$="O" LET UDOPT=1
+	Endif
+	if futurepp
+		tmp$ = GetParameter$("EFFDATE")
+		if erpCron ! sent in mmddyy format
+			! convert to yymmdd
+			call date(tmp$,tmp1$,6,e)
+			if e
+				EffDate = 0
+			else
+				EffDate = tmp1$
+			end if
+		else
+			tmp$=chkDateFrmt$(tmp$)
+			if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+			tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+			EffDate=tmp1$[3,8] ! drop to yymmdd
+		end if
+		X$=EffDate using "&&&&&&"
+		Call DateToJulian(1,x$,tmp$,F)
+		if f let effdate=0 ! not valid
+		let JDate[1]=tmp$
+		if updtbc and effdate=0 ! cannot happen
+			returnStatus=0
+			Message$="Date must exist"
+			Goto fldinvalid
+		Endif
+		if not(clrpendpp) and not(paudit) ! not for cancel
+			tmp$ = rtrim$(ucase$(GetParameter$("OVRWEXT"))) ! existing - O=Overwrite, K=Keep
+			if erpCron
+				if tmp$ = "Y"
+					tmp$ = "O"
+				else
+					tmp$ = "K"
+				end if
+			end if
+			if tmp$<>"O" and tmp$<>"K"
+				ReturnStatus=0
+				Message$="NO UPDATE - Bad Overwrite passed"
+				Goto fldinvalid
+			Endif
+			LET UDOPT=0 \ IF tmp$="K" LET UDOPT=1
+		Endif
+	Endif
+	IF EFFDATE=0 LET EFFDATE=CURDATE;JDATE[1]=JDATE[0] ! need for rebate call
+	if paudit ! audit list - slsm sort?
+		tmp$ = ucase$(rtrim$(GetParameter$("SRTSLSM")))
+		SortSS=0 \ if tmp$="Y" let SortSS=1
+	Else
+		if updatef ! post update
+			tmp$ = ucase$(rtrim$(GetParameter$("PUAUDIT")))
+			if tmp$="Y" let PAudit=1;SortSS=1
+		Endif
+	Endif
+	!If P9$[32,32]="Y" ! whses
+		ProdMain=1 ! always!
+		Clear WH[]
+		tmp$ = GetParameter$("WHSEL")
+		! sent as comma delimited
+		CPOS=1
+		stloop: ! loop it
+		Search tmp$[CPOS],",",EPOS
+		If EPOS
+			x1 = cpos + epos - 2 ! move to before comma
+			tmp1$=tmp$[CPOS,X1]
+			if tmp1$="0" let tmp1$="A";prodmain=1
+			If tmp1$="A" ! all
+				for x=1 to 99
+					Wh[x]=1
+				Next X
+				Wh[0]=99
+			Endif
+			let x2=tmp1$
+			if x2>0 and x2<100
+				wh[x2]=1
+				wh[0]=wh[0]+1
+			Endif
+			cpos = cpos + epos ! start after comma
+			EPOS=0
+			Goto STLoop ! look for next
+		Else ! no more commas, was there no comma at end?
+			if cpos>1 and CPOS<=Len(tmp$) ! found one comma
+				tmp1$=tmp$[CPOS]
+				if tmp1$="0" let tmp1$="A";prodmain=1
+				If tmp1$="A" ! all
+					for x=1 to 99
+						Wh[x]=1
+					Next X
+					Wh[0]=99
+				Endif
+				let x2=tmp1$
+				if x2>0 and x2<100
+					wh[x2]=1
+					wh[0]=wh[0]+1
+				Endif
+			Endif
+		Endif
+		If Prodmain=0 and Wh[0]=0
+			returnStatus=0
+			Message$="NO WAREHOUSES SELECTED"
+			Goto fldinvalid
+		Endif
+		
+	!Else ! no whses
+	!	Prodmain=1 ! always
+	!	Clear WH[] ! not mwhse
+	!Endif
+	tmp$ = GetParameter$("SECSORT") ! if audit list by slsm - additional
+	if tmp$<>"1" and tmp$<>"2" let tmp$="1"
+	if not(PAudit) or not(SortSS) let tmp$=" "
+	ASort=tmp$
+	tmp$ = ucase$(rtrim$(GetParameter$("EMLSREP")))
+	if p61$[30,30]<>"Y" let tmp$="N"
+	If Not(PAudit) or not(SortSS) let tmp$="N" ! no audit by sslm
+	if tmp$ <> "Y" let tmp$="N"
+	emrep=0 \ if tmp$="Y" let emrep=1
+	tmp$ = ucase$(rtrim$(GetParameter$("SAVEOPT")))
+	if tmp$[1,1]="A" or tmp$[1,1]="U"
+		Whse=wh[0] \ IF WHSE>=99 LET WHSE=0
+		Retval$[64,65]=sTR$(Whse)+Blank$ !  Using "##"
+		for x=1 to 99
+			tmp1$="0" \ if wh[x] let tmp1$="1"
+			let retval$[100+x,100+x]=tmp1$[1,1]
+		Next X
+		Urecflag=0 \ if tmp$[1,1]="U" let urecflag=1
+		tchan=findchannel()
+		CALL "progdfltw","mx070","",tchan,RETVAL$,URECFLAG
+	Endif
+	if p61$[30,30]="Y" And EMRep ! email reports - check / get from email
+		!UCC=FindChannel()
+		!OPEN #UCC,"usercntrl"                   
+		UCC= openfile(-9988, intCo) \ if ucc = -1 error 42
+		PortScr=Rec_uac
+		IF PORTSCR<=0 LET EMAILFROM$=""
+		if custom_Customer$="MORRISETTE" and EMAILFROM$="" let EMailFrom$="pbilal@morrisettepaper.com"    
+		IF PORTSCR>0                                                 
+		  MAT  READ #UCC,PORTSCR,212;EMAILFROM$;                      
+		ENDIF                                                        
+		CLOSE #UCC
+		call "mxvaleaddr.dl4",EMAILFROM$,X1,e$
+		if not(X1) or emailFrom$=""
+			!call "errmsg","Your email address is invalid (set up in 958)!"
+			!call "errmsg","You cannot email perm cost report!"
+			emrep=0
+		Else
+			emrep=1
+		endif
+	Else
+		emrep=0
+	Endif
+	
+	LET T0[0]=RETVAL$[1,1] \ LET T0[1]=RETVAL$[2,2]            
+	LET T2$[1,1]=RETVAL$[3,3] \ LET C1=RETVAL$[4,11]           
+	LET CATGY=RETVAL$[12,13]                                   
+	LET R3$[1,4]=RETVAL$[14,17] \ LET R4$[1,4]=RETVAL$[18,21]  
+	LET R1$[1,12]=RETVAL$[22,33] \ LET R2$[1,12]=RETVAL$[34,45]
+	LET V0[0]=RETVAL$[46,51] \ LET V0[1]=RETVAL$[52,57]        
+	LET BSLS=RETVAL$[58,60] \ LET ESLS=RETVAL$[61,63]          
+	LET WHSE=wh[0] ! RETVAL$[64,65]                                    
+	LET PRINTCOST$=RETVAL$[66,66]                              
+	LET BCUST=RETVAL$[67,72] \ LET ECUST=RETVAL$[73,78]        
+	IF RETVAL$[67,67]="I" LET IVSELECT=1 ELSE  LET IVSELECT=0 
+	IF PRINTCOST$="Y" LET PRINTCOST=1 ELSE  LET PRINTCOST=0
+	IF T0[0]=3 LET T0[0]=1 ! FUTURE DOES SYSTEM
+	let emailflag=0 \ if emrep let emailflag=1
+	printchan=0
+	if not(erpCron) ! if from ERPScheduler - print channel already open
+		! open printer
+		tmp$ = rtrim$(GetParameter$("Printer")) ! let's see if 1 selected (-- = NONE)
+		IF PAUDIT ! if no print - ignore
+			if tmp$[1,2]="--"
+				Returnstatus=0
+				Message$="NO PRINTER SELECTED"
+				goto fldinvalid
+			Endif
+			onchannelno=0 ! zero for channel 
+			printchan = openprinter(e$,onchannelno) 
+		Endif
+	end if
+	xmlprnt=0
+	if printchan=-1 let xmlprnt=1 ! to browser
+	! OK - START THE UPDATE  (in test: 4 min 40 sec run for 35400 records!) up to 15 mins for same
+	!call programdump("/tmp/bcu070u!","")
+	If xmlprnt ! WE CANNOT DO AN XML (BROWSER)!!! multi-format & TIMEOUT ISSUES!
+		if v9[0]=0 ! send header
+			v9[0]=v9[0]+1
+			List$[0]=bsdel$,"070",fdel$
+			webstr$="" ! if you can figure a way - DO IT HERE!
+			LIST$[1]=WEBSTR$
+			call addtostr(e$,rstr$,List$[])
+		Endif
+	Else ! per rce - send status before anything else - says process will continue!?
+		if returnstatus=1 Message$="OK - Program in process..."
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		! try call dxclose()  Else Rem ! do we do this?
+		Prtch=0 ! start off with printer
+	Endif
+	IF FUTUREPP IF UPDATEF call LOG_70_SETTINGS()
+	IF FUTUREPP IF CLRPENDPP call LOG_70_SETTINGS()
+	IF PAUDIT<>9 IF NOT(FUTUREPP) call LOG_70_SETTINGS()
+	k1$=" ",K1$;printreport=0
+	K1$=V0[0] USING "######" ! vendor
+	Mode$=">"
+	LET EXC=1 ! exceptions print
+	Do
+		!e=1 ! lock it!
+		IF SORTSS<2 !" cct99991 - "phase 1 sort/no sort Dir 4=vendor Order
+			Unlock #LPC ! unlock file
+			!LPR=filegetlastpricez(e$,LPC,mode$,4,k1$,lp.,e) ! faster with "SEARCH"!
+			Search #LPC,3,4;k1$,LPR,E
+			if e let LPR=-1 ! mode$=">" ! switch to next
+			If LPR<=0 Exit do
+			Vend=k1$[1,6]
+			!if vend>v0[1] exit do
+			IF (E OR VEND>V0[1])
+				IF NOT(SORT)
+					Exit do ! GOTO L_9100:
+				ELSE
+					LET SORTSS=2;K9$=" ";T1=0;FIRST_TIME=1
+					GOTO l_2570:
+				ENDIF		
+			ENDIF
+		endif
+		L_2570: IF SORTSS=2 !"phase 2 going thru sort ! cct99991 -custom
+			SEARCH #9,3,1;K9$,R[5],E ! if e>2 gosub err_search
+			IF E Exit Do !  GOTO L_9100:
+			IF ASORT=1 LET K1$=K9$[4]
+			IF ASORT=2 LET K1$=K9$[10]
+		endif		
+		numrec[0]=numrec[0]+1 ! num read
+		read record #LPC,LPR,0;lp. ! LOCK IT 
+		IF LP.WHSE<=0 LET LP.WHSE=1
+		If Whse and Wh[lp.Whse]=0 goto bplpr
+		if lp.LineType or lp.PermPriceType<>-7 goto bplpr
+		if lp.Prod$<R1$ or lp.Prod$>R2$ goto bplpr
+		let k2$=lp.CustNum using "######"
+		CUR=filegetcust(e$,CUC,"=",1,k2$,cust.)
+		clear e$
+		if cur<=0 
+			IF NOT(FUTUREPP)
+			  IF V9[1]>V9[4] call dohdg()
+			  Print #PrtCh;"Customer";lp.CustNum;"not found.  Record for product ";lp.Prod$;
+			  IF NOT(FUTUREPP) Print #PrtCh;" not updated."
+			  IF FUTUREPP Print #PrtCh;" not printed."
+			  v9[1]=v9[1]+1
+			ENDIF
+			numrec[2]=numrec[2]+1
+			goto bplpr
+		endif
+		cust=lp.custnum
+		if ivselect ! individual
+			K2$=" ",k2$
+			k2$="}"+Cust Using "######"
+			Search #src,2,1;k2$,R,E
+			if e goto bplpr ! not on list
+		Else
+			if cust<BCust or Cust>ECust goto bplpr
+		Endif
+		IF FIRST_TIME LET LAST_CC1=cust.SalesmanCode;FIRST_TIME=0	! "cct99991
+		LET LASTCUST=LP.CustNum							! "cct99991
+		Prod$=lp.prod$
+		PRR=filegetprod(e$,PRC,"=",1,prod$,pr.)
+		clear e$
+		if prr<=0 
+			 IF NOT(FUTUREPP)
+			   IF V9[1]>V9[4] call dohdg()
+			   Print #PrtCh;"Product ";Prod$;" not found.  Record not ";
+			   IF NOT(FUTUREPP) Print #PrtCh;"updated." ELSE  Print #PrtCh;"printed."
+			   v9[1]=v9[1]+1
+			 ENDIF
+			 numrec[2]=numrec[2]+1
+			goto bplpr
+		Endif
+		uok=ChkPrdUM(e$,lp.UMPrice,Intco,pr.)
+		clear e$
+		if not(uok)
+			IF NOT(FUTUREPP)
+			  IF V9[1]>V9[4] call dohdg()
+			  Print #PrtCh;"Bad price ";
+			  Print #PrtCh;"unit for customer";lp.CustNum;"item ";Prod$;
+			  IF NOT(FUTUREPP) Print #PrtCh;".  Item not updated."
+			  IF FUTUREPP Print #PrtCh;".  Item not printed." 
+			  v9[1]=v9[1]+1
+			ENDIF
+			numrec[2]=numrec[2]+1
+			goto bplpr
+		Endif
+		uok=ChkPrdUM(e$,lp.UMCost,Intco,pr.)
+		clear e$
+		if not(uok)
+			IF NOT(FUTUREPP)
+			  IF V9[1]>V9[4] call dohdg()
+			  Print #PrtCh;"Bad cost ";
+			  Print #PrtCh;"unit for customer";lp.CustNum;"item ";Prod$;
+			  IF NOT(FUTUREPP) Print #PrtCh;".  Item not updated."
+			  IF FUTUREPP Print #PrtCh;".  Item not printed." 
+			  v9[1]=v9[1]+1
+			ENDIF
+			numrec[2]=numrec[2]+1
+			goto bplpr
+		Endif
+		IF P9$[21,21]="Y" !  multi slsm
+		  MAT  READ #CUC,CUR,502;S0;
+		  Try LET SLS=S0[pr.ProdCat]  Else let sls=0
+		  IF NOT(SLS) LET SLS=cust.SalesmanCode
+		  IF SLS<BSLS OR SLS>ESLS GOTO bplpr
+		ELSE
+		  IF cust.SalesmanCode<BSLS OR cust.SalesmanCode>ESLS GOTO bplpr
+		ENDIF
+		! now whse
+		k2$=" ",k2$
+		k2$=Prod$+lp.whse using "##"
+		PWR=filegetprodwhse(e$,PWC,"=",1,k2$,pw.)
+		clear e$
+		if PWR<=0 and p9$[32,32]="Y"
+			IF NOT(FUTUREPP)
+			  IF V9[1]>V9[4] call dohdg()
+			  Print #PrtCh;"Warehouse";LP.WHSE;"not found for product ";Prod$;".  Record not "
+			  IF NOT(FUTUREPP) Print #PrtCh;"updated." ELSE  Print #PrtCh;"printed."
+			  v9[1]=v9[1]+1
+			  numrec[2]=numrec[2]+1
+			  goto bplpr
+			Endif
+			!let lp.whse=0 ! goto bplpr if FUTUREPP - just use prodfile
+		Endif
+		if pwr<=0 clear pw.
+		IF RTRIM$(CG$)<>""  ! ! task#60744  
+			IF rtrim$(CG$)<>rtrim$(pr.CostUpdGrp$) GOTO bplpr ! ! task#60744  
+		ENDIF ! task#60744  
+		IF CATGY IF CATGY<>pr.ProdCat GOTO bplpr
+		IF pr.ComdtyCode$<R3$ GOTO bplpr
+		IF pr.ComdtyCode$>R4$ GOTO bplpr
+		if LP.WgtFactor<=0 let LP.WgtFactor=1
+		if pr.LbsFact<=0 let pr.LbsFact=1
+		LET HLDLBS[1,0]=LP.UnitWgt;HLDLBS[1,1]=LP.WgtFactor
+		LET HLDLBS[0,0]=pr.LbsUnit;HLDLBS[0,1]=pr.LbsFact
+		! finally start update
+		IF FUTUREPP IF UPDATEF !is this future and are we updateing
+			Call LOG_PERMPRICE_BEFORE()
+		ENDIF
+		IF PAUDIT<>9 IF NOT(CLRPENDPP) IF NOT(FUTUREPP)
+		 ! log before
+		  Call LOG_PERMPRICE_BEFORE()
+		ENDIF
+		IF CLRPENDPP ! clear pending prices
+			if lp.PendPermPrice>0 and lp.PendPermPrdate
+				X$=lp.PendPermPrdate using "&&&&&&"
+				Call DateToJulian(1,x$,tmp$,F)
+				if f let tmp$="999999"
+				let jdate[2]=tmp$
+				IF UDOPT=0 ! "all up to
+				  IF JDATE[2]>JDATE[1] GOTO bplpr
+				ELSE  ! "only
+				  IF JDATE[2]<>JDATE[1] GOTO bplpr
+				ENDIF  ! "all else clear it
+				IF PAUDIT<>9 !okay to log before
+				  Call LOG_PERMPRICE_BEFORE()
+				ENDIF
+				LET lp.PendPermPrice=0;lp.PendPermPrdate=0
+				IF PAUDIT<>9
+				  LET lp.PppChgDBy=rec_uac
+				  Write Record #LPC,LPR,0;lp.;
+				  Call LOG_PERMPRICE_AFTER()
+				ENDIF
+				LET Numrec[1]=Numrec[1]+1
+			Endif
+			goto bplpr ! that's all folks
+		Endif
+		! ok - continue
+		If FuturePP 
+			call setpend()
+			PRec[2]=0-Effdate
+		Endif
+		call setwhse()
+		PTYPE=cust.PriceType
+		MAT  READ #ptc,PTYPE,28;PT;
+		LET DFT_COST=PT[0] \ IF NOT(DFT_COST) LET DFT_COST=P60$[29,29]
+		LET COST=0;W9=lp.whse
+		LET COST=0;COST_ORIGIN=0
+		!GOSUB L_12400:
+		call plcprcupdt()
+		if p9$[32,32]="Y" and w9 call wlcprcupdt()
+		LET COST=pr.CostLoad;COST_ORIGIN=2
+		IF DFT_COST=2 LET COST=pr.CostLoad2;COST_ORIGIN=5
+		IF DFT_COST=3 LET COST=pr.CostAvg;COST_ORIGIN=4
+		IF DFT_COST=4 LET COST=pr.CostPO;COST_ORIGIN=3
+		IF DFT_COST=5 LET COST=pr.CostBase;COST_ORIGIN=1
+		IF P9$[32,32]="Y" ! "whse pricing
+		  if pw.costload>0 LET COST=pw.CostLoad;COST_ORIGIN=2
+		  IF DFT_COST=2 and pw.CostLoad2>0 LET COST=pw.CostLoad2;COST_ORIGIN=5
+		  IF DFT_COST=3 and pw.CostAvg>0 LET COST=pw.CostAvg;COST_ORIGIN=4
+		  IF DFT_COST=4 and pw.CostLastPo>0 LET COST=pw.CostLastPo;COST_ORIGIN=3
+		  IF DFT_COST=5 and pw.CostBase>0 LET COST=pw.CostBase;COST_ORIGIN=1
+		ENDIF
+		REM START OF REBATE AREA
+		LET RBCOST=0 \ LET RBSLCOST=0 
+		LET TYPE=0
+		FOR I=0 TO 7
+		  FOR J=0 TO 3
+			LET PARAMETER[I,J]=0
+		  NEXT J
+		NEXT I
+		LET PARAMETER[1,0]=PRC
+		LET PARAMETER[2,0]=PWC
+		LET PARAMETER[3,0]=vtc
+		LET PARAMETER[4,0]=rhc
+		LET PARAMETER[5,0]=rdc
+		LET PARAMETER[1,1]=prr
+		LET PARAMETER[2,1]=PWR
+		LET PARAMETER[1,2]=LP.WHSE
+		LET PARAMETER[2,2]=LP.CustNum
+		LET PARAMETER[3,2]=0
+		!LET X$=EFFDATE USING "######"
+		let PARAMETER[4,2]=EFFDATE
+		LET PARAMETER[5,2]=cust.PriceType
+		LET PARAMETER[6,2]=0
+		LET PARAMETER[7,2]=0 
+		clear e$
+		call rebates(e$,parameter[],pr.ProdCode$,e)
+		IF NOT(E) ! rebate found
+		  LET RBCOST=PARAMETER[1,3]
+		  LET RBSLCOST=PARAMETER[2,3]
+		ENDIF
+		IF RBSLCOST AND (NOT(COST) OR RBSLCOST<COST)
+		  LET COST=RBSLCOST
+		ENDIF
+		IF pr.CatchwgtItem$="Y" ! "catch weight
+		  LET pr.LbsUnit=HLDLBS[0,0];pr.LbsFact=HLDLBS[0,1]
+		  LET CNVTU[0]=0;CNVTU[1]=lp.UMCost;CNVTU[2]=2 
+		  LET CNVTA=COST
+		  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  LET pr.LbsUnit=HLDLBS[1,0];pr.LbsFact=HLDLBS[1,1]
+		  LET CNVTU[0]=lp.UMCost;CNVTU[1]=0;CNVTU[2]=2 
+		  LET CNVTA=AMOUNT
+		  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  LET COST=AMOUNT
+		ENDIF
+		LET CNVTU[0]=0;CNVTU[1]=lp.UMCost;CNVTU[2]=2
+		LET CNVTA=lp.PermCost
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET CTMP[0]=AMOUNT
+		LET CNVTA=cost
+		ctmp[1]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		IF LP.PendPermPrice=0 ! "nothing to update
+		  IF T0[0]=1 AND abs((ctmp[0]*10^Q0[1])-(ctmp[1]*10^Q0[1]))<1  !! TAKE MASKING INTO ACCOUNT
+			LET PASSINFO[8]=1
+			IF PAUDIT<>9 IF NOT(FUTUREPP) Call LOG_PERMPRICE_AFTER()
+			GOTO bplpr
+		  ENDIF
+		ENDIF 
+		IF NOT(COST) OR (NOT(LP.PermCost) AND T0[0]=1)
+		  IF NOT(FUTUREPP)
+			IF V9[1]>V9[4] Call dohdg()
+			IF NOT(COST)
+				Print #PrtCh;"No current";
+			Else
+				Print #PrtCh;"No permanent";
+			Endif
+			Print #PrtCh;" cost for customer";LP.CustNum;"product ";lp.Prod$;".  Record not ";
+			IF NOT(FUTUREPP) Print #PrtCh;"updated." ELSE  Print #PrtCh;"printed."
+			v9[1]=v9[1]+1
+		  ENDIF
+		  numrec[2]=numrec[2]+1
+			goto bplpr
+		Endif
+		LET OLDNUM=LP.PermPrice
+		LET OLDCOST=LP.PermCost;OLD_COST_ORIGIN=lp.PermCostOrg
+		IF PAUDIT
+		  LET NUMUM=lp.UMPrice
+		ENDIF
+		LET X2[0]=lp.PermPrice
+		IF T0[0]=2 AND T2$="%"
+		  LET X2[1]=X2[0]+((X2[0]*(ABS(C1)/100)))*SGN(C1)
+		  LET lp.PermPrice=X2[1];lp.PermCost=COST;lp.PermCostOrg=COST_ORIGIN
+		ENDIF
+		IF T0[0]=2 AND T2$="$"
+		  LET CNVTU[0]=0;CNVTU[1]=lp.UMPrice;CNVTU[2]=2
+		  LET CNVTA=lp.PermPrice
+		  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  LET lp.PermPrice=AMOUNT;X2[0]=lp.PermPrice
+		  LET X2[1]=X2[0]+C1
+		  LET lp.PermPrice=X2[1];lp.PermCost=COST;lp.PermCostOrg=COST_ORIGIN
+		  LET CNVTU[0]=lp.UMPrice;CNVTU[1]=0;CNVTU[2]=2
+		  LET CNVTA=lp.PermPrice
+		  if cnvta>=10000 and lp.umprice=pr.baseum let cnvtu[2]=6 ! no 6 digit round!
+		  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  LET lp.PermPrice=AMOUNT
+		ENDIF
+		IF T0[0]=1
+		  LET X2[1]=COST+(COST*((X2[0]-lp.PermCost)/lp.PermCost))
+		  LET CNVTU[0]=0;CNVTU[1]=lp.UMPrice;CNVTU[2]=2;CNVTA=X2[1]
+		  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  LET CNVTU[0]=lp.UMPrice;CNVTU[1]=0;CNVTU[2]=2;CNVTA=AMOUNT
+		  if cnvta>=10000 and lp.umprice=pr.baseum let cnvtu[2]=6 ! no 6 digit round!
+		  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  LET X2[1]=AMOUNT
+		  LET CALCPRC=1;DTCHG=1
+		  IF (NOT(FUTUREPP) OR NOT(UPDATEF)) AND LP.PendPermPrice>0 ! "stored a pend
+			LET X$=LP.PendPermPrdate using "&&&&&&"
+			Call DateToJulian(1,x$,tmp$,F)
+			LET X2=tmp$ \ if f LET X2=999999
+			LET JDATE[2]=X2
+			IF JDATE[2]<=JDATE[1] ! "less than or equal to eff or system dat
+			  LET lp.PermPrice=LP.PendPermPrice
+			  LET LP.PendPermPrice=0;LP.PendPermPrdate=0
+			  LET lp.PermCost=COST;lp.PermCostOrg=COST_ORIGIN
+			  LET CALCPRC=0
+			ENDIF  ! "of stored/pending date is valid
+		  ENDIF  ! "use calc'd info
+		  IF FUTUREPP AND UPDATEF AND UDOPT=1 ! "keep existing check
+			IF LP.PendPermPrice>0 AND LP.PendPermPrdate ! "has data
+			  LET lp.PermPrice=LP.PendPermPrice
+			  LET lp.PermCost=COST;lp.PermCostOrg=COST_ORIGIN
+			  LET CALCPRC=0;DTCHG=0
+            ENDIF
+		  ENDIF  ! "keep existing
+		  IF CALCPRC ! "do system calc / check
+			IF X2[1]=lp.PermPrice
+			  IF PAUDIT<>9 IF NOT(FUTUREPP)
+				LET PASSINFO[8]=2
+				Call LOG_PERMPRICE_AFTER()
+			  ENDIF
+			  GOTO bplpr
+			ENDIF
+			IF T0[1]=5 ! " only updating costs, do not care about price-!cct113225
+				LET LP.PermCost=COST
+				GOTO L_3820:
+			ENDIF 
+			IF X2[1]>lp.PermPrice LET lp.PermPrice=X2[1];lp.PermCost=COST;lp.PermCostOrg=COST_ORIGIN 
+			IF X2[1]<lp.PermPrice
+			  IF T0[1]=1 LET lp.PermPrice=X2[1];lp.PermCost=COST;lp.PermCostOrg=COST_ORIGIN 
+			  IF T0[1]=2
+				IF PAUDIT<>9 IF NOT(FUTUREPP)
+				  LET PASSINFO[8]=3
+				  LET PASSINFO[9]=X2[1]
+				  call LOG_PERMPRICE_AFTER()
+				ENDIF
+				GOTO bplpr
+			  ENDIF
+			  IF T0[1]=3 LET lp.PermCost=COST;lp.PermCostOrg=COST_ORIGIN 
+             ENDIF
+		  ENDIF  ! "of sys calc/chk
+		ENDIF
+		IF (FUTUREPP AND NOT(UPDATEF)) OR NOT(FUTUREPP) ! "show 'em/move i
+																	  
+		  IF LP.PendPermPrice>0 ! "have something loaded in field
+			LET X$=lp.PendPermPrdate using "&&&&&&"
+			Call DateToJulian(1,x$,tmp$,F)
+			LET X2=tmp$ \ if f LET X2=999999
+			LET JDATE[2]=X2
+			IF JDATE[2]<=JDATE[1] ! "less than or equal to eff or syst
+			  LET lp.PermPrice=LP.PendPermPrice
+			  LET LP.PendPermPrice=0;lp.PendPermPrdate=0
+			ENDIF
+		  ENDIF
+		ENDIF
+		LET CNVTU[0]=0;CNVTU[1]=lp.UMPrice;CNVTU[2]=2
+		LET CNVTA=lp.PermPrice
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET CNVTU[0]=lp.UMPrice;CNVTU[1]=0;CNVTU[2]=2
+		LET CNVTA=AMOUNT
+		IF CNVTA>=10000 AND lp.umprice=pr.BaseUM let CNVTU[2]=6 ! avoid 6 digit truncate rule
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET lp.PermPrice=AMOUNT
+		L_3820: ! " cct99991 - custom for morrisette
+		LET CNVTU[0]=0;CNVTU[1]=lp.UMCost;CNVTU[2]=2
+		LET CNVTA=lp.PermCost
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET CNVTU[0]=lp.UMCost;CNVTU[1]=0;CNVTU[2]=2
+		LET CNVTA=AMOUNT 
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET lp.PermCost=AMOUNT
+		IF PAUDIT
+		  LET NEWNUM=lp.PermPrice
+		  LET NEWCOST=lp.PermCost;NEW_COST_ORIGIN=LP.PermCostOrg
+		  LET COSTUM=lp.UMCost
+		ENDIF
+		LET numrec[1]=numrec[1]+1
+		IF PAUDIT and SortSS<>2
+		  LET E=2
+		  SEARCH #SRC,1,0;K9$,R[9],E \ IF E goto bpaud ! GOSUB ERR_SEARCH:             
+		  LET AUDONE[0]=cust.SalesmanCode;AUDONE[1]=0;AUDONE[2]=NUMUM
+		  LET AUDONE[4]=lp.LastPriceType
+		  if custom_customer$="MORRISETTE" LET AUDONE[4]=lp.UMSell !"sellin uom was type
+		  LET AUDONE[3]=COSTUM;AUDTHREE[0]=LP.CustNum;AUDTHREE[1]=PRR
+		  LET AUDTHREE[2]=OLDNUM;AUDTHREE[3]=NEWNUM;AUDTHREE[4]=OLDCOST 
+		  LET AUDTHREE[5]=NEWCOST;AUDTHREE[7]=LP.DEPT
+		  LET AUDTHREE[6]=LP.Contract
+		  IF FUTUREPP ! "needs last buy & Whse
+			LET AUDTHREE[8]=LP.OrdDate;AUDONE[1]=LP.WHSE
+		  ENDIF
+		  audthree[9]=lp.Quantity !last qty
+		  MAT  WRITE #SRC,R[9],0;AUDONE;
+		  MAT  WRITE #SRC,R[9],10;AUDTHREE;
+		  IF NOT(SORTSS)
+			LET K9$=" ",K9$
+		    LET K9$=K1$
+		  ELSE
+			LET K9$=" ",K9$;K9$[1,3]=cust.SalesmanCode USING "###"
+			!LET K9$[4,13]=K1$[31,40];K9$[14,33]=K1$[11,30]
+			!LET K9$[34,43]=K1$[1,10]
+			! cct99991- second sort by vendor(asort=1) or customer (asort=2)
+			IF ASORT=1 LET K9$[4]=K1$
+			IF ASORT=2 LET K9$[4,9]=LP.CustNum USING "######";K9$[10]=K1$
+		  ENDIF
+		  SEARCH #SRC,4,1;K9$,R[9],E ! \ IF E GOSUB ERR_SEARCH: 
+		  bpaud: ! aud prob
+		ENDIF
+		IF NOT(FUTUREpp)
+		  LET LP.PrevPermPrice=OLDNUM;LP.PermPrceChgDate=TIM(6)
+		  IF PAUDIT<>9
+			Write Record #LPC,LPR,0;lp.;
+			call LOG_PERMPRICE_AFTER()
+		  ENDIF
+		ELSE  ! "is future
+		  IF UPDATEF ! "record changes to file
+			LET LP.PendPermPrice=lp.PermPrice
+			IF DTCHG ! "we've chg'd something so change chg'd fields
+				  LET LP.PendPermPrdate=EFFDATE
+				  LET lp.PppChgDBy=rec_uac
+				  IF PAUDIT<>9 ! only record pending
+					!MAT  WRITE #5,R[5],336;PPPUSERID;
+					Write #LPC,LPR,336;lp.PppChgDBy;
+					!MAT  WRITE #5,R[5],352;PPPCID;
+					lp.PppChgDDate=CurDate
+					Write #LPC,LPR,352;lp.PppChgDDate;
+					LET X$=TIM(11) USING "&&",TIM(12) USING "&&",TIM(13) USING "&&"
+					lp.PppChgDTime=X$
+					Write #LPC,LPR,356;lp.PppChgDTime;
+				  ENDIF
+			ENDIF
+			IF PAUDIT<>9 ! only record pending (full new perm[0]&perm[1] calc made)
+			  !MAT  WRITE #5,R[5],324;LPFPERM;
+			  Write #LPC,LPR,324;lp.PendPermPrice;
+			  write #LPC,LPR,330;lp.PendPermPrdate;
+			  call LOG_PERMPRICE_AFTER()
+			ENDIF
+		  ENDIF
+		ENDIF
+	BPLPR: ! failed test
+	Unlock #LPC
+	Loop
+	if not(futurepp) and prtch=0 ! Printer only
+		Print #PrtCh;Numrec[0];" RECORDS SCANNED ";Numrec[2];" EXCEPTIONS"
+		IF V9[0]>0 Print #PrtCh;"\14\"
+	Endif
+	let exc=0 ! not exceptions - now print
+	v9[1]=100;v9[0]=0
+	! if paudit call prntaud() ! send message 1st - so print after that
+	FldInvalid: ! exit due to bad data
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! doupdt
+! 
+!--------------------------------------------------------------------
+Sub plcprcupdt()
+! update load costs & prices on prod
+  Try
+	DIM 1%,PFU1[20],2%,C4[8],3%,PFU2[6],A[33]
+	Dim 3%,BASECOST
+	let PRec[0]=PRR
+	IF PR.Load1MupTbl
+		LET WH=0;LTBL=PR.Load1MupTbl;CNVTA=0
+		LET OTYPE=1
+		clear e$
+		CALL MXLOAD5L(e$,OTYPE,WH,LTBL,PREC[],CNVTA,IntCo,rstr$)
+		LET pr.CostLoad=CNVTA
+	ENDIF
+	IF pr.Load2MupTbl
+		LET WH=0;LTBL=pr.Load2MupTbl;CNVTA=0
+		LET OTYPE=1
+		clear e$
+		CALL MXLOAD5L(e$,OTYPE,WH,LTBL,PREC[],CNVTA,IntCo,rstr$)
+		LET pr.CostLoad2=CNVTA
+	ENDIF
+	
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! plcprcupdt
+! 
+!--------------------------------------------------------------------
+Sub wlcprcupdt()
+! update load costs & prices on prodwhse
+  Try
+	DIM 1%,PFU1[20],2%,C4[8],3%,PFU2[6],A[33]
+	Dim 3%,BASECOST,W3[24]
+	let PRec[0]=PRR
+	IF Pw.Load1MupTbl
+		LET WH=W9;LTBL=PW.Load1MupTbl;CNVTA=-999 ! cnvta=-999 means no prod defaulting
+		LET OTYPE=1
+		clear e$
+		CALL MXLOAD5L(e$,OTYPE,WH,LTBL,PREC[],CNVTA,IntCo,rstr$)
+		LET pw.CostLoad=CNVTA
+	ENDIF
+	IF pw.Load2MupTbl
+		LET WH=W9;LTBL=pw.Load2MupTbl;CNVTA=-999 ! -999 means use only existing whse vars
+		LET OTYPE=1
+		clear e$
+		CALL MXLOAD5L(e$,OTYPE,WH,LTBL,PREC[],CNVTA,IntCo,rstr$)
+		LET pw.CostLoad2=CNVTA
+	ENDIF
+	
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! wlcprcupdt
+! 
+!--------------------------------------------------------------------
+Sub PRICEFAC()
+! REM round prices based upon pricing factor        
+  Try
+	dim 1%,PRFac
+	Dim 3%
+	Dim keycomm$[10]
+	IF P61$[50,50]<>"Y" Exit Sub
+	LET KEYCOMM$=pr.ComdtyCode$+Blank$
+	SEARCH #CMC,2,1;KEYCOMM$,REC_CMDTY,E                          
+	IF NOT(E)                                                   
+	  MAT  READ #CMC,REC_CMDTY,40;PRFAC;                          
+	  IF PRFAC                                                  
+		LET CNVTA=X4;CNVTU[0]=0;CNVTU[1]=pr.UMPriceDefault;CNVTU[2]=2    
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		CALL "pricernd",PRFAC,AMOUNT                            
+		LET CNVTA=AMOUNT;CNVTU[0]=pr.UMPriceDefault;CNVTU[1]=0;CNVTU[2]=2
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET X4=AMOUNT                                           
+	  ENDIF                                                     
+	ENDIF                                                       
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! PRICEFAC
+! 
+!--------------------------------------------------------------------
+sub prntaud()
+! print audit list
+  try
+	dim k7$[60],S1$[30],CustName$[30]
+	dim costum$[4],numum$[4]
+	dim 2%,LPR1[3]
+	DIM 3%,LPUNF[6]
+	LET V9[0]=0
+	if not(sortss) call dohdg() ! audit heading
+	LAST_CC1=-1;PRINTREPORT=1
+	LET PMASK$="---------"
+	LET X=LEN(PMASK$)-Q0[1] \ IF X<0 LET X=Q0[1]
+	LET PMASK$[X,X]="." ! NEED TO SWITCH TO SET MASK SIZE!
+	LET K9$=" ",K9$;LASTCUST=-1 
+	do
+		search #SRC,3,1;K9$,R[9],E
+		if e exit do
+		if k9$[1,1]="}" exit do ! into individual custs
+		clear lp.
+		MAT  READ #SRC,R[9],0;AUDONE;
+		MAT  READ #SRC,R[9],10;AUDTHREE;
+		LET Cust.SalesmanCode=AUDONE[0];LP.DEPT=AUDTHREE[7];NUMUM=AUDONE[2]      
+		LET COSTUM=AUDONE[3];LP.CustNum=AUDTHREE[0];PRR=AUDTHREE[1]
+		LET OLDNUM=AUDTHREE[2];NEWNUM=AUDTHREE[3];OLDCOST=AUDTHREE[4]
+		LET NEWCOST=AUDTHREE[5]
+		if custom_customer$<>"MORRISETTE"
+			LET LP.Contract=AUDTHREE[6] \ LET lp.LastPriceType=AUDONE[4]
+		Else
+			let LP.Contract=audthree[6] \ let lp.UMSell=audone[4]
+			lp.Quantity=audthree[9]!last qty
+		Endif
+		IF FUTUREPP
+		  LET LP.WHSE=AUDONE[1]
+		  LET LP.OrdDate=AUDTHREE[8]
+		ENDIF 
+		Read record #PRC,PRR,0;pr.;
+		IF pr.LbsFact<=0 LET pr.LbsFact=1
+		LET HLDLBS[0,0]=pr.LbsUnit;HLDLBS[0,1]=pr.LbsFact
+		LET K7$=" ",K7$;S1$=" ",S1$
+		let SLSEMAIL$=" ",SLSEMAIL$
+		LET K7$=Cust.SalesmanCode USING "###"
+		SEARCH #SLC,2,1;K7$,R[13],E ! \ IF E>1 GOSUB ERR_SEARCH:
+		IF NOT(E)
+		  MAT  READ #SLC,R[13],0;S1$;
+		  MAT  READ #SLC,R[13],922;SLSEMAIL$;
+		ENDIF
+		LET K7$=" ",K7$ 
+		IF NOT(SORTSS)
+		  LET K7$=K9$
+		  SEARCH #LPC,2,4;K7$,LPR,E \ IF E>1 goto bpprnt
+		ELSE
+		  LET K7$=K9$[4]
+		  SEARCH #LPC,2,1;K7$,LPR,E \ IF E>1 goto bpprnt
+		ENDIF
+		IF NOT(E)
+		  MAT  READ #lpc,lpr,198;LPR1;
+		  MAT  READ #lpc,lpr,220;LPUNF;
+		  LET HLDLBS[1,0]=LPR1[0];HLDLBS[1,1]=LPUNF[5]
+		ELSE
+		  LET HLDLBS[0,0]=pr.LbsUnit;HLDLBS[0,1]=pr.LbsFact
+		ENDIF
+		IF pr.CatchwgtItem$="Y"
+		  LET A[6]=HLDLBS[1,0];A[5]=HLDLBS[1,1]
+		ENDIF
+		LET K7$=" ",K7$
+		LET K7$=LP.CustNum USING "######"
+		SEARCH #CUC,2,1;K7$,R[7],E ! \ IF E>1 GOSUB ERR_SEARCH:  
+		IF E
+		  LET CUSTNAME$=" ",CUSTNAME$
+		ELSE
+			MAT  READ #CUC,R[7],30;CUSTNAME$;
+			IF P9$[21,21]="Y" !  multi slsm
+			  MAT  READ #CUC,R[7],502;S0;
+			  Try LET SLS=S0[pr.ProdCat] ELSE let sls=0
+			  IF NOT(SLS) LET SLS=Cust.SalesmanCode
+			ENDIF
+		ENDIF
+		IF Cust.SalesmanCode<>LAST_CC1 ! "page break on new slsm? even normal rpt? I say only Sorted
+			IF SORTSS
+				IF emrep and PRTCH=EMCH ! run thru audit file for  slsm 
+				   if Prtch<>-1
+					Try CLOSE #PRTCH Else Rem
+				   Endif
+				   CALL "mxvaleaddr.dl4",SLSEMAIL$,X1,e$
+				   IF NOT(X1) OR SLSEMAIL$="" ! no or bad email
+					!! we want to skip this slsm! we're now doing the slsm email loop
+					let k9$[4]="z" ! set sortkey to end of this slsm
+					!goto skip_email: ! do not print anything at all in email
+					LET LAST_CC1=Cust.SalesmanCode ! set to curr slsm?
+					goto BPPrnt
+				   Endif
+				   LET SYS$="$/usr/ub/sys/email.report -f ''",EMAILFROM$,"''"," -t ''",SLSEMAIL$,"''"," -s ''","Perm Price Audit (70)","''" 
+				   LET SYS$=SYS$," -c ''","Attached is your Perm Price Audit (70).","''"   
+				   EMCh=Findchannel()
+				   Prtch=EMCh
+				   OPEN #PRTCH,SYS$ 
+				   skip_email: ! 
+				endif
+				call dohdg()
+			Endif
+			LET LAST_CC1=Cust.SalesmanCode
+		ENDIF 
+		IF V9[1]+10>V9[4] call dohdg() ! so also adds foot_note (per page!)
+		!IF V9[1]>V9[4] call dohdg()
+		LET CNVTU[0]=0;CNVTU[1]=NUMUM;CNVTU[2]=2
+		LET CNVTA=OLDNUM
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET OLDNUM=AMOUNT
+		LET NEWBNUM=NEWNUM;NEWBCOST=NEWCOST	! "cct99991- custom for morrisette
+		LET CNVTA=NEWNUM
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET NEWNUM=AMOUNT
+		LET CNVTU[1]=COSTUM
+		IF FUTUREPP LET CNVTU[1]=NUMUM
+		LET CNVTA=OLDCOST
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET OLDCOST=AMOUNT
+		LET CNVTA=NEWCOST
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET NEWCOST=AMOUNT
+		if custom_customer$="MORRISETTE"
+			LET CNVTA=lp.Quantity;cnvtu[1]=lp.UMSell
+			let cnvtu[2]=1
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			LET lqty=AMOUNT
+		Endif
+		LET COSTUM$="Err ";NUMUM$="Err "
+		IF COSTUM=-1 LET COSTUM$="CWT "
+		IF COSTUM=-3 LET COSTUM$="LB  "
+		IF NUMUM=-1 LET NUMUM$="CWT "
+		IF NUMUM=-3 LET NUMUM$="LB  "
+		IF COSTUM>0 MAT  READ #CCC,COSTUM,10;COSTUM$;            
+		IF NUMUM>0 MAT  READ #CCC,NUMUM,10;NUMUM$; 
+		call doprnt()
+	BPPRNT: ! bad data
+	Loop
+	if custom_customer$="ACME" goto PADDone ! no hdg/footnote
+	X1=10 \ if custom_customer$="MORRISETTE" let x1=2
+	IF V9[1]+X1>V9[4]
+		call dohdg() ! so also adds foot_note (per page!)
+	Else ! enough room
+		call foot_note()
+	Endif
+	PADDone: ! audit list is done
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! prntaud
+! 
+!--------------------------------------------------------------------
+Sub dohdg()
+! report headings
+  Try
+	if xmlprnt exit sub
+	IF PRINTREPORT call FOOT_NOTE()
+	!	 IF V9[1]>=V9[4] ! DO HEADING
+		IF V9[0] ! "only if >0
+		  Print #PrtCh;"\14\";
+		ENDIF
+		LET V9[0]=V9[0]+1 \ LET V9[1]=6
+		Print #PrtCh;" "
+		IF NOT(FUTUREPP) 
+		  X$=PDate$(CurDate)
+		  Print #PrtCh; TAB 1;X$;
+		ELSE
+		  LET X$=PDate$(EffDate)
+		  Print #PrtCh;"EFFECTIVE ";X$;
+		ENDIF
+		Print #PrtCh; TAB(64-LEN(CNAME$)/2);CNAME$; TAB 120;"PAGE:";V9[0]
+		Print #PrtCh;" - MX070 - ";MSC$(3);
+		IF EXC Print #PrtCh; TAB 40;"P E R M   P R I C E   E X C E P T I O N S"
+		IF FUTUREPP AND UPDATEF AND NOT(EXC)
+		  Print #PrtCh; TAB 41;"F U T U R E   ";
+		ENDIF
+		IF NOT(EXC)
+		  Print #PrtCh; TAB 44;"P E R M   P R I C E   ";
+		  IF NOT(UPDATEF) OR NOT(FUTUREPP) ! "just a listing or post update
+		      Print #PrtCh;"A U D I T"
+		  ELSE  ! "updating 'pending'
+			Print #PrtCh;"L O A D"
+		  ENDIF
+		ENDIF
+		Print #PrtCh;" "
+		IF T0[0]=1 Print #PrtCh;"AUTO FACTOR"; ELSE  Print #PrtCh;"MANUAL FACTOR";
+		IF T0[0]=2 Print #PrtCh;" OF TYPE ";T2$;" FACTOR";C1 ELSE  Print #PrtCh;""
+		Print #PrtCh;"COST GRP"; \ IF CG$="" Print #PrtCh;" ALL "; ELSE  Print #PrtCh;" ";CG$[1,4];
+		Print #PrtCh;"CATEGORY"; \ IF CATGY Print #PrtCh;CATGY; ELSE  Print #PrtCh;" ALL ";   
+		Print #PrtCh;"COMMODITY "; \ IF R3$="    " Print #PrtCh;"FIRST"; ELSE  Print #PrtCh;R3$;
+		Print #PrtCh;" TO "; \ IF R4$="}}}}" Print #PrtCh;"LAST"; ELSE  Print #PrtCh;R4$;
+		Print #PrtCh;" PRODUCT "; \ IF R1$[1,2]="  " Print #PrtCh;"FIRST"; ELSE  Print #PrtCh;R1$;
+		Print #PrtCh;" TO "; \ IF R2$[1,2]="}}" Print #PrtCh;"LAST"; ELSE  Print #PrtCh;R2$;
+		Print #PrtCh;" VENDOR "; \ IF V0[0]=0 Print #PrtCh;"FIRST"; ELSE  Print #PrtCh;V0[0];
+		Print #PrtCh;" TO "; \ IF V0[1]=999999 Print #PrtCh;"LAST"; ELSE  Print #PrtCh;V0[1]; 
+		Print #PrtCh;" SLSM "; \ IF BSLS=0 Print #PrtCh;"FIRST"; ELSE  Print #PrtCh;BSLS;
+		Print #PrtCh;" TO "; \ IF ESLS=999 Print #PrtCh;"LAST"; ELSE  Print #PrtCh;ESLS
+		Print #PrtCh;" "
+		IF EXC GOTO L_5990:
+		IF SORTSS
+		  IF P9$[21,21]="Y" !multi slsm
+			Print #PrtCh; TAB 1;"SALESMAN:";SLS \ LET V9[1]=V9[1]+1
+			print #prtch; tab 50;"VENDOR:";svendname$[1,30];" TO ";evendname$[1,30]
+			LET V9[1]=V9[1]+1
+		  ELSE
+			Print #PrtCh; TAB 1;"SALESMAN:";cust.SalesmanCode;
+			IF FUTUREPP Print #PrtCh;"  ";S1$; !  ELSE  Print #PrtCh;""
+			print #prtch; tab 50;"VENDOR:";svendname$[1,30];" TO ";evendname$[1,30];
+			print #prtch;""
+			LET V9[1]=V9[1]+1
+		  ENDIF
+		ENDIF
+		IF FUTUREPP GOTO AUD_HEDNG:
+		if custom_customer$="MORRISETTE" ! many column changes
+			PRINT #prtch; TAB 1;"CUSTOMER"; Tab 12;"CUST";tab 25;"DEPT"; TAB 30;"ITEM CODE";
+			PRINT #prtch; TAB 43;"DESCRIPTION";tab 60;"LAST";
+			PRINT #prtch; TAB 68;"ORIGINAL";
+			PRINT #prtch; TAB 80;"NEW CALC";
+			print #prtch; tab 92;"CONTRACT";
+			if printcost print #prtch;TAB 106;"OLD"; TAB 121;"NEW" else print #prtch;""
+			print #prtch;tab 12;"NAME";TAB 60;"QTY";
+			PRINT #prtch; TAB 69;"PRICE"; TAB 81;"PRICE"; 
+			print #prtch; tab 93;"NUMBER";
+			if printcost print #prtch;TAB 106;"COST"; TAB 121;"COST";     ! else print #prtch;""
+			PRINT #prtch; TAB 129;"GM%"		! " custom for morrisette
+		Else ! standard 
+			Print #PrtCh; TAB 1;"CUSTOMER"; TAB 12;"CUST"; TAB 25;"DEPT"; TAB 30;"ITEM CODE";
+			Print #PrtCh; TAB 43;"DESCRIPTION"; TAB 60;"PRICE";
+			Print #PrtCh; TAB 68;"ORIGINAL";
+			Print #PrtCh; TAB 80;"NEW CALC";
+			Print #PrtCh; TAB 92;"CONTRACT";
+			IF PRINTCOST Print #PrtCh; TAB 106;"OLD"; TAB 121;"NEW" ELSE  Print #PrtCh;""
+			Print #PrtCh; TAB 12;"NAME"; TAB 60;"TYPE";
+			Print #PrtCh; TAB 69;"PRICE"; TAB 81;"PRICE";
+			Print #PrtCh; TAB 93;"NUMBER";
+			IF PRINTCOST Print #PrtCh; TAB 106;"COST"; TAB 121;"COST" ELSE  Print #PrtCh;""
+		Endif
+		LET V9[1]=V9[1]+2
+		goto L_5990
+		
+		AUD_HEDNG: REM "future Audit heading
+		if Custom_customer$<>"MORRISETTE" ! standard
+			Print #PrtCh; TAB 1;"------------ ITEM ------------"; TAB 54;"PRICE";
+			Print #PrtCh; TAB 60;"LAST"; TAB 67;"----- CURRENT PERMANENT -----"; 
+			Print #PrtCh; TAB 98;"------ FUTURE PERMANENT ------"
+			Print #PrtCh; TAB 1;"NUMBER"; TAB 13;"DESCRIPTION"; TAB 44;"U/M";    
+			Print #PrtCh; TAB 49;"WHSE"; TAB 54;"TYPE"; TAB 60;"BUY";
+			IF PRINTCOST Print #PrtCh; TAB 67;"UNIT COST";
+			Print #PrtCh; TAB 79;"UNIT SELL"; TAB 91;"GP %";
+			IF PRINTCOST Print #PrtCh; TAB 97;"UNIT COST";
+			Print #PrtCh; TAB 109;"UNIT SELL"; TAB 121;"GP %"
+		Else ! custom morrisette
+			Print #prtch;Tab 1;"------------ ITEM ------------";Tab 54;"LAST";
+			Print #prtch;Tab 60;"LAST";Tab 67;"------------ LAST ------------";
+			Print #prtch;Tab 98;"----------- FUTURE -----------"
+			Print #prtch;Tab 1;"NUMBER";Tab 13;"DESCRIPTION";Tab 43;"U/M";
+			Print #prtch;Tab 48;"WHSE";Tab 54;"QTY";Tab 60;"BUY";
+			If Printcost Print #prtch;Tab 67;"UNIT COST";
+			Print #prtch;Tab 79;"UNIT SELL";Tab 91;"GP %";
+			If PrintCost Print #prtch;Tab 97;"UNIT COST";
+			Print #prtch;Tab 109;"UNIT SELL";Tab 121;"GP %"
+		Endif
+		LET V9[1]=V9[1]+2
+		L_5990: ! DONE   RETURN
+	 ! Endif ! of heading
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! dohdg
+! 
+!--------------------------------------------------------------------
+Sub doprnt()
+! print out changes
+  Try
+    If xmlprnt
+		if v9[0]=0 ! send header
+			v9[0]=v9[0]+1
+			List$[0]=bsdel$,"070",fdel$
+			webstr$="" ! if you can figure a way - DO HEADING HERE!
+			LIST$[1]=WEBSTR$
+			call addtostr(e$,rstr$,List$[])
+		Endif
+		! line to xml
+		webstr$="" ! if you can figure a way - DO LINE DETAIL HERE!
+		call addtostr(e$,rstr$,webstr$+rdel$)
+	Else ! all others
+	 IF NOT(FUTUREPP)
+	   If custom_customer$<>"MORRISETTE" ! normal
+		  Print #PrtCh; USING "######"; TAB 2;LP.CustNum;
+		  Print #PrtCh; TAB 10;CUSTNAME$[1,15];
+		  Print #PrtCh; USING "####"; TAB 25;LP.DEPT; TAB 30;pr.ProdCode$;
+		  Print #PrtCh; TAB 43;pr.Desc1$[1,17];
+		  Print #PrtCh; USING "--#"; TAB 60;lp.LastPriceType;
+		  Print #PrtCh; USING PMASK$; TAB 63;OLDNUM;"/";NUMUM$;
+		  Print #PrtCh; USING PMASK$; TAB 80;NEWNUM;
+		  IF LP.Contract Print #PrtCh; USING "######"; TAB 90;LP.Contract;
+		  IF PRINTCOST Print #PrtCh; USING PMASK$; TAB 101;OLDCOST;"/";COSTUM$;
+		  IF PRINTCOST Print #PrtCh; USING PMASK$; TAB 118;NEWCOST ELSE  Print #PrtCh;""
+		Else ! custom - morrisette
+		  Print #PrtCh; USING "######"; TAB 0;LP.CustNum;
+		  Print #PrtCh; TAB 8;CUSTNAME$[1,15];
+		  Print #PrtCh; USING "####"; TAB 23;LP.DEPT; TAB 28;pr.ProdCode$;
+		  Print #PrtCh; TAB 41;pr.Desc1$[1,17];
+		  print #prtch; using "######.##";tab 56;lqty; !"last orde qty
+		  ! Print #PrtCh; USING "--#"; TAB 60;lp.LastPriceType;
+		  Print #PrtCh; USING PMASK$; TAB 63;OLDNUM;"/";NUMUM$;
+		  Print #PrtCh; USING PMASK$; TAB 80;NEWNUM;
+		  IF LP.Contract Print #PrtCh; USING "######"; TAB 90;LP.Contract;
+		  IF PRINTCOST Print #PrtCh; USING PMASK$; TAB 101;OLDCOST;"/";COSTUM$;
+		  IF PRINTCOST Print #PrtCh; USING PMASK$; TAB 118;NEWCOST; !  ELSE  Print #PrtCh;""
+		  LET GPP=0 \ IF NEWBNUM LET GPP=FNR((1-(NEWBCOST/NEWBNUM))*100)!"cct99991
+		  PRINT #prtch; USING "----#.##%"; TAB 123;GPP		! "cct99991
+		  let v9[1]=v9[1]+1  ! "(for the 'gpp' print)
+	    Endif
+	 ELSE
+		  IF LASTCUST<>LP.CustNum
+			IF V9[1]+4>V9[4] call dohdg()
+			Print #PrtCh;""
+			Print #PrtCh; USING "######"; TAB 2;LP.CustNum;
+			Print #PrtCh; TAB 10;CUSTNAME$;
+			Print #PrtCh; USING "####"; TAB 42;LP.DEPT
+			Print #PrtCh;" " \ LET V9[1]=V9[1]+3
+			LET LASTCUST=LP.CustNum
+		  ENDIF
+		  If custom_Customer$<>"MORRISETTE"  ! standard
+			  Print #PrtCh; TAB 1;pr.ProdCode$;
+			  Print #PrtCh; TAB 13;pr.Desc1$;
+			  Print #PrtCh; TAB 44;NUMUM$;
+			  Print #PrtCh; USING "##"; TAB 49;LP.WHSE;
+			  Print #PrtCh; USING "--#"; TAB 54;lp.LastPriceType;
+		  Else ! custom
+			Print #PrtCh; TAB 0;pr.ProdCode$;
+			  Print #PrtCh; TAB 12;pr.Desc1$;
+			  Print #PrtCh; TAB 43;NUMUM$;
+			  Print #PrtCh; USING "##"; TAB 48;LP.WHSE;
+			  Print #PrtCh; using "######.##";tab 50;lqty; !" last ordered qty
+		  Endif
+		  x$=" ",x$
+		  if lp.orddate>100 LET X$=PDate$(LP.OrdDate)
+		  Print #PrtCh; TAB 60;X$[1,3];X$[9,10];
+		  IF PRINTCOST Print #PrtCh; USING PMASK$; TAB 66;OLDCOST;
+		  Print #PrtCh; USING PMASK$; TAB 78;OLDNUM;
+		  LET X3[1]=0
+		  IF OLDNUM LET X3[1]=FNR((OLDNUM-OLDCOST)*100/OLDNUM)
+		  Print #PrtCh; USING "----#.#"; TAB 89;X3[1];
+		  IF PRINTCOST Print #PrtCh; USING PMASK$; TAB 97;NEWCOST;
+		  Print #PrtCh; USING PMASK$; TAB 109;NEWNUM; 
+		  LET X3[1]=0
+		  IF NEWNUM LET X3[1]=FNR((NEWNUM-NEWCOST)*100/NEWNUM)
+		  Print #PrtCh; USING "----#.#"; TAB 120;X3[1]
+	 ENDIF
+	 LET V9[1]=V9[1]+1
+	Endif ! of xml or other
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! doprnt
+! 
+!--------------------------------------------------------------------
+Sub LOG_70_SETTINGS()
+! track what the user set
+  Try 
+	dim k9$[60]
+	DIM 3%
+	IF NOT(TRACKPERM) exit sub
+	sLOG_70_SETTINGS: ! START/restart
+	READ #CTLC,20,82;SEQ70
+	LET SEQ70=SEQ70+1
+	WRITE #CTLC,20,82;SEQ70;
+	FOR X=0 TO 20 \ LET LOG70[X]=0 \ Next X
+	  LET LOG70$=" ",LOG70$
+	  LET LOG70[0]=SEQ70
+	  LET LOG70[1]=TIM(6)
+	  LET X$=TIM(11) USING "&&",TIM(12) USING "&&",TIM(13) USING "&&"
+	  LET LOG70[2]=X$
+	  LET LOG70[3]=T0[0]
+	  IF FUTUREPP
+		LET LOG70[3]=3
+		LET LOG70[16]=JDATE[1]
+		LET LOG70[17]=CLRPENDpp
+		LET LOG70[18]=UDOPT
+	  ENDIF
+	LET LOG70[4]=T0[1]
+	LET LOG70[5]=C1
+	LET LOG70[6]=CATGY
+	LET LOG70[7]=V0[0]
+	LET LOG70[8]=V0[1]
+	LET LOG70[9]=BSLS
+	LET LOG70[10]=ESLS
+	LET LOG70[11]=BCUST
+	LET LOG70[12]=ECUST
+	LET LOG70[13]=PRINTCOST
+	LET LOG70[14]=PAUDIT
+	LET LOG70[15]=rec_uac
+	LET LOG70$[1,1]=T2$[1,1]
+	LET LOG70$[2,12]=CG$[1,11]
+	LET LOG70$[13,16]=R3$[1,4]
+	LET LOG70$[17,20]=R4$[1,4]
+	LET LOG70$[21,32]=R1$[1,12]
+	LET LOG70$[33,44]=R2$[1,12]
+	LET K9$=" ",K9$
+	LET K9$=LOG70[0] USING "######"
+	SEARCH #PPLog,2,1;K9$,R15,E
+	IF NOT(E) GOTO sLOG_70_SETTINGS 
+	LET E=2 
+	SEARCH #PPLog,1,0;K9$,R15,E
+	If E Error 11000 !IF E GOSUB ERR_SEARCH:
+	MAT  WRITE #PPLog,R15,0;LOG70
+	MAT  WRITE #PPLog,R15,126;WH ! whse selections
+	MAT  WRITE #PPLog,R15,326;LOG70$;
+	SEARCH #PPLog,4,1;K9$,R15,E     
+	If E Error 11000 !IF E GOSUB ERR_SEARCH:
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! LOG_70_SETTINGS
+! 
+!--------------------------------------------------------------------
+Sub LOG_PERMPRICE_BEFORE()
+REM load before data in and hold
+Try
+	IF NOT(TRACKPERM) exit sub
+	FOR X=0 TO 20 \ LET PASSINFO[X]=0 \ NEXT X
+	LET PASSINFO[0]=lpc ! 5
+	LET PASSINFO[1]=LPR
+	LET PASSINFO[2]=1
+	passinfo[10] = CH_PERM_LOG
+	CALL "logpermprice",Intco,PPLOG$,PERMLOG[],PASSINFO[],dblog$
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! LOG_PERMPRICE_BEFORE
+! 
+!--------------------------------------------------------------------
+Sub LOG_PERMPRICE_AFTER()
+REM update after fields  
+Try
+	IF NOT(TRACKPERM) exit sub
+	LET PASSINFO[0]=lpc ! 5
+	LET PASSINFO[1]=LPR
+	LET PASSINFO[2]=2
+	LET PASSINFO[3]=1
+	IF FUTUREPP LET PASSINFO[3]=2
+	LET PASSINFO[4]=rec_uac
+	LET PASSINFO[7]=SEQ70
+	passinfo[10] = CH_PERM_LOG
+	CALL "logpermprice",Intco,PPLOG$,PERMLOG[],PASSINFO[],dblog$
+else
+    include "src/callsuberr.inc"
+  end try
+end sub ! LOG_PERMPRICE_AFTER
+! 
+!--------------------------------------------------------------------
+Sub SetPend()
+! set pending costs
+ Try
+	IF pr.PendLoadCost LET pr.CostLoad=pr.PendLoadCost
+	IF pr.PendBrkTbl LET pr.BrkTbl=pr.PendBrkTbl
+	IF pr.PendMupTbl LET pr.MUpTbl=pr.PendMupTbl
+	LET X$=pr.PendBaseDate Using "&&&&&&"
+	Call DateToJulian(1,x$,tmp$,F)
+	LET X2=tmp$ \ if f let x2=0
+	LET JDATE[2]=X2
+	IF pr.PendBaseCost AND JDATE[2]<=JDATE[1] ! "Pending Base and within Eff Date
+	  LET pr.CostBase=pr.PendBaseCost
+	ENDIF
+	LET X$=pr.PendLastCostDate using "&&&&&&"
+	Call DateToJulian(1,x$,tmp$,F)
+	LET X2=tmp$ \ if f let x2=0
+	LET JDATE[2]=X2
+	IF pr.PendLastCost AND JDATE[2]<=JDATE[1] ! "Pending Last and within Eff Date 
+
+	  LET pr.CostPO=pr.PendLastCost
+	ENDIF
+	IF P9$[32,32]="Y"
+	  IF pw.PendLoadCost LET pw.CostLoad=pw.PendLoadCost
+	  IF pw.PendBrkTbl LET pw.BrkTbl=pw.PendBrkTbl
+	  IF pw.PendMupTbl LET pw.MUpTbl=pw.PendMupTbl
+	  LET X$=pw.PendBaseDate using "&&&&&&"
+	  Call DateToJulian(1,x$,tmp$,F)
+	  LET X2=tmp$ \ if f let x2=0
+	  LET JDATE[2]=X2
+	  IF pw.PendBaseCost AND JDATE[2]<=JDATE[1] LET pw.CostBase=pw.PendBaseCost
+	  LET X$=pw.PendPOCostDate using "&&&&&&"
+	  Call DateToJulian(1,x$,tmp$,F)
+	  LET X2=tmp$ \ if f let x2=0
+	  LET JDATE[2]=X2
+	  IF pw.PendPOCost AND JDATE[2]<=JDATE[1] LET pw.CostLastPo=pw.PendPOCost
+	ENDIF                                                                
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SetPend
+! 
+!--------------------------------------------------------------------
+Sub SetWhse()
+! set warehouse cost/price vats
+ Try
+	IF P9$[32,32]="Y" ! "warehouse pricing turned on          
+	  LET X2=pw.Price1+pw.Price2+pw.Price3+pw.Price4+pw.Price5+pw.Price6
+	  IF pw.MUpTbl
+		LET pr.MUpTbl=pw.MUpTbl
+	  ELSE
+		IF X2 LET pr.MUpTbl=0
+	  Endif
+	  if not(pw.Price1) let pw.Price1=pr.ListPrice1
+	  if not(pw.Price2) let pw.Price2=pr.ListPrice2
+	  if not(pw.Price3) let pw.Price3=pr.ListPrice3
+	  if not(pw.Price4) let pw.Price4=pr.ListPrice4
+	  if not(pw.Price5) let pw.Price5=pr.ListPrice5
+	  if not(pw.Price6) let pw.Price6=pr.ListPrice6
+	  IF NOT(pw.Load1MupTbl) AND NOT(pw.CostLoad) LET pw.Load1MupTbl=pr.Load1MupTbl
+	  IF NOT(pw.CostLoad) LET pw.CostLoad=pr.CostLoad
+	  IF NOT(pw.Load2MupTbl) AND NOT(pw.CostLoad2) LET pw.Load2MupTbl=pr.Load2MupTbl
+	  IF NOT(pw.CostLoad2) LET pw.CostLoad2=pr.CostLoad2
+	  IF NOT(pw.CostAvg) LET pw.CostAvg=pr.CostAvg
+	  IF NOT(pw.CostLastPo) LET pw.CostLastPo=pr.CostPO
+	  IF NOT(pw.CostBase) LET pw.CostBase=pr.CostBase
+	  IF NOT(pw.CostNetPO) LET pw.CostNetPO=pr.CostNetPO
+	  IF pw.BrkTbl LET pr.BrkTbl=pw.BrkTbl
+	  IF pw.MUpTbl LET pr.MUpTbl=pw.MUpTbl
+	  IF NOT(pw.Vend) LET pw.Vend=pr.PrimVend
+	ENDIF                                                     
+                                                    
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SetWhse
+! 
+!--------------------------------------------------------------------
+Sub FOOT_NOTE()
+REM"print price type information
+ Try
+	DIM V$[60]
+	V$="\15\",V$
+	IF LAST_CC1<0 Exit sub
+	IF FUTUREPP AND V9[0]<=0 exit sub
+	if custom_customer$="MORRISETTE" goto FNDone ! no footnotes - still tof next
+	if custom_customer$="ACME" goto FNDone ! no footnotes
+	LET V9[2]=52 !  \ GOSUB VFC: 
+	VFC: REM "============= vertical forms contorl
+	IF V9[1]<V9[2] !  RETURN                        
+		Print #PrtCh;V$[V9[1],V9[2]-1];                   
+		LET V9[1]=V9[2] 
+	Endif
+	! Print #PrtCh;" "
+	Print #PrtCh; TAB 2;"The price type list as following:"
+	Print #PrtCh; TAB 2;"-17 to -8 manual price bracket entry ";
+	Print #PrtCh; TAB 65;" -7 manual price entry "
+	Print #PrtCh; TAB 2;" -6 to -1 manual list price entry ";
+	Print #PrtCh; TAB 65;"  1 matrix price "
+	Print #PrtCh; TAB 2;"  2 customer/single product contract ";
+	Print #PrtCh; TAB 65;"  3 single product promotion "
+	Print #PrtCh; TAB 2;"  4 customer/commodity contract";
+	Print #PrtCh; TAB 65;"  5 10 bracket price "
+	Print #PrtCh; TAB 2;"  6 customer/all product contract";
+	Print #PrtCh; TAB 65;"  7 commodity promotion "
+	Print #PrtCh; TAB 2;"  8 all product promotion ";
+	Print #PrtCh; TAB 65;"  9 quantity break discount "
+	Print #PrtCh; TAB 2;" 10 manual % discount ";
+	Print #PrtCh; TAB 65;" 11 size (u/m) promotion"
+	Print #PrtCh; TAB 2;" 12 customer/size (u/m) contract  ";
+	Print #PrtCh; TAB 65;" 13 fixed price customer contract "
+	Print #PrtCh; TAB 2;" 14 manual gtm % price   "
+	FNDone: ! footnote done
+	LET V9[1]=V9[1]+90
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! FOOT_NOTE
+! 
+!--------------------------------------------------------------------

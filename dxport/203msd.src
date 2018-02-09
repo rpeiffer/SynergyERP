@@ -1,0 +1,201 @@
+! 203msd    Standalone print for MSD sheets
+!
+! loadsave -w -n 100,10 -o prog/dxport/203msd.dl4 src/203msd.src
+!
+! NOTE: This is a lightweight version of the current native 203 option
+!       to print MSDS.  It only allows specified *sheets* to be printed
+!       (no order batches, etc.), and does *not* use the image process
+!       server.  This means a printer can be selected and you do not
+!       need an image process server to actually print the sheet.
+!
+! 03/15/2011 - rgp - initial version
+
+Option Default Dialect IRIS1
+
+Declare Intrinsic Function FindChannel
+Declare Intrinsic Sub String,FindF
+
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare external function openfile
+
+try
+
+!
+! this program can either be chained to via a block ID OR
+! called via a link from somewhwere else to PDF print a
+! single msds sheet number
+!
+try
+	enter pdfOneItem
+else
+	dim 1%,pdffilename
+end try
+
+
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100],msg$[250],pdffilename$[100],mergedir$[200]
+Dim 2%,uport,prid$[2]
+dim DCSScript$[100],DCSPrinter$[50],DCSPDFPrinter$[50]
+
+Dim action$[30],options$[30],userid$[8],b$[200],3%
+Dim action1$[30],action2$[30],action3$[30] ! actions for programs
+Dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1000] ! .net delimiters
+Dim WebStr$[1000],Message$[200]
+b$ = " ",b$
+DIM 1%,DCSPRTRTYPE,DCSP1[4],DCS,goodStatus,returnStatus
+DIM DCSP1$[10],DCSSCR$[300],DCSX$[20],P176$[256],EXT$[6]
+DIM DCSFNAME$[50],DCSLINEIN$[100],DCSPRNTNAME$[100]
+
+Dim sheets$[700],printSheet$[10],ilist$[500],tmp$[500],imkey$[50],ubsaspid$[50]
+
+dim 3%
+
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+!  Call dxsave(0,"dx.in!")  ! \ Stop
+
+MAT  READ #1,176,0;P176$;
+LET EXT$=".imd"                   
+IF P176$[2,2]="Y" LET EXT$=".imd" 
+IF P176$[3,3]="Y" LET EXT$=".tif" 
+
+! -------------------------------------------------------
+! Printer drivers / scripts
+! -------------------------------------------------------
+DCSScript$="$/usr/ub/sys/fax"           ! script to process DCS output
+                                        ! be sure to include beginning "$"
+DCSPrinter$="imgtif2pcl"                ! regular printer
+DCSPDFPrinter$="imgtif2pdf"             ! pdf printer
+
+! *******************************************
+!* M A I N   L O G I C
+! *******************************************
+
+LET UBSASPID$="UBSASPID" 
+SYSTEM 28,UBSASPID$      
+
+call dxget("BLOCKID",tmp$) \ tmp$ = rtrim$(tmp$)
+if tmp$ = ""
+	goodStatus=1	! non-blockid called program returns 1 if alls well
+else
+	goodStatus=0	! blockid called program returns 0 if alls well
+end if
+returnStatus=goodStatus ! alls well so far
+
+if pdfOneItem
+	prid$="P"
+	printerselected = 0
+else
+	Call DXGet("PRINTER",prid$) \ prid$=ucase$(prid$) \ printerselected=prid$
+end if
+Call DXGet("SHEETS",sheets$) \ sheets$ = rtrim$(sheets$) \ sheets$=ucase$(sheets$)
+if sheets$ = ""
+	message$ = "You must enter at least 1 MSD sheet."
+	returnStatus = not(goodStatus)
+	goto OutEnd
+end if
+let sheets$=sheets$+","  ! add a trailing comma
+
+
+gosub OpenPrinter
+sheetcntr=0
+pagecntr=0
+do
+	printSheet$=sheets$[KPOS+1] TO ",":KPOS
+	if printSheet$ = "" exit do
+	gosub PrintMSDS
+loop
+
+goto OutEnd:
+
+!******************************************************************
+! SUBROUTINES AND ENDING LOGIC
+!******************************************************************
+
+OpenPrinter: !
+	If prid$="P"  ! pdf
+		! close printer open on channel 0 - we need to open our own
+		try close #0 else rem
+		Open #0, DCSScript$+" "+DCSPDFPrinter$
+		pdffilename$="msds"+rtrim$(userid$)+".pdf"
+		return
+	End if
+	! we're going to a regular printer which is open on chnl 0
+	gosub GETDCSPRTRTYPE:
+	If Not(dcsprtrtype)
+		returnstatus=not(goodstatus)
+		message$="The printer is not for DCS Laser Form, please reselect another printer"
+		goto OutEnd
+	End If
+	try close #0 else rem ! close actual printer
+	open #0, DCSScript$+" "+DCSPrinter$
+Return
+
+include "src/rtn.dcscode_r10.i"
+
+PrintMSDS: ! print msds sheet
+	TOTALPAGE = 0
+	IMKEY$ = " ",IMKEY$
+	IMKEY$[1,8] = "MD" + printSheet$
+	Call "prntimage.dl4",IMKEY$,ILIST$,TOTALPAGE,E,intco
+	If Len(ILIST$) > 0 And TOTALPAGE And Not(E)
+		for i = 1 to TOTALPAGE
+			if pagecntr = 0
+				if prid$ = "P"
+					print #0;pdffilename$;
+					print #0; tab 80;ubsaspid$[1,50]
+				else
+					print #0;dcsprntname$
+				end if
+			end if
+			print #0;ilist$;
+			IF P176$[6,6]="Y"
+				print #0;i Using "&&&&";EXT$
+			else
+				print #0;i Using "&&";EXT$
+			endif
+			pagecntr = pagecntr + 1
+			if pagecntr >= 50
+				Try Close #0 else rem
+				if prid$ = "P"
+					Open #0,DCSScript$+" "+DCSPDFPrinter$
+				else
+					Open #0,DCSScript$+" "+DCSPrinter$
+				End If
+				pagecntr = 0
+			end if
+		next i
+		sheetcntr = sheetcntr + 1
+	End If
+Return
+
+
+!*****************************
+!* END OF THE LINE
+!*****************************
+OutEnd: ! that's all folks
+	tmp$=bsdel$+"status"+fdel$+rdel$+"Status"+fdel$+"Message"+fdel$
+	if returnstatus <> goodStatus ! got an error - return error message
+		call env(2,"PDF","")
+		tmp$=tmp$+rdel$+str$(returnStatus)+fdel$+message$+fdel$
+	else
+		if not(sheetcntr)
+			tmp$=tmp$+rdel$+str$(not(goodStatus))+fdel$+"No MSDS found that matched your criteria."+fdel$
+		else
+			if prid$="P"  ! pdf
+				! tmp$="<section>status</eof></eor>Status</eof>Message</eof>PDF</eof></eor>"+str$(goodStatus)+"</eof>Click OK for PDF</eof>"+pdffilename$+"</eof></eor></section>"
+				tmp$=tmp$+"PDF"+fdel$+rdel$+str$(goodStatus)+fdel$
+				tmp$=tmp$+"Click OK for PDF"+fdel$+pdffilename$+fdel$
+			else ! printer
+				tmp$=tmp$+rdel$+str$(goodStatus)+fdel$+"MSDS Printed Successfully"+fdel$
+			end if
+		end if
+	end if
+	Call AddToStr(e$,rstr$,tmp$+rdel$+esdel$)
+	Call SetOutPut(e$,rstr$)
+
+Else ! MAIN TRY
+	include "src/callmainerrnet.inc"
+End Try
+

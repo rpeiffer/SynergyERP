@@ -1,0 +1,1668 @@
+! UsrCtrlm - User Control File Handler
+!
+! support for UserCntrl check/edit/inquire routines for browser
+!
+! 1.0 02/05/08
+!		add send program grid 09/10/08
+!		add audit log update & logoff  09/11/08
+!		add get/submit user data & submit grid 01/27/09
+!		add send div,slsm,slsgrp on login 04/29/11 - 4217
+!		add ucf$[10] and allow ord and inv delete - 22440
+!! CUSTOM FOR ZEPHYR CLASSIC ONLY!!- 08/14/01 jliu cct146285 - add flag in 958 "LIMIT EDIT IN 208" 
+!
+! loadsave -w -n 100,10 -o prog/dxport/usrctrlm.dl4 src/usrctrlm.src
+!
+include "src/copyright.inc"
+!
+! subs used in this program
+!  S	PD951		chain to port default program
+!  S	CheckID		for the login .net program to check if valid PM User
+!  S    UsrCntrlM	the main display of USERCNTRL DATA
+!  S    UsrCntrlU	to write back the USERCNTRL DATA
+!  S	SndUPGrid	to send the Program Grid for User
+!  S    AddAudLog	add entry to audit log
+!  S	SubmitUPGrid write back Program Grid for User
+!  S	getpmproglist to send the list of Paper Master Programs in cntrl.prog
+!  S	getportdflt to retreive a value from 951 port screen
+!  S	CPUsrCntrl  to copy from a diff id 
+!  S	DelUCntrl	to delete a user
+!  S	GetUIDSalesReps list of user IDs and their associated Sales Reps.
+
+!include structure,filehandler libs & default structure dims
+
+! *declare additional dl4 intrinsic subs & functions
+Declare Intrinsic Function FindChannel
+Declare Intrinsic Sub Logic, programdump
+OPTION BASE YEAR 1980  ! required to get SPC(2) to UB Year (DL4=1988)
+
+! *declare additional external libs & subs & functions
+External Lib "libgeneral.lib"
+Declare External Sub SubErr, CreateNetStatus, GetDelimiters
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+Declare External Sub UserCntrl
+
+External Lib "progwebxref.dl4"
+Declare External Sub Progidxref
+
+External Lib "dxblockcustom.lib"
+Declare External Sub blockPrintersDropList
+
+Declare Sub CheckID,UsrCntrlM,UsrCntrlU,SndUPGrid,AddAudLog,SubmitUPGrid
+Declare Sub getpmproglist,CPUsrCntrl,DelUCntrl,GetMySQL,GetUIDSalesReps
+
+Declare Function GetPRTDFLT
+! 
+! Program / UserCntrl Notes
+! this program is for checking,(eventually displaying & writing) the UserCntrl File.
+! there is a call in "ubsfunc.dl4" called "usercntrl" that will retrieve the
+! a2$[50] flags and the a5[10] flags/levels. This call will have to be added to all
+! the programs that need and use the old Cost_Lev[3] and Commsec that was in the
+! unibasic version of PaperMaster. There are no more Common variables that can be passed.
+! As there is a limit of 4,000 chars total for the "U_" variables, we will not use them
+! and just do the call in the places where it needs the levels/flags. The levels/flags will
+! be more up to date that way, as the U_ are only set on starting login. They would not change
+! until the user logs off & back on again.
+!
+! **main procedure
+!
+!
+! dim variables used by program
+!
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+try
+	Option String Redim is legal ! in case subs dim/use same names
+	dim action$[30],options$[30],userid$[10],blank$[200],Action1$[30],3%
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[1200],tmp$[1200]
+	dim Message$[200],WebStr$[900],tmp1$[100]
+	Dim 2%,ReturnStatus,maxcnt,3%,o1,R[99]
+	maxcnt=100
+	dim List$[maxcnt,1000] ! for .net
+	dim p61$[256],p60$[50],Custom_customer$[30]
+	
+	call dxopen()
+	!
+
+	Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$)
+	Blank$=" ",Blank$
+	ReturnStatus=1
+	Message$="OK"
+	mat READ #ctlc,60,50;P60$;
+	mat read #ctlc,61,0;p61$;
+	mat read #ctlc,115,60;custom_customer$;
+	custom_customer$=UCASE$(TRIM$(custom_customer$))
+	! Call dxsave(0,"usrctl.txt!") !   Stop
+	!
+	! open files
+	!
+	UCC = OpenFile(-9988, intCo) \ if UCC<1 Goto UsrFin
+	UserID$=UCase$(UserID$) ! make sure it's UPPERCASE as that's what PM uses
+	If UserID$[1,1]="" OR UserID$[1,2]="  " ! no userid? try to get it
+	  Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	  Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Endif
+	If UserID$[1,1]="" OR UserID$[1,2]="  " ! no userid? try to get it
+	  Call DXGet("ID",tmp$) ! try from passed variable?
+	  Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Endif
+	
+	action$=UCase$(action$)
+	action$=RTrim$(Action$) ! "trim spaces from end
+	! Call programdump("/tmp/ulog1!","")
+	if action$="PD951" ! port default program (mu951) - chain to proper program
+		close ! close all files before we leave
+		chain "serp951.dl4"
+	end if
+	If action$="CHECKUID" ! see if valid User ID entered & log in audit log  doc=UserCntrl-CheckID.doc
+		Call CheckID(e$,UserID$,intco,ReturnStatus,Message$,maxcnt,List$[])
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call AddToStr(e$,rstr$,List$[]) ! add 2nd section
+		! done with it
+		call SetOutPut(e$,rstr$)
+		! Call programdump("/tmp/ulog3!","")
+		end ! "end of action / program
+	Endif
+	If action$="GETMYSQL" ! get mysql information
+		Call GetMySQL(e$,intco,ReturnStatus,Message$,maxcnt,List$[])
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,List$[]) ! add 2nd section
+		call AddToStr(e$,rstr$,WebStr$)
+		! done with it
+		call SetOutPut(e$,rstr$)
+		! Call programdump("/tmp/ulog3!","")
+		end ! "end of action / program
+	Endif
+	If action$="GETASSISTANTPRINTERS" 
+		clear list$[]
+		list$[0]=bsdel$,"Printers",fdel$
+		List$[1]="Name",fdel$,"Id",fdel$,"Default",fdel$
+		call AddToStr(e$,rstr$,List$[])
+		pdfoption=0 ! no PDF
+		xmloption=0 ! BROWSER not OK
+		Call blockPrintersDropList(rstr$,xmloption,pdfoption)
+		Call AddToStr(e$,rstr$,esdel$) ! end of section
+		Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		Call AddToStr(e$,rstr$,WebStr$)
+		Call SetOutPut(e$,rstr$)
+	endif
+	If Action$="UIDGET" ! send up data						doc=UserCntrl-GetUserData.doc
+		! userid passed in getsession or got above!
+		Call UsrCntrlM()
+		! may also want to get grid too (if erp doesn't like 2 calls!?)
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		! done with it
+		call SetOutPut(e$,rstr$)
+		! all done
+		END ! "end of get uid info
+	Endif
+	If action$="UIDSUBMIT" ! write back						doc=UserCntrl-SubmitUserData.doc
+		Close #UCC ! close ro file - reopen with write
+		UCC = OpenFile(9988, intCo) \ if UCC<1 Goto UsrFin
+		! userid passed in getsession or got above!
+		Call UsrCntrlU()
+		! all done
+		End ! end of action/program
+	Endif
+	IF action$="UIDCOPY" ! copy user						doc=UserCntrl-CopyUserID.doc
+		Close #UCC ! close ro file - reopen with write
+		UCC = OpenFile(9988, intCo) \ if UCC<1 Goto UsrFin
+		! userid must be sent
+		clear list$[]
+		tmpcnt=maxcnt
+		Call CPUsrCntrl()
+		! all done
+		End ! end of action/program
+	Endif
+	If action$="DELUID" ! delete user						doc=UserCntrl-DeleteUserID.doc
+		Close #UCC ! close ro file - reopen with write
+		UCC = OpenFile(9988, intCo) \ if UCC<1 Goto UsrFin
+		! userid must be passed!
+		Call DelUCntrl()
+		! all done
+		End ! end of action/program
+	Endif
+	If Action$="SUBMITUPGRID" ! submit grid					doc=UserCntrl-SubmitUserPGrid.doc
+		Close #UCC ! close ro file - reopen with write
+		UCC = OpenFile(9988, intCo) \ if UCC<1 Goto UsrFin
+		! userid sent
+		Call SubmitUPGRID()
+		! all done
+		End
+	Endif
+	If Action$="UIDLIST" ! send list of UID's				doc=UserCntrl-GetUIDList.doc
+		! just id & name
+		Dim UCKey$[30],A1$[40]
+		Dim 3%
+		Clear List$[]
+		tmpcnt=maxcnt
+		List$[0]=bsdel$,"USERIDLIST",fdel$
+		List$[1]="ID",fdel$,"DESCRIPTION",fdel$
+		row=2
+		UCkey$=" ",ucKey$
+		Do
+			Search #UCC,3,1;UCKey$,UCR,E
+			If E exit do
+			Mat read #UCC,UCR,260;a1$;
+			tmp$=RTrim$(A1$[21,40])
+			If tmp$<>""
+				List$[row]=RTrim$(UCKey$[1,10]),fdel$,RTriM$(A1$[21,40]),fdel$
+				row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			Endif
+		Loop
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[]) ! add data section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		
+		! done with it
+		call SetOutPut(e$,rstr$)
+		End
+	Endif
+	If Action$="SLSMLIST" ! send list of slsm				doc=UserCntrl-GetSlsmList.doc
+		! Slsm # & Name
+		Dim SKey$[40],s1$[30]
+		Dim 1%,SC,3%,SCR
+		Clear List$[]
+		tmpcnt=maxcnt
+		List$[0]=bsdel$,"SLSMLIST",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$
+		! List$[2]="0",fdel$,"ANY",fdel$
+		Row=2 ! 3
+		SKey$=" ",SKey$
+		SC=Openfile(-1824,IntCo) \ if SC=-1 Error 42
+		Do
+			Search #SC,3,1;SKey$,SCR,E
+			If E exit do
+			Mat read #SC,SCR,0;S1$;
+			x3=skey$ \ if x3<=0 let s1$="" ! NOT VALID
+			tmp$=RTrim$(S1$)
+			If tmp$<>""
+				List$[row]=RTrim$(SKey$[1,4]),fdel$,RTrim$(S1$),fdel$
+				row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			Endif
+		Loop
+		Close #SC
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[]) ! add data section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		
+		! done with it
+		call SetOutPut(e$,rstr$)
+		End
+	Endif
+	If Action$="GETUIDSALESREPS"
+		call GetUIDSalesReps()
+	END IF
+	If Action$="DFLTPLIST" ! port default name list			doc=UserCntrl-GetDPortList.doc
+		! Port Name In Userport File!
+		Dim N1$[18]
+		Dim 1%,UPC,3%,UPR
+		UPC=OpenFile(-9989,IntCo) \ if UPC=-1 Error 42
+		Clear List$[]
+		tmpcnt=maxcnt
+		maxrec=CHF(UPC)-1
+		List$[0]=bsdel$,"USRPRTLIST",fdel$
+		List$[1]="PORT",fdel$,"NAME",fdel$
+		row=2
+		For UPR=1 to maxrec
+			Mat read #UPC,UPR,100;N1$;
+			tmp$=RTrim$(N1$)
+			If tmp$<>"" ! ok - named￼  Programs changed
+				List$[row]=Str$(UPR),fdel$,tmp$,fdel$
+				row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			Endif
+		Next UPR
+		Close #UPC
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[]) ! add data section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		
+		! done with it
+		call SetOutPut(e$,rstr$)
+		End
+	Endif
+	If action$="GETPGRID" ! user's program grid				doc=UserCntrl-GetProgGrid.doc
+		Call SndUPGrid(e$,UserId$,intCo,ReturnStatus,Message$,maxcnt,List$[])
+		call AddToStr(e$,rstr$,List$[]) ! add data section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		
+		! done with it
+		call SetOutPut(e$,rstr$)
+		! Call programdump("/tmp/ulog3!","")
+		End ! end action/program
+	Endif
+	If action$="GETPRGXREF" ! program to ID# xref (as a sep call)		doc=UserCntrl-WebtoProdID.doc
+		Clear List$[]
+		Row=0;tmpcnt=maxcnt
+		Call Progidxref(e$,ReturnStatus,Message$,tmpcnt,row,List$[])
+		call AddToStr(e$,rstr$,List$[]) ! add data section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		
+		! done with it
+		call SetOutPut(e$,rstr$)
+		End ! end action/program
+	Endif
+	If action$="ADDAUDLOG" ! add to audit log				doc=UserCntrl-AuditLog.doc
+		LType=0 ! running a program, log it
+		Call AddAudLog(e$,UserId$,intCo,LType,ReturnStatus)
+		! has own status & setoutput
+		End ! end action/program
+	Endif
+	If action$="ULOGOFF" ! user log off						doc=UserCntrl-LogOff.doc
+		LType=2 ! logoff
+		Call AddAudLog(e$,UserId$,intCo,LType,ReturnStatus)
+		! has own status & setoutput
+		End ! end action/program
+	Endif
+	If action$="GETPMPROG" ! get cntrl.prog program list	doc=UserCntrl-GetPMProgList.doc
+		! snd program #, name & all flags?
+		call getpmproglist()
+		! all done
+		End ! of action/program
+	Endif
+	If action$="SUBMPMPROG" ! submit cntrl.prog program list
+		! update of cntrl.prog from web?
+		End ! of action/program
+	Endif
+	!
+
+	If Action$="PORTDEFAULT" ! send list of slsm				doc=UserCntrl-GetPortDefault.doc
+	! 
+	! PD1[4]   - default invoice printer                     
+	! PD1[5]   - default quote printer                       
+	! PD1[6]   - default message printer, 0 for no hard-copy 
+	! PD2[13]  - default order . held order printer    ##.## 
+	! PD2[14]  - default credit . pickup printer       ##.## 
+	! PD2[15]  - default bill of lading . ship label   ##.## 
+	Dim PD$[50]
+	dim 1%,doingWh
+	Dim 1%,PD1[9],UPORT,2%,PD2[19],3%
+	!
+	!
+		Try
+			Call DXGet("U_PORT",tmp$) \ uport=tmp$
+			Call DXGet("951FLD",tmp$) \ fieldnum=tmp$
+			!
+			ch_pd = FindChannel()
+			ropen #ch_pd,"cntrl/prtdflt"  ! global file
+			! if flag enabled, and for an order that is not type 2 or 3
+			! get warehouse default instead of user default
+			doingWh = 0
+			if P60$[31,31] = "Y" and fieldnum = 20
+				call dxget("ORD_TYPE", tmp$) \ ordtype = tmp$
+				call dxget("ORD_WAREHOUSE", tmp$) \ ordwhse = tmp$
+				if ordtype> 0 AND ordtype<>2 and ordtype<>3 and ordwhse>0
+					doingWh = 1
+					let uport = ordwhse
+				end if
+			end if
+			RereadDefaults: ! in case wh level returned nothing
+			mat read #ch_pd,uport,0;pd1
+			mat read #ch_pd,uport,20;pd2
+			mat read #ch_pd,uport,100;pd$;
+			!
+			prtdflt = GetPRTDFLT(fieldnum)
+			!
+			if doingWh and prtdflt = 0
+				! fall back to user level port default
+				! as wh level returned nothing
+				Call DXGet("U_PORT",tmp$) \ uport=tmp$
+				doingWh = 0
+				goto RereadDefaults:
+			end if
+			tmp$=bsdel$+"PORTDEFAULT"+fdel$+rdel$+"951FLD"+fdel$+"VALUE"+fdel$+rdel$+str$(fieldnum)+fdel$+str$(prtdflt)+fdel$+rdel$+esdel$
+			Call AddToStr(e$,rstr$,tmp$)
+			!
+			message$="OK"
+			returnstatus=1  ! ok
+		Else
+			message$="Error in Port Default"
+			returnstatus=0  ! ok
+		End Try
+		!
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		!
+		! done with it
+		call SetOutPut(e$,rstr$)
+		End
+	Endif
+	!
+
+	! add bad action for option code (ALL ACTIONS SHOULD END PROGRAM)
+	UsrFin: ! finish it
+	ReturnStatus=0
+	Message$="ACTION NOT FOUND!"
+	If UCC<1 let Message$="FILE NOT FOUND!"
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+	call SetOutPut(e$,rstr$)
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! main program
+! --------------------------------------------------------------------------------------
+Sub CheckID(e$,UserId$,intCo,ReturnStatus,Message$,maxcnt,List$[])
+  ! Does a check of UserCntrl file see if valid user ID/password
+  !
+  ! e$         : error message
+  ! UserId$		: log on user id
+  ! intCO		: company #
+  ! returnstatus : whether ok(=1) or not(=0)
+  ! message$	: pass back to .net
+  ! maxcnt		: max # of lines for list$[]
+  ! List$[]		: data list
+  ! comes into routine as OK in both - so only change if not found
+  try
+!
+	Dim 1%,FndUID,A5[10],PD1[9],SLSMCODE[9],2%,tmpcnt
+	Dim a1$[40],A2$[50],TUID$[10],UCKey$[40],Passwrd$[10],cname$[30]
+	Dim ksl$[40],UCF$[10]
+	DIM 3%,a4[5],s3[9]
+	tmpcnt=maxcnt
+	clear List$[]
+	let TUID$=UserID$+blank$
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max
+	List$[0]=bsdel$,"USERINFO",fdel$
+	!
+	webstr$="ID",fdel$,"Description",fdel$,"CompanyName",fdel$
+	webstr$=webstr$+"Div"+fdel$+"SLSPID"+fdel$+"SLSGRP"+fdel$ ! added 04/29
+	List$[1]=webstr$
+	row=2;FndUID=0
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	If TUID$[1,10]<>blank$[1,10] !  as usercntrl is 10 chars vs 8 for .net
+	  ! Call UserCntrl(TUID$,A2$,A5[],FndUID,intCo) ! we need more than this (Need Password Check too)
+	  Let UCKey$=TUID$
+	  Search #UCC,2,1;UCKey$,UCR,FndUID
+	  If FndUID<>0 ! means not found
+	    Let ReturnStatus=0
+		Let Message$="USERID "+Trim$(TUID$)+" NOT FOUND"
+	  Else ! found it check password
+		Call DXGet("PWD",tmp$) ! (cannot use "password" as Dynamic Export converts to encrypted field)
+		Let PassWrd$=UCASE$(tmp$)+Blank$
+		mat read #UCC,UCR,300;a4;
+		Mat read #UCC,UCR,260;a1$;
+		Mat read #UCC,UCR,336;A2$;
+		Mat Read #UCC,UCR,386;A5;
+		Mat read #ucc,ucr,630;slsmcode;
+		mat read #UCC,UCR,652;ucf$;
+		tmp$=UCase$(A1$[11,20])+Blank$ ! in case lc or nulls
+		IF tmp$[1,10]<>PassWrd$[1,10] ! different password
+		  Let ReturnStatus=0
+		  Let Message$="INCORRECT PASSWORD!"
+		Endif ! otherwise let on thru
+	  Endif
+	Else ! can't have blank for user id!
+	  Let ReturnStatus=0
+	  Let Message$="NO USERID ENTERED"
+	Endif
+	call DXGet("S_USER.AppID", tmp$) \ checkCo = tmp$
+	if checkCo<1 or checkCo>9
+		let ReturnStatus=0
+		let Message$="Invalid company number set up in DynamicX!"
+	end if
+	! Call programdump("/tmp/ulog2!","")
+	Read #ctlc,3,0;cname$;	! get CompanyName
+	If returnstatus=1 ! it's okay
+	  Webstr$=RTrim$(UCKEY$),fdel$,RTrim$(A1$[21,40]),fdel$,RTrim$(cname$),fdel$ ! id and desc
+	  ! now get div,slsid,slsgrp
+	  SMC=openfile(-1824,IntCo)
+	  if smc>=0
+		ksl$=" ",ksl$;ksl$=A5[5] using "###"
+		If A5[5]>0 and A5[5]<1000
+			Search #smc,2,1;ksl$,R[9],E
+		Else
+			let e=1
+		Endif
+		if not(e)
+			mat read #smc,r[9],862;s3;
+		Else ! SLSM GONE OR ZERO
+			s3[9]=0;A5[5]=0
+		Endif
+		Try close #SMC Else Rem
+	  Else ! no file
+		s3[9]=0
+	  Endif
+	  ch_pd = FindChannel()
+	  ropen #ch_pd,"cntrl/prtdflt"  ! global file
+	  Uport=A4[0]
+	  If Uport>0 and UPort<CHF(ch_pd)
+	  mat read #ch_pd,UPort,0;pd1;
+	  Else
+		pd1[1]=0
+	  Endif
+	  Try Close #ch_pd Else Rem
+	  webstr$=webstr$+Str$(PD1[1])+fdel$+Str$(A5[5])+fdel$+Str$(S3[9])+fdel$
+	  List$[row]=webstr$
+	Else ! problem with password
+	  Webstr$=RTrim$(UCKey$),fdel$,Message$,fdel$,fdel$ ! id & fail message
+	  webstr$=webstr$,"0",fdel$,"0",fdel$,"0",fdel$ ! div,slsid,slsgrp
+	  List$[row]=webstr$
+	Endif
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$ ! end of section
+	LType=1 ! logon
+	Call AddAudLog(e$,UserId$,intCo,LType,ReturnStatus)
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! CheckID
+! --------------------------------------------------------------------------------------
+Sub GetMySQL(e$,intCo,ReturnStatus,Message$,maxcnt,List$[])
+  ! Get MySQL parameters
+  !
+  ! e$         : error message
+  ! intCO	: company #
+  ! returnstatus : whether ok(=1) or not(=0)
+  ! message$	: pass back to .net
+  ! maxcnt		: max # of lines for list$[]
+  ! List$[]		: data list
+  ! comes into routine as OK in both - so only change if not found
+  try
+!
+	DIM 3%
+
+	tmpcnt=maxcnt
+	clear List$[]
+	List$[0]=bsdel$,"MYSQLINFO",fdel$
+	!
+	webstr$="MySQLFlag",fdel$,"Database",fdel$
+	webstr$=webstr$+"Address"+fdel$+"Port"+fdel$+"TemplateID"+fdel$
+	webstr$=webstr$+"TemplatePassword"+fdel$
+	webstr$=webstr$+"SchedulerID"+fdel$+"SchedulerPassword"+fdel$
+	List$[1]=webstr$
+	row=2
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	call dxget("u_mysql_db", tmp$)
+	! if p61$[107,107] <> "Y" or rtrim$(tmp$) = ""
+	if p61$[107,107] <> "Y"
+		! no MySQL option
+		webstr$ = "N"+fdel$+""+fdel$+""+fdel$+str$(0)+fdel$+""+fdel$
+		webstr$ = webstr$+""+fdel$+""+fdel$+""+fdel$
+	else
+		webstr$ = "Y"+fdel$+tmp$+fdel$
+		call dxget("u_mysql_server", tmp$)
+		let webstr$ = webstr$+tmp$+fdel$
+		call dxget("u_mysql_port", tmp$) \ let portNo = tmp$
+		let webstr$ = webstr$+str$(portNo)+fdel$
+		call dxget("u_mysql_user", tmp$)
+		let webstr$ = webstr$+tmp$+fdel$
+		call dxget("u_mysql_password", tmp$)
+		let webstr$ = webstr$+tmp$+fdel$
+		call dxget("u_mysql_erpsched_user", tmp$)
+		let webstr$ = webstr$+tmp$+fdel$
+		call dxget("u_mysql_erpsched_password", tmp$)
+		let webstr$ = webstr$+tmp$+fdel$
+	end if
+	List$[row]=webstr$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetMySQL
+! --------------------------------------------------------------------------------------
+Sub UsrCntrlM()
+! send all appropriate data to .net
+! port desc's are in userport @ port,100;c2$[1,18]
+  try
+	DIM 1%,A1[9,9],a5[10],UCF$[10],SLSMCODE[9]
+	Dim 1%,FndUID,2%,tmpcnt,B0[16]
+	Dim TUID$[10],UCKey$[40],WebStr$[1000]
+	Dim 1%,X1[9],2%,X2[9],3%,X3[9]
+	Dim 2%,A2[2]
+	Dim 3%,A3[31],A4[5]
+	Dim A1$[40],A2$[50],A0$[48],B0$[20],A3$[30]
+	tmpcnt=maxcnt
+	clear List$[]
+	Call dxget("USRID",tmp$)
+	tmp$=RTrim$(tmp$)
+	If tmp$="" ! or do we just get current user? I say current user
+		!ReturnStatus=0
+		!Message$="NO USER ID SENT!"
+		!Goto UIDDone
+		tmp$=UserId$
+	Endif
+	let TUID$=UCase$(tmp$)+blank$
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max
+	List$[0]=bsdel$,"USERDATA",fdel$
+	! GRID SENT SEPARATE ACTION/CALL
+	WebStr$="USERID",fdel$,"PSWRD",fdel$,"DESCRIPTION",fdel$,"MUSER",fdel$
+	webStr$=WebStr$,"DEPT",fdel$,"PORTDFLT",fdel$,"AVGCOST",fdel$
+	WebStr$=WebStr$,"LOADCOST",fdel$,"POCOST",FDEL$,"BASECOST",fdel$
+	WebStr$=WebStr$,"SLSM",fdel$,"EMAIL",fdel$,"COMMISS",fdel$
+	WebStr$=WebStr$,"COLLNOTE",fdel$,"DFTWHSE",fdel$,"HPCOMM",fdel$
+	WebStr$=WebStr$,"SOPOCOST",fdel$,"UPDSTK",fdel$,"ORDQTY",fdel$
+	WebStr$=WebStr$,"DELLNS",fdel$,"LNPRTD",fdel$,"ORDRSTS",fdel$
+	WebStr$=WebStr$,"CMCOPY",fdel$,"OVRBO",fdel$,"COST299",fdel$
+	WebStr$=WebStr$,"DELWHSE",fdel$,"CCCSCRN",fdel$,"OENOTE",fdel$
+	WebStr$=WebStr$,"EDTTAX",fdel$,"102AHR",fdel$,"CMTP3",fdel$
+	WebStr$=WebStr$,"MAXIES",fdel$,"SNCUST",fdel$,"SECLP",fdel$
+	WebStr$=WebStr$,"GL239",fdel$,"DEL105S",fdel$,"TXTPHN",fdel$
+	WebStr$=Webstr$,"FRTOVRRD",fdel$,"MAXOES",fdel$
+	Webstr$=webstr$,"FRTCOST",fdel$,"MISCCOST",fdel$
+	webstr$=webstr$,"ONLYCM6",fdel$,"ORDQTYSHPBO",fdel$
+	webstr$=webstr$,"SPCNTRTVIEW",fdel$,"RBCNTRTVIEW",fdel$
+	webstr$=webstr$,"EDITORDROADNET",FDEL$,"DELORD",fdel$
+	webstr$=webstr$,"DELINV",fdel$,"PRINTINVHIST",fdel$
+	webstr$=webstr$,"CMCOMEDT",fdel$
+	Webstr$=webstr$,"SPCPREDIT",fdel$
+	List$[1]=webstr$
+	Row=2
+	Let UCKey$=TUID$
+	Search #UCC,2,1;UCKey$,UCR,FndUID
+	If FndUID<>0 ! means not found
+		Let ReturnStatus=0
+		Let Message$="USERID "+Trim$(TUID$)+" NOT FOUND"
+	Else ! found it  send grid
+		MAT  READ #UCC,UCR,0;A1;   
+		MAT  READ #UCC,UCR,200;A2; 
+		MAT  READ #UCC,UCR,212;A0$;
+		MAT  READ #UCC,UCR,408;A3; 
+		MAT  READ #UCC,UCR,260;A1$;
+		MAT  READ #UCC,UCR,300;A4; 
+		MAT  READ #UCC,UCR,336;A2$;
+		MAT  READ #UCC,UCR,386;A5; 
+		Mat READ #UCC,UCR,630;SLSMCODE;
+		mat read #UCC,UCR,600;a3$;
+		mat read #UCC,UCR,652;UCF$;
+		FOR X1=0 TO 15                                           
+			LET O1=2^X1 \ LET M1=1
+			Try
+				CALL LOGIC(M1,O1,A2[0],B0[X1])
+			Else
+				let b0[x1]=0 ! so ends up 0/n
+			End try
+			LET B0[X1]=SGN(B0[X1]) ! changes it to 0/1
+			tmp$="N" \ if B0[x1] let tmp$="Y"
+			Let B0$[x1+1,x1+1]=tmp$[1,1]
+		NEXT X1 
+		if a5[9]<1 let a5[9]=4
+		If A5[9]>4 or Fra(A5[9]) let A5[9]=4
+		! PM Mixes 0 & 1 with Y & N - not all Y/N some other letters/nos
+		WebStr$=RTrim$(A1$[1,10]),fdel$,RTrim$(A1$[11,20]),fdel$,RTrim$(A1$[21,40]),fdel$
+		WebStr$=WebStr$,B0$[2,2],fdel$ ! multi-user
+		WebStr$=WebStr$,A2$[1,2],fdel$,Str$(A4[0]),fdel$,Str$(A5[0]),fdel$
+		WebStr$=WebStr$,Str$(A5[1]),fdel$,Str$(A5[2]),fdel$,Str$(A5[3]),fdel$
+		WebStr$=WebStr$,Str$(A5[5]),fdel$,RTrim$(A0$),fdel$,Str$(a5[4]),fdel$
+		tmp$[1,1]="N" \ if A5[6] let tmp$[1,1]="Y"
+		tmp$[2,2]="Y" \ if A4[1] let tmp$[2,2]="N" ! Reversed for some reason (NOT(A4[1]))=Y
+		WebStr$=WebStr$,tmp$[1,1],fdel$,tmp$[2,2],fdel$,A2$[3,3],fdel$
+		WebStr$=WebStr$,B0$[8,8],fdel$,B0$[14,14],fdel$,B0$[6,6],fdel$
+		WebStr$=WebStr$,B0$[7,7],fdel$,A2$[15,15],fdel$,A2$[23,23],FDEL$
+		WebStr$=WebStr$,A2$[26,26],fdel$,a2$[27,27],fdel$,a2$[28,28],fdel$
+		WebStr$=WebStr$,a2$[29,29],fdel$,a2$[30,30],fdel$,a2$[31,31],fdel$
+		WebStr$=WebStr$,a2$[32,32],fdel$,a2$[33,33],fdel$,a2$[34,34],fdel$
+		WebStr$=WebStr$,a2$[35,35],fdel$,a2$[36,36],fdel$,a2$[38,38],fdel$
+		WebStr$=WebStr$,A2$[42,42],fdel$,a2$[43,43],fdel$,rTrim$(a3$),fdel$
+		tmp$="Y" \ if a2$[45,45]="N" let tmp$="N" ! Yes is default
+		webstr$=webstr$,tmp$,fdel$
+		webstr$=webstr$,Str$(A5[9]),fdel$ ! max ord edt stat
+		! freight cost security
+		let tmp3=a2$[17,17]
+		if tmp3<0 let tmp3=2
+		if tmp3>2 let tmp3=2
+		if rtrim$(a2$[17,17])="" let tmp3=2
+		Webstr$=webstr$,str$(tmp3),fdel$
+		! misc cost security
+		let tmp3=a2$[18,18]
+		if tmp3<0 let tmp3=2
+		if tmp3>2 let tmp3=2
+		if rtrim$(a2$[18,18])="" let tmp3=2
+		Webstr$=webstr$,str$(tmp3),fdel$
+		! only cm type 6
+		let tmp$="N"\if a2$[44,44]="Y" let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$
+		!  ordqtyshpbo
+		let tmp$="N"\ if a2$[46,46]="Y" let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$
+		! View Special Price Contract
+		let tmp$="F" \if a2$[48,48]="I" let tmp$="I"
+		webstr$=webstr$,tmp$,fdel$
+		! view rebate contracts
+		let tmp$="F" \if a2$[49,49]="I" let tmp$="I"
+		webstr$=webstr$,tmp$,fdel$
+		! edit order after roadnet
+		let tmp$="Y" \if a2$[50,50]="N" let tmp$="N"
+		webstr$=webstr$,tmp$,FDEL$
+		tmp$="Y" \ if ucf$[1,1]="N" let tmp$="N"
+		webstr$=webstr$,tmp$,fdel$
+		tmp$="Y" \ if ucf$[2,2]="N" let tmp$="N"
+		webstr$=webstr$,tmp$,fdel$
+		tmp$="Y" \ if ucf$[3,3]="N" let tmp$="N"
+		webstr$=webstr$,tmp$,fdel$
+		tmp$="N" \ if ucf$[4,4]="Y" let tmp$="Y"
+		if P60$[24,24]="Y" let tmp$="N" ! Comm is by Line = No edit
+		webstr$=webstr$,tmp$,fdel$
+		let tmp$="Y"\if ucf$[6,6]="N" let tmp$="N"
+		webstr$=webstr$,tmp$,fdel$
+		List$[row]=WebStr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif ! end of found uid or not
+	List$[row]=esdel$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	! Multi-Salesrep Functionality
+	List$[row]=bsdel$,"MULTIREP",fdel$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	list$[row]="ID",fdel$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	If FndUID=0 ! means found
+		for x1 = 0 to 9
+			list$[row] = str$(slsmcode[x1]),fdel$
+			row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		next x1
+	end if
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	UIDDone: ! 
+	
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! UsrCntrlM
+! --------------------------------------------------------------------------------------
+Sub UsrCntrlU()
+! write back data to file - does it include grid? NO
+  try
+	DIM 1%,A1[9,9],a5[10],ucf$[10],SLSMCODE[9]
+	Dim 1%,FndUID,2%,tmpcnt,B0[16]
+	Dim TUID$[10],UCKey$[40],WebStr$[1000]
+	Dim 1%,X1[9],2%,X2[9],3%,X3[9]
+	Dim 2%,A2[2]
+	Dim 3%,A3[31],A4[5]
+	Dim A1$[40],A2$[50],A0$[48],B0$[20],a3$[30]
+	Clear B0[]
+	Call dxget("USRID",tmp$)
+	tmp$=RTrim$(tmp$)
+	If tmp$="" ! or do we just get current user? I say submit requires one!
+		ReturnStatus=0
+		Message$="NO USER ID SENT!"
+		Goto SUIDDone
+		!tmp$=UserId$
+	Endif
+	let TUID$=UCase$(tmp$)+blank$
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max
+	Let UCKey$=TUID$
+	Search #UCC,2,1;UCKey$,UCR,FndUID
+	If FndUID<>0 ! means not found - So it's new?
+		Let E=2;UCR=0
+		Search #UCC,1,0;UCKey$,UCR,E
+		If E
+			ReturnStatus=0
+			Message$="SE "+Str$(E)+" GETTING NEW USERID RECORD!"
+			Goto SUIDDone
+		Endif
+		Clear A1[]
+		Clear A2[]
+		A0$=Blank$
+		Clear A3[]
+		LET A2[0]=1 \ LET A2[1]=524287 \ LET A2[2]=1023
+		FOR X1=0 TO 31                                 
+		  LET A3[X1]=4294967295                        
+		NEXT X1                                        
+		A1$=Blank$
+		Clear A4[]
+		A2$=Blank$
+		Clear A5[]
+		A1$[1,10]=UCKey$[1,10]
+		a3$=blank$
+		Mat write #UCC,UCR,0;A1; ! prevent BE 52!
+		Mat write #UCC,UCR,260;A1$;
+		Search #UCC,4,1;UCKey$,UCR,E
+		If E
+			ReturnStatus=0
+			Message$="SE "+Str$(E)+" ADDING NEW USERID KEY!"
+			Goto SUIDDone
+		Endif
+		clear SLSMCODE[]
+	Else ! found it  read grid
+		MAT  READ #UCC,UCR,0;A1;   
+		MAT  READ #UCC,UCR,200;A2; 
+		MAT  READ #UCC,UCR,212;A0$;
+		MAT  READ #UCC,UCR,408;A3; 
+		MAT  READ #UCC,UCR,260;A1$;
+		MAT  READ #UCC,UCR,300;A4; 
+		MAT  READ #UCC,UCR,336;A2$;
+		MAT  READ #UCC,UCR,386;A5;
+		Mat read #ucc,ucr,630;slsmcode;
+		mat read #UCC,UCR,600;a3$;
+		A1$[1,10]=UCKey$[1,10] ! passed
+		FOR X1=0 TO 15                                           
+			LET O1=2^X1 \ LET M1=1
+			Try
+				CALL LOGIC(M1,O1,A2[0],B0[X1])
+			Else
+				let b0[x1]=0 ! so ends up 0/n
+			End try
+		next x1
+	Endif
+	! ok - get rest of data
+	call dxget("PSWRD",tmp$)
+	A1$[11,20]=UCase$(tmp$)+Blank$
+	call dxget("DESC",tmp$)
+	A1$[21,40]=tmp$+Blank$
+	call dxget("MUSER",tmp$)
+	B0[1]=0 \ if UCase$(tmp$)="Y" let B0[1]=1
+	call dxget("DEPT",tmp$)
+	A2$[1,2]=tmp$+Blank$
+	call dxget("PORTDFLT",tmp$)
+	A4[0]=tmp$
+	call dxget("AVGCOST",tmp$)
+	X2=tmp$ \ if x2<0 or x2>2 or fra(x2) let x2=0
+	A5[0]=x2
+	call dxget("LOADCOST",tmp$)
+	X2=tmp$ \ if x2<0 or x2>2 or fra(x2) let x2=0
+	A5[1]=x2
+	call dxget("POCOST",tmp$)
+	X2=tmp$ \ if x2<0 or x2>2 or fra(x2) let x2=0
+	A5[2]=x2
+	call dxget("BASECOST",tmp$)
+	X2=tmp$ \ if x2<0 or x2>2 or fra(x2) let x2=0
+	A5[3]=x2
+	call dxget("SLSM",tmp$)
+	X2=tmp$ \ if x2<0 or x2>999 or fra(x2) let x2=0
+	A5[5]=x2
+	call dxget("EMAIL",tmp$)
+	Let a0$=tmp$+Blank$
+	call dxget("COMMISS",tmp$)
+	X2=tmp$ \ if x2<0 or x2>1000 or fra(x2) let x2=0
+	A5[4]=x2
+	call dxget("COLLNOTE",tmp$)
+	A5[6]=0 \ if UCase$(tmp$)="Y" let a5[6]=1
+	call dxget("DFTWHSE",tmp$)
+	A4[1]=1 \ if UCase$(tmp$)="Y" let a4[1]=0 ! reverse sign
+	call dxget("HPCOMM",tmp$)
+	a2$[3,3]=UCase$(tmp$)
+	Call dxget("SOPOCOST",tmp$)
+	B0[7]=0 \ if UCase$(tmp$)="Y" Let B0[7]=1
+	call dxget("UPDSTK",tmp$)
+	B0[13]=0 \ if UCase$(tmp$)="Y" let B0[13]=1
+	call dxget("ORDQTY",tmp$)
+	B0[5]=0 \ if UCase$(tmp$)="Y" Let B0[5]=1
+	Call dxget("DELLNS",tmp$)
+	B0[6]=0 \ if UCase$(tmp$)="Y" let B0[6]=1
+	call dxget("LNPRTD",tmp$)
+	A2$[15,15]=UCase$(tmp$)
+	call dxget("ORDRSTS",tmp$)
+	x2=tmp$ \ if x2<2 or x2>4 let x2=2
+	Let A2$[23,23]=Str$(X2)
+	call dxget("CMCOPY",tmp$)
+	let a2$[26,26]=UCase$(tmp$)
+	call dxget("OVRBO",tmp$)
+	a2$[27,27]=UCase$(tmp$)
+	call dxget("COST299",tmp$)
+	a2$[28,28]=UCase$(tmp$)
+	call dxget("DELWHSE",tmp$)
+	a2$[29,29]=UCase$(tmp$)
+	call dxget("CCCSCRN",tmp$)
+	a2$[30,30]=UCase$(tmp$)
+	call dxget("OENOTE",tmp$)
+	a2$[31,31]=UCase$(tmp$)
+	call dxget("EDTTAX",tmp$)
+	a2$[32,32]=UCase$(tmp$)
+	call dxget("102AHR",tmp$)
+	a2$[33,33]=UCase$(tmp$)
+	call dxget("CMTP3",tmp$)
+	a2$[34,34]=UCase$(tmp$)
+	call dxget("MAXIES",tmp$)
+	x2=tmp$ \ if x2<>0 and x2<>5 and x2<>6 let x2=0
+	a2$[35,35]=Str$(X2)
+	call dxget("SNCUST",tmp$)
+	a2$[36,36]=UCase$(tmp$)
+	call dxget("SECLP",tmp$)
+	a2$[38,38]=UCase$(tmp$)
+	call dxget("GL239",tmp$)
+	a2$[42,42]=UCase$(tmp$)
+	call dxget("DEL105S",tmp$)
+	a2$[43,43]=UCase$(tmp$)
+	call dxget("TXTPHN",tmp$)
+	a3$=tmp$+Blank$
+	call dxget("FRTOVRRD",tmp$)
+	a2$[45,45]="Y" \ if UCase$(RTrim$(tmp$))="N" let a2$[45,45]="N"
+	call dxget("MAXOES",tmp$)
+	x2=tmp$ \ if x2<1 or x2>4 or fra(x2) let x2=4
+	let a5[9]=x2
+	Call dxget("FRTCOST",tmp$)
+	IF rtrim$(tmp$)<>"" 
+		let x2=tmp$
+		if x2<0 or x2>2 or fra(x2) let x2=2
+	else
+		let x2=2
+	endif
+	let a2$[17,17]=str$(x2)
+	Call dxget("MISCCOST",tmp$)
+	if rtrim$(tmp$)<>""
+		let x2=tmp$
+		if x2<0 or x2>2 or fra(x2) let x2=2
+	else
+		let x2=2
+	endif
+	let a2$[18,18]=str$(x2)
+	Call dxget("ONLYCM6",tmp$)
+	let a2$[44,44]="N"\if UCase$(RTrim$(tmp$))="Y" let a2$[44,44]="Y"
+	Call dxget("ORDQTYSHPBO",tmp$)
+	let a2$[46,46]="N"\if UCase$(RTrim$(tmp$))="Y" let a2$[46,46]="Y"
+	Call dxget("SPCNTRTVIEW",tmp$)
+	let a2$[48,48]="F"\if UCase$(RTrim$(tmp$))="I" let a2$[48,48]="I"
+	Call dxget("RBCNTRTVIEW",tmp$)
+	let a2$[49,49]="F"\if UCase$(RTrim$(tmp$))="I" let a2$[49,49]="I"
+	Call dxget("EDITORDROADNET",tmp$)
+	let a2$[50,50]="N"\if UCase$(RTrim$(tmp$))="Y" let a2$[50,50]="Y"
+	call dxget("DELORD",tmp$)
+	ucf$[1,1]="Y" \ if UCase$(RTrim$(tmp$))="N" let ucf$[1,1]="N"
+	call dxget("DELINV",tmp$)
+	ucf$[2,2]="Y" \ if UCase$(RTrim$(tmp$))="N" let ucf$[2,2]="N"
+	call dxget("PRINTINVHIST",tmp$)
+	ucf$[3,3]="Y" \ if UCase$(RTrim$(tmp$))="N" let ucf$[3,3]="N"
+	call dxget("CMCOMEDT",tmp$)
+	ucf$[4,4]="N" \ if UCase$(RTrim$(tmp$))="Y" let ucf$[4,4]="Y"
+	if ucf$[4,4]="Y" and P60$[24,24]="Y"
+		ReturnStatus=0
+		Message$="Commission is per line - No Total screen edit is allowed"
+		Let UCF$[4,4]="N" ! or Goto SUIDDone ! exit? or change it
+	Endif 
+	call dxget("SPCPREDIT",tmp$)
+	ucf$[6,6]="Y" \ if UCase$(RTrim$(tmp$))="N" let ucf$[6,6]="N"
+	! ALL done - write it back
+	 LET A2[0]=0  ! repack B0[] into a2[0]
+	FOR X1=0 TO 15    
+		IF B0[X1] LET A2[0]=A2[0]+2^X1
+	NEXT X1 
+	LET A2[1]=524287 \ LET A2[2]=1023
+	FOR X1=0 TO 31                                 
+	  LET A3[X1]=4294967295                        
+	NEXT X1                                        
+	for x1=0 to 9
+		call dxget("MULTIREP"+str$(x1), tmp$) \ slsmcode[x1] = tmp$
+	next x1
+	MAT  WRITE #UCC,UCR,0;A1;   
+	MAT  WRITE #UCC,UCR,200;A2; 
+	MAT  WRITE #UCC,UCR,212;A0$;
+	MAT  WRITE #UCC,UCR,408;A3; 
+	MAT  WRITE #UCC,UCR,260;A1$;
+	MAT  WRITE #UCC,UCR,300;A4; 
+	MAT  WRITE #UCC,UCR,336;A2$;
+	MAT  WRITE #UCC,UCR,386;A5;
+	Mat write #ucc,UCR,630;slsmcode;
+	mat write #UCC,UCR,600;a3$;
+	mat write #UCC,UCR,652;UCF$;
+	SUIDDone: ! 
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+	call SetOutPut(e$,rstr$)
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! UsrCntrlU
+! --------------------------------------------------------------------------------------
+Sub SndUPGrid(e$,UserId$,intCo,ReturnStatus,Message$,maxcnt,List$[])
+! Send program grid (all 999!)
+! e$         : error message
+  ! UserId$		: log on user id
+  ! intCO		: company #
+  ! returnstatus : whether ok(=1) or not(=0)
+  ! message$	: pass back to .net
+  ! maxcnt		: max # of lines for list$[]
+  ! List$[]		: data list
+  ! comes into routine as OK in both - so only change if not found
+  try
+	DIM 1%,A1[9,9]
+	Dim 1%,FndUID,2%,tmpcnt
+	Dim TUID$[10],UCKey$[40],WebStr$[1000]
+	Dim 1%,X1[9],2%,X2[9],3%,X3[9]
+	tmpcnt=maxcnt
+	clear List$[]
+	Call dxget("USRID",tmp$)
+	tmp$=RTrim$(tmp$)
+	If tmp$="" ! or do we just get current user? I say current user
+		!ReturnStatus=0
+		!Message$="NO USER ID SENT!"
+		!Goto UIDDone
+		tmp$=UserId$
+	Endif
+	let TUID$=UCase$(tmp$)+blank$
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max
+	List$[0]=bsdel$,"PROGRAMGRID",fdel$
+	! how to send? we'll do 10 rows with 100 per row (0-99,100-199, etc)
+	WebStr$="HUNDRED",fdel$
+	For X=1 to 100
+		WebStr$=WebStr$,"x",X-1 Using "&&",fdel$ ! so is x00,x01,x02, etc
+	Next x
+	List$[1]=webstr$
+	Row=2
+	Let UCKey$=TUID$
+	Search #UCC,2,1;UCKey$,UCR,FndUID
+	If FndUID<>0 ! means not found
+	    Let ReturnStatus=0
+		Let Message$="USERID "+Trim$(TUID$)+" NOT FOUND"
+	Else ! found it  send grid
+		Mat read #UCC,UCR,0;A1;
+		for s1=0 to 9 ! main screen (hundreds)
+			WebStr$=Str$(S1),"xx",fdel$ ! start over
+			For s2=0 to 9 ! (tens)
+				let x3=A1[s1,s2] ! instead of L1
+				for x1=0 to 9
+					! LET L2=2^X \ LET L3=1 \ CALL $LOGIC,L3,L1,L2,L4 ! 958
+					let x2=2^x1 ! we use x1 instead of  L2
+					X=1 ! instead of  L3
+					Call Logic(x,x3,x2,x0) ! x0=0/#  instead of L4
+					tmp$="0"
+					if x0 let tmp$="1"
+					WebStr$=WebStr$,tmp$,fdel$ ! send 0 or 1? or Y / N
+				Next X1
+			Next S2
+			List$[row]=WebStr$
+			row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Next S1
+	Endif ! found record
+	List$[row]=esdel$ ! end of section
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	! Call Progidxref(e$,ReturnStatus,Message$,tmpcnt,row,List$[]) ! as part of grid send
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! SndUPGrid
+! --------------------------------------------------------------------------------------
+Sub AddAudLog(e$,UserId$,intCo,LType,ReturnStatus)
+! write Selection to Auditlog file
+! e$	error message
+! UserID$	user
+! IntCo		Company #
+! LType		type: 0=program, 1=logon, 2=logoff
+! ReturnStatus	1 on program, 0/1 on logon
+! if program - open cntrl.prog to see if it tracks audit
+! if logon / logoff - just do it
+  try
+  ! LET C1$="CNTRL0.PROG";C1$[6,6]=C2 USING "#"                
+  ! CALL 96,C1$,S3 \ IF S3 GOTO L_125:                         
+	!LET C1$="CNTRL.PROG"                                       
+	!L_125: OPEN #2,C1$,#3,"CNTRL.LPT",#7,"USERPORT","USERCNTRL"
+  ! IF ERR 0 GOTO L_7035:                                                 
+  ! OPEN #9,"CNTRL.AUD"                                                   
+	!IF ERR 0 GOSUB ERR_TRAP:                                              
+	!IF CHF(9)>2^16-10 GOTO L_7050:   ! file is full (2^16=65536 recs)                                     
+	!WRITE #9,CHF(9),0,LOCKTIME;P2,SPC(6),C1,R1,(SPC 2*36000+SPC 3)/600,C2;
+	! P2=selection, c1=action (1=runprog, 2=noaccess, 3=logon, 4=logoff, 5=bad logon, 6=to scope)
+	! R1=Usercntrl rec, c2=coid#  SPC(2)=Hrs since base yr, SPC(3)=10th sec of hour
+	! C1=6 P2=997, C1=3/4 P2=C2, C1=5 P2=0/C2
+	!L_7030: CLOSE #9 \ RETURN                                             
+	!L_7035: IF ERR 0 GOSUB ERR_TRAP:                                      
+	!IF SPC 8=42 RETURN  
+	Dim Fle$[30],Prg$[30],UCKey$[60],TUID$[10]
+	Dim 1%,S1[4],T1[2],Tchan,A1[9,9]
+	Dim 1%,C1,R1,P2,C2
+	Dim 2%,X2[9]
+	Dim 3%,X3[9],t9[20]
+	let TUID$=UserID$+blank$
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max
+	Let UCKey$=TUID$
+	Search #UCC,2,1;UCKey$,R1,FndUID
+	! Call programdump("/tmp/ulog3!","")
+	if FndUID<>0 and LType=0 goto UAComp
+	if FndUID=0
+		Mat read #UCC,R1,0;A1;
+	Else
+		Clear A1[]
+	Endif
+	If LType=0 ! program
+		Call DXGet("PROGID",tmp$)
+		PRG$=UCASE$(Tmp$)
+		If Prg$="CUSTM" let Prg$="101"
+		If Prg$="SERPORDH" Let Prg$="201"
+		If Prg$="SERPPOH" let Prg$="361"
+		! do we need the above? or need more? - add above
+		x2=Prg$
+		If X2<=0 or x2>999 ! range of valid prog #'s
+			! try to get from Prg$?
+			If Len(Prg$)>1 ! must be at least 2!
+				tmp$=""
+				For X=1 to Len(Prg$)
+					If Prg$[x,x]>="0" and Prg$[x,x]<="9"
+						let tmp$=tmp$+Prg$[x,x]
+					Endif
+				Next X
+				X2=tmp$ ! try again with just #'s
+			Endif
+			If X2<=0 or x2>999 ! range of valid prog #'s
+				ReturnStatus=0
+				Message$="PROGRAM OUT OF RANGE!"
+				Goto UADone
+			Endif
+		Endif
+		P2=X2
+		TChan = FindChannel()
+		Fle$="files/cntrl/cntrl"+Str$(IntCo)+".prog"
+		Try
+			ROpen #TChan,Fle$
+		Else
+			Fle$="files/cntrl/cntrl.prog"
+			ROpen #TChan,Fle$
+		End try
+		Mat read #TChan,P2,30;T1;
+		Close #TChan
+		FOR K=0 TO 6                            
+			LET O1=2^K \ CALL LOGIC(1,O1,T1,T9[K])
+			LET T9[K]=SGN(T9[K])                  
+		NEXT K  
+		ReturnStatus=1
+		Message$="OK"
+		LET X1=INT(P2/100);X2=INT((P2-X1*100)/10);X3=FRA(P2/10)*10
+		LET L1=A1[X1,X2] \ LET L2=2^X3 \ CALL LOGIC(1,L1,L2,X1)   
+		IF X1 ! (allowed access) RETURN +1 
+			If Not(T9[4]) goto UADone ! no auditting for this program
+			C1=1 ! ran program
+		Else ! not allowed - always record
+			LET C1=2 ! no access
+			ReturnStatus=0
+			Message$="ACCESS DENIED"
+		Endif
+
+		! okay - we add to audit log
+		TChan = FindChannel()
+		Fle$="files/cntrl/cntrl.aud"
+		Open #TChan,Fle$
+		Let X2=CHF(TCHAN) ! # records
+		If X2>2^16-10 ! limit on formatted = 65536 recs
+			ReturnStatus=0
+			Message$="AUDIT LOG IS FULL! PLEASE RUN PURGE"
+			Goto UACDone
+		Endif
+		If C1=0 let C1=1 ! runprogram
+		! C1=2 ! access denied (not used anymore - web handles it)
+		X2=SPC(6) \ if x2<1 or x2>7999 let x2=1 ! limit to 1% range
+		Let X3=CHF(TCHAN)
+		WRITE #TChan,X3,0;P2,X2,C1,R1,(SPC(2)*36000+SPC(3))/600,IntCo;
+		UACDone: ! close file
+		Close #TChan
+	UADone: ! finished program
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		
+	! done with it
+		call SetOutPut(e$,rstr$)
+	Endif ! program run type=0
+	If LType=1 ! logon (no webStatus(called internally)
+		TChan = FindChannel()
+		Fle$="files/cntrl/cntrl.aud"
+		Open #TChan,Fle$
+		Let X2=CHF(TCHAN) ! # records
+		! Call programdump("/tmp/ulog4!","")
+		If X2>2^16-10 ! limit on formatted = 65536 recs
+			!ReturnStatus=0
+			!Message$="AUDIT LOG IS FULL! PLEASE RUN PURGE"
+			Goto UALDone ! just exit - no status
+		Endif
+		C1=3 ! LOGON
+		P2=IntCo ! send coid
+		If ReturnStatus=0 let C1=5 ! fail logon (passed from internal call)
+		X2=SPC(6) \ if x2<1 or x2>7999 let x2=1 ! limit to 1% range
+		Let X3=CHF(TCHAN)
+		WRITE #TChan,x3,0;P2,X2,C1,R1,(SPC(2)*36000+SPC(3))/600,IntCo;
+		UALDone: ! close & exit
+		! Call programdump("/tmp/ulog5!","")
+		Close #TChan
+	Endif ! logon type=1
+	If LType=2 ! logoff
+		TChan = FindChannel()
+		Fle$="files/cntrl/cntrl.aud"
+		Open #TChan,Fle$
+		Let X2=CHF(TCHAN) ! # records
+		If X2>2^16-10 ! limit on formatted = 65536 recs
+			ReturnStatus=0
+			Message$="AUDIT LOG IS FULL! PLEASE RUN PURGE"
+			Goto UALODone ! just exit - no status
+		Endif
+		C1=4 ! LOGOFF
+		P2=IntCo ! send coid
+		X2=SPC(6) \ if x2<1 or x2>7999 let x2=1 ! limit to 1% range
+		Let X3=CHF(TCHAN)
+		WRITE #TChan,x3,0;P2,X2,C1,R1,(SPC(2)*36000+SPC(3))/600,IntCo;
+		UALODone: ! close & exit
+		Close #TChan
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		! done with it
+		call SetOutPut(e$,rstr$)
+	Endif ! logoff type=2
+	UAComp: ! complete
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! AddAudLog
+! --------------------------------------------------------------------------------------
+Sub SubmitUPGrid()
+! Submit program grid (all 999!)
+  try
+	DIM 1%,A1[9,9]
+	Dim 1%,FndUID,2%,tmpcnt
+	Dim TUID$[10],UCKey$[40],WebStr$[1000]
+	Dim 1%,X1[9],2%,X2[9],3%,X3[9]
+	Call dxget("USRID",tmp$)
+	tmp$=RTrim$(tmp$)
+	If tmp$="" ! or do we just get current user? I say required on submit!
+		ReturnStatus=0
+		Message$="NO USER ID SENT!"
+		Goto SUPGDone
+	Endif
+	let TUID$=UCase$(tmp$)+blank$
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max
+	Let UCKey$=TUID$
+	Search #UCC,2,1;UCKey$,UCR,FndUID
+	If FndUID<>0 ! means not found
+	    Let ReturnStatus=0
+		Let Message$="USERID "+Trim$(TUID$)+" NOT FOUND"
+	Else ! found it  send grid
+		Mat read #UCC,UCR,0;A1;
+		! how to do this? let's use the mu958a way G1=100, Y=10, x=1
+		for x2=0 to 999 ! full range of id's sent
+			G1=Int(x2/100) ! hundreds
+			X2[1]=x2-(g1*100) ! strip hundreds
+			Y=int(x2[1]/10) ! tens
+			X=x2[1]-(y*10) ! strip tens - remainder equals digits
+			webstr$=X2 Using "&&&"
+			CALL dxget("PG"+WebStr$,tmp$) ! pg0 to pg999 ! CAN'T GET ZERO FILL!!
+			X1=tmp$ \ if x1<>0 and x1<>1 let x1=0
+			If X1=1 ! yes
+				!PRINT 'ML'" YES ";                                               
+				LET L1=A1[G1,Y] \ LET L2=2^X \ LET L3=2 \ CALL LOGIC(L3,L2,L1,L4)
+				LET A1[G1,Y]=L4
+			Endif
+			If X1=0 ! no
+				LET L2=2^X \ LET L3=4 \ CALL LOGIC(L3,L2,L1,L4)
+				LET L1=A1[G1,Y] \ LET L2=L4 \ LET L3=1 \ CALL LOGIC(L3,L2,L1,L4)
+				LET A1[G1,Y]=L4
+			Endif
+		Next X2
+		Mat Write #UCC,UCR,0;A1;
+		ReturnStatus=1
+		Message$="OK"
+	Endif ! done
+	SUPGDone: ! finito - send response
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+		! done with it
+	call SetOutPut(e$,rstr$)
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! SubmitUPGrid
+! --------------------------------------------------------------------------------------
+Sub getpmproglist()
+! send listing of pm programs from cntrl.prog
+  try
+	Dim F1$[26],P3$[4]
+	Dim 1%,T1[1]
+	Dim 3%,S2,O1,T9[10]
+	CPC=Findchannel()
+	tmp$="cntrl/cntrl"+Str$(IntCo)+".prog"
+	Try 
+		ROpen #CPC,tmp$ ! try cntrl#.prog
+	Else ! no cntrl#.prog - use cntrl.prog
+		CPC=FindChannel() ! reget in case
+		tmp$="cntrl/cntrl.prog"
+		Try
+			ROPEN #CPC,tmp$
+		Else
+			ReturnStatus=0
+			Message$="CANNOT OPEN CNTRL.PROG"
+			Goto PMPGDone
+		End try
+	End try
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"PROGRAMLIST",fdel$
+	WebStr$="ID",fdel$,"DESCRIPTION",fdel$,"PRFX",fdel$,"VALID",fdel$,"MENU",FDEL$
+	WebStr$=WebStr$,"PRNT",fdel$,"CTRL",fdel$
+	WebStr$=WebStr$,"AUDIT",fdel$,"HARDCP",fdel$,"SORT",fdel$
+	WebStr$=WebStr$,"FORMMENU",fdel$
+	List$[1]=WebStr$
+	row=2
+	for s2=10 to 999 ! as that's what PM allows?
+		READ #CPC,S2;F1$        
+		READ #CPC,S2,26;P3$     
+		MAT  READ #CPC,S2,30;T1;
+		FOR K=0 TO 6                                                       
+			LET O1=2^K \ LET M=1 \ CALL LOGIC(M,O1,T1[0],O2) \ LET T9[K]=SGN(O2)
+		NEXT K
+		!F1$=Desc, p3$=Prefix, t1[0]=bitmap, t1[1]=form/menu
+		! t9[0]=valid, t9[1]=menu, 2=prnt, 3=ctrl, 4=aud, 5=harcopy, 6=sort
+		WebStr$=S2 Using "&&&",fdel$ ! ID
+		WebStr$=WebStr$,RTrim$(F1$),fdel$,RTrim$(P3$),fdel$ ! desc,prefix
+		Tmp$="N",tmp$ 
+		For X=0 to 6
+		   if t9[x] let tmp$[x+1,x+1]="Y"
+		Next X
+		let tmp$[8]="" ! cut it
+		webstr$=WebStr$,tmp$[1,1],FDEL$
+		if tmp$[1,1]="Y" ! can send rest
+			webstr$=WebStr$,tmp$[2,2],fdel$,tmp$[3,3],fdel$ ! menu,prnt
+			WebStr$=WebStr$,tmp$[4,4],fdel$,tmp$[5,5],fdel$ ! ctrl, aud
+			WebStr$=WebStr$,tmp$[6,6],fdel$,tmp$[7,7],fdel$ ! HC, SORT
+			WebStr$=WebStr$,Str$(T1[1]),fdel$ ! form/menu
+		Else ! not valid - no send
+			WebStr$=webStr$," ",fdel$," ",fdel$ ! menu,prnt
+			WebStr$=webStr$," ",fdel$," ",fdel$ ! ctrl,aud
+			WebStr$=webStr$," ",fdel$," ",fdel$ ! HC, Sort
+			WebStr$=webStr$," ",fdel$ ! form/menu
+		Endif
+		List$[row]=WebStr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Next S2
+	! all done
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	PMPGDone: ! 
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+	call SetOutPut(e$,rstr$)
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! getpmproglist
+! --------------------------------------------------------------------------------------
+Function GetPRTDFLT(fieldnum)
+	!
+		Select Case fieldnum
+		Case 1
+			! Desc c2$ from userctrl
+			PRTDFLT = PD1[0]
+		Case 2
+			! roh detail
+			PRTDFLT = PD1[0]
+		Case 3
+			! EntrerdBy
+			PRTDFLT = PD1[0]
+		Case 4
+			! Division
+			PRTDFLT = PD1[1]
+		Case 5
+			! Warehouse
+			PRTDFLT = PD1[2]
+		Case 6
+			! Cash Sale Customer No
+			PRTDFLT = PD2[0]
+		Case 7
+			! Part Pay Cash Customer
+			PRTDFLT = PD2[1]
+		Case 8
+			! Check Sale Customer No
+			PRTDFLT = PD2[2]
+		Case 9
+			! Part Pay Check Customer
+			PRTDFLT = PD2[3]
+		Case 10
+			! C.O.D. Sale Customer No
+			PRTDFLT = PD2[4]
+		Case 11
+			! M/C C/C Sale Customer No
+			PRTDFLT = PD2[5]
+		Case 12
+			! Part Pay M/C Customer
+			PRTDFLT = PD2[6]
+		Case 13
+			! Visa C/C Sale Customer No
+			PRTDFLT = PD2[7]
+		Case 14
+			! Part Pay Visa Customer
+			PRTDFLT = PD2[8]
+		Case 15
+			! AMEX C/C Sale Customer No
+			PRTDFLT = PD2[9]
+		Case 16
+			! Part Pay AMEX Customer
+			PRTDFLT = PD2[10]
+		Case 17
+			! Other C/C Sale Customer No
+			PRTDFLT = PD2[11]
+		Case 18
+			! Part Pay Other Customer No
+			PRTDFLT = PD2[12]
+		Case 19
+			! Cash Drawer Port 
+			PRTDFLT = PD1[3]
+		Case 20
+			! Order Forms Printer . Held 
+			PRTDFLT = PD2[13]
+		Case 21
+			! Invoice Forms Printer
+			PRTDFLT = PD1[4]
+		Case 22
+			! Credit Forms Printer . Pickups
+			PRTDFLT = PD2[14]
+		Case 23
+			! Quote Forms Printer
+			PRTDFLT = PD1[5]
+		Case 24
+			! Bill of Lading . Ship Lbl Ptr
+			PRTDFLT = PD2[15]
+		Case 25
+			! Mail Message
+			PRTDFLT = PD1[6]
+		Case 26
+			! Cash Receipts Bank #
+			PRTDFLT = PD1[7]
+		Case 27
+			! Credit Card Bank # 
+			PRTDFLT = PD1[8]
+		Case 28
+			! Receipt Printer
+			PRTDFLT = PD1[9]
+		Case 29
+			! RF LABEL PRINTER
+			PRTDFLT = PD2[17]
+			!
+		Case Else
+			PRTDFLT = 0 
+			!
+		End Select
+End Function PRTDFLT
+! --------------------------------------------------------------------------------------
+Sub CPUsrCntrl()
+! copy from 1 user to a second
+  Try
+	DIM 1%,A1[9,9],a5[10],UCF$[10],SLSMCODE[9]
+	Dim 1%,FndUID,2%,tmpcnt,B0[16]
+	Dim TUID$[10],UCKey$[40],WebStr$[1000]
+	Dim FUID$[10]
+	Dim 1%,X1[9],2%,X2[9],3%,X3[9]
+	Dim 2%,A2[2]
+	Dim 3%,A3[31],A4[5]
+	Dim A1$[40],A2$[50],A0$[48],B0$[20],a3$[30]
+	Clear B0[]
+	Call dxget("USRID",tmp$)
+	tmp$=RTrim$(tmp$)
+	If tmp$="" ! or do we just get current user? I say submit requires one!
+		ReturnStatus=0
+		Message$="NO USER ID SENT!"
+		Goto CPIDDone
+		!tmp$=UserId$
+	Endif
+	let TUID$=UCase$(tmp$)+blank$
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max
+	Let UCKey$=TUID$
+	Search #UCC,2,1;UCKey$,UCR,FndUID
+	If FndUID<>0 ! means not found - So it's new?
+		Let E=2;UCR=0
+		Search #UCC,1,0;UCKey$,UCR,E
+		If E
+			ReturnStatus=0
+			Message$="SE "+Str$(E)+" GETTING NEW USERID RECORD!"
+			Goto CPIDDone
+		Endif
+		Clear A1[]
+		Clear A2[]
+		A0$=Blank$
+		Clear A3[]
+		A1$=Blank$
+		Clear A4[]
+		A2$=Blank$
+		Clear A5[]
+		A1$[1,10]=UCKey$[1,10]
+		a3$=blank$
+		Mat write #UCC,UCR,0;A1; ! prevent BE 52!
+		Mat write #UCC,UCR,260;A1$;
+		Search #UCC,4,1;UCKey$,UCR,E
+		If E
+			ReturnStatus=0
+			Message$="SE "+Str$(E)+" ADDING NEW USERID KEY!"
+			Goto SCPIDNow
+		Endif
+	Else ! found it  read grid
+		MAT  READ #UCC,UCR,0;A1;   
+		MAT  READ #UCC,UCR,200;A2; 
+		MAT  READ #UCC,UCR,212;A0$;
+		MAT  READ #UCC,UCR,260;A1$;
+		MAT  READ #UCC,UCR,300;A4; 
+		MAT  READ #UCC,UCR,336;A2$;
+		MAT  READ #UCC,UCR,386;A5;
+		Mat read #ucc,ucr,630;slsmcode;
+		MAT  READ #UCC,UCR,408;A3; 
+		mat read #UCC,UCR,600;a3$;
+		mat read #UCC,UCR,652;UCF$;
+		A1$[1,10]=UCKey$[1,10] ! passed - make sure id is correct
+	Endif
+	SCPIDNow: ! get from
+	Call dxget("FRMUSRID",tmp$)
+	tmp$=RTrim$(tmp$)
+	If tmp$="" ! or do we just get current user? I say submit requires one!
+		ReturnStatus=0
+		Message$="NO FROM USER ID SENT!"
+		Goto CPIDDone
+		!tmp$=UserId$
+	Endif
+	let FUID$=UCase$(tmp$)+blank$
+	If Len(FUID$)>10 Let FUID$[11]="" ! Cut it at max
+	if FUID$=TUID$
+		returnstatus=0
+		message$="Can not copy from same ID"
+		Goto CPIDDone
+	Endif
+	Let UCKey$=FUID$
+	Search #UCC,2,1;UCKey$,fUCR,FndUID
+	If FndUID<>0 ! means not found - So it's new?
+		returnstatus=0
+		message$="FROM USER ID NOT FOUND!"
+		goto CPIDDone
+	Endif
+	! read just copied fields (all but ID,password,desc)
+	MAT  READ #UCC,FUCR,0;A1;   
+	MAT  READ #UCC,FUCR,200;A2; 
+	MAT  READ #UCC,FUCR,212;A0$;
+	! MAT  READ #UCC,FUCR,260;A1$; ! NOT ID,PW,DESC! from the from
+	MAT  READ #UCC,FUCR,300;A4; 
+	MAT  READ #UCC,FUCR,336;A2$;
+	MAT  READ #UCC,FUCR,386;A5;
+	Mat Read #ucc,fucr,630;slsmcode;
+	MAT  READ #UCC,FUCR,408;A3; 
+	mat read #UCC,FUCR,600;a3$;
+	mat read #UCC,FUCR,652;UCF$;
+	! write all fields back for orig uid
+	LET A2[1]=524287 \ LET A2[2]=1023
+	FOR X1=0 TO 31                                 
+	  LET A3[X1]=4294967295                        
+	NEXT X1                                        
+	MAT  WRITE #UCC,UCR,0;A1;   
+	MAT  WRITE #UCC,UCR,200;A2; 
+	MAT  WRITE #UCC,UCR,212;A0$;
+	MAT  WRITE #UCC,UCR,260;A1$; ! from read/set up
+	MAT  WRITE #UCC,UCR,300;A4; 
+	MAT  WRITE #UCC,UCR,336;A2$;
+	MAT  WRITE #UCC,UCR,386;A5;
+	Mat write #ucc,ucr,630;slsmcode;
+	MAT  WRITE #UCC,UCR,408;A3; 
+	mat write #UCC,UCR,600;a3$;
+	mat write #UCC,UCR,652;UCF$;
+	! now send all data for user to web
+	clear List$[]
+	tmpcnt=maxcnt
+	call UsrCntrlM() ! send new user data
+	Clear List$[]
+	call SndUPGrid(e$,UserId$,intCo,ReturnStatus,Message$,tmpcnt,List$[])
+	call AddToStr(e$,rstr$,List$[]) ! add data section
+	CPIDDone: ! finished
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+	call SetOutPut(e$,rstr$)
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! CPUsrCntrl
+! --------------------------------------------------------------------------------------
+Sub DelUCntrl()
+! delete the user
+ Try
+	DIM 1%,A1[9,9],a5[10],UCF$[10],SLSMCODE[9]
+	Dim 1%,FndUID,2%,tmpcnt,B0[16]
+	Dim TUID$[10],UCKey$[40],WebStr$[1000]
+	Dim FUID$[10]
+	Dim 1%,X1[9],2%,X2[9],3%,X3[9]
+	Dim 2%,A2[2]
+	Dim 3%,A3[31],A4[5]
+	Dim A1$[40],A2$[50],A0$[48],B0$[20],a3$[30]
+	Clear B0[]
+	Returnstatus=1
+	message$="OK - User was deleted"
+	Call dxget("USRID",tmp$)
+	tmp$=UCase$(RTrim$(tmp$))
+	If tmp$="" ! or do we just get current user? I say submit requires one!
+		ReturnStatus=0
+		Message$="NO USER ID SENT!"
+		Goto DLIDDone
+		!tmp$=UserId$
+	Endif
+	let TUID$=UCase$(tmp$)+blank$
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max
+	Let UCKey$=TUID$
+	Search #UCC,2,1;UCKey$,UCR,FndUID
+	If FndUID<>0 ! means not found - So it's new?
+		message$="User not on file - delete not needed"
+		goto DLIDDONE ! that's easy - not there - GET OUT!
+	Else ! delete index, return record
+		Search #UCC,5,1;UCKey$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error ",Str$(E)," Deleting Index"
+			goto DLIDDone
+		Endif
+		Let E=3;R=UCR
+		Search #UCC,1,0;UCkey$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error ",Str$(E)," Returning Record"
+		Endif
+	Endif
+	DLIDDONE: ! finished
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+	call SetOutPut(e$,rstr$)
+ else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! DelUCntrl
+! --------------------------------------------------------------------------------------
+
+sub GetUIDSalesReps()
+try ! main try
+	! just id & name
+	Dim UCKey$[30],A1$[40]
+	Dim 1%,A5[9],SLSMCODE[9]
+	Dim 3%
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"DATA",fdel$
+	List$[1]="ID"+fdel$
+	for I = 1 to 11
+		List$[1] = List$[1]+"REP"+str$(i)+fdel$
+	next i
+	row=2
+	UCkey$=" ",ucKey$
+	Do
+		Search #UCC,3,1;UCKey$,UCR,E
+		If E exit do
+		Mat read #UCC,UCR,260;a1$;
+		Mat read #UCC,UCR,386;a5;
+		Mat read #UCC,UCR,630;SLSMCODE;
+		tmp$=RTrim$(A1$[21,40])
+		If tmp$<>""
+			List$[row]=RTrim$(UCKey$[1,10])+fdel$+str$(a5[5])+fdel$
+			for I = 0 to 9
+				list$[row] = list$[row]+str$(SLSMCODE[i])+fdel$
+			next i
+			row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Loop
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add data section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	
+	! done with it
+	call SetOutPut(e$,rstr$)
+else
+	include "src/callsuberr.inc"
+end try
+  !
+end sub ! GetUIDSalesReps
+! --------------------------------------------------------------------------------------

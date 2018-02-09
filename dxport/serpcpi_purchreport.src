@@ -1,0 +1,743 @@
+!
+! CPI purchasing report
+!
+! ERP Assistant Enabled
+!
+!
+! loadsave -w -n 100,10 -o prog/dxport/serpcpi_purchreport.dl4 src/serpcpi_purchreport.src
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+Declare External Sub ERPCronSuccess
+Declare External Function GetParameter$
+
+External lib "libcpi.lib"
+Declare External Function CPIQtyAvail
+
+External Lib "ubsprconv.dl4"
+declare external function Xunit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+include "src/inc/filecpihead.inc"
+include "src/inc/filecpidet.inc"
+Include "src/inc/filespecprice.inc" ! Special Price Lines (MANUAL KEY ADD/UPDATE ONLY!)
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+include "src/inc/filesslsm.inc"
+include "src/inc/filea80vm.inc"
+include "src/inc/filebuyer.inc"
+
+!
+Declare Intrinsic Sub InpBuf,String,Findf,programdump,DateToJulian,JulianToDate
+Declare Intrinsic Sub Time,FormatDate
+!Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,getuidrec,buildsort
+
+! Internal Subroutines and Functions
+Declare Sub OpenFiles,GetParameters,SelectAndSort
+Declare Sub TotalAllContracts,TotalConsignments
+Declare Sub ProcessContractLine
+Declare Function AmountOnTransfer, IsSelected
+Declare Sub PrintHeader,PrintLine
+
+dim 1%,user
+dim 1%,cnvtu[2]
+dim 1%,sortBuyer,begBuyer,endBuyer,begWh,endWh
+dim 1%,indBuyerIdx,indWhIdx,indVendorIdx
+dim 1%,indBuyer[99],indWh[99]
+dim 2%,begVendor,endVendor,indVendor[99]
+dim 3%,cnvta,contractAvail
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200],List$[50,200],3%
+b$=" ",b$
+dim message$[150],webstr$[200],custom_customer$[30]
+
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+! call dxsave(0,"cpicbr.in!")
+USER=GetUIDRec(e$,IntCo,Userid$)
+
+! record structures
+dim cpih. as cpihead
+dim cpid. as cpidet
+dim cpid2. as cpidet
+dim sd. as specprice
+dim sd2. as specprice
+dim sr. as sslsm
+Dim PR. as prod ! product file
+Dim PW. as prodwhse ! prodwhse file
+Dim PW2. as prodwhse ! prodwhse file
+dim vend. as a80vm
+dim buyer. as buyer
+
+! keys
+dim K_cpid$[50],K_cpid2$[50],K_sort$[50],K_sd$[50],K_sd2$[50]
+dim K_pr$[50],K_pw$[50],K_pw2$[50],K_ordl$[50],K_ordh$[50]
+dim K_vend$[50],K_cpih$[50],K_sr$[50]
+dim 3%,R_cpid,R_cpid2,R_sd,R_sd2,R_pr,R_pw,R_pw2,R_ordl,R_ordh,R_vend,R_cpih,R_sr
+
+dim qmask$[20],pmask$[20],dec$[5],currProdWh$[14],SPUDA2$[14]
+dim 1%,L3[3],H4[2],OWHT[1],cpiChan[99]
+dim 2%,L4[3],H5[16],firstConsWH,Q0[1]
+dim 3%,L7[12],onTransfer,currVendor,currBuyer
+
+! all quantities in qty um defined on
+! contract
+! [0] = contract reserve
+! [1] = contract remaining
+! [2] = WH available
+! [3] = on PO
+! [4] = on transfer
+dim 3%,quantities[4],poCost
+
+! everything else
+dim P9$[50],pageHeading$[132]
+dim p61$[256]
+dim 2%,pageNo,lineNo,maxLines,D5
+dim 3%,repTotal
+
+!
+! M A I N   L O G I C
+!
+Mat Read #1,19,50;P9$;
+mat read #1,60,16;firstConsWH;
+mat read #1,61,0;p61$;
+mat read #1,67,182;SPUDA2$;
+SPUDA2$ = rtrim$(SPUDA2$)
+if p61$[111,111]<>"Y"
+	e$ = "CPI is not active."
+	error 10000
+	end
+Endif
+READ #1,3,172;D5 ! system date YYMMDD
+Mat read #1,115,40;q0;
+if q0[1]<2 let q0[1]=2
+if q0[1]>5 let q0[1]=4
+qmask$ = "--,---,--#.##"
+Let Dec$="#",Dec$
+Let Pmask$="------------.",Dec$[1,Q0[1]]     !price mask        
+call OpenFiles() ! open after the check
+call GetParameters()
+if toBrowser
+	!<section>
+	tmp$ = bsdel$,"CPIPRPT",fdel$,rdel$
+	Call addtostr(e$,rstr$,tmp$)
+	tmp$ = ""
+	if sortBuyer tmp$ = tmp$,"BUYER ID",fdel$
+	tmp$ = tmp$,"VENDOR ID",fdel$,"PRODUCT CODE",fdel$
+	tmp$ = tmp$,"PRODUCT DESCRIPTION",fdel$
+	tmp$ = tmp$,SPUDA2$,fdel$,"PURCHASING WH",fdel$
+	tmp$ = tmp$,"CONTRACT",fdel$,"# CONTRACTS",fdel$
+	tmp$ = tmp$,"START DATE",fdel$
+	tmp$ = tmp$,"COST UOM",fdel$,"PO COST",fdel$
+	tmp$ = tmp$,"UOM",fdel$
+	tmp$ = tmp$,"CONTRACT RESERVE",fdel$
+	tmp$ = tmp$,"CONTRACT REMAINING",fdel$,"WH AVAILABLE",fdel$
+	tmp$ = tmp$,"QTY ON PO",fdel$
+	tmp$ = tmp$,"QTY ON TRANSFER",fdel$
+	tmp$ = tmp$,"CPI REORDER QTY",fdel$,"SUGGESTED REORDER QTY",fdel$
+	tmp$ = tmp$,"NOTE 1",fdel$,"NOTE 2",fdel$,"NOTE 3",fdel$,"NOTE 4",fdel$
+	call addtostr(e$,rstr$,tmp$+rdel$)
+else
+	maxLines = 60
+	if not(erpCron) call setoutput(e$,rstr$, 2)
+end if
+call SelectAndSort()
+pageHeading$ = "CPI Purchasing Report"
+currBuyer = -1
+currVendor = -1
+lineNo = maxLines + 1 ! make sure next line we print prints header
+! loop through the sorted CPI contracts
+K_sort$ = " ",K_sort$
+do
+	search #CH_SORT,3,1;K_sort$,R_cpid,e \ if e exit do
+	contracts = K_sort$[27,28]
+	totalWhAvail = K_sort$[29]
+	read record #CH_CPID,R_cpid,0;cpid.;
+	call ProcessContractLine()
+loop
+
+OutEnd: !
+If toBrowser Call addtostr(e$,rstr$,esdel$) !end section
+if toBrowser or erpCron call setoutput(e$,rstr$,1)
+call ERPCronSuccess()
+try Close else rem
+! 
+! 
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end
+
+
+! ***********************************************************************
+! Nobody but us subroutines down here
+! ***********************************************************************
+
+Sub OpenFiles()
+Try
+	CH_SR=OpenFile(-1824,IntCo) \ if ch_sr=-1 Error 42 ! salesrep
+	CH_CC=OpenFile(-1728,IntCo) \ if ch_cc=-1 Error 42 ! u/m codes
+	CH_ORDH=OpenFile(-1840,IntCo) \ if ch_ordh=-1 Error 42 ! order header
+	CH_ORDL=OpenFile(-1888,IntCo) \ if ch_ordl=-1 Error 42 ! order line
+	CH_PR=OpenFile(-1792,IntCo) \ if ch_pr=-1 Error 42 ! product
+	CH_PW=OpenFile(-1744,IntCo) \ if ch_pw=-1 Error 42 ! product wh
+	CH_CPIH=OpenFile(-9929,IntCo) \ if ch_cpih=-1 Error 42 ! cpi header
+	CH_CPID=OpenFile(-9928,IntCo) \ if ch_cpid=-1 Error 42 ! cpi detail
+	CH_SD=OpenFile(-1936,IntCo) \ If ch_sd=-1 Error 42 ! Contract Lines
+	CH_VEND=OpenFile(-2400,IntCo) \ If ch_vend=-1 Error 42 ! vendor
+	CH_BUYER=OpenFile(-9991,IntCo) \ If ch_buyer=-1 Error 42 ! buyer
+	CH_SORT = buildsort(e$,25,0) \ if ch_sort=-1 error 42
+	cpiChan[0] = 1
+	cpiChan[1] = CH_CPID
+	cpiChan[2] = CH_SD
+	cpiChan[3] = CH_PR
+	cpiChan[4] = CH_ORDL
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! openfiles
+
+Sub GetParameters()
+try
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	MAT  READ #CTLC,115,60;CUSTOM_CUSTOMER$;
+	Custom_customer$=UCase$(Trim$(custom_customer$))
+	tmp$ = ucase$(GetParameter$("SORTBUYER"))
+	if tmp$ = "Y" sortBuyer = 1
+	begBuyer = 0
+	endBuyer = 999
+	if sortBuyer
+		! these parameters are only in effect
+		! if sort buyer is set to "Y"
+		tmp$ = rtrim$(GetParameter$("INDBUYER"))
+		if len(tmp$) > 0 ! individual trumps ranges
+			if tmp$[len(tmp$)]<>"," let tmp$=tmp$+","  ! add a trailing comma
+			idx = 0
+			do
+				tmp2$=tmp$[idx+1] TO ",":idx
+				if len(trim$(tmp2$)) < 1 exit do
+				indBuyer[indBuyerIdx + 1] = tmp2$
+				indBuyerIdx = indBuyerIdx + 1
+				if indBuyerIdx >= 99 exit do
+			loop
+		else
+			begBuyer = GetParameter$("BEGBUYER")
+			endBuyer = GetParameter$("ENDBUYER")
+			if not(endBuyer) endBuyer = 999
+		end if
+	end if
+	begVendor = 0
+	endVendor = 999999
+	tmp$ = rtrim$(GetParameter$("INDVEND"))
+	if len(tmp$) > 0 ! individual trumps ranges
+		if tmp$[len(tmp$)]<>"," let tmp$=tmp$+","  ! add a trailing comma
+		idx = 0
+		do
+			tmp2$=tmp$[idx+1] TO ",":idx
+			if len(trim$(tmp2$)) < 1 exit do
+			indVendor[indVendorIdx + 1] = tmp2$
+			indVendorIdx = indVendorIdx + 1
+			if indVendorIdx >= 99 exit do
+		loop
+	else
+		begVendor = GetParameter$("BEGVEND")
+		endVendor = GetParameter$("ENDVEND")
+		if not(endVendor) endVendor = 999999
+	end if
+	begWh = 0
+	endWh = 99
+	tmp$ = rtrim$(GetParameter$("INDWH"))
+	if len(tmp$) > 0 ! individual trumps ranges
+		if tmp$[len(tmp$)]<>"," let tmp$=tmp$+","  ! add a trailing comma
+		idx = 0
+		do
+			tmp2$=tmp$[idx+1] TO ",":idx
+			if len(trim$(tmp2$)) < 1 exit do
+			indWh[indWhIdx + 1] = tmp2$
+			indWhIdx = indWhIdx + 1
+			if indWhIdx >= 99 exit do
+		loop
+	else
+		begWh = GetParameter$("BEGWH")
+		endWh = GetParameter$("ENDWH")
+		if not(endWh) endWh = 99
+	end if
+	tmp$ = ucase$(GetParameter$("USECONS"))
+	if tmp$ = "Y" useConsignments = 1
+	if not(firstConsWH) useConsignments = 0
+	toBrowser = 0
+	try
+		i = Chf(0)
+	else
+		toBrowser = spc(8)
+	end try
+	if toBrowser and toBrowser <> 49 error toBrowser
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! openfiles
+
+Sub SelectAndSort()
+try
+	K_cpid$ = " ",K_cpid$
+	do
+		R_cpid = filegetcpidet(e$,CH_CPID,">",2,K_cpid$,cpid.)
+		if R_cpid <= 0 exit do
+		if not(cpid.ResStock) goto SkipThisContractLine ! not a reserve stock contract 
+		if not(cpid.PurWhse) goto SkipThisContractLine ! no purchsing wh??
+		! make sure we want this warehouse
+		if not(IsSelected(begWh, endWh, indWh[], indWhIdx, cpid.PurWHse)) goto SkipThisContractLine
+		K_sd$ = K_cpid$ ! key should match
+		R_sd = filegetspecprice(e$,CH_SD,"=",2,K_sd$,sd.)
+		if R_sd <= 0 goto SkipThisContractLine ! shouldn't happen
+		if sd.CancelDate and sd.CancelDate < D5 goto SkipThisContractLine ! not in effect any more
+		tmpContractAvail = CPIQtyAvail(e$,cpid.ContractNumber, cpid.ProductID$, dummy, cpiChan[], 0)
+		if tmpContractAvail <= 0 goto SkipThisContractLine ! reserve already depleted
+		! get the product record (conversions)
+		k_pr$ = " ",k_pr$ \ k_pr$[1,12] = cpid.ProductID$
+		R_pr = filegetprod(e$,CH_PR,"=",1,K_pr$,pr.)
+		if R_pr <= 0 goto SkipThisContractLine ! shouldn't happen
+		K_pw$ = " ",k_pw$
+		K_pw$ = cpid.ProductID$+cpid.PurWhse using "##"
+		R_pw = filegetprodwhse(e$,CH_PW,"=",1,K_pw$,PW.)
+		If R_pw<0
+			! this could happen - warehouse record not set up
+			! treat as 0 avail
+			clear pw.
+		end if
+		! make sure this vendor and buyer are wanted
+		if not(IsSelected(begVendor, endVendor, indVendor[], indVendorIdx, pw.Vend)) goto SkipThisContractLine
+		if not(IsSelected(begBuyer, endBuyer, indBuyer[], indBuyerIdx, pw.Buyer)) goto SkipThisContractLine
+		! search for this on transfer orders
+		onTransfer = AmountOnTransfer(R_pr,cpid.PurWhse)
+		whAvail = pw.QtyOnHand - pw.QtyOnOrd
+		if useConsignments
+			call TotalConsignments()
+		else
+			whses = 1
+		end if
+		! OK - this is definitely a product / WH combo we want to check
+		! we need to determine (if not already done for this combo)
+		! how much stock is allocated for ALL contract lines referring
+		! to this combination to see if COMBINED we exceed the available
+		!
+		if currProdWh$[1,14] <> k_pw$[1,14]
+			! contractAvail for all contracts set in TotalAllContracts sub
+			call TotalAllContracts()
+			currProdWh$[1,14] = k_pw$[1,14]
+		end if
+		! contractAvail set in TotalAllContracts sub
+		! if avail on the contract does not exceed what's avail in wh
+		! + on po + transfers, we don't need to worry about it
+		! and amount on po
+		if contractAvail <= whAvail + onTransfer + pw.QtyOnPO goto SkipThisContractLine 
+		! OK we got one that we want, add it
+		K_sort$ = " ",K_sort$
+		if sortBuyer K_sort$[1,3] = pw.Buyer using "###"
+		K_sort$[4,9] = pw.Vend using "######"
+		K_sort$[10,21] = cpid.ProductID$
+		! OK we need a tie break here in the event
+		! the product resides in more than one cpi contract
+		K_sort$[22,26] = cpid.ContractNumber using "#####"
+		! number of contracts involved
+		K_sort$[27,28] = contracts using "&&"
+		! put *TOTAL* wh available (MIGHT include consignment amounts)
+		K_sort$[29] = whAvail
+		search #CH_SORT,4,1;K_sort$,R_cpid,e \ if e error 11000
+		SkipThisContractLine: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! SelectAndSort
+
+Function AmountOnTransfer(productRec, transWH)
+try
+	dim 3%,onTransfer ! net amount of ins and outs
+
+	onTransfer = 0
+	K_ordl$ = " ",K_ordl$ \ K_ordl$[1,6] = productRec Using "######"
+	do
+		Search #ch_ordl,3,2;K_ordl$,R_ordl,E \ If E exit do
+		If productRec <> val(K_ordl$[1,6]) exit do 
+		Mat Read #ch_ordl,R_ordl,8;L3;
+		MAT READ #ch_ordl,R_ordl,16;L4;
+		Mat Read #ch_ordl,R_ordl,168;L7;
+		If L3[0] <> 0 Goto SkipOrderLine ! only inv items
+		foundHeader = 0
+		For ST = 1 To 7
+			K_ordh$[1,2] = ST Using "##"
+			K_ordh$[3,8] = K_ordl$[7,12]
+			Search #CH_ORDH,2,1;K_ordh$,R_ordh,E !!-!! \ If E > 1 Gosub ERR_SEARCH
+			If not(E)
+				foundHeader = 1
+				ST = 7 ! force loop to terminate
+				Mat Read #CH_ORDH,R_ordh,104;H5;
+				mat read #CH_ORDH,R_ordh,486;OWHT;
+				! determine whse (if not line level, header)
+				IF L4[3]<1 OR L4[3]>99
+					MAT READ #CH_ORDH,R_ordh,78;H4;
+					LET L4[3]=H4[2]
+				ENDIF
+			end if
+		Next ST
+		if not(foundHeader) goto SkipOrderLine
+		If H5[7] <> 16 and H5[7] <> 8 Goto SkipOrderLine
+		if not(useConsignments) and H5[7] = 8 Goto SkipOrderLine
+		if H5[7] = 16 ! true transfer
+			if owht[0]=1 ! only approved
+				! coming in
+				if transWH = h5[11] onTransfer = onTransfer + (L7[2] - L7[0])
+				! going out - don't total
+				! if transWH = l4[3] onTransfer = onTransfer - (L7[2] - L7[0])
+				if custom_customer$ = "PIEDMONT"
+					! transfer amount reduces WH avail for WH stock is
+					! going out of.  Piedmont assumes that transfer is
+					! being done to fill a sales order for that
+					! contract, so add to on transfer amount
+					if transWH = l4[3] onTransfer = onTransfer + (L7[2] - L7[0])
+				end if
+			Endif
+		else ! consignment transfer
+			! transfer amount reduces WH avail for WH stock is
+			! going out of.  if using consigment WH assume that transfer is
+			! being done to fill a sales order for that
+			! contract, so add to on transfer amount
+			! TRANSFER AMOUNTS SHOULD REFLECT WHAT IS SHIPPED ONLY
+			! AS BACKORERED STOCK HAS NOT BEEN RECEIVED
+			if transWH = l4[3] onTransfer = onTransfer + L7[4]
+		end if
+		SkipOrderLine:
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end function onTransfer
+
+Function IsSelected(begRange, endRange, indList[], lastItem, searchVal)
+try
+	retVal = 0
+	if lastItem
+		! indivdual list items take priority
+		! over range definitions
+		for i = 1 to lastItem
+			if searchVal = indList[i]
+				i = lastItem
+				retVal = 1
+			end if
+		next i
+	else
+		if searchVal>=begRange and searchVal<=endRange retVal = 1
+	end if
+
+else
+	include "src/callsuberr.inc"
+end try
+end function retVal
+
+Sub TotalAllContracts()
+try
+	K_cpid2$ = " ",K_cpid2$
+	K_cpid2$[1,12] = K_cpid$[1,12]
+	contractAvail = 0 ! return in base units
+	contracts = 0
+	do
+		R_cpid2 = filegetcpidet(e$,CH_CPID,">",2,K_cpid2$,cpid2.)
+		if R_cpid2 <= 0 exit do
+		if K_cpid2$[1,12] <> K_cpid$[1,12]  exit do
+		if val(k_pw$[13,14]) <> cpid2.PurWhse goto SkipThisContractLine2
+		K_sd2$ = K_cpid2$ ! key should match
+		R_sd2 = filegetspecprice(e$,CH_SD,"=",2,K_sd2$,sd2.)
+		if R_sd2 <= 0 goto SkipThisContractLine2 ! shouldn't happen
+		if sd2.CancelDate and sd2.CancelDate < D5 goto SkipThisContractLine2 ! not in effect any more
+		tmpContractAvail = CPIQtyAvail(e$,cpid2.ContractNumber, cpid2.ProductID$, dummy, cpiChan[], 0)
+		! add to running total
+		contractAvail=contractAvail+tmpContractAvail
+		contracts = contracts + 1
+		SkipThisContractLine2: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! TotalAllContracts
+
+
+Sub TotalConsignments()
+try
+	! whAvail is set to amount in current warehouse we are reviewing
+	! add to this the consignment amounts (careful not to add the amount
+	! in for the current again in case they are running for a consignment)
+	K_pw2$ = " ",k_pw2$
+	K_pw2$ = cpid.ProductID$+(firstConsWH - 1) using "##"
+	do
+		R_pw2 = filegetprodwhse(e$,CH_PW,">",1,K_pw2$,PW2.)
+		if R_pw2 <= 0 exit do
+		if pw2.Whse > 98 exit do
+		if pw2.ProdCode$ <> cpid.ProductID$ exit do
+		if pw2.Whse <> cpid.PurWhse
+			! got one
+			whAvail = whAvail + (pw2.QtyOnHand - pw2.QtyOnOrd)
+		end if
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! TotalConsignments
+
+
+Sub ProcessContractLine()
+Try
+	K_cpih$ = cpid.ContractNumber using "C#####"
+	R_cpih = filegetcpihead(e$,CH_CPIH,"=",1,K_cpih$,cpih.)
+	if R_cpih <= 0 exit sub ! shouldn't happen
+	K_sd$ = " ",K_sd$
+	K_sd$[1,6] =  cpid.ContractNumber using "C#####"
+	K_sd$[7,18] = cpid.ProductID$
+	R_sd = filegetspecprice(e$,CH_SD,"=",1,K_sd$,sd.)
+	if R_sd <= 0 exit sub ! shouldn't happen
+	! get the product record (conversions)
+	k_pr$ = " ",k_pr$ \ k_pr$[1,12] = cpid.ProductID$
+	R_pr = filegetprod(e$,CH_PR,"=",1,K_pr$,pr.)
+	if R_pr <= 0 exit sub ! shouldn't happen
+	K_pw$ = " ",k_pw$
+	K_pw$ = cpid.ProductID$+cpid.PurWhse using "##"
+	R_pw = filegetprodwhse(e$,CH_PW,"=",1,K_pw$,PW.)
+	If R_pw<0
+		! this could happen - warehouse record not set up
+		! treat as 0 avail
+		clear pw.
+	end if
+	clear quantities[]
+	! search for this on transfer orders
+	onTransfer = AmountOnTransfer(R_pr,cpid.PurWhse)
+	! get remaining available amount on contract: res stock - sold - allocated to SO
+	! convert reserve stock to base
+	quantities[0] = cpid.ResStock
+	contractAvail = CPIQtyAvail(e$,cpid.ContractNumber, cpid.ProductID$, dummy, cpiChan[], 0)
+	! convert contractAvail to contract units
+	let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=contractAvail !convertqty
+	quantities[1]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,flag,PR.)
+	! convert WH avail to contract units
+	let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=(totalWhAvail) !convertqty
+	quantities[2]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,flag,PR.)
+	! convert on PO to contract units
+	let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=pw.QtyOnPO !convertqty
+	quantities[3]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,flag,PR.)
+	! convert on transfer to contract units
+	let cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=onTransfer !convertqty
+	quantities[4]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,flag,PR.)
+	! convert PO cost
+	let cnvtu[0]=0;cnvtu[1]=sd.UMCost;cnvtu[2]=2;cnvta=pw.CostLastPO !convertqty
+	poCost=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,flag,PR.)
+	clear buyer.
+	if pw.Buyer > 0
+		read record #CH_BUYER,pw.Buyer,0;buyer.;
+	else
+		buyer.BuyerName$ = "NOT ON FILE!"
+	end if
+	clear vend.
+	if pw.Vend > 0
+		K_vend$ = pw.Vend using "######"
+		R_vend = filegeta80vm(e$,CH_VEND,"=",1,K_vend$,vend.)
+		if R_vend<= 0 vend.Name$ = "NOT ON FILE!"
+	else
+		vend.Name$ = "NOT ON FILE!"
+	end if
+	clear sr.
+	if cpih.Salesman > 0
+		K_sr$ = " ",K_sr$
+		K_sr$[1,3] = cpih.Salesman using "###"
+		R_sr = filegetsslsm(e$,CH_SR,"=",1,K_sr$,sr.)
+		if R_sr<= 0 sr.Name$ = "NOT ON FILE!"
+	else
+		sr.Name$ = "NOT ON FILE!"
+	end if
+	call PrintLine()
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ProcessContractLine
+
+
+Sub PrintHeader()
+Try
+	if lineNo < (maxLines - 1 - extraLines) exit sub ! no need to print a header
+	! need to print one
+	if pageNo > 0 print #0;"\14\" ! form feed
+	pageNo = pageNo + 1
+	Print #0;" - CPIPRPT -"; Tab (Int(66 - (Len(pageHeading$) / 2)));pageHeading$
+	tmp$ = "" \ Call Time(tmp$)
+	Print #0; Tab 1;"DATE ";tmp$;
+! 	tmp$ = "FOR SALESREP: "+ltrim$(sr.SlsmNum$)+" - "+rtrim$(sr.Name$)
+! 	Print #0;Tab (Int(66 - (Len(tmp$) / 2)));tmp$;
+	Print #0; Using "PAGE ###"; Tab 119;pageNo
+	Print #0;" "
+	Print #0; tab (89-q0[1]); "WH";Tab (92-q0[1]);"CTRCT (##)";
+	Print #0;Tab (103-q0[1]);"ST DATE";
+	Print #0;Tab (112-q0[1]);"CUOM";
+	Print #0; tab (125);"PO COST"
+	print #0; tab 20;"UNIT";tab 25;
+	print #0;"CONTRCT RESRV";tab 39;"CONTRCT AVAIL";tab 53;
+	print #0;"WH AVAILABLE";tab 67;"   QTY ON PO";tab 81;
+	print #0;"QTY ON TRNSFR";tab 95;
+	print #0;"CPI REORD QTY";tab 109;
+	print #0;"SUGGEST REORD";
+	print #0;""
+	print #0;""
+	lineNo = 8
+	if sortBuyer
+		print #0;pw.Buyer;" - ";buyer.BuyerName$
+		lineNo = lineNo + 1
+	end if
+	if sortBuyer print #0; tab 4;
+	print #0; pw.Vend;" - ";vend.Name$
+	lineNo = lineNo + 1
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintHeader
+
+Sub PrintLine()
+Try
+	! contract remain: contract avail - (wh avail + on po + on transfer)
+	suggestedReorder = fnr(quantities[1] - (quantities[2] + quantities[3] + quantities[4]))
+	if suggestedReorder < 0 suggestedReorder = 0
+	if toBrowser
+		tmp$ = ""
+		if sortBuyer tmp$ = tmp$,pw.Buyer," - ",buyer.BuyerName$,fdel$
+		tmp$ = tmp$,pw.Vend," - ",vend.Name$,fdel$
+		tmp$ = tmp$,rtrim$(cpid.ProductID$),fdel$
+		tmp$ = tmp$,rtrim$(pr.Desc1$),fdel$
+		tmp$ = tmp$,rtrim$(sd.Uda2$),fdel$
+		tmp$ = tmp$,cpid.PurWhse,fdel$
+		tmp$ = tmp$,cpid.ContractNumber,fdel$
+		tmp$ = tmp$,contracts,fdel$
+		if sd.StartDate
+			tmp2$ = sd.StartDate using "&&&&&&" \ call formatdate(tmp2$)
+			tmp$ = tmp$,tmp2$
+		end if
+		tmp$ = tmp$,fdel$
+		tmp$ = tmp$,xunit$(sd.UMCost,CH_CC),fdel$
+		tmp$ = tmp$,rtrim$(fnr(poCost) using pmask$),fdel$
+		tmp$ = tmp$,xunit$(sd.UMQty,CH_CC),fdel$
+		tmp$ = tmp$,rtrim$(fnr(quantities[0]) using qmask$),fdel$
+		tmp$ = tmp$,rtrim$(fnr(quantities[1]) using qmask$),fdel$
+		tmp$ = tmp$,rtrim$(fnr(quantities[2]) using qmask$),fdel$
+		tmp$ = tmp$,rtrim$(fnr(quantities[3]) using qmask$),fdel$
+		tmp$ = tmp$,rtrim$(fnr(quantities[4]) using qmask$),fdel$
+		tmp$ = tmp$,rtrim$(cpid.ReorderQty using qmask$),fdel$
+		! suggested reorder: Reserve - Contract on ord - whavail 
+		if contracts = 1 ! more than 1 - suggested reorder not valid
+			tmp$ = tmp$,rtrim$(suggestedReorder using qmask$),fdel$
+		else
+			tmp$ = tmp$,"0",fdel$
+		end if
+		tmp$=tmp$,rtrim$(cpid.Note1$),fdel$
+		tmp$=tmp$,rtrim$(cpid.Note2$),fdel$
+		tmp$=tmp$,rtrim$(cpid.Note3$),fdel$
+		tmp$=tmp$,rtrim$(cpid.Note4$),fdel$
+		call addtostr(e$,rstr$,tmp$+rdel$)
+	else
+		extraLines = 0
+		if rtrim$(cpid.Note1$) <> "" extraLines = extraLines + 1
+		if rtrim$(cpid.Note2$) <> "" extraLines = extraLines + 1
+		if rtrim$(cpid.Note3$) <> "" extraLines = extraLines + 1
+		if rtrim$(cpid.Note4$) <> "" extraLines = extraLines + 1
+		if sortBuyer
+			if currBuyer <> pw.Buyer
+				if lineNo <= maxLines - 3
+					print #0;pw.Buyer;" - ";buyer.BuyerName$
+					lineNo = lineNo + 1
+					currBuyer = pw.Buyer
+					! force vendor as well
+					print #0; tab 4; pw.Vend;" - ";vend.Name$
+					lineNo = lineNo + 1
+					currVendor = pw.Vend
+				else
+					currBuyer = pw.Buyer
+					currVendor = pw.Vend
+					Call PrintHeader()
+				end if
+			end if
+		end if
+		if currVendor <> pw.Vend
+			if lineNo <= maxlines - 2
+				if sortBuyer print #0; tab 4;
+				print #0; pw.Vend;" - ";vend.Name$
+				lineNo = lineNo + 1
+				currVendor = pw.Vend
+			else
+				currVendor = pw.Vend
+				call PrintHeader()
+			end if
+		end if
+		call PrintHeader()
+		print #0; tab 8;cpid.ProductID$;tab 21;pr.Desc1$;tab 52;
+		print #0; sd.Uda2$;tab (89 - q0[1]);
+		print #0; cpid.PurWhse using "##";tab (92 - q0[1]);
+		print #0; cpid.ContractNumber using "#####";
+		print #0; contracts using " (##)"; tab (103 - q0[1]);
+		if sd.StartDate
+			tmp2$ = sd.StartDate using "&&&&&&" \ call formatdate(tmp2$)
+			print #0;tmp2$;
+		end if
+		print #0; tab (112 - q0[1]);xunit$(sd.UMCost,CH_CC);
+		print #0; tab (117 - q0[1]);
+		print #0; fnr(poCost) using pmask$;
+		print #0; ""
+		lineNo = lineNo + 1
+		print #0; tab 20; xunit$(sd.UMQty, CH_CC); tab 25;
+		print #0; fnr(quantities[0]) using qmask$; tab 39;
+		print #0; fnr(quantities[1]) using qmask$; tab 53;
+		print #0; fnr(quantities[2]) using qmask$; tab 67;
+		print #0; fnr(quantities[3]) using qmask$; tab 81;
+		print #0; fnr(quantities[4]) using qmask$; tab 95;
+		print #0; cpid.ReorderQty using qmask$; tab 109;
+		if contracts = 1 ! more than 1 - suggested reorder not valid
+			print #0; fnr(suggestedReorder) using qmask$;
+		else
+			print #0; "*** MANUAL ***";
+		end if
+		print #0;""
+		lineNo = lineNo + 1
+		if rtrim$(cpid.Note1$) <> ""
+			print #0; tab 8; cpid.Note1$
+			lineNo = lineNo + 1
+		end if
+		if rtrim$(cpid.Note2$) <> ""
+			print #0; tab 8; cpid.Note2$
+			lineNo = lineNo + 1
+		end if
+		if rtrim$(cpid.Note3$) <> ""
+			print #0; tab 8; cpid.Note3$
+			lineNo = lineNo + 1
+		end if
+		if rtrim$(cpid.Note4$) <> ""
+			print #0; tab 8; cpid.Note4$
+			lineNo = lineNo + 1
+		end if
+		print #0;""
+		lineNo = lineNo + 1
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintLine
+
+end

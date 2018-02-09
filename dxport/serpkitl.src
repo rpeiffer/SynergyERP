@@ -1,0 +1,1779 @@
+!"serpkitl" === description  synergy erp  order entry/edit system
+!  for kit entry/edit
+! 
+! loadsave -w -n 100,10 -o prog/dxport/serpkitl.dl4 src/serpkitl.src 
+!
+! includes native programs 201k,239k,281k (,286k in serp286)
+! chained from oemenu.dl4 - depends on action2$ for type(ORDERS,QUOTES,HISTORY)
+! action$="KITLINES"
+!
+include "src/copyright.inc"
+!
+! External Functions & subs in program
+!	S	DELOKIT		Delete a kit (201e)
+!   S	DELQKIT		Delete a kit (281e)
+!
+include "src/inc/fileprod.inc"
+include "src/inc/fileordhead.inc" ! combined ros,rot,roh
+include "src/inc/filerolz.inc" ! lines
+include "src/inc/filesproddesc.inc" ! nstk lines
+include "src/inc/fileprodwhse.inc" ! prodwhse
+include "src/inc/fileccodes.inc" ! u/m file
+include "src/inc/filesordlotz.inc" ! sordlot (fixed dir's)
+include "src/inc/filesprodlot.inc" ! sprodlot
+include "src/inc/filecommhead.inc" ! commodity header
+include "src/inc/filesordlkitl.inc" ! kit lines
+include "src/inc/filesordflenz.inc" ! ord sn's
+include "src/inc/filepserlno.inc" ! master sn
+!
+include "src/inc/sql_prod.inc" ! SQL defintions
+!
+
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,JDate$,FormatDate2$
+Declare External Function ChkAltItem$
+Declare External Function OpenMySQLMirror ! new function
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "librasl.lib"
+Declare External Sub allocordlot,chkwhrasl
+
+External Lib "libprodwh.lib"
+Declare External Sub mxwhcreate
+Declare External Function getwhavail
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,ProdGroup,UMDList
+Declare External Function getpravail,getumrec,ChkPrdUM
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+!
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian, JulianToDate
+! internal subs/function
+Declare Sub OpenFiles,updatelog,GetOrdInfo
+Declare Sub chklines,Delalloc,sendkitlines
+Declare Sub BldKit,getkprod,getkitcost
+Declare Sub delkline,wrtkline
+Declare Function GetOrdRec
+
+Declare External Sub DELOKIT
+Declare External Sub DELQKIT
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	! NOTE ALWAYS PRR for Product Rec, PWR for Prodwhse Record!
+	! and OHR as header Record
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200],olkey$[60]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60]
+	Dim OrgProd$[12],LPType$[5]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,PRC,PWC,CCC,OHC,OTC,OSC,OLC,CMC
+	dim 1%,cost_lev[4],Whse,debug,ordpad,pt[37]
+	Dim 2%,Q0[1],cust
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,PRR,OHR,PWR,FChan[30],FRec[99],RChan[30]
+	Dim 3%,SUM,SQty,SHQty,BOQty,R[99],O1,UB0[16]
+	dim 3%,S9[12],Orderno
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim slist$[maxcnt,1000] ! second list
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/ol.log" ! fields for DEBUG
+
+	Dim PR. as prod
+	Dim MPR. as prod ! make item struct 
+	Dim pw. as prodwhse
+	dim roh. as roh ! order header
+	dim ros. as ros ! order ship to file
+	dim rot. as rot ! order total file
+	dim rol. as rolnew ! order lines
+	dim cmc. as commhead ! commodity code
+	dim umc. as ccodes ! um codes file
+	Dim Nstk. as sproddesc ! non-stock file
+	Dim Kitl. as sordlkitl ! kit lines file
+	dim sql_prod. as sql_prod
+
+	!
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! call dxopen() ! done in oemenu - for standalone
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	e$=""
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serpkitl"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	Action2$=UCase$(action2$)
+	Action2$=RTrim$(action2$) ! UC and trimmed
+	if action2$="" Let action2$="ORDERS" ! this is default / GOTTA HAVE IT!!
+	if debugdetail
+		dmsg$="SERPKITL ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$ 
+		if Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	if action1$<>"DROPLIST" and action1$<>"GETPROD" ! don't need it
+	  if action2$<>"ORDERS" and action2$<>"QUOTES" and action2$<>"HISTORY" ! need one of them
+		returnstatus=0
+		message$="Unknown action2="+Action2$
+		goto serpkdone ! get out now! 
+	  Endif
+	Endif
+	call OpenFiles() ! open all needed files
+	call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+	e$=""
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	QMask$="----------#.####" ! KITS USE 4 DECIMALS!
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	IF P9$[29,29]="N" LET COST_LEV[1]=0 ! = SHOW COST IN OE
+	returnstatus=0
+	Message$="Action 1 not found"
+	call dxget("SOURCE",tmp$)
+	source=tmp$
+	! call dxsave(0,"tmp/kitl.txt!") ! get inputs
+	select case action1$ ! as action is used in oemenu
+
+		case "DROPLIST" !   send droplists					doc=KITL-GetDroplists.doc
+			! need commod's,linetypes,(UM upon get line)
+			returnstatus=1
+			message$="OK"
+			clear list$[]
+			list$[0]=bsdel$,"FLAGS",fdel$
+			list$[1]="CostSec",fdel$
+			List$[2]=Str$(Cost_Lev[1]),fdel$ ! loadcost sec
+			list$[3]=esdel$
+			call addtostr(e$,rstr$,list$[])
+			clear list$[]
+			! commodity
+			call filedroplistcommhead(e$,list$[],maxcnt,CMC)
+			call addtostr(e$,rstr$,list$[])
+			clear list$[]
+			! line types - symbols = %,Q,W,F
+			list$[0]=bsdel$,"LINECALC",fdel$
+			List$[1]="ID",fdel$,"DESC",fdel$
+			list$[2]="0",fdel$,"Percent of Quantity",fdel$
+			list$[3]="1",fdel$,"Multiple of Quantity",fdel$
+			list$[4]="2",fdel$,"Percent of Weight",fdel$
+			List$[5]="-1",fdel$,"Fixed Amount",fdel$
+			! "-2" = Message Line - allow change to? I think no
+			List$[6]=esdel$
+			call addtostr(e$,rstr$,list$[])
+			if debugdetail
+				dmsg$="Droplist sent "+Message$
+				Call updatelog(debug)
+			Endif
+			! end of droplists
+		case "GETKLINES" ! send existing kit lines			doc=KITL-GetKitLines.doc
+			returnstatus=1
+			message$="OK"
+			call getOrdInfo()
+			if returnstatus=0 goto GKLDone ! failed
+			Call sendkitlines()
+			call addtostr(e$,rstr$,List$[])
+			GKLDone: ! get kit lines done
+			if debugdetail
+				dmsg$="Send kit lines "+Str$(orderno)+" "+Message$
+				Call updatelog(debug)
+			Endif
+			if rol.qtyship=0 and returnstatus=0 let returnstatus=1 ! ok if qty=0
+			! done
+		Case "DELETEKIT" ! delete the whole mess			doc=KITL-DeleteKit.doc
+			returnstatus=1
+			message$="OK"
+			if action2$="HISTORY" goto SERPKDone
+			if source=207 goto SERPKDone
+			call getOrdInfo()
+			if returnstatus=0 or returnstatus=2 goto DKLDone ! failed
+			S9[7]=Orderno;S9[9]=Lineno
+			if action2$="ORDERS"
+				call DELOKIT(e$,IntCo,S9[],FChan[])
+			Endif
+			if action2$="QUOTES"
+				call DELQKIT(e$,IntCo,S9[],FChan[])
+			Endif
+			
+			DKLDone: ! finished
+			!if olr>0 and action2$<>"HISTORY" ! no delete designation - per committee
+				!read record #OLC,OLR,0;rol. ! in case changed in here
+				!rol.KitDesignation$=blank$ ! take out kit
+				!write record #OLC,OLR,0;rol.;
+			!Endif
+			if debugdetail
+				dmsg$="Delete kit lines "+Str$(orderno)+"-"+Str$(LineNo)+" "+Message$
+				Call updatelog(debug)
+			Endif
+			if rol.qtyship=0 and returnstatus=0 let returnstatus=1 ! ok if qty=0
+			! done
+		Case "BUILDKIT" ! build / rebuild kit				doc=KITL-BuildKitLines.doc
+			returnstatus=1
+			message$="OK"
+			if action2$="HISTORY" goto SERPKDone
+			if source=207 goto SERPKDone
+			call getOrdInfo()
+			if returnstatus=0 or returnstatus=2 goto BNKLDone ! failed
+			S9[7]=Orderno;S9[9]=Lineno ! FIRST DELETE ANY OLD
+			if action2$="ORDERS"
+				call DELOKIT(e$,IntCo,S9[],FChan[])
+			Endif
+			if action2$="QUOTES"
+				call DELQKIT(e$,IntCo,S9[],FChan[])
+			Endif
+			
+			! now build new from bom
+			clear list$[]
+			clear Slist$[] ! optional lines
+			call bldkit()
+			! now send lines
+			Call sendkitlines()
+			call addtostr(e$,rstr$,List$[])
+			call addtostr(e$,rstr$,SList$[]) ! optionals
+			Read record #OLC,OLR,0;rol.;
+			rol.KitDesignation$="KIT"
+			write record #OLC,OLR,0;rol.;
+			! DO RASL? NO SINGLE KIT LINE RASL!!
+			if action2$="ORDERS"
+				S9[2]=OHR;S9[3]=0;S9[4]=208 ! determine program #?
+				S9[9]=rol.LineNum ! kitl.KitLineNum
+				S9[12]=OLR ! PASS THE LINE JUST UPDATED (new single line mxrasl5)?
+				RChan[0]=1;RChan[1]=PRC;RCHan[2]=OHC;RChan[3]=OLC
+				RChan[4]=ktc;RChan[5]=ccc;RChan[6]=PLTC;RChan[7]=0
+				RChan[8]=SLTC;RChan[9]=0
+				! Call dxsave(0,"/tmp/kits.txt!")
+				Call "MXRASL5.DL4",intco,Ctlc,S9[],RChan[] ! unrem to activate
+			Endif
+			BNKLDone: ! finished
+			if rol.qtyship=0 and returnstatus=0 let returnstatus=1 ! ok if qty=0
+			if debugdetail
+				dmsg$="Build kit lines "+Str$(orderno)+"-"+Str$(LineNo)+" "+Message$
+				Call updatelog(debug)
+			Endif
+			! done
+		Case "SUBMITKLINE" ! new/exist						doc=KITL-SubmitKitLine.doc
+			returnstatus=1
+			message$="OK"
+			if action2$="HISTORY" goto SERPKDone
+			if source=207 goto SERPKDone
+			call getOrdInfo()
+			if returnstatus=0 or returnstatus=2 goto SKLDone ! failed - get out
+			call wrtkline()
+			SKLDone: ! 
+			if debugdetail
+				dmsg$="Submit kit line "+Str$(orderno)+"-"+Str$(LineNo)+"/"+Str$(KLineNo)+" "+Message$
+				Call updatelog(debug)
+			Endif
+			if rol.qtyship=0 and returnstatus=0 let returnstatus=1 ! ok if qty=0
+			! done
+		Case "GETPROD" ! for new or um						doc=KITL-GetProdData.doc
+			returnstatus=1
+			message$="OK"
+			call dxget("PRODID",tmp$)
+			! 1st - altitem check
+			Let PROD$=UCase$(tmp$)+Blank$
+			tmp$=ChkAltItem$(e$,IntCo,Prod$,roh.CustNum)
+			If tmp$<>"" If tmp$[1,2]<>"  " let prod$=tmp$ ! has alt item
+			PRR=filegetprod(e$,PRC,"=",1,Prod$,pr.)
+			if PRR<0
+				returnstatus=0
+				message$="PRODUCT NOT FOUND"
+				goto GetPDone
+			Endif
+			! 1st um list
+			Clear List$[]
+			call UMDList(e$,"QTY",PRC,PRR,List$[],IntCo,Pr.)
+			call addtostr(e$,rstr$,List$[])
+			E2=PRR;Whse=1
+			call getkprod() ! will return KCOST(A2)
+			KUM=pr.UMPrdtnDefault
+			if KUM<=0 let KUM=pr.UMSellDefault
+			Clear List$[]
+			List$[0]=bsdel$,"PRODINFO",fdel$
+			webstr$="PRODID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+			webstr$=webstr$,"COMMOD",fdel$,"COST",fdel$,"UM",fdel$
+			List$[1]=webstr$
+			webstr$=RTrim$(pr.ProdCode$),fdel$
+			webstr$=webstr$,RTrim$(pr.DESC1$),fdel$,RTrim$(pr.Desc2$),fdel$
+			webstr$=webstr$,pr.ComdtyCode$,fdel$
+			cnvtu[0]=0;cnvtu[1]=KUM;cnvtu[2]=2
+			cnvta=A2
+			X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			webstr$=webstr$,LTrim$(X3 using PMask$),fdel$
+			tmp$=XUnit$(KUM,ccc)
+			webstr$=webstr$,tmp$,fdel$
+			List$[2]=webstr$
+			List$[3]=esdel$
+			call addtostr(e$,rstr$,List$[])
+			GetPDone: ! 
+			if debugdetail
+				dmsg$="Get detail for "+Prod$+Message$
+				Call updatelog(debug)
+			Endif
+			! done
+		Case "TOTALKIT" ! done - total/write cost			doc=KITL-TotalKit.doc
+			returnstatus=1
+			message$="OK"
+			if action2$="HISTORY" goto SERPKDone
+			if source=207 goto SERPKDone
+			call getOrdInfo()
+			if returnstatus=0 or returnstatus=2 goto TTLKDone ! failed
+			call getkitcost()
+			TTLKDone: ! 
+			if debugdetail
+				dmsg$="Total kit lines "+Str$(orderno)+"-"+Str$(LineNo)+" "+Message$
+				Call updatelog(debug)
+			Endif
+			if rol.qtyship=0 and (returnstatus=0 or returnstatus=2) let returnstatus=1 ! ok if qty=0
+			! done
+		Case "DELKLINE" ! delete a single line				doc=KITL-DelKitLine.doc
+			returnstatus=1
+			message$="OK"
+			if action2$="HISTORY" goto SERPKDone
+			if source=207 goto SERPKDone
+			call getOrdInfo()
+			if returnstatus=0 or returnstatus=2 goto DKTLDone ! failed
+			call delkline()
+			DKTLDone: ! 
+			if debugdetail
+				dmsg$="Delete kit line "+Str$(orderno)+"-"+Str$(LineNo)+"/"+Str$(KLineNo)+" "+Message$
+				Call updatelog(debug)
+			Endif
+			if rol.qtyship=0 and returnstatus=0 let returnstatus=1 ! ok if qty=0
+			! done
+		! next case
+	End Select
+	SERPKDone: ! finished
+	if debugdetail
+		dmsg$="End of Program SERPKITL" \ Call updatelog(debug)
+	Endif
+	
+  ! status section ALWAYS SENT
+	Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)                 
+	Call AddToStr(e$,rstr$,WebStr$)                                        
+	Call SetOutPut(e$,rstr$)
+	! call programdump("tmp/kitlog0!","") ! dump program
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+! we'll try all flavors - orders,quotes,history
+ Try
+    !
+	if action2$="ORDERS" ! 201k
+		CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+		PRC = OpenFile(1792,intCo) \ If PRC = -1 Error 42 ! prod
+		PWC = OpenFile(1744,intCo) \ If PWC = -1 Error 42 ! prodwhse
+		CCC = OpenFile(-1728,intCo) \ If CCC = -1 Error 42 ! u/m codes file
+		OHC = OpenFile(1840,IntCo) \ if ohc = -1 Error 42 ! order header
+		OSC = OpenFile(1856,IntCo) \ if osc = -1 Error 42 ! order shipto
+		OTC = OpenFile(1872,IntCo) \ if otc = -1 Error 42 ! order totals
+		OLC = OpenFile(1888,IntCo) \ if olc = -1 Error 42 ! order lines
+		NSC = OpenFile(2128,IntCo) \ if nsc = -1 Error 42 ! non-stock lines
+		CMC = OpenFile(-2288,IntCo) \ if cmc = -1 Error 42 ! commod code(HEAD)
+		KTC = OpenFile(1312,IntCo) \ if ktc=-1 Error 42 ! kit lines
+		PLTC=OpenFile(2528,IntCo) \ if PLTC = -1 Error 42 ! PRODLOT
+		SLTC=OpenFile(2320,IntCo) \ if SLTC = -1 Error 42 ! SORDLOT
+		BOMC=OpenFile(-656,IntCo) \ if BOMC = -1 Error 42 ! bom
+		OSNC = OpenFile(2944,IntCo) \ if OSNC=-1 Error 42 ! ord serno
+		SNMC = OpenFile(416,IntCo) \ if SNMC=-1 Error 42 ! serlno
+	Endif
+	if action2$="QUOTES" ! 281k
+		CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+		PRC = OpenFile(1792,intCo) \ If PRC = -1 Error 42 ! prod
+		PWC = OpenFile(1744,intCo) \ If PWC = -1 Error 42 ! prodwhse
+		CCC = OpenFile(-1728,intCo) \ If CCC = -1 Error 42 ! u/m codes file
+		OHC = OpenFile(1280,IntCo) \ if ohc = -1 Error 42 ! order header
+		OSC = OpenFile(1392,IntCo) \ if osc = -1 Error 42 ! order shipto
+		OTC = OpenFile(2656,IntCo) \ if otc = -1 Error 42 ! order totals
+		OLC = OpenFile(1344,IntCo) \ if olc = -1 Error 42 ! order lines
+		NSC = OpenFile(1424,IntCo) \ if nsc = -1 Error 42 ! non-stock lines
+		CMC = OpenFile(-2288,IntCo) \ if cmc = -1 Error 42 ! commod code(HEAD)
+		KTC = OpenFile(1296,IntCo) \ if ktc=-1 Error 42 ! kit lines
+		SLTC=OpenFile(2320,IntCo) \ if SLTC = -1 Error 42 ! SORDLOT
+		PLTC=OpenFile(2528,IntCo) \ if PLTC = -1 Error 42 ! PRODLOT
+		BOMC=OpenFile(-656,IntCo) \ if BOMC = -1 Error 42 ! bom
+		OSNC=-1;SNMC=-1
+	Endif
+	If action2$="HISTORY" ! AS IN 239K
+		CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+		PRC = OpenFile(1792,intCo) \ If PRC = -1 Error 42 ! prod
+		PWC = OpenFile(1744,intCo) \ If PWC = -1 Error 42 ! prodwhse
+		CCC = OpenFile(-1728,intCo) \ If CCC = -1 Error 42 ! u/m codes file
+		OHC = OpenFile(1136,IntCo) \ if ohc = -1 Error 42 ! order header
+		OSC = OpenFile(1152,IntCo) \ if osc = -1 Error 42 ! order shipto
+		OTC = OpenFile(1168,IntCo) \ if otc = -1 Error 42 ! order totals
+		OLC = OpenFile(1184,IntCo) \ if olc = -1 Error 42 ! order lines
+		NSC = OpenFile(9935,IntCo) \ if nsc = -1 Error 42 ! non-stock lines
+		CMC = OpenFile(-2288,IntCo) \ if cmc = -1 Error 42 ! commod code(HEAD)
+		KTC = OpenFile(1328,IntCo) \ if ktc=-1 Error 42 ! kit lines
+		SLTC=OpenFile(2320,IntCo) \ if SLTC = -1 Error 42 ! SORDLOT
+		PLTC=OpenFile(2528,IntCo) \ if PLTC = -1 Error 42 ! PRODLOT
+		BOMC=OpenFile(-656,IntCo) \ if BOMC = -1 Error 42 ! bom
+		OSNC=-1;SNMC=-1
+	Endif
+	sqlChan = OpenMySQLMirror(e$)
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+	Endif
+	FChan[1]=ohc;fchan[2]=osc;fchan[3]=otc
+	fchan[4]=prc;fchan[5]=pwc;fchan[6]=sltc
+	fchan[7]=pltc;fchan[8]=ktc;fchan[9]=sqlChan
+	fchan[11]=osnc;fchan[12]=snmc ! s/n's
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+
+!------------------------------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Function GetOrdRec(e$,OHC,OSC,OTC,OrderNo,roh. as roh, ros. as ros, rot. as rot,...)
+! search thru all status for Order
+! ohc,osc,otc = channels for roh, ros, rot
+! orderNo = Order # to find (or invoice #)
+! roh.,ros.,rot. = structs for roh,ros,rot
+! returns 
+! X3 = order header rec #
+	Try
+		Dim KOHC$[20]
+		Dim 1%,X[9],SCHN[2]
+		Dim 2%,X2[9]
+		Dim 3%,X3[9],OHR
+		Try Enter Action2$  Else Dim Action2$[30]
+		SCHN[0]=OHC;SCHN[1]=OSC;SCHN[2]=OTC
+		Let Ordno=OrderNo
+		let OHR=-1 ! not found as default
+		if debugdetail
+			dmsg$="Look for Order "+Str$(Ordno) \ Call updatelog(debug)
+		Endif
+		SStat=1;EStat=99
+		! if action2$="QUOTES" let EStat=9 ! 1 to 9 is enough
+		if action2$="HISTORY" let SStat=30;EStat=33 ! s/b 31&32
+		For X=SStat to EStat
+			e$=""
+			If X<20 or x>24 ! skip deleted
+				Let KOHC$=" ",KOHC$
+				KOHC$[1,2]=X Using "##"
+				KOHC$[3]=OrderNo Using "######"
+				if action2$="HISTORY" ! diff size
+					let kohc$[3]=OrderNo Using "##########" ! 10
+					Search #OHC,2,1;kohc$,X3,E
+					if e>0 let x3=-1
+					if x3>0
+						read record #OHC,X3,0;roh.;
+						OSR=roh.InvsRec
+						read record #OSC,OSR,0;ros.;
+						OTR=roh.InvtRec
+						read record #OTC,OTR,0;rot.;
+					Endif
+				Else
+					X3=filegetrohz(e$,SCHN[],"=",1,kohc$,roh.,ros., rot.)
+				Endif
+				e$=""
+				If X3>0 ! found it
+				  Exit function X3
+				Endif
+			Endif
+		Next X
+		if debugdetail
+			dmsg$="Order NOT FOUND "+Str$(OrdNo) \ Call updatelog(debug)
+		Endif
+	else
+    include "src/callsuberr.inc"
+  end try
+end Function OHR ! getordrec
+! 
+!--------------------------------------------------------------------
+sub GetOrdInfo()
+! get order data
+  Try
+	DELN=0 ! delete whole kit flag
+	Call DXGet("ORDERID",tmp$)
+	OrderNo=tmp$
+	if action2$="HISTORY" AND orderno>9999999999 let orderno=0
+	if action2$<>"HISTORY" and orderno>999999 let orderno=0
+	If OrderNo<=0 Or Fra(OrderNO)
+		ReturnStatus=0
+		Message$="INVALID ORDER!"
+		goto goidone
+	Endif
+	OHR=GetOrdRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.,action2$)
+	e$=""
+	If OHR<=0
+		ReturnStatus=0
+		Message$="ORDER NOT FOUND!"
+		goto goidone
+	Endif
+	If ros.status=32
+		returnstatus=0
+		message$="NOT AN ORDER"
+		goto goidone
+	Endif
+	
+	Call DXGet("LINENO",tmp$)
+	LineNo=tmp$
+	
+	If LineNo>0 ! sent line - get info from it
+		OLKey$=" ",OLKey$
+		if action2$<>"HISTORY"
+			OLKey$[1,6]=Orderno Using "######"
+			OLKey$[7,9]=LineNo Using "###"
+			OLKey$[11]="" ! cut at 11 - 10 blank
+		Else ! is history
+			olkey$[1,10]=orderno using "##########"
+			olkey$[11,13]=Lineno using "###"
+			olkey$[15]="" ! cut at 15 - 14 blank
+		Endif
+		OLR=filegetrolz(e$,OLC,"=",1,OLKey$,rol.)
+		If OLR<0 
+			clear rol.
+			returnstatus=0
+			message$="Order line not found!"
+			let deln=1 ! flag for delete
+			goto GOIDOne
+		Endif ! did not find line
+	Else
+		returnstatus=0
+		message$="Invalid Line Number"
+		goto GOIDone
+	Endif
+	if rol.LineType<>0 or rol.NStkItem
+		returnstatus=0
+		message$="Order line not inventory"
+		let deln=1 ! flag for delete
+		goto GOIDone
+	Endif
+	if p9$[22,22]<>"Y"
+		returnstatus=0
+		message$="KITS NOT ALLOWED"
+		let deln=1 ! flag for delete
+		goto GOIDone
+	Endif
+	if roh.Ordtype=4 or roh.ordtype=15 ! B&H or H&B
+		let rol.qtyship=rol.CurrRelQty;rol.QtyBO=rol.QtyOrd-rol.PrevQtyShip-rol.QtyBO
+	Endif
+	if rol.QtyShip=0 ! we allow <0 kit? does in 201k
+		returnstatus=0
+		message$="NO QUANTITY TO SHIP"
+		let deln=1 ! flag for delete
+		!goto GOIDone
+	Endif
+	! now get make item data
+	If not(rol.NStkItem)
+		PRR=rol.PDRecNum
+		if prr>0
+			read record #PRC,PRR,0;MPR.;
+		Else
+			clear mpr.
+		Endif
+		if Mpr.MBFlg$<>"M"
+			returnstatus=0
+			message$="PRODUCT IS NOT A MAKE ITEM"
+			let deln=1 ! flag for delete
+		Endif
+	Endif
+	GOIDone: ! finished
+	if returnstatus=1 ! ok so far
+		if action2$="ORDERS"
+			if source<>207 call chklines()
+		Endif
+	Else ! failed somewhere
+		if action2$<>"HISTORY" ! is quote or order
+			if deln and source<>207 ! delete all lines
+				s9[7]=roh.OrdNum;S9[9]=Lineno
+				if action2$="ORDERS"
+					call DELOKIT(e$,IntCo,S9[],FChan[])
+				Endif
+				if action2$="QUOTES"
+					call DELQKIT(e$,IntCo,S9[],FChan[])
+				Endif
+			Endif
+		Endif
+	Endif
+	! NEED DFT_COST
+	LET P3=ROH.PriceType \ IF P3<=0 OR P3>100 LET P3=1
+	Chan=OpenFile(-752,IntCo) ! MAT  READ #1,88,752;F$;
+	If Chan>0 !OPEN #CHAN[1],F$[1,16]
+		try
+			MAT  READ #CHAN,P3,28;PT;
+			LET DFT_COST=PT[roh.Ordtype-1]
+		Else
+			DFT_Cost=0
+		End try
+	ENDIF
+	IF NOT(DFT_COST) LET DFT_COST=P60$[29,29]
+	Try Close #chan Else Rem
+	if rol.qtyship=0 and returnstatus=0 let returnstatus=2
+ Else
+ include "src/callsuberr.inc"
+  end try
+end Sub ! GetOrdInfo
+! 
+!--------------------------------------------------------------------
+Sub chklines()
+! check lines for order changes (L_600) on 201k
+ TRY
+	if action2$<>"ORDERS" goto cldone
+	if source=207 goto cldone
+	Key1$=" ",key1$
+	key1$[1,9]=olkey$
+	Do
+		KLR=filegetsordlkitl(e$,KTC,">",1,key1$,kitl.)
+		if klr<=0 exit do
+		if key1$[1,9]<>OLKey$[1,9] exit do
+		whse=kitl.Whse
+		if kitl.CalcType<>-2 ! not message
+			If roh.ordtype=2 or roh.ordtype=5 or rol.UpdtStk=0 ! no stock
+				call delalloc(e$,Intco,FChan[],kitl.)
+				kitl.LineType=1
+				goto DALDONE
+			Endif
+			if rol.OrgWhse or kitl.Whse<>rol.whse ! changed whse on the line
+				! whse=rol.OrgWhse
+				call delalloc(e$,Intco,FChan[],kitl.)
+				kitl.Whse=rol.Whse ! change kit
+			Endif
+			kitl.LineType=0 ! it's stock
+			DALDone: ! finished
+			write record #KTC,KLR,0;kitl.;
+		Endif
+	Loop
+	cldone: ! finished
+ Else
+ include "src/callsuberr.inc"
+  end try
+end Sub ! chklines
+! 
+!--------------------------------------------------------------------
+Sub DelAlloc(e$,Intco,FChan[],kitl. as sordlkitl)
+! delete any previous product alloc (L_4800 & L_5000)
+! as it's called by external sub - gotta pass all needed
+ Try
+	dim Keypw$[40],K2$[60],k3$[60],k4$[60],SN1$[54]
+	dIM S0$[36],prod$[12],RTKey$[60],SLKey$[60],SLKey2$[60]
+	Dim 1%,S1[3]
+	Dim 2%,s2[3]
+	dIM 3%,S3[5],P3[4],T7,R[99]
+	dim 1%,sn1,snn1[2],2%,sn0[1],3%,rec_ron
+	
+	dim pr. as prod
+	dim pw. as prodwhse
+	PRC=fchan[4];pwc=fchan[5]
+	sltc=fchan[6];pltc=fchan[7];sqlChan=fchan[9]
+	Prod$=kitl.KitProd$;whse=kitl.whse
+	osnc=fchan[11];snmc=fchan[12]
+	if kitl.LineType=1 goto NStkNod ! NO STK KEPT
+	if action2$<>"ORDERS" goto NStkNod ! NO STK KEPT
+	if source=207 goto DALCDONE ! NOT ON INQUIRY
+	KPRR=filegetprod(e$,PRC,"=",1,prod$,pr.)
+	if KPRR>0 ! found it
+		x3=kitl.QtyUsed \ if x3<0 let x3=0
+		pr.QtyonPWO=pr.QtyonPWO-x3
+		if pr.QtyonPWO<0 let pr.QtyonPWO=0
+		write record #PRC,KPRR,0;pr.;
+		!
+		if sqlChan >= 0 ! MySQL enabled and channel opened
+			call prod_DL4SQLConvert(e$,"FROMDL4",pr.,sql_prod.,KPRR)
+			e = prod_SQLAddUpdate(e$,sqlChan,sql_prod.) ! mode="a" or "c"
+			if e <> 1 ! returns the number of records add/updated/deleted
+				error 11000 ! do bad update stuff
+			end if
+		end if
+		!			
+		! now prodwhse
+		If Whse>0 and whse<100
+			keypw$=Prod$+Whse Using "##"
+			KPWR=filegetprodwhse(e$,PWC,"=",1,Keypw$,pw.)
+			if KPWR>0
+				pw.QtyOnOrd=pw.QtyOnOrd-x3
+				if pw.QtyOnOrd<0 let pw.QtyOnOrd=0
+				write record #PWC,KPWR,0;pw.;
+			Endif
+		Endif
+		if pr.SerNoTrack$="Y" ! kit sn's!?
+			If osnc>0 and snmc>0 ! only if open
+				RTKey$=" ",RTKey$
+				RTkey$[1,6]=KITL.OrdNum using "######"
+				RTKey$[7,9]=kitl.OrdLineNum using "###"
+				SLKEY$=RTKEY$
+				DO
+					SEARCH #OSNC,3,1;RTKEY$,R[9],E
+					IF E EXIT DO
+					IF RTKEY$[1,9]<>SLKEY$[1,9] EXIT DO
+					rec_ron=R[9]
+					MAT  READ #OSNC,rec_ron,0;SN1$;                        
+					if sn1$[1,12]=kitl.KitProd$ ! even if diff prod? no, not for kits                           
+						MAT  READ #OSNC,rec_ron,54;SN0;                
+						MAT  READ #OSNC,rec_ron,62;SN1;                
+						SEARCH #OSNC,5,1;RTKEY$,rec_ron,E 
+						If E let E$="Search Error "+Str$(E)+" @ line ",SPC(10),"in serpkitl" \ Error 10000 ! Gosub ERR_SEARCH
+						LET SLKEY2$=" ",SLKEY2$                        
+						let SLKEY2$=SN1$[25,54]                         
+						let SLKEY2$[31]=KPRR USING "######" 
+						Search #OSNC,2,2;slkey2$,Rec_ron,E
+						if not(e)
+							SEARCH #OSNC,5,2;SLKEY2$,rec_ron,E
+							If E let E$="Search Error "+Str$(E)+" @ line ",SPC(10),"in serpkitl" \ Error 10000 ! Gosub ERR_SEARCH
+						Endif
+						LET E=3 \ SEARCH #OSNC,1,0;RTKEY$,r[9],E
+						If E let E$="Search Error "+Str$(E)+" @ line ",SPC(10),"in serpkitl" \ Error 10000 ! Gosub ERR_SEARCH
+						if snmc>0
+							if sn1>0 and sn0[1]>0                              
+								  READ #snmc,sn0[1],294;SNN1[2]      
+								  IF SNN1[2]=3 LET SNN1[2]=0             
+								  !IF credit !! deleting c/m (don't know!)
+									  IF SNN1[2]=5 LET SNN1[2]=1     
+								  !ENDIF
+								  WRITE #snmc,sn0[1],294;SNN1[2];    
+							endif                                          
+						endif                                                  
+					endif ! Right prod                
+				LOOP ! order/line
+			Endif ! sn files open
+		Endif ! sn tracking on prod
+	Endif ! of good prod
+	NStkNod: ! no stk already
+	L_5000: Rem DELETE SORDLOT
+	K3$ = " ",K3$ \ K2$ = " ",K2$ \ K4$ = " ",K4$
+	K3$[1,6] = KITL.OrdNum USING "######" ! key1$[1,9]
+	K3$[7,9] = KITL.OrdLineNum USING "###"
+	K4$ = K3$
+	Search #SLTC,2,3;K3$,V1,E
+	If Not(E) Goto L_5060
+	L_5050: Search #SLTC,3,3;K3$,V1,E
+	If E = 2 goto DALCDONE 
+	L_5060: If K3$[1,9] <> K4$[1,9] goto DALCDONE
+	If K3$[30,32] <> "KIT" Goto L_5050
+	X2 = K3$[33,35] \ If X2 <> KITL.KitLineNum Goto L_5050
+	R[7] = V1 \ K4$ = K3$
+	Mat Read #SLTC,R[7];S0$;
+	Mat Read #SLTC,R[7],60;S3;
+	T7 = S3
+	K2$ = " ",K2$
+	K2$[1,12] = S0$[1,12]
+	K2$[13,51] = K3$[1,39]
+	Search #SLTC,5,1;K2$,V1,E
+	If E ! Gosub ERR_SEARCH
+	Endif
+	K3$ = " ",K3$ \ K3$[1,22] = K2$[30,51] \ K3$[23,39] = K2$[13,29]
+	K3$[40,51] = K2$[1,12] \ E = 0
+	Search #SLTC,5,2;K3$,V1,E
+	If E ! Gosub ERR_SEARCH
+	Endif
+	K3$ = " ",K3$ \ K3$ = K4$
+	K2$ = " ",K2$ \ E = 0 \ K2$ = K4$
+	Search #SLTC,5,3;K2$,V1,E
+	If E or V1<>R[7] ! Gosub ERR_SEARCH
+	! If V1 <> R[7] Stop "RECORDS DO NOT AGREE"
+	Endif
+	S0$ = " ",S0$
+	For I = 0 To 3
+	  S1[I] = 0 \ S2[I] = 0 \ S3[I] = 0
+	Next I
+	Mat Write #SLTC,R[7];S0$;
+	Mat Write #SLTC,R[7],36;S1;
+	Mat Write #SLTC,R[7],44;S2;
+	Mat Write #SLTC,R[7],60;S3;
+	K2$ = " ",K2$ \ E = 3 \ V1 = R[7]
+	Search #SLTC,1,0;K2$,V1,E
+	If E or v1<>R[7] ! Gosub ERR_SEARCH
+	! If V1 <> R[7] Stop "RECORDS DO NOT AGREE"
+	Endif
+	K3$ = K4$;K3$[30,35] = "      "
+	M1 = -1
+	! Gosub L_5380
+	L_5380: Rem NOW BACK OUT OF SPRODLOT
+	K2$ = K3$[18,39];K2$[23] = K3$[10,11];K2$[25] = K3$[12,17];K2$[31] = kitl.KitProd$
+	Search #PLTC,2,1;K2$,V1,E
+	If E =0 ! = 1 Return 
+		!If E Gosub ERR_SEARCH
+		Mat Read #PLTC,V1,82;P3;
+		P3[3] = P3[3] + (T7 * M1)
+		If P3[3] < 0 Let P3[3] = 0
+		Mat Write #PLTC,V1,82;P3;
+	Endif
+	K3$ = K4$
+	Goto L_5050
+	
+	DALCDONE: ! finished
+ Else
+ include "src/callsuberr.inc"
+  end try
+end Sub ! DelAlloc
+! 
+!--------------------------------------------------------------------
+Sub sendkitlines()
+ Try
+	Clear List$[]
+	List$[0]=bsdel$,"ORDERLINE",fdel$
+	Webstr$="REFNO",fdel$,"LINENO",fdel$
+	webstr$=webstr$,"PRODID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+	webstr$=webstr$,"SHIP QTY",fdel$,"STKUM",fdel$
+	webstr$=webstr$,"EXTSHIP",fdel$
+	List$[1]=webstr$
+	webstr$=Str$(roh.OrdNum) \ if action2$="HISTORY" let webstr$=Str$(roh.InvNum)
+	webstr$=webstr$,fdel$,Str$(LineNo),fdel$
+	webstr$=webstr$,RTrim$(rol.ProdCode$),fdel$
+	webstr$=webstr$,RTrim$(rol.Desc1$),fdel$
+	webstr$=webstr$,RTrim$(rol.Desc2$),fdel$
+	cnvtu[0]=0;cnvtu[1]=MPR.UMStkDefault;cnvtu[2]=1
+	CNVTA = rol.QtyShip ! BOM QTY is STK
+	X3 = ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,MPR.)
+	webstr$=webstr$,LTrim$(X3 Using QMask$[1,14]),fdel$
+	tmp$=XUnit$(mpr.UMStkDefault,ccc)
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(rol.ExtShipAmt using qmask$[1,14]),fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	call addtostr(e$,rstr$,List$[])
+	clear list$[]
+	List$[0]=bsdel$,"KITLINES",fdel$
+	webstr$="KITLINE",fdel$,"KLTYPE",fdel$
+	webstr$=webstr$,"KPRODID",fdel$,"KDESC1",fdel$,"KDESC2",fdel$
+	webstr$=webstr$,"CALCID",fdel$,"KITUM",fdel$
+	webstr$=webstr$,"COMMOD",fdel$,"QTYUSED",fdel$
+	webstr$=webstr$,"COST",fdel$,"EXTCOST",fdel$,"COMMENT",fdel$
+	webstr$=webstr$,"AVAILABLE",fdel$,"SerialNo",fdel$
+	list$[1]=webstr$
+	row=2;tmpcnt=maxcnt
+	if returnstatus=2 goto SKLineDone
+	! ok - do list
+	Key1$=" ",key1$
+	key1$[1,9]=olkey$
+	if action2$="HISTORY" let key1$[1,13]=olkey$
+	Do
+		KLR=filegetsordlkitl(e$,KTC,">",1,key1$,kitl.)
+		if klr<=0 exit do
+		if action2$<>"HISTORY" if key1$[1,9]<>OLKey$[1,9] exit do
+		If action2$="HISTORY" if key1$[1,13]<>olkey$[1,13] exit do
+		tmp$="STK" \ if kitl.LineType=1 let tmp$="NSTK"
+		if kitl.CalcType=-2 let tmp$="MSG"
+		webstr$=Str$(kitl.KitLineNum),fdel$ ! line number
+		if tmp$<>"MSG" ! product
+			Prod$=kitl.KitProd$
+			KPRR=filegetprod(e$,PRC,"=",1,Prod$,pr.)
+			if kprr<0 ! not product anymore
+				! clear kitl.
+				! resets as msg line
+				tmp$="MSG";kitl.LineType=1;kitl.CalcType=-2
+				kitl.FGProd$=rol.ProdCode$;kitl.KitProd$="Z"+blank$
+				kitl.Whse=rol.Whse;kitl.OrdLineNum=rol.LineNum
+				if action2$<>"HISTORY"
+					write record #KTC,KLR,0;kitl.;
+				Endif
+			Else ! product found
+				! convert qty/cost
+				cnvtu[0]=0;cnvtu[1]=kitl.UMRec;cnvtu[2]=1
+				tmp1$=kitl.Cmdty$
+				if tmp1$="MACH" or tmp1$="TIME" or tmp1$="LABR" let cnvtu[2]=5
+				cnvta=kitl.QtyUsed
+				QTYU=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+				cnvtu[2]=2
+				cnvta=kitl.UnitCost
+				UCost=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+				webstr$=webstr$,tmp$,fdel$ ! type
+				webstr$=webstr$,RTrim$(kitl.KitProd$),fdel$
+				webstr$=webstr$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.desc2$),fdel$
+				webstr$=webstr$,Str$(kitl.CalcType),fdel$
+				tmp$=XUnit$(kitl.UMRec,ccc)
+				webstr$=webstr$,tmp$,fdel$,kitl.Cmdty$,fdel$
+				webstr$=webstr$,LTrim$(QTYU using QMask$),fdel$
+				IF COST_LEV[1]  !show cost
+					webstr$=webstr$,LTrim$(UCost using PMask$),fdel$
+					X3=FNR(kitl.QtyUsed*kitl.UnitCost)
+					webstr$=webstr$,LTrim$(X3 Using QMask$[1,14]),fdel$
+				Else
+					webstr$=webstr$,fdel$,fdel$ ! do not show costs
+				Endif
+				webstr$=webstr$,RTrim$(kitl.Desc$),fdel$
+				x3[1]=getwhavail(e$,intco,PWC,kitl.KitProd$,kitl.Whse)
+				cnvtu[0]=0;cnvtu[1]=kitl.UMRec;cnvtu[2]=1
+				cnvta=X3[1]
+				QTYA=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+				webstr$=webstr$,LTrim$(QTYA using QMask$[1,14]),fdel$
+				tmp$=pr.SerNoTrack$ \ if kitl.LineType=1 or kitl.CalcType=-2 let tmp$="N"
+				if tmp$<>"Y" let tmp$="N"
+				if action2$<>"ORDERS" AND action2$<>"HISTORY" let tmp$="N"
+				webstr$=webstr$,tmp$,fdel$ ! sn track
+			Endif
+		Endif
+		if tmp$="MSG" ! just desc's
+			webstr$=webstr$,tmp$,fdel$,fdel$,fdel$ ! type, no id,desc1
+			webstr$=webstr$,fdel$,fdel$,fdel$,fdel$ ! d2,cid,um,comm
+			webstr$=webstr$,fdel$,fdel$,fdel$,RTrim$(kitl.Desc$),fdel$ ! qty,cost,ext,comment(is desc)
+			webstr$=webstr$,fdel$,"N",fdel$ ! avl/sn
+		Endif ! product
+		list$[row]=webstr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Loop
+	SKLineDone: ! 
+	List$[row]=esdel$
+  Else
+ include "src/callsuberr.inc"
+  end try
+end Sub ! sendkitlines
+! 
+!--------------------------------------------------------------------
+Sub BldKit()
+! build kit from bomfle
+  Try
+	dim Keypw$[40],K2$[60],k3$[60],k4$[60]
+	dIM bm$[26],KL$[58],k7$[60]
+	Dim 1%,BM1[3],Kl1[5]
+	Dim 2%,KL2[1]
+	Dim 3%,BM,L7[12],a[33],KL3[1],KInvNo
+	Dim 3%,WHBld[5]
+	SList$[0]=bsdel$,"OPTKITLINES",fdel$
+	webstr$="KITLINE",fdel$,"KLTYPE",fdel$
+	webstr$=webstr$,"KPRODID",fdel$,"KDESC1",fdel$,"KDESC2",fdel$
+	webstr$=webstr$,"CALCID",fdel$,"KITUM",fdel$
+	webstr$=webstr$,"COMMOD",fdel$,"QTYUSED",fdel$
+	webstr$=webstr$,"COST",fdel$,"EXTCOST",fdel$,"COMMENT",fdel$
+	webstr$=webstr$,"AVAILABLE",fdel$,"SerialNo",fdel$
+	Slist$[1]=webstr$
+	srow=2;stmpcnt=maxcnt
+	if rol.NStkItem or rol.Qtyship<=0 goto KEXPDone
+	Whse=roh.wh
+	If rol.whse>0 and rol.whse<100 let whse=rol.whse
+	if roh.ordtype=7 and roh.ConsWh let whse=roh.ConsWh
+	l7[4]=rol.Qtyship
+	IF MPR.LbsFact<=0 LET MPR.LbsFact=1
+	LET WGHT=FNR(MPR.LbsUnit*L7[4]/MPR.LbsFact)
+	cnvtu[0]=0;cnvtu[1]=Mpr.UMStkDefault;cnvtu[2]=1
+	cnvta=L7[4] ! BOM IS IN STK QTY!
+	L7[4]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,MPR.)
+	if mpr.revlvl$="" let mpr.revlvl$=blank$
+	K4$ = " ",K4$;K4$[1,5] = rol.PDRecNum Using "#####"
+	L_6210: Search #BOMC,3,1;K4$,R45,E
+	If E Goto KEXPDONE
+	X2 = K4$[1,5] \ If X2 <> rol.PDRecNum Goto KEXPDONE
+	If K4$[15,16] <> MPR.RevLvl$ Goto L_6210
+	Mat Read #BOMC,R45,0;BM;
+	Mat Read #BOMC,R45,48;BM1;
+	Mat Read #BOMC,R45,56;BM$;
+	! Gosub L_8100 ! clear kit vars
+	FOR I=0 TO 5                   
+	  IF I<=1 LET KL2[I]=0;KL3[I]=0
+	  LET KL1[I]=0                 
+	NEXT I \ LET KL$=" ",KL$       
+	LET KL1[5]=1                                      
+	CLEAR Kitl.
+	X = K4$[6,9] \ If X <= 0 Goto L_6210 ! kit line = x
+	T1 = 0 \ If BM1[1] = -1 Let T1 = BM
+	If BM1[1] = 0 Let T1 = L7[4] * BM / 100
+	If BM1[1] = 1 Let T1 = L7[4] * BM
+	If BM1[1] = 2 Let T1 = WGHT * BM / 100
+	If BM1[1] = -2 Goto L_6500
+	E2 = K4$[10,14];ECOST = 1 ! \ Gosub L_3800 ! read prod - get cost
+	call getkprod()
+	If PR.ProdCode$[1,5] = "     " Let BM1[1] = -2 \ Goto L_6500
+	If BM1[2] = 1 Gosub L_6400 \ Goto L_6210 ! optional
+	TMP$=PR.ComdtyCode$;KL1[3]=1
+	If TMP$ = "MACH" Or TMP$ = "TIME" Or TMP$ = "LABR" Goto L_6300 ! NO STK KEPT!
+	T1 = Int(T1 + .99999)
+	Kl1[3]=0 ! stk item
+	x3[1]=getwhavail(e$,intco,PWC,PR.ProdCode$,Whse)
+	x1=0 \ if p60$[27,27]="S" let x1=1
+	if p60$[27,27]="B" let x1=2
+	if p60$[27,27]="E" let x1=3
+	if action2$="QUOTES" let x1=0 ! no chk on quotes
+	if X1>0 ! has bochk set
+	 If KL1[3]=0 and T1>X3[1] ! order > whavail
+	  if x3[1]>0 ! has some avail
+		Let T1=X3[1] ! take it all
+		Let kitissue=1
+	  Else ! zero or <0 avail
+		Let T1=0
+		Let Kitissue=1 ! all backordered
+	  Endif
+	 Endif ! of updt and ord>avail
+	Endif
+	L_6300: Rem
+	Gosub L_6600 ! write kit
+	If KL1[3] = 1 Goto L_6335 ! no stk
+	if action2$="ORDERS"
+		Mat Read #PRC,E2,256;A
+		A[1] = A[1] + T1
+		Mat Write #PRC,E2,256;A;
+		!
+		if sqlChan >= 0 ! MySQL enabled and channel opened
+			e = prod_UpdateSQLFromDL4(e$, intCo, PR.ProdCode$, sqlChan, PRC)
+			if e <> 1 ! returns the number of records add/updated/deleted
+				error 11000 ! search error
+			end if
+		end if
+	!
+	Endif
+	! PASSR[1] = R46;TYPE = 6;QTY = T1
+	If Whse>0 and whse<100
+		keypw$=Pr.ProdCode$+Whse Using "##"
+		KPWR=filegetprodwhse(e$,PWC,"=",1,Keypw$,pw.)
+		If KPWR<=0 ! not there - build it NOW
+			Clear pw.
+			Whbld[0] = PWC
+			Whbld[1] = Whse
+			Whbld[2] = pr.PrimVend ! B[24]
+			
+			Call mxwhcreate(e$,IntCo,Pr.ProdCode$,Whbld[])        
+			KPWR = Whbld[2];e$ = ""
+			if kpwr>0 read record #PWC,KPWR,0;pw.; ! read new record
+		Endif
+		if KPWR>0 and action2$="ORDERS"
+			pw.QtyOnOrd=pw.QtyOnOrd+T1 ! Qty
+			!if pw.QtyOnOrd<0 let pw.QtyOnOrd=0
+			write record #PWC,KPWR,0;pw.;
+		Endif
+	Endif
+	! Swap 1,"MXPRWH" ! update whse
+	L_6335: Rem
+	Goto L_6210
+	L_6400: Rem OPTIONAL (send in slist$ - let user select)
+	!Print @0,21;'CE RB';"PRODUCT: ";P$[140,151];" IS OPTIONAL. USE IT? (Y/N)   ";
+	!Input ""UM$ \ Print @0,21;'CE';
+	!If UM$ <> "Y" If UM$ <> "N" Goto L_6400
+	!If UM$ = "N" Return 
+	!If UM$ = "Y" Return 1
+	!Goto L_6400
+	! set up kit vars for send of optional
+	kitl.KitLineNum=x ! bom line
+	kitl.FGProd$ = rol.ProdCode$;kitl.KitProd$ = pr.ProdCode$
+	kitl.OrdLineNum=rol.LineNum
+	kitl.Cmdty$ = pr.ComdtyCode$ \ If BM1[1] = -2 Let kitl.Desc$ = BM$[1,26]
+	kitl.Whse = Whse;kitl.LineType = 0;kitl.UMRec = BM1[0];kitl.CalcType = BM1[1]
+	If BM1[1] = -2 Let kitl.LineType = 1
+	If roh.Ordtype = 2 Or roh.Ordtype = 5 Let kitl.LineType = 1
+	tmp1$=kitl.Cmdty$
+	if tmp1$="MACH" or tmp1$="TIME" or tmp1$="LABR" let kitl.LineType = 1
+	kitl.OrdNum = roh.OrdNum;kitl.CustNum = roh.CustNum
+	kitl.UnitCost = KCOST;kitl.QtyUsed = T1
+	If roh.Ordtype = 8 Or roh.Ordtype = 16 Let kitl.UnitCost = 0
+	tmp$="STK" \ if kitl.LineType=1 let tmp$="NSTK"
+	if kitl.CalcType=-2 let tmp$="MSG"
+	webstr$=Str$(kitl.KitLineNum),fdel$ ! line number
+	if tmp$<>"MSG" ! product
+			Prod$=kitl.KitProd$
+			KPRR=E2 ! already gotten filegetprod(e$,PRC,"=",1,Prod$,pr.)
+			if kprr<0 ! not product anymore
+				! clear kitl.
+				! resets as msg line
+				tmp$="MSG";kitl.LineType=1;kitl.CalcType=-2
+				kitl.FGProd$=rol.ProdCode$;kitl.KitProd$="Z"+blank$
+				kitl.Whse=rol.Whse;kitl.OrdLineNum=rol.LineNum
+				if action2$<>"HISTORY"
+					write record #KTC,KLR,0;kitl.;
+				Endif
+			Else ! product found
+			   if kitl.linetype=0 ! check stock
+				x3[1]=getwhavail(e$,intco,PWC,kitl.KitProd$,kitl.Whse)
+				x1=0 \ if p60$[27,27]="S" let x1=1
+				if p60$[27,27]="B" let x1=2
+				if p60$[27,27]="E" let x1=3
+				if action2$="QUOTES" let x1=0 ! no chk
+				if X1>0 ! has bochk set
+				 If kitl.linetype=0 and kitl.QtyUsed>X3[1] ! order > whavail
+				  if x3[1]>0 ! has some avail
+					Let kitl.QtyUsed=X3[1] ! take it all
+					Let kitissue=1
+				  Else ! zero or <0 avail
+					Let kitl.QtyUsed=0
+					Let Kitissue=1 ! all backordered
+				  Endif
+				 Endif ! of updt and ord>avail
+				Endif
+			   Else ! nonstk
+				x3[1]=0
+			   Endif ! of stk check
+				! convert qty/cost
+				cnvtu[0]=0;cnvtu[1]=kitl.UMRec;cnvtu[2]=1
+				tmp1$=kitl.Cmdty$
+				if tmp1$="MACH" or tmp1$="TIME" or tmp1$="LABR" let cnvtu[2]=5
+				cnvta=kitl.QtyUsed
+				QTYU=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+				cnvtu[2]=2
+				cnvta=kitl.UnitCost
+				UCost=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+				webstr$=webstr$,tmp$,fdel$ ! type
+				webstr$=webstr$,RTrim$(kitl.KitProd$),fdel$
+				webstr$=webstr$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.desc2$),fdel$
+				webstr$=webstr$,Str$(kitl.CalcType),fdel$
+				tmp$=XUnit$(kitl.UMRec,ccc)
+				webstr$=webstr$,tmp$,fdel$,kitl.Cmdty$,fdel$
+				webstr$=webstr$,LTrim$(QTYU using QMask$),fdel$
+				webstr$=webstr$,LTrim$(UCost using PMask$),fdel$
+				X3=FNR(kitl.QtyUsed*kitl.UnitCost)
+				webstr$=webstr$,LTrim$(X3 Using QMask$[1,14]),fdel$
+				webstr$=webstr$,RTrim$(kitl.Desc$),fdel$
+				cnvtu[0]=0;cnvtu[1]=kitl.UMRec;cnvtu[2]=1
+				cnvta=X3[1]
+				QTYA=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+				webstr$=webstr$,LTrim$(QTYA using QMask$[1,14]),fdel$
+				tmp$=pr.SerNoTrack$ \ if kitl.LineType=1 or kitl.CalcType=-2 let tmp$="N"
+				if tmp$<>"Y" let tmp$="N" 
+				if action2$<>"ORDERS" let tmp$="N"
+				webstr$=webstr$,tmp$,fdel$ ! sn track
+			Endif
+	Endif ! of not msg
+	if tmp$="MSG" ! just desc's
+		webstr$=webstr$,tmp$,fdel$,fdel$,RTrim$(kitl.Desc$),fdel$ ! no id,desc1
+		webstr$=webstr$,fdel$,fdel$,fdel$,fdel$ ! d2,cid,um,comm
+		webstr$=webstr$,fdel$,fdel$,fdel$,fdel$ ! qty,cost,ext,comment(is desc)
+		webstr$=webstr$,fdel$,"N",FDEL$ ! avail
+	Endif ! product
+	Slist$[srow]=webstr$
+	srow=srow+1 \ if srow>stmpcnt let stmpcnt=expandarray(e$,SList$[])
+	return
+	L_6500: Rem MESSAGE LINE
+	!P$ = " ",P$;P$[140,141] = "Z "
+	!PFU1[8] = 0;
+	Clear pr.
+	pr.ProdCode$="Z"+blank$
+	KCOST = 0;T1 = 0
+	KL1[3]=1;kl1[5]=-2
+	Goto L_6300
+	L_6600: Rem KIT LINE
+	K3$ = " ",K3$;K3$[1,6] = ROH.OrdNum Using "######";K3$[7,9] = rol.LineNum Using "###"
+	K3$[10,12] = X Using "&&&"
+	Search #KTC,2,1;K3$,R46,E \ If Not(E) Goto L_6670
+	!If E > 1 Gosub ERR_SEARCH
+	C = 46 \ M = 1 \ D = 0 \ E = 2
+	Search #ktc,1,0;k3$,V1,e
+	! IF E Gosub ERR_SEARCH
+	R46 = V1
+	C = 46;D = 1;M = 4;K7$ = K3$;V1 = R46
+	Search #ktc,4,1;k7$,v1,e
+	! if e Gosub ERR_SEARCH
+	R46 = V1
+	L_6670: KL$ = " ",KL$;KL$[1,12] = rol.ProdCode$;KL$[13,24] = pr.ProdCode$
+	KL$[25,28] = pr.ComdtyCode$ \ If BM1[1] = -2 Let KL$[29,54] = BM$[1,26]
+	KL1[0] = Whse;KL1[1] = X;KL1[2] = rol.LineNum;KL1[3] = 0;KL1[4] = BM1[0];KL1[5] = BM1[1]
+	If BM1[1] = -2 Let KL1[3] = 1
+	If roh.Ordtype = 2 Or roh.Ordtype = 5 Let KL1[3] = 1
+	TMP$=PR.ComdtyCode$
+	If TMP$ = "MACH" Or TMP$ = "TIME" Or TMP$ = "LABR" Let KL1[3] = 1
+	KL2[0] = roh.OrdNum;KL2[1] = roh.CustNum
+	KL3[0] = KCOST;KL3[1] = T1
+	If roh.Ordtype = 8 Or roh.Ordtype = 16 Let KL3[0] = 0
+	Mat Write #KTC,R46,0;KL$;
+	Mat Write #KTC,R46,58;KL1;
+	Mat Write #KTC,R46,70;KL2;
+	Mat Write #KTC,R46,78;KL3;
+	KInvno=0
+	write #KTC,R46,90;KInvNo
+	DA = 0
+	RETURN
+	KEXPDONE: ! DONE
+	SList$[srow]=esdel$
+  Else
+ include "src/callsuberr.inc"
+  end try
+end Sub ! BldKit
+! 
+!--------------------------------------------------------------------
+Sub getkprod()
+! get kit product and costs
+  try
+	Dim K30$[60]
+	Dim 1%,W0
+	Dim 3%,PREC[5]
+	Rem READ PROD
+	w0=Whse
+	If KL1[5] = -2 Goto GKPDone
+	!Mat Read #3,E2;P$;
+	!Mat Read #3,E2,156;B;
+	!Mat Read #3,E2,256;A;
+	!Mat Read #3,E2,512;PFU1;
+	!Mat Read #3,E2,554;PFU2; \ Mat Read #3,E2,620;LM;
+	!Mat Read #3,E2,596;PRPARC; \ Mat Read #3,E2,894;C4;
+	!Mat Read #3,E2,938;PF_LOAD2;
+	Read record #PRC,E2,0;pr.;
+	If Not(pr.CostLoad) Let pr.CostLoad = pr.CostAvg
+	If Not(pr.CostLoad) Let pr.CostLoad = pr.CostPO
+	PREC[0] = E2;R[3] = E2
+	If pr.UMStkDefault <= 0 Let pr.UMStkDefault = pr.BaseUM
+	If pr.UMPrdtnDefault <= 0 Let pr.UMPrdtnDefault = pr.UMStkDefault
+	If P9$[32,32] <> "Y" Goto L_3880
+	! Gosub L_3700 ! prodwhse
+	LET K30$=" ",K30$;K30$[1,12]=pr.ProdCode$
+	LET K30$[13]=W0 USING "##"
+	SEARCH #PWC,2,1;K30$,R[30],E ! \ IF E>1 GOSUB ERR_SEARCH:
+	IF Not(E)
+		Read Record #PWC,R[30],0;pw.;
+	Else
+		LET pw.CostLoad=pr.CostLoad;pw.CostLoad2=pr.CostLoad2
+		LET pw.Load1MupTbl=pr.Load1MupTbl;pw.Load2MupTbl=pr.Load2MupTbl
+		LET pw.CostAvg=pr.CostAvg;pw.CostLastPo=pr.CostPO;pw.CostBase=pr.CostBase
+	Endif
+	! Gosub L_69000 ! set whse
+	IF P9$[32,32]="Y" ! "warehouse pricing turned on          
+	  !LET X2=W3[19]+W3[20]+W3[21]+W3[22]+W3[23]+W3[24]
+	  !IF WHPARC[1] LET C4[3]=WHPARC[1] ELSE  IF X2 LET C4[3]=0
+	  !FOR X2=20 TO 25
+	  !	IF NOT(W3[X2-1]) LET W3[X2-1]=A[X2]
+	  !NEXT X2
+	  IF NOT(pw.Load1MupTbl) AND NOT(pw.CostLoad) LET pw.Load1MupTbl=pr.Load1MupTbl
+	  IF NOT(pw.CostLoad) LET pw.CostLoad=pr.CostLoad
+	  IF NOT(pw.Load2MupTbl) AND NOT(pw.CostLoad2) LET pw.Load2MupTbl=pr.Load2MupTbl
+	  IF NOT(pw.CostLoad2) LET pw.CostLoad2=pr.CostLoad2
+	  IF NOT(pw.CostAvg) LET pw.CostAvg=pr.CostAvg
+	  IF NOT(pw.CostLastPo) LET pw.CostLastPo=pr.CostPO
+	  IF NOT(pw.CostBase) LET pw.CostBase=pr.CostBase
+	  !IF NOT(WHMISC[2]) LET WHMISC[2]=PRPARC[2]
+	  !IF WHPARC[0] LET B[22]=WHPARC[0]
+	  !IF NOT(W2[3]) LET W2[3]=B[24]
+	ENDIF
+	L_3880: Gosub L_3900
+	A2 = KCOST;ECOST = 0
+	Goto GKPDone
+	L_3900: Rem GET KIT COST (use order's default)
+	If ECOST Gosub L_8200 ! LOADS FROM TABLE
+	If P9$[32,32] = "Y" ! "set loaded cost
+	  KCOST = pw.CostLoad
+	  If DFT_COST = 2
+		KCOST = pw.CostLoad2
+	  Else 
+		If DFT_COST = 3
+		  KCOST = pw.CostAvg
+		Else 
+		  If DFT_COST = 4
+			KCOST = pw.CostLastPo
+		  Else 
+			If DFT_COST = 5
+			  KCOST = pw.CostBase
+			End If 
+		  End If 
+		End If 
+	  End If 
+	Else 
+	  KCOST = pr.CostLoad
+	  If DFT_COST = 2
+		KCOST = pr.CostLoad2
+	  Else 
+		If DFT_COST = 3
+		  KCOST = pr.CostAvg
+		Else 
+		  If DFT_COST = 4
+			KCOST = pr.CostPO
+		  Else 
+			If DFT_COST = 5
+			  KCOST = pr.CostBase
+			End If 
+		  End If 
+		End If 
+	  End If 
+	End If 
+	Return 
+	L_8200: REM CALC LOADS FROM LOAD MARKUP         
+	IF P9$[32,32]="Y"
+	  IF pw.Load1MupTbl
+		LET WH=W0;LTBL=pw.Load1MupTbl;CNVTA=0
+		GOSUB L_8305: \ IF R[3]>0 LET pw.CostLoad=CNVTA  
+	  ENDIF
+	  IF pw.Load2MupTbl
+		LET WH=W0;LTBL=pw.Load2MupTbl;CNVTA=0
+		GOSUB L_8305: \ IF R[3]>0 LET pw.CostLoad2=CNVTA  
+	  ENDIF
+	ELSE
+	  IF pr.Load1MupTbl
+		LET WH=0;LTBL=pr.Load1MupTbl;CNVTA=0
+		GOSUB L_8305: \ IF R[3]>0 LET pr.CostLoad=CNVTA    
+	  ENDIF
+	  IF pr.Load2MupTbl
+		LET WH=0;LTBL=pr.Load2MupTbl;CNVTA=0
+		GOSUB L_8305: \ IF R[3]>0 LET pr.CostLoad2=CNVTA
+	  ENDIF
+	ENDIF
+	RETURN
+	L_8305: REM CALL
+	LET PREC[0]=R[3]
+	CALL "MXLOAD5.DL4",roh.ordtype,WH,LTBL,PREC[],CNVTA,IntCO,e$,rstr$
+	RETURN
+	GKPDone: ! finished
+  Else
+ include "src/callsuberr.inc"
+  end try
+end Sub ! getkprod
+! 
+!--------------------------------------------------------------------
+Sub getkitcost()
+! total lines - write rol (if appropriate)
+  Try
+	Dim K6$[60]
+	Dim 3%,KL3[1],T9
+	! IF REBATE OR SPECIAL COSTS - NO UPDATE!
+	IF ROL.CostOrigin=9 OR ROL.CostOrigin=10 OR ROL.CostOrigin=11 GOTO GKCDONE
+	LET T9=0
+	K6$=" ",K6$;K6$[1,6]=roh.OrdNum USING "######";K6$[7,9]=rol.Linenum USING "###"
+	Key1$=K6$
+	Do 
+		SEARCH #KTC,3,1;K6$,KTR,E
+		IF E exit do
+		if k6$[1,9]<>Key1$[1,9] exit do
+		MAT  READ #KTC,ktr,78;KL3;
+		LET T9=T9+FNR(KL3[0]*KL3[1])
+	Loop                                                              
+	! UPDATE COSTS ON ORDER LINE
+	Read record #olc,OLR,0;rol.
+	if rol.KitDesignation$<>"KIT" GOTO gkcdone ! not a kit?
+	IF rol.QtyShip=0 or t9=0 GOTO GKCDONE ! DO NOT ZERO
+	LET rol.UnitCost=ABS(T9/rol.QtyShip)
+	if roh.ordtype=4 or roh.ordtype=25	!"bill and hold
+		LET rol.ExtLoadShip=T9 
+	endif
+	LET rol.ExtLoadShip=FNR(rol.QtyShip*rol.UnitCost)
+	LET rol.ExtLoadOrd=FNR(rol.QtyOrd*rol.UnitCost)
+	rol.LoadUpchrg=0
+	write record #OLC,OLR,0;rol.;
+	GKCDONE: !
+	! if just once to allocate DO RASL NOW?
+	! DO RASL? NO SINGLE KIT LINE RASL!!
+	if action2$="ORDERS"
+		S9[2]=OHR;S9[3]=0;S9[4]=208 ! determine program #?
+		S9[9]=rol.Linenum ! kitl.KitLineNum
+		S9[12]=OLR ! PASS THE LINE JUST UPDATED (new single line mxrasl5)?
+		RChan[0]=1;RChan[1]=PRC;RCHan[2]=OHC;RChan[3]=OLC
+		RChan[4]=ktc;RChan[5]=ccc;RChan[6]=PLTC;RChan[7]=0
+		RChan[8]=SLTC;RChan[9]=0
+		! Call dxsave(0,"/tmp/kits.txt!")
+		Call "MXRASL5.DL4",intco,Ctlc,S9[],RChan[] ! unrem to activate
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! getkitcost
+!------------------------------------------------------------------------------
+Sub delkline()
+! delete a single kit line
+  Try
+	call dxget("KITLINE",tmp$)
+	if tmp$=""
+		returnstatus=0
+		message$="NO LINE SENT"
+		goto DSKLDONE
+	Endif
+	KLineno=tmp$
+	if klineno<=0 or klineno>999
+		returnstatus=0
+		message$="INVALID LINE SENT"
+		goto DSKLDONE
+	Endif
+	key1$=OLKey$
+	key1$[10]=klineno using "&&&"
+	KLR=filegetsordlkitl(e$,KTC,"=",1,key1$,kitl.)
+	if klr<=0 goto DSKLDONE
+	If Action2$="ORDERS" ! order - back out any alloc
+		call DelAlloc(e$,Intco,FChan[],kitl.)
+	Endif
+	Search #KTC,5,1;key1$,R,E
+	if e 
+		returnstatus=0
+		message$="Search Error "+Str$(E)+" delete kit line"
+	Endif
+	let e=3;r=KLR
+	Search #KTC,1,0;key1$,R,E
+	if e 
+		returnstatus=0
+		message$="Search Error "+Str$(E)+" return kit record"
+	Endif
+
+  DSKLDONE: !
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! delkline
+!------------------------------------------------------------------------------
+Sub wrtkline()
+! submit/write kit line
+  Try
+	!Call dxsave(0,"tmp/kitsb.txt!")
+	whse=roh.wh
+	if rol.whse>0 and rol.whse<100 let whse=rol.whse
+	call dxget("KITLINE",tmp$)
+	if tmp$=""
+		returnstatus=0
+		message$="NO LINE SENT"
+		goto WKLDONE
+	Endif
+	KLineno=tmp$
+	if klineno<=0 or klineno>999
+		returnstatus=0
+		message$="INVALID LINE SENT"
+		goto WKLDONE
+	Endif
+	key1$=OLKey$;newkl=0
+	key1$[10]=klineno using "&&&"
+	KLR=filegetsordlkitl(e$,KTC,"=",1,key1$,kitl.)
+	if klr<=0 
+		Let newkl=1
+		clear kitl.
+		KLR=0
+		KITL.KitLineNum=KLINENO
+	Endif
+	call dxget("KLTYPE",tmp$)
+	tmp$=UCase$(RTrim$(tmp$))
+	if tmp$="" let tmp$="STK"
+	if tmp$<>"STK" AND tmp$<>"NSTK" and tmp$<>"MSG"
+		returnstatus=0
+		message$="KIT LINE TYPE INVALID"
+		goto WKLDone
+	Endif
+	If tmp$="MSG" let msgln=1
+	if msgln 
+		if not(newkl) and kitl.KitProd$[1,2]<>"Z "
+			returnstatus=0
+			message$="KIT LINE IS IN USE"
+		Endif
+		goto GetComment ! limit is desc/comment ONLY
+	Endif
+	call dxget("PRODID",tmp$)
+	! 1st - altitem check
+	Let PROD$=UCase$(tmp$)+Blank$
+	if prod$[1,2]="Z " ! message
+		let msgln=1
+		goto getcomment
+	Endif
+	tmp$=ChkAltItem$(e$,IntCo,Prod$,roh.CustNum)
+	If tmp$<>"" If tmp$[1,2]<>"  " let prod$=tmp$ ! has alt item
+	PRR=filegetprod(e$,PRC,"=",1,Prod$,pr.)
+	if PRR<0
+		returnstatus=0
+		message$="PRODUCT NOT FOUND"
+		goto WKLDone
+	
+	Endif
+	if not(newkl) ! existing
+		if kitl.KitProd$<>Prod$ ! cannot switch products on lines!
+			returnstatus=0
+			message$="KIT LINE IS ALREADY USED BY "+KITL.KITPROD$
+			goto WKLDone
+		Endif
+	Endif ! of chk if line exists already and is diff product
+	kitl.KitProd$=Prod$+blank$
+	If Action2$="ORDERS" ! order - back out any alloc
+		if not(newkl) call DelAlloc(e$,Intco,FChan[],kitl.)
+	Endif
+	If not(msgln)
+		let e2=prr;ECost=1
+		call getkprod() ! get default data
+	Endif
+	GetComment: ! message line is comment only!
+	call dxget("COMMENT",tmp$)
+	kitl.Desc$=tmp$+Blank$
+	if msgln ! that's all!
+		kitl.KitProd$="Z"+Blank$
+		LET KITL.UMRec=0;kitl.CalcType=-2
+		kitl.UnitCost=0;kitl.QtyUsed=0;kitl.LineType=1
+		goto wrtkit
+	Endif
+	!call dxget("CALCID",tmp$)
+	!if RTrim$(tmp$)=""
+	!	returnstatus=0
+	!	message$="NO Calculation type sent"
+	!	goto WKLDone
+	!Endif
+	!x=tmp$
+	!if x<-1 or x>2
+	!	returnstatus=0
+	!	message$="Invalid Calculation type"
+	!	goto WKLDone
+	!Endif
+	!let kitl.CalcType=x
+	IF NEWKL LET kitl.CalcType=1 ! QTY DEFLT
+	call dxget("KITUM",tmp$)
+	R=getumrec(e$,ccc,tmp$,IntCo,PR.)
+	If R <> 0 Let tmp$ = Str$(R)
+	UM=tmp$
+	Flag=ChkPrdUM(e$,UM,IntCo,Pr.)
+	If Not(Flag)
+		returnstatus=0
+		message$="U/M not on Product"
+		goto WKLDONE
+	Endif
+	kitl.UMRec=UM
+	call dxget("QTYUSED",tmp$)
+	X3=tmp$
+	if x3<0 ! does not allow neg on 201k
+		returnstatus=0
+		message$="Can not use Negative Quantity"
+		goto WKLDONE
+	Endif
+	cnvtu[0]=kitl.UMRec;cnvtu[1]=0;cnvtu[2]=1
+	cnvta=X3
+	amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	kitl.QtyUsed=amount
+	!if COST_LEV[1]>0 ! costs on oe
+		!call dxget("COST",tmp$)
+		!X3=tmp$
+		!if x3<0 ! does not allow neg on 201k
+		!	returnstatus=0
+		!	message$="Can not have Negative Cost"
+		!	goto WKLDONE
+		!Endif
+		!cnvtu[0]=kitl.UMRec;cnvtu[1]=0;cnvtu[2]=2
+		!cnvta=X3
+		!amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		!kitl.UnitCost=amount
+	!Else ! no cost on oe
+		let kitl.UnitCost=KCOST ! always from prod - no change allowed
+	!Endif
+
+	WRTKit: ! write results now
+	IF kitl.KitProd$[1,2]<>"Z " LET kitl.LineType=0
+	IF roh.Ordtype=2 OR roh.Ordtype=5 LET kitl.LineType=1
+	if kitl.linetype=0
+		tmp$=pr.ComdtyCode$
+		if tmp1$="MACH" or tmp1$="TIME" or tmp1$="LABR" let kitl.linetype=1
+	Endif
+	if kitl.CalcType=-2 let kitl.LineType=1
+	If kitl.linetype=0 and action2$="ORDERS"
+		x3[1]=getwhavail(e$,intco,PWC,kitl.KitProd$,Whse)
+		x1=0 \ if p60$[27,27]="S" let x1=1
+		if p60$[27,27]="B" let x1=2
+		if p60$[27,27]="E" let x1=3
+		if action2$="QUOTES" let X1=0 ! no chk 
+		if X1>0 ! has bochk set
+			if KITL.QTYUSED AND kitl.QtyUsed>X3[1] ! order > whavail
+			  returnstatus=0
+			  message$="NOT ENOUGH AVAILABLE"
+			  goto WKLDONE
+			Endif ! not enough
+		Endif ! of bochk
+	Endif ! of stk item
+	! record order data
+	kitl.FGProd$=rol.ProdCode$
+	kitl.Cmdty$=pr.ComdtyCode$+blank$
+	kitl.Whse=Whse
+	kitl.OrdLineNum=rol.LineNum
+	kitl.OrdNum=roh.OrdNum
+	kitl.CustNum=roh.CustNum
+	IF roh.Ordtype=8 OR roh.Ordtype=16 LET kitl.UnitCost=0 
+	If newkl ! new
+		LET E=2;R=0
+		SEARCH #KTC,1,0;KEY1$,r,e
+		if e
+			returnstatus=0
+			message$="Search Error "+Str$(E)+" getting new record"
+			goto WKLDone
+		Endif
+		let klr=r
+		search #KTC,4,1;key1$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error "+Str$(E)+" inserting new key"
+			goto WKLDone
+		Endif
+	Endif
+	write record #KTC,KLR,0;kitl.;
+	if kitl.LineType=0 and action2$="ORDERS" ! stock item
+		let pr.QtyonPWO=pr.QtyonPWO+kitl.Qtyused
+		write record #PRC,PRR,0;pr.;
+		!
+		if sqlChan >= 0 ! MySQL enabled and channel opened
+			call prod_DL4SQLConvert(e$,"FROMDL4",pr.,sql_prod.,PRR)
+			e = prod_SQLAddUpdate(e$,sqlChan,sql_prod.) ! mode="a" or "c"
+			if e <> 1 ! returns the number of records add/updated/deleted
+				error 11000 ! do bad update stuff
+			end if
+		end if
+		!			
+		prodkey$=Prod$+Whse Using "##"
+		PWR=filegetprodwhse(e$,PWC,"=",1,prodkey$,pw.)
+		if PWR<=0 ! not found
+			Clear pw.
+			Whbld[0] = PWC
+			Whbld[1] = Whse
+			Whbld[2] = pr.PrimVend ! B[24]
+			
+			Call mxwhcreate(e$,IntCo,Pr.ProdCode$,Whbld[])        
+			PWR = Whbld[2];e$ = "" 
+			If PWR>0 read record #PWC,PWR,0;pw.;
+		Endif
+		if pwr>0
+			let pw.QtyOnOrd=pw.QtyOnOrd+kitl.Qtyused
+			write record #PWC,PWR,0;pw.;
+		Endif
+	! DO RASL? NO SINGLE KIT LINE RASL!!
+		S9[2]=OHR;S9[3]=0;S9[4]=208 ! determine program #?
+		S9[9]=rol.Linenum ! kitl.KitLineNum
+		S9[12]=OLR ! PASS THE LINE JUST UPDATED (new single line mxrasl5)?
+		RChan[0]=1;RChan[1]=PRC;RCHan[2]=OHC;RChan[3]=OLC
+		RChan[4]=ktc;RChan[5]=ccc;RChan[6]=PLTC;RChan[7]=0
+		RChan[8]=SLTC;RChan[9]=0
+		! Call dxsave(0,"/tmp/kits.txt!")
+		! Call "MXRASL5.DL4",intco,Ctlc,S9[],RChan[] ! unrem to activate 
+	Endif ! of do rasl on orders
+	WKLDONE: ! 
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! wrtkline
+!------------------------------------------------------------------------------
+! EXTERNAL SUBS
+!------------------------------------------------------------------------------
+External Sub DELOKIT(e$,IntCo,S9[],FChan[])
+! delete all kit lines
+  try
+	Declare Sub OpenFiles,Delalloc
+	Declare Function GetOrdRec
+	Dim buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action2$[30] ! action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200],olkey$[60]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60]
+	Dim OrgProd$[12],LPType$[5]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,PRC,PWC,CCC,OHC,OTC,OSC,OLC,CMC,och[2]
+	dim 1%,cost_lev[4],Whse,debug,ordpad,2%,Q0[1],cust
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,PRR,OHR,PWR,FRec[99]
+	Dim 3%,SUM,SQty,SHQty,BOQty,R[99],O1,UB0[16]
+	Dim PR. as prod
+	Dim MPR. as prod ! make item struct 
+	Dim pw. as prodwhse
+	dim roh. as roh ! order header
+	dim ros. as ros ! order ship to file
+	dim rot. as rot ! order total file
+	dim rol. as rolnew ! order lines
+	dim cmc. as commhead ! commodity code
+	dim umc. as ccodes ! um codes file
+	Dim Nstk. as sproddesc ! non-stock file
+	Dim Kitl. as sordlkitl ! kit lines file
+	Action2$="ORDERS"
+	! call OpenFiles()
+	! call OpenFiles()
+	ohc=FChan[1];osc=fchan[2];otc=fchan[3]
+	prc=FChan[4];pwc=fchan[5];sltc=fchan[6];pltc=fchan[7]
+	ktc=FChan[8];osnc=fchan[11];snmc=fchan[12]
+	if osnc<=0 
+		let OSNC = OpenFile(2944,IntCo) \ if OSNC=-1 Error 42 ! ord serno
+		let fchan[11]=osnc;och[1]=osnc
+	endif
+	if snmc<=0 
+		let SNMC = OpenFile(416,IntCo) \ if SNMC=-1 Error 42 ! serlno
+		let fchan[12]=snmc;och[2]=snmc
+	Endif
+	OrderNo=S9[7];LineNo=S9[9]
+	OHR=GetOrdRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.,action2$)
+	if OHR<=0 goto DOKDone
+	olkey$=" ",olkey$
+	olkey$[1,6]=OrderNo using "######"
+	olkey$[7,9]=Lineno Using "###"
+	olkey$[11]=""
+	key1$=OLKey$
+	Do
+		KLR=filegetsordlkitl(e$,KTC,">",1,key1$,kitl.)
+		if klr<=0 exit do
+		if key1$[1,9]<>OLKey$[1,9] exit do
+		whse=kitl.Whse
+		call delalloc(e$,Intco,FChan[],kitl.) ! back out product,whse,sordlot,sprodlot
+		Search #KTC,5,1;KEY1$,R,E
+		LET E=3;R=KLR
+		SEARCH #KTC,1,0;KEY1$,R,E
+	Loop
+
+	DOKDone: ! finished
+	if och[1] ! opened sordflen
+		try close #och[1] else rem
+	endif
+	if och[2] ! open pserlno
+		try close #och[2] else rem
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DELOKIT
+!------------------------------------------------------------------------------
+External Sub DELQKIT(e$,IntCo,S9[],FChan[])
+! delete all Quote kit lines (no allocations)
+  try
+	Declare Sub OpenFiles,Delalloc
+	Declare Function GetOrdRec
+	Dim buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200],olkey$[60]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60]
+	Dim OrgProd$[12],LPType$[5]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,PRC,PWC,CCC,OHC,OTC,OSC,OLC,CMC
+	dim 1%,cost_lev[4],Whse,debug,ordpad,2%,Q0[1],cust
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,PRR,OHR,PWR,FRec[99]
+	Dim 3%,SUM,SQty,SHQty,BOQty,R[99],O1,UB0[16]
+	Dim PR. as prod
+	Dim MPR. as prod ! make item struct 
+	Dim pw. as prodwhse
+	dim roh. as roh ! order header
+	dim ros. as ros ! order ship to file
+	dim rot. as rot ! order total file
+	dim rol. as rolnew ! order lines
+	dim cmc. as commhead ! commodity code
+	dim umc. as ccodes ! um codes file
+	Dim Nstk. as sproddesc ! non-stock file
+	Dim Kitl. as sordlkitl ! kit lines file
+	Action2$="QUOTES"
+	! call OpenFiles()
+	ohc=FChan[1];osc=fchan[2];otc=fchan[3]
+	prc=FChan[4];pwc=fchan[5];sltc=fchan[6];pltc=fchan[7]
+	ktc=FChan[8]
+	OrderNo=S9[7];LineNo=S9[9]
+	OHR=GetOrdRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.,action2$)
+	if OHR<=0 goto DQKDone
+	olkey$=" ",olkey$
+	olkey$[1,6]=OrderNo using "######"
+	olkey$[7,9]=Lineno Using "###"
+	olkey$[11]=""
+	key1$=OLKey$
+	Do
+		KLR=filegetsordlkitl(e$,KTC,">",1,key1$,kitl.)
+		if klr<=0 exit do
+		if key1$[1,9]<>OLKey$[1,9] exit do
+		whse=kitl.Whse
+		! call delalloc() ! back out product,whse,sordlot,sprodlot
+		Search #KTC,5,1;KEY1$,R,E
+		LET E=3;R=KLR
+		SEARCH #KTC,1,0;KEY1$,R,E
+	Loop
+
+	DQKDone: ! finished
+
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DELQKIT
+!------------------------------------------------------------------------------

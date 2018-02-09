@@ -1,0 +1,390 @@
+!
+! loadsave -w -n 100,10 -o prog/util/sysfbuild src/sysfbuild.src
+!
+! sysfbuild -- PaperMaster file build utility - callable version
+
+!==============================================================================+
+! Purpose:  To build any given Paper Master data file [as defined in ssup0201].|
+! Author:   Nate 04/22/96 -- Based on filebuild.s and ssup0207.                |
+! Modified:                                                                    |
+!==============================================================================+
+Declare Intrinsic Sub String,FindF,Time
+Declare Intrinsic Function FindChannel
+include "src/utilcopyright.inc"
+dim e$[300]
+
+try
+!----------------------------------------------------------------------------+
+!Inbound variables                                                           |
+!----------------------------------------------------------------------------+
+!fcode$  = File code. The file code as defined in ssup0201 (e.g. ROH)        |
+!coid    = Company number. Builds the given data file for this company.      |
+!groupid = Group number. Builds the given data file for this group.          |
+!pth$    = Optional. If not null, it will be used to build the file at the   |
+!          given path. It must end with a "/".                               |
+!owrite$ = Overwrite existing files flag. "N"=don't overwrite, "Y"=do.       |
+!row     = Row position to print progress   (recommend 23)                   |
+!col     = Column postion to print progress (recommend 0)                    |
+!ch_log  = It is up to the caller to build a text file for auditing purposes.|
+!          Please do not use channels 80-83.                                 |
+!        = -1 = deactivates the log (if you do not wish to use one)          |
+!----------------------------------------------------------------------------+
+
+Enter FCODE$,COID,GROUPID,PTH$,OWRITE$,ROW,COL,CH_LOG,DFILE$,REASON$,E,...
+! if "fromUpgrade" don't send print statements with
+! control strings as this is being executed via
+! a job not attached to terminal.  Be sure to send
+! all output to ch_log as this will be reviewed and
+! sent back to software repository
+try
+	enter fromUpgrade
+else
+	dim 1%,fromUpgrade
+end try
+
+!----------------------------------------------------------------------------+
+!Outbound variables                                                          |
+!----------------------------------------------------------------------------+
+!dfile$  = The full pathname and file name of the freshly built file.        |
+!e       = Error. Zero indicates success, non-zero indicates failure.        |
+!        = 0 = success                                                       |
+!        = 1 = control file not found                                        |
+!        = 2 = ssuf02m is corrupt                                            |
+!        = 3 = fcode$ not found                                              |
+!        = 4 = invalid build flag                                            |
+!        = 5 = file exists but not allowed to overwrite it (see owrite$)     |
+!        = 6 = error building file                                           |
+!        = 7 = ssuf02i is corrupt (search mode 2)                            |
+!        = 8 = file is missing index definitions                             |
+!        = 9 = no directory number is specified for the given file           |
+!        = 10= key is defined for an odd length (illegal length)             |
+!        = 11= unable to build file - wouldn't accept key of given length    |
+!        = 12= ssuf02i is corrupt (search mode 3)                            |
+!        = 13= unable to build file (out of disk space? permissions?)        |
+!        = 14= unable to determine starting record number of newly built file|
+!        = 15= log channel is in conflict with channels used here (80-82)    |
+!        = 16= group number is invalid                                       |
+!        = 17= unable to create subdirectory as specified                    |
+!        = 19= some basic error
+!reason$ = Description of error. Please define it for at least 100 characters|
+!----------------------------------------------------------------------------+
+
+
+Dim 1%,FNAME$[60],MASK$[16],MASK2$[30],SUFFIX$[7],EXT$[10]
+Dim 1%,TYPE$[1],FILNAME$[100],FILNAME16$[16],WORK$[40],D$[36],X$[100],J$[100]
+Dim 1%,RESP$[1],KCODE$[20],COID$[4],GROUPID$[4],U5$[10],LOGMSG$[200],TM$[30]
+Dim 1%,D0[3],Z9[2000]
+Dim 2%,D2[2],RPLY$[3]
+Dim 3%,REC_SSUF02I,REC_SSUF02M,REC_CNTRL,REC_LOG,REC_FCODE
+
+! initialization
+GROUPID$ = Str$(GROUPID)
+FALSE = 0;TRUE = Not(FALSE)
+!"clean up inbound data, if applicable, and initialize outbound data
+Call String(1,FCODE$)
+X$ = FCODE$ \ Gosub STRIP_BLANKS \ FCODE$ = X$[X,Y]
+If FCODE$ = "" Or FCODE$ = " "
+	E = 3
+	REASON$ = "file code is null"
+	error 10000
+End If
+If COID < 0 Or COID > 9
+	E = 1
+	REASON$ = "Invalid company #: " + Str$(COID)
+	error 10000
+End If
+If GROUPID < 0 Or GROUPID > 99
+	E = 16
+	REASON$ = "group number is invalid: " + Str$(GROUPID)
+	error 10000
+End If
+If PTH$ <> ""
+	If PTH$[Len(PTH$),Len(PTH$)] <> "/"
+		E = 18
+		REASON$ = "The path " + PTH$ + " doesn't end with a /"
+		error 10000
+	End If
+End If
+Call String(1,OWRITE$)
+If ROW < 0 Or ROW > 23 Let ROW = 23
+If COL < 0 Or COL > 79 Let COL = 0
+! If CH_LOG >= 80 And CH_LOG <= 83
+! 	E = 15
+! 	REASON$ = "The log file can't be assigned to channel " + Str$(CH_LOG)
+! 	error 10000
+! End If
+If CH_LOG <> -1
+	NTOPEN = FALSE
+	try
+		E = Chf$(800 + CH_LOG)
+	else
+		Let NTOPEN = Spc(8)
+	end try
+	If NTOPEN
+		E = 15
+		REASON$ = "The log file is not open on channel #" + Str$(CH_LOG)
+		REASON$ = REASON$ + ". Please open it before calling this program."
+		error 10000
+	End If
+End If
+REASON$ = ""
+E = 19
+LOGMSG$ = "Sysfbuild: Building " + FCODE$
+Gosub DO_WRITE_LOG
+
+! open files
+Call FindF("cntrl/cntrl" + Str$(COID),FOUND)
+If Not(FOUND)
+	REASON$ = "Control file #" + Str$(COID) + " not found"
+	E = 1
+	error 10000
+End If
+CH_CNTRL = FindChannel()
+Ropen #CH_CNTRL,"cntrl/cntrl" + Str$(COID)
+CH_SSUF02M = FindChannel()
+Ropen #CH_SSUF02M,"1/ssuf02m"
+CH_SSUF02I = FindChannel()
+Ropen #CH_SSUF02I,"1/ssuf02i"
+KLEN = Chf(300 + CH_SSUF02I) * 2
+Dim KDATA$[KLEN]
+YPOS = 13
+
+! main - let the building begin
+Gosub FND_FILE
+Gosub BLD_FILE
+REASON$ = "Success: built " + FILNAME$
+Goto OUTEND
+
+FND_FILE: Rem"Find file in file layout database
+	REASON$ = "Searching for layout " + FCODE$
+	LOGMSG$ = REASON$ \ Gosub DO_WRITE_LOG
+	if not(fromUpgrade) Print @COL,ROW;REASON$;'CL';
+	WORK$ = FCODE$
+	SRCH_FCODE: Search #CH_SSUF02M,2,1;WORK$,REC_SSUF02M,E
+	If E > 2
+		REASON$ = "SE#" + Str$(E) + " while looking up " + FCODE$
+		E = 2
+		error 10000
+	End If
+	X$ = WORK$ \ Gosub STRIP_BLANKS \ X$ = X$[X,Y]
+	If E Or X$ <> FCODE$ !"beware of partial matches
+	E = 3
+		REASON$ = FCODE$ + " not defined in system layouts"
+		error 10000
+	End If
+	FCODE$ = WORK$
+	Mat Read #CH_SSUF02M,REC_SSUF02M,0;D$
+	Mat Read #CH_SSUF02M,REC_SSUF02M,36;D0
+	Mat Read #CH_SSUF02M,REC_SSUF02M,44;D2;
+Return ! FND_FILE
+
+STRIP_BLANKS: Rem"remove blanks only
+	X = 1;Y = Len(X$)
+	LOOP5: If X$[Y,Y] = " " And Y > 1 Let Y = Y - 1 \ Goto LOOP5
+	LOOP6: If X$[X,X] = " " And X < Y Let X = X + 1 \ Goto LOOP6
+Return
+
+BLD_FILE: Rem"build file
+	LOGMSG$ = "Building "+fcode$
+	gosub DO_WRITE_LOG
+	if not(fromUpgrade) Print @COL,ROW;"Building ";FCODE$;'CL';
+	If D0[2] > 2
+		REASON$ = "Invalid value for a build flag: d0[2]=" + Str$(D0[2])
+		E = 4
+		error 10000
+	End If
+	TYPE$ = D$[36,36]
+	If TYPE$ = "N" Let TYPE$ = "C"
+	If TYPE$ = "Y" Let TYPE$ = "I"
+	FILNAME$ = D$[1,16]
+	If D0[1] >= 0
+		Read #CH_CNTRL,88,D0[1];FILNAME16$;
+		FILNAME$ = FILNAME16$
+	End If
+	Call String(2,FILNAME$)
+	X$ = PTH$ + FILNAME$ \ Gosub STRIP_BLANKS \ FILNAME$ = X$[X,Y]
+	Gosub ADD_GRP_USR
+	Call FindF(FILNAME$,FOUND)
+	If FOUND
+		If OWRITE$ = "N"
+			REASON$ = FILNAME$ + " already exists and overwrite permission is set to no."
+			E = 5
+			error 10000
+		End If
+		FILNAME$[Len(FILNAME$) + 1] = "!"
+	End If
+	If NRECS = 0 And TYPE$ <> "K" Let NRECS = 1
+	If TYPE$ = "K" Let RECLEN = 256;D2[0] = 0
+	NRECS = D2[0];NKEYS = 0;RECLEN = D0[0]
+	LOGMSG$ = "Building " + FILNAME$ + " with a record length of " + Str$(RECLEN) \ Gosub DO_WRITE_LOG
+	WORK$ = NRECS;WORK$[1,1] = "[";X1 = Len(WORK$)
+	WORK$[X1] = RECLEN;WORK$[X1,X1] = ":"
+	If D0[2] = 2 Let X$ = "<11>" Else Let X$ = ""
+	WORK$[Len(WORK$)] = "] ",X$,FILNAME$
+	If FILNAME$[Len(FILNAME$)] = "!" Let FILNAME$[Len(FILNAME$)] = ""
+	X$ = FILNAME$ To "/"
+	If (Len(X$))
+		Call FindF(X$,FOUND)
+		If Not(FOUND)
+			J$ = "mkdir ",X$
+			System J$,E
+			If E
+				REASON$ = "Unable to create the directory as defined: " + X$
+				E = 17
+				error 10000
+			End If
+			LOGMSG$ = "Created subdirectory " + X$ \ Gosub DO_WRITE_LOG
+		End If
+	End If
+	F8 = 0
+	ch_fcode = FindChannel()
+	try
+		Build #CH_FCODE,WORK$
+	else
+		Let F8 = Spc(8)
+	end try
+	If F8
+		REASON$ = "Error " + Str$(F8) + " building " + WORK$
+		E = 6
+		LOGMSG$ = REASON$ \ Gosub DO_WRITE_LOG
+		error 10000
+	End If
+	If TYPE$ = "I" Or TYPE$ = "K"
+		LOGMSG$ = "Structuring directories:" \ Gosub DO_WRITE_LOG
+		KCODE$ = FCODE$
+		Search #CH_SSUF02I,2,1;KCODE$,REC_SSUF02I,E
+		If E > 1
+			REASON$ = "SE#" + Str$(E) + " in dir 1 of " + Chf$(800 + CH_SSUF02I)
+			E = 7
+			error 10000
+		End If
+		If E
+			REASON$ = FCODE$ + " is missing directory definitions"
+			E = 8
+			LOGMSG$ = REASON$ \ Gosub DO_WRITE_LOG
+			Kill FILNAME$
+			error 10000
+		End If
+		CHG_DIR: DIR = KCODE$[11,12]
+		If Not(DIR)
+			REASON$ = "No directory specified for " + KCODE$
+			E = 9
+			error 10000
+		End If
+		Read #CH_SSUF02I,REC_SSUF02I;KDATA$;
+		If KDATA$[1,1] = "#"
+			X1 = KDATA$[2]
+		Else
+			X1 = Len(KDATA$)
+		End If
+		KEYLEN = Int(X1 / 2 + .5)
+		LOGMSG$ = "Structuring directory #" + Str$(DIR) + ": Length of " + Str$(KEYLEN) + " words" \ Gosub DO_WRITE_LOG
+		If KEYLEN = 0
+			REASON$ = "Invalid key size for dir " + Str$(DIR) + ": length= " + Str$(KEYLEN)
+			E = 10
+			error 10000
+		End If
+		Search #CH_FCODE,0,DIR;WORK$,KEYLEN,E
+		If E
+			REASON$ = "Unable to define key length for " + Chf$(800 + CH_FCODE)
+			E = 11
+			error 10000
+		End If
+		KCODE$[13,14] = "99"
+		Search #CH_SSUF02I,3,1;KCODE$,REC_SSUF02I,E
+		If E > 2
+			REASON$ = "SE#" + Str$(E) + " while scanning dir 1 of " + Chf$(800 + CH_SSUF02I)
+			REASON$ = REASON$ + " with key >" + KCODE$ + "<"
+			E = 12
+			error 10000
+		End If
+		If KCODE$[1,10] <> FCODE$[1,10] Let E = 2
+		If Not(E) Goto CHG_DIR
+		Search #CH_FCODE,0,0;WORK$,NKEYS,E
+		If E
+			REASON$ = "SE#" + Str$(E) + ": Unable to build file " + Chf$(800 + CH_FCODE)
+			E = 13
+			error 10000
+		End If
+	End If ! If TYPE$ = "I" Or TYPE$ = "K"
+	If D2[0]
+		LOGMSG$ = "Allocating " + Str$(D2[0]) + " data records" \ Gosub DO_WRITE_LOG
+		Dim 1%,Z9[RECLEN - 1],2%
+		REC_FCODE = 0
+		If TYPE$ = "I"
+			E = 0 \ Search #CH_FCODE,1,0;WORK$,REC_FCODE,E
+			If E
+				REASON$ = "Unable to determine record number of first real"
+				REASON$ = REASON$ + " data record for " + Chf$(800 + CH_FCODE)
+				E = 14
+				error 10000
+			End If
+		End If
+		For X = REC_FCODE To REC_FCODE + D2[0] - 1
+			Mat Write #CH_FCODE,X;Z9;
+		Next X
+	End If
+	LOGMSG$ = "File structure complete" \ Gosub DO_WRITE_LOG
+	DFILE$ = Chf$(800 + CH_FCODE)
+	LOGMSG$ = DFILE$ + " has been built" \ Gosub DO_WRITE_LOG
+Return ! BLD_FILE
+
+ADD_GRP_USR: Rem"Add group/user number to filename
+	COID$ = Str$(COID)
+	Search FILNAME$,"#",POS_
+	WORK$ = FILNAME$
+	If POS_
+		WORK$ = FILNAME$[1,POS_ - 1],COID$,FILNAME$[POS_ + 1]
+		FILNAME$ = WORK$
+	End If
+	Search FILNAME$,"%",POS_
+	WORK$ = FILNAME$
+	If POS_
+		WORK$ = FILNAME$[1,POS_ - 1],GROUPID$,FILNAME$[POS_ + 1]
+		FILNAME$ = WORK$
+	End If
+Return
+
+DO_WRITE_LOG: Call Time(TM$)
+	If CH_LOG <> -1 Print #CH_LOG;TM$;": ";LOGMSG$
+Return
+
+
+OUTEND: Rem"exit (return to caller)
+	if not(fromUpgrade) Print @COL,ROW;'CL';
+	LOGMSG$ = "Sysfbuild: Exiting"
+	Gosub DO_WRITE_LOG
+	try
+		Close #CH_CNTRL,#CH_SSUF02M,#CH_SSUF02I,#CH_FCODE
+	else
+		rem
+	end try
+	E = 0
+End
+
+else ! main try
+	origError = spc(8)
+	If Spc(8) <> 10000
+		dim msc4$[100] \ msc4$=msc$(4)
+		if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+		call env(2,"PROGNAME",msc4$)
+		e = 14
+		if spc(8) = 11000
+			call utilsearcherr(e$, e, Spc(10))
+		else
+			Call utilsuberr(e$,Spc(8),Spc(10),Msc$(2))
+		end if
+		call programdump()
+	else
+		e$ = reason$
+	End If
+	If ch_log <> -1
+		Print #ch_log;e$
+	End If
+	try
+		Close #CH_CNTRL,#CH_SSUF02M,#CH_SSUF02I,#CH_FCODE
+	else
+		rem
+	end try
+	error origError
+end try

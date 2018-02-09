@@ -1,0 +1,988 @@
+!! --- SERPWCLAIM
+! description Warranty Claims
+!  encompasses 491, 494, 497
+!
+! loadsave -w -n 100,10 -o prog/dxport/serpwclaim.dl4 src/serpwclaim.src
+!
+! 1.0 mm/dd/yyyy change??
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+include "src/inc/fileprod.inc" ! product
+include "src/inc/filepserlno.inc"  ! product serial #'s
+include "src/inc/filereprtrans.inc"  ! serial # repair file
+include "src/inc/fileclaimfle.inc" ! claim file
+include "src/inc/filea80vm.inc" ! vendor file
+include "src/inc/filecust.inc" ! customer
+
+! *declare additional dl4 intrinsic subs & functions
+Declare Intrinsic Function FindChannel
+Declare Intrinsic Sub Logic, programdump, datetojulian
+!
+! *declare additional external libs & subs & functions
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+!
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,formatdate2$,PDate$
+Declare External Function getuidrec
+Declare External Sub UserCntrl 
+Declare External Sub GetCostLevels
+!
+External Lib "ubsprconv.dl4"     
+Declare External Function XUnit$ 
+!
+! internal subs
+Declare Sub OpenFiles,CLMList,cpmtlist
+Declare Sub domclaim,delclms,getnewclm
+Declare Sub SVclaim,SVPMNT,DELPMNT
+Declare Function Chk4srno,chkDateFrmt$
+!--------------------------------------------------------------------
+!
+!
+! ** main procedure
+!
+OPTION GOSUB NESTING 16  ! Default is 8
+try
+  Option String Redim is legal ! in case subs dim/use same names
+  !
+  Dim action$[30],options$[30],userid$[8],fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+  Dim rstr$[5000]
+  Dim 2%,WHSE,Q0[1]
+  Dim 1%,IntCo
+  Dim 3%,SPREC,rec_uac
+
+  dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! error handling variables
+  dim Section$[30],X$[10]
+  dim mergedir$[60],action1$[20],action2$[30]
+  dim Company$[2],keyvend$[10],keyval$[60]
+  dim tmpkey$[50],Serno$[30],CustName$[30]
+  dim 1%,editstatus,source
+  dim 1%,ua5[10],x1[9],flags[11]
+  dim 1%,tmp1,intSls,CTLC,errflag,WH,Div,portnum,chan[25]
+  dim 2%,tmp2,maxcnt \ maxcnt=100 ! max records in arrays
+  dim 3%,tmp3
+  DIM 3%,parm[25],ORGTOT[10]
+  dim 2%,vendid,vendName$[30],Prod$[12]
+  dim 2%,currdate,x2[9],CustNo
+  dim 4%,tmp4
+  Dim 1%,CNVTU[2],ERRTYPE
+  dim 3%,qty,cost,amount,baseqty,cnvta
+  dim 3%,lineqty,lineum,linecost,lineextamt,lbsunit,lbsfact                                        
+  dim 3%,rec_tmp,x3[9],r[99]
+  dim WORK$[600],tmpField$[1,30]
+  dim p60$[50],p61$[256],P9$[50]
+  dim List$[maxcnt,1000],sdate$[50]
+  dim logfname$[50],QMask$[20],PMask$[20]
+  dim SearKey$[64],BegKey$[64],mode$[3]
+  dim Desc$[50],k1$[64],Vendid$[6]
+  dim tmp$[200],tmp1$[200],WebStr$[1000],Message$[200],MSG$[500]
+  dim blank$[200] \ blank$=" ",blank$
+  !!! define structures !!! 
+  dim pr. as prod ! prod
+  dim wrp. as reprtrans ! repair trans
+  dim psn. as pserlno ! product serial #
+  dim clm. as claimfle ! claim file
+  dim vend. as a80vm ! vendor file
+  dim cust. as cust ! customer
+    
+  Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H) ! rounding to nearest penny
+  !
+  ! call dxopen() ! done in serpsn
+  
+  call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+  mat read #ctlc,60,50;p60$; ! system flag variable
+  mat read #ctlc,61,0;p61$;
+  mat read #ctlc,19,50;p9$;                                                 
+  Mat Read #ctlc,115,40;Q0;
+   QMask$ = "---------#.##"                                              
+  tmp$ = "#",tmp$                                                         
+  If Q0[1] <= 0 Let Q0[1] = 2                                             
+  If Q0[1] Let PMask$ = "-----------#.",tmp$[1,Q0[1]] !price mask         
+  !
+  ACTION2$=UCASE$(RTRIM$(ACTION2$))
+  ACTION1$=UCASE$(RTRIM$(ACTION1$)) ! both Uppercase and trimmed
+  ! ACTION IS USED IN SNMENU (serpsn)
+  !
+  ! Call DXSave(0,"tmp/wclm491.txt!") ! \ stop ! data as received
+  !call programdump("tmp/wclm491d!","") ! dump vars
+  !
+  ReturnStatus=0
+  Message$="ACTION1 NOT FOUND"
+  IF P60$[25,25]<>"Y" ! NO S/N'S KEPT SYSTEM WIDE
+	ReturnStatus=0
+	Message$="NO SERIAL NUMBERS FOR SYSTEM"
+	Goto WCMDone
+  Endif
+  call OpenFiles()
+  ! we'll use as many other calls as we can
+  ! Prodsearch - in prodm, SNList in serpsn
+  ! Vendsearch - in vendm, custsearch in custm
+  select case action1$
+	Case "GETCLAIM" ! chk/get claim					edit	doc=CLM-GetClaimData.doc
+		returnstatus=1 ! use action2 for inq,edit,etc		doc=CLM-GetClaimHeader.doc
+		Message$="OK"
+		call domclaim()
+		! end of GetClaim
+	Case "CLAIMPAYS" ! get payments for claim(sn497)		doc=CLM-GetPaymentList.doc
+		returnstatus=1
+		Message$="OK"
+		call cpmtlist()
+		! end of Claimpays
+	Case "CLAIMLIST" ! list claims							doc=CLM-GetClaimList.doc
+		returnstatus=1
+		Message$="OK"
+		call CLMList()
+		! end of Claimpays
+	Case "CLAIMDELETE" ! delete								doc=CLM-DeleteClaimData.doc
+		Returnstatus=1
+		Message$="OK"
+		call delclms()
+		! end of claimdelete
+	Case "SUBMITCLAIM" ! submit								doc=CLM-SubmitClaim.doc
+		Returnstatus=1
+		Message$="OK"
+		call SVclaim()
+		! end of SUBMITCLAIM
+	Case "SUBMITPAY" ! submit payment						doc=CLM-SubmitPayment.doc
+		returnstatus=1
+		message$="OK"
+		Call SVPMNT()
+		! end of SUBMITPAY
+	Case "DELETEPAY" ! delete payment						doc=CLM-DeleteClaimPayment.doc
+		returnstatus=1
+		message$="OK"
+		Call DELPMNT()
+		! end of DELETEPAY
+	Case "GETCUSTNAME" ! customer name						doc=CLM-GetCustName.doc
+		Returnstatus=1
+		Message$="OK"
+		call dxget("CUSTID",tmp$)
+		Custno=tmp$
+		if custno=0 and RTrim$(tmp$)="0"
+			CustName$=""
+		Else
+			if custno<=0 or custno>999999 or fra(custno)
+				returnstatus=0
+				message$="Invalid Customer Number"
+				goto WCMDone
+			Endif
+			tmpkey$=CustNo Using "######"
+			CMR=filegetcust(e$,CH_Cust,"=",1,tmpkey$,cust.)
+			if cmr<=0
+				returnstatus=0
+				message$="Customer Number not found"
+				goto WCMDone
+			Endif
+			CustName$=cust.Name$
+		Endif
+		Clear List$[]
+		List$[0]=bsdel$,"CUSTNAME",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$
+		List$[2]=Str$(CustNo),fdel$,RTrim$(custName$),fdel$
+		List$[3]=esdel$
+		Call addtostr(e$,rstr$,list$[])
+		! end of GETCUSTNAME
+	Case "GETVENDNAME" ! Vendor name						doc=CLM-GetVendName.doc
+		Returnstatus=1
+		Message$="OK"
+		call dxget("VENDID",tmp$)
+		Vendid=tmp$
+		if Vendid=0 and RTrim$(tmp$)="0"
+			VendName$=""
+		Else
+			if vendid<=0 or vendid>999999 or fra(vendid)
+				returnstatus=0
+				message$="Invalid Vendor Number"
+				goto WCMDone
+			Endif
+			tmpkey$=Vendid Using "######"
+			VMR=filegeta80vm(e$,CH_vend,"=",1,tmpkey$,vend.)
+			if vmr<=0
+				returnstatus=0
+				message$="Vendor Number not found"
+				goto WCMDone
+			Endif
+			VendName$=vend.Name$
+		Endif
+		Clear List$[]
+		List$[0]=bsdel$,"VENDNAME",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$
+		List$[2]=Str$(vendid),fdel$,RTrim$(vendName$),fdel$
+		List$[3]=esdel$
+		Call addtostr(e$,rstr$,list$[])
+		! end of GETVENDNAME
+	Case "GETPRODDATA" ! product							doc=CLM-GetProdData.doc
+		ReturnStatus=1  ! used only on new manual entry claim
+		Message$="OK" 
+		! set list header
+		Clear List$[]
+		
+		Call DXGet("PRODID",tmp$)
+		tmp$=UCase$(RTrim$(tmp$))
+		if tmp$="" 
+			let returnstatus=0
+			Let message$="Invalid Product Code Submitted"
+			goto endproddetail:
+		endif
+		Prod$=tmp$+blank$
+		Let keyval$=Prod$
+		Let keyval$[13]="";e=0 ! no lock
+		rec_prod = filegetprod(e$,ch_prod,"=",1,Keyval$,PR.,e)
+		If rec_prod<=0 ! not found
+			Let message$="PRODUCT "+rtrim$(prod$)+" NOT FOUND"
+			Let ReturnStatus=0
+			goto endproddetail:
+		Endif
+		if pr.SerNoTrack$<>"Y"
+			Let message$="PRODUCT "+rtrim$(prod$)+" Does not keep serial numbers"
+			Let ReturnStatus=0
+			goto endproddetail:
+		Endif
+		List$[0]=bsdel$,"PRODDATA",fdel$
+		List$[1]="PRODID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+		List$[2]=prod$,fdel$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.Desc2$),fdel$
+		List$[3]=esdel$
+		Call addtostr(e$,rstr$,list$[])
+		! end of GETPRODDATA
+		endproddetail: ! end of getproddata
+  end select
+	WCMDone: ! 
+	! status section - always send
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+	call SetOutput(e$,rstr$) ! 
+  ! call dxclose()
+else
+  include "src/callmainerrnet.inc"
+  ! call dxclose()
+end try
+end
+!  END OF PROGRAM SERPWCLAIM
+!--------------------------------------------------------------------
+sub OpenFiles()
+  
+  Try
+    !
+    Ch_Prod = OpenFile(-1792,intCo) \ If Ch_Prod = -1 Error 42  !product file 
+	Ch_PSN = OpenFile(-416,intCo) \ If Ch_PSN = -1 Error 42  !product serial #'s
+	Ch_WRP = OpenFile(-2992,intCo) \ If Ch_WRP = -1 Error 42  !repair trans
+	ch_clm = OpenFile(-1472,Intco) \ if ch_clm=-1 Error 42 ! claim file
+    Ch_Vend = OpenFile(-2400,intCo) \ If Ch_Vend = -1 Error 42  ! vend
+	Ch_Cust=OpenFile(-1808,Intco) \ if ch_cust=-1 error 42 ! customer
+  	!
+   else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+
+! ------------------------------------------------------------------------
+Sub ClmList()
+! list claims
+  Try
+	call dxget("VENDID",tmp$) ! in case by vendor
+	VendNo=tmp$
+	If vendno<0 or vendno>999999 or fra(vendno)
+		returnstatus=0
+		message$="Invalid Vendor"
+		goto CLDone
+	Endif
+	if tmp$="0" let vendno=-1 ! want's vendor zero!
+	call dxget("STARTNO",tmp$)
+	SClm=tmp$
+	
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"CLAIMLIST",fdel$
+	webstr$="RORDER",fdel$,"VENDOR",fdel$,"VENDNAME",fdel$
+	webstr$=webstr$,"SENDDATE",fdel$,"VENDCLM",fdel$
+	webstr$=webstr$,"STATUS",fdel$,"OPENAMT",fdel$
+	List$[1]=webstr$
+	row=2
+	K1$=" ",k1$
+	K1$=SClm Using "######"
+	Do
+		search #ch_clm,3,1;k1$,R[1],E
+		if e exit do
+		IF K1$[7,7]<>"" AND K1$[7,8]<>"  " GOTO BPCLML ! it's a pay line
+		READ RECORD #ch_clm,R[1],0;clm.;
+		if vendno ! for a vendor
+			x2=vendno \ if vendno=-1 let x2=0
+			if x2<>clm.VendNo goto BPClmL
+		Endif
+		Webstr$=Str$(clm.RepairOrder),fdel$
+		Webstr$=webstr$,Str$(clm.VendNo),fdel$
+		vendid$=clm.vendno Using "######"
+		VMR=filegeta80vm(e$,Ch_vend,"=",1,vendid$,vend.)
+		if VMR<=0 clear vend.
+		webstr$=webstr$,RTrim$(vend.name$),fdel$
+		tmp$="" \ if clm.DateSent>100 let tmp$=PDate$(clm.DateSent)
+		webstr$=webstr$,tmp$,fdel$
+		WEBSTR$=WEBSTR$,RTrim$(clm.VendClaimNo$),fdel$
+		tmp$="OPEN" \ if clm.ClaimStatus=1 let tmp$="CLOSED"
+		webstr$=webstr$,tmp$,fdel$
+		X3=clm.ClaimAmount-clm.RecvD
+		webstr$=webstr$,LTrim$(X3 using QMask$),fdel$
+		List$[row]=webstr$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	 BPCLML: ! bypass
+	Loop
+	List$[row]=esdel$
+	call addtostr(e$,rstr$,List$[])
+	CLDone: ! done
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! ClmList
+
+! ------------------------------------------------------------------------
+Sub cpmtlist()
+! list payments for rpr order/claim
+  Try
+	call dxget("RORDER",tmp$)
+	RPORDNO=tmp$
+	if RPORDNO<=0 or RPORDNO>999999 or FRA(RPORDNO)
+		returnstatus=0
+		Message$="Invalid Repair Order"
+		goto CPMDONE
+	Endif
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"CLMPAYS",fdel$
+	webstr$="PMTNUM",fdel$,"SEQNUM",fdel$,"DATERECV",fdel$,"AMTRECV",fdel$
+	webstr$=webstr$,"PAYDESC1",fdel$,"PAYDESC2",fdel$,"STATUS",fdel$
+	List$[1]=webstr$
+	row=2
+	K1$=" ",k1$
+	K1$=RPORDNO Using "######"
+	Do
+		Search #ch_clm,3,1;K1$,R[1],E
+		if e exit do
+		x2=K1$[1,6] \ if x2<>RPORDNO exit do
+		IF K1$[7,7]="" or K1$[7,8]="  " GOTO BPMTL ! it's not a pay line
+		Read Record #CH_CLM,R[1],0;clm.;
+		webstr$=RTrim$(clm.VendPayNo$),fdel$,k1$[7,8],fdel$
+		tmp$="" \ if clm.DateRecD let tmp$=PDate$(clm.DateRecD)
+		webstr$=webstr$,tmp$,fdel$
+		webstr$=webstr$,LTrim$(clm.RecvD Using QMask$),fdel$
+		webstr$=webstr$,RTrim$(clm.ProbDesc1$),fdel$,RTrim$(clm.ProbDesc2$),fdel$
+		tmp$="OPEN" \ if clm.ClaimStatus=1 let tmp$="ACCEPTED"
+		webstr$=webstr$,tmp$,fdel$
+		list$[row]=webstr$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	 BPMTL: ! done
+    Loop
+	List$[row]=esdel$
+	call addtostr(e$,rstr$,List$[])
+   CPMDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! cpmtlist
+
+! ------------------------------------------------------------------------
+Sub DoMClaim()
+! main master claim entry/edit/inq
+  Try
+	call dxget("RORDER",tmp$)
+	RPORDNO=tmp$
+	if RPORDNO<=0 or RPORDNO>999999 or FRA(RPORDNO)
+		returnstatus=0
+		Message$="Invalid Repair Order"
+		goto CLMDONE
+	Endif
+	K1$=" ",k1$
+	k1$=RPORDNO Using "######"
+	Search #ch_clm,2,1;k1$,R[1],E
+	if not(e) goto gotclm
+	if action2$="" ! 497 inq
+		returnstatus=0
+		message$="Repair Order Claim not found"
+		goto CLMDone
+	Endif
+	Newclaim=1
+	clear clm. ! it's new
+	clm.RepairOrder=RPORDNO
+	call getnewclm() ! search/get data
+	goto shoClaim ! has default data loaded - so show it
+
+	GotClm: ! got one
+	read record #ch_clm,R[1],0;clm.;
+	if k1$[7,7]<>"" and K1$[7,8]<>"  " ! it's a payment
+		returnstatus=0
+		Message$="Did not find master claim"
+		goto CLMDone
+	Endif
+	! if action2$="" goto shoclaim
+	
+	! goto CLMDone ! entry/edit/submit - send status not data
+	ShoClaim: ! send claim data
+	! first get vend & s/n data
+	Searkey$=" ",Searkey$
+	if clm.VendNo
+		searkey$=clm.VendNo Using "######"
+		vmr=filegeta80vm(e$,CH_Vend,"=",1,SearKey$,vend.)
+		if vmr<=0 clear vend.
+	Else
+		clear vend.
+	Endif
+	if rtrim$(vend.name$)="" let vend.name$="Vendor not found"
+	prod$=clm.ProdCode$
+	serno$=clm.SerialNo$
+	SNexst=Chk4srno(serno$,prod$,R)
+	if snexst let SNRec=R
+	if SNRec<=0
+		clear psn.
+	Else
+		READ RECORD #CH_PSN,SNRec,0;psn.;
+	Endif
+	IF psn.ProdDesc1$=""  ! means no desc
+		PRR=filegetprod(e$,Ch_Prod,"=",1,prod$,pr.)
+		if prr<=0
+			let psn.ProdDesc1$="Product Not Found"
+		Else
+			let psn.ProdDesc1$=pr.Desc1$
+		Endif
+	Endif
+	if psn.ProdDesc2$="" let psn.ProdDesc2$="Serial number not on file"
+	clear list$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"CLAIMDATA",fdel$
+	webstr$="RORDER",FDEL$,"STATUS",FDEL$,"PRODID",FDEL$
+	webstr$=webstr$,"PDESC1",FDEL$,"PDESC2",FDEL$,"SNID",fdel$
+	webstr$=webstr$,"VENDID",fdel$,"VENDNAME",fdel$
+	webstr$=webstr$,"CUSTID",fdel$,"CUSTNAME",fdel$,"RODATE",fdel$
+	webstr$=webstr$,"WHSE",fdel$,"ROAMOUNT",fdel$
+	webstr$=webstr$,"PRBDESC1",fdel$,"PRBDESC2",fdel$
+	webstr$=webstr$,"VENDREF",fdel$,"DATESENT",fdel$
+	webstr$=webstr$,"CLAIMAMT",fdel$,"PAIDAMT",fdel$
+	webstr$=webstr$,"NEWTYPE",fdel$
+	List$[1]=webstr$
+	row=2
+	webstr$=Str$(clm.RepairOrder),fdel$
+	tmp$="OPEN" \ if clm.ClaimStatus=1 let tmp$="CLOSED"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,RTrim$(clm.ProdCode$),fdel$
+	webstr$=webstr$,RTrim$(psn.ProdDesc1$),fdel$,RTrim$(psn.ProdDesc2$),fdel$
+	webstr$=webstr$,RTrim$(clm.SerialNo$),fdel$
+	webstr$=webstr$,Str$(clm.VendNo),fdel$,RTrim$(vend.Name$),fdel$
+	if Custno Let tmp$=Str$(CustNo) Else let tmp$=""
+	webstr$=webstr$,tmp$,fdel$,RTrim$(clm.CustName$),fdel$
+	tmp$="" \ if clm.RoDate>100 let tmp$=PDate$(clm.RoDate)
+	webstr$=webstr$,tmp$,fdel$,Str$(clm.Whse),fdel$
+	webstr$=webstr$,LTrim$(clm.RoAmount using QMask$),fdel$
+	webstr$=webstr$,RTrim$(clm.ProbDesc1$),fdel$,RTrim$(clm.ProbDesc2$),fdel$
+	webstr$=webstr$,RTrim$(clm.VendClaimNo$),fdel$
+	tmp$="" \ if clm.DateSent>100 let tmp$=PDate$(clm.DateSent)
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(clm.ClaimAmount Using QMask$),fdel$
+	webstr$=webstr$,LTrim$(clm.RecvD using QMask$),fdel$
+	tmp$="EXISTING"
+	if newclaim=1
+		tmp$="NEW "
+		if RPR let tmp$=tmp$,"FROM REPAIR"
+		if ORD let tmp$=tmp$,"FROM ORDER"
+		if not(RPR) and not(ORD) let tmp$="MANUAL ENTRY"
+	Endif
+	webstr$=webstr$,tmp$,fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	! all done
+	CLMDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DoMClaim
+
+! ------------------------------------------------------------------------
+Function Chk4srno(serno$,prod$,R)
+! check if serial number exists for product
+  Try
+	dim cpsno. as pserlno
+	snexst=1
+	keyval$=SERNO$
+	mode$=">"
+	do
+		R=filegetpserlno(e$,ch_psn,mode$,1,keyval$,cpsno.)
+		if r<0 let snexst=0 \ exit do
+		if keyval$[1,30]<>serno$ let snexst=0 \ exit do
+		if Prod$[1,12]<>Blank$[1,12]
+			IF cpsno.ProductCode$=prod$ exit do
+		Else ! no prod even
+			exit do ! first match is one
+		Endif
+	loop
+  else
+    include "src/callsuberr.inc"
+  end try
+end Function snexst ! Chk4srno
+! 
+!--------------------------------------------------------------------
+Sub DelClms()
+! delete all entries with a number
+  Try
+	close #CH_CLM ! close read only
+	ch_clm = OpenFile(1472,Intco) \ if ch_clm=-1 Error 42 ! claim file
+	call dxget("RORDER",tmp$)
+	RPORDNO=tmp$
+	if RPORDNO<=0 or RPORDNO>999999 or FRA(RPORDNO)
+		returnstatus=0
+		Message$="Invalid Repair Order"
+		goto DCLMDONE
+	Endif
+	K1$=" ",k1$ ! we delete any payments also
+	k1$=RPORDNO Using "######"
+	mode=2
+	Do
+		Search #ch_clm,mode,1;k1$,R[1],E
+		if e exit do
+		X2=K1$[1,6] \ if x2<>RPORDNO exit do
+		mode=3 ! do next
+		Search #ch_clm,5,1;K1$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error "+Str$(E)+" deleting key "+K1$
+		Else
+			let E=3
+			Search #ch_clm,1,0;K1$,R[1],E
+			if e
+				returnstatus=0
+				message$="Search Error "+Str$(E)+" returning record "+Str$(R[1])
+			Endif
+		Endif
+	Loop
+
+	DCLMDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DelClms
+
+! ------------------------------------------------------------------------
+Sub getnewclm()
+! search for it - fill in if there
+  Try
+	IKC=OpenFile(-9994,IntCo) \ if ikc=-1 Error 42
+	IHC=OpenFile(-1136,IntCo) \ if ihc=-1 error 42
+	ISC=OpenFile(-1152,IntCo) \ if isc=-1 error 42
+	ITC=OpenFile(-1168,Intco) \ if itc=-1 error 42
+	ILC=OpenFile(-1184,IntCo) \ if ilc=-1 error 42
+	Include "src/inc/fileinvhead.inc" ! ih,is,it
+	Include "src/inc/fileinvl.inc" ! lines
+	Dim invh. as invh
+	Dim invs. as invs
+	Dim invt. as invt
+	Dim invl. as invl
+	! first look to the repair trans
+	SearKey$=" ",SearKey$
+	RPR=0
+	Do
+		Search #ch_wrp,3,1;searkey$,R[2],E
+		if e exit do
+		X2=Searkey$[43,48]
+		if x2=RPORDNO ! found it
+			read record #CH_WRP,R[2],0;wrp.;
+			clm.RepairOrder=RPORDNO
+			clm.ProdCode$=wrp.ItemCode$
+			clm.SerialNo$=wrp.SerialNo$
+			clm.ProbDesc1$=wrp.ProblemDesc1$
+			clm.ProbDesc2$=wrp.ProblemDesc2$
+			clm.CustName$=wrp.CustomerName$
+			clm.RoDate=wrp.Date
+			clm.Whse=wrp.Whse
+			clm.RoAmount=wrp.Invoice
+			CustNo=wrp.Customer
+			RPR=9
+			exit do
+		Endif
+	Loop
+	If RPR Goto GNCDone ! found it - finished
+	Searkey$=" ",Searkey$
+	Searkey$=RPORDNO Using "######" ! have dir 3 of hhkey
+	Search #IKC,2,3;SearKey$,R[3],E
+	if e goto GNCDone ! no match
+	read record #IHC,R[3],0;invh.;
+	R[4]=invh.ShipRec
+	read record #ISC,R[4],0;invs.;
+	R[5]=invh.TotRec
+	read record #ITC,R[5],0;invt.;
+	if invh.Status<>30 goto GNCDone ! no credits
+	if invh.OrdType<>21 and invh.OrdType<>22 goto GNCDone ! wrong type
+	tmpkey$=" ",tmpkey$
+	tmpkey$[1,10]=Searkey$[7] ! refno
+	tmpkey$[14]="A" ! rpr line 
+	Search #ILC,2,1;tmpkey$,R[6],E
+	if not(e)
+		read record #ilc,R[6],0;invl.;
+	Else
+		clear invl.
+	Endif
+	! ok - start load
+	clm.ProdCode$=invl.ProdCode$+Blank$
+	tmpkey$[14]="B" ! for s/n data
+	Search #ILC,2,1;tmpkey$,R[6],E
+	if not(e)
+		read record #ilc,R[6],0;invl.;
+	Else
+		clear invl.
+	Endif
+	clm.SerialNo$=invl.Desc1$+Blank$
+	clm.VendNo=invl.Vendor
+	tmpkey$[14]="C" ! for problem
+	Search #ILC,2,1;tmpkey$,R[6],E
+	if not(e)
+		read record #ilc,R[6],0;invl.;
+	Else
+		clear invl.
+	Endif
+	clm.ProbDesc1$=invl.Desc1$+Blank$
+	clm.ProbDesc2$=invl.Desc2$+Blank$
+	! and the rest..
+	CustNo=invh.CustNum
+	clm.RoDate=invh.InvDate
+	clm.Whse=invh.Wh
+	clm.CustName$=invs.Name$+Blank$
+	clm.RoAmount=invt.TotShipCost ! @110 in sn491!?
+	ORD=9
+
+	GNCDone: ! finished
+	Try Close #IHC Else Rem
+	Try Close #ISC Else Rem
+	Try Close #ITC Else Rem
+	Try Close #ILC Else Rem
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! getnewclm
+
+! ------------------------------------------------------------------------
+Sub SVclaim()
+! get back fields & save it
+  Try
+	close #CH_CLM ! close read only
+	ch_clm = OpenFile(1472,Intco) \ if ch_clm=-1 Error 42 ! claim file
+	call dxget("RORDER",tmp$)
+	RPORDNO=tmp$
+	if RPORDNO<=0 or RPORDNO>999999 or FRA(RPORDNO)
+		returnstatus=0
+		Message$="Invalid Repair Order"
+		goto SCLMDONE
+	Endif
+	K1$=" ",k1$
+	k1$=RPORDNO Using "######"
+	K1$[7]=""
+	Search #ch_clm,2,1;k1$,R[1],E
+	if k1$[7,7]<>"" and k1$[7,8]<>"  " ! it has pay lines and no master
+		returnstatus=0
+		message$="There are payments to a missing master claim"
+		goto SCLMDone
+	Endif
+	if e let Newclaim=1
+	if newclaim ! new 
+		clear clm. ! it's new
+		clm.VendPayNo$=blank$ ! space fill
+	Endif
+	clm.RepairOrder=RPORDNO
+
+	call dxget("PRODID",tmp$)
+	Prod$=UCase$(RTrim$(tmp$))
+	clm.ProdCode$=prod$,blank$
+	call dxget("SNID",tmp$)
+	clm.SerialNo$=UCase$(tmp$)+Blank$
+	call dxget("VENDID",tmp$)
+	clm.VendNo=tmp$
+	call dxget("CUSTNAME",tmp$)
+	clm.CustName$=tmp$+Blank$
+	call dxget("RODATE",tmp$) \ tmp$=trim$(tmp$)
+	if tmp$<>"" let tmp$=chkDateFrmt$(tmp$) ! will add 19 or 20 to year zero
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	let tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+	clm.RoDate=tmp1$[3,8] ! drop to yymmdd
+	call dxget("WHSE",tmp$)
+	clm.Whse=tmp$
+	call dxget("ROAMOUNT",tmp$)
+	clm.RoAmount=tmp$
+	call dxget("PRBDESC1",tmp$)
+	clm.ProbDesc1$=tmp$+Blank$
+	call dxget("PRBDESC2",tmp$)
+	clm.ProbDesc2$=tmp$+Blank$
+	call dxget("VENDREF",tmp$)
+	clm.VendClaimNo$=tmp$+blank$
+	call dxget("DATESENT",tmp$) \ tmp$=trim$(tmp$)
+	if tmp$<>"" let tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	let tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+	clm.DateSent=tmp1$[3,8] ! drop to yymmdd
+	call dxget("CLAIMAMT",tmp$)
+	clm.ClaimAmount=tmp$
+	if newclaim
+		let e=2;r=0
+		search #ch_clm,1,0;K1$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error "+Str$(E)+" getting new record"
+			goto SCLMDone
+		Endif
+		K1$[7]="" ! make sure 6 only!
+		Search #ch_clm,4,1;K1$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error "+Str$(E)+" adding new key "+K1$
+			goto SCLMDone
+		Endif
+		R[1]=R
+	Endif
+	clm.SpareNotUsed$[1,50]=blank$ ! don't fill whole string(NULLS!)
+	write record #CH_CLM,R[1],0;clm.;
+	SCLMDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SVclaim
+! ------------------------------------------------------------------------
+Function chkDateFrmt$(DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY
+! if not make it MM/DD/YYYY
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE" or DIn$="0" or DIn$=""
+	  Let DOut$=UCase$(DIn$)
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function DOut$ ! chkDateFrmt$
+! 
+!--------------------------------------------------------------------
+SUB SVPMNT()
+! save payments
+  Try
+	close #CH_CLM ! close read only
+	ch_clm = OpenFile(1472,Intco) \ if ch_clm=-1 Error 42 ! claim file
+	read #ctlc,20,26;editstatus;
+	if editstatus=2 or editstatus=4
+		returnstatus=0
+		if editstatus=2 let message$="JOURNAL "
+		if editstatus=4 let message$="ACCEPT "
+		message$=message$+" IS IN PROCESS"
+		! if editstatus=3 let message$="JOURNAL HAS BEEN RUN"
+		goto SPMTDONE2
+	Endif
+	EDITSTATUS=1
+	close #ctlc
+	CTLC = OpenFile(9999,IntCo) \ if ctlc=-1 error 42
+	Write #ctlc,20,26;editstatus;
+	dim cclm. as claimfle
+	call dxget("RORDER",tmp$)
+	RPORDNO=tmp$
+	if RPORDNO<=0 or RPORDNO>999999 or FRA(RPORDNO)
+		returnstatus=0
+		Message$="Invalid Repair Order"
+		goto SPMTDONE
+	Endif
+	K1$=" ",k1$
+	k1$=RPORDNO Using "######"
+	K1$[7]=""
+	search #ch_clm,2,1;K1$,R[2],E
+	if k1$[7,7]<>"" and k1$[7,8]<>"  " let e=1
+	if e
+		returnstatus=0
+		message$="Master Claim not found"
+		goto SPMTDone
+	Endif
+	read record #ch_clm,r[2],0;cclm.; ! copy of master
+	call dxget("SEQNUM",tmp$)
+	x2=tmp$
+	if x2<0 or x2>99 or fra(x2)
+		returnstatus=0
+		message$="Invalid Payment Sequence # (1-99)"
+		goto SPMTDone
+	Endif
+	let k1$[7,8]=X2 Using "##"
+	Search #ch_clm,2,1;k1$,R[1],E
+	x3=k1$[7,8] \ if x3=0 and e=0 let e=1 ! can not find pay # zero!
+	if x2 and e<>0
+		returnstatus=0
+		message$="Payment not found"
+		goto SPMTDONE
+	Endif
+	if e let Newclaim=1
+	if newclaim ! needs next payseq
+		x2=1
+		do
+			k1$[7,8]=x2 using "##"
+			search #ch_clm,2,1;k1$,R,e
+			if e exit do
+			x2=x2+1
+		Loop
+		! okay - not found
+	! Endif
+	! if newclaim ! new 
+		clear clm. ! it's new
+		let e=2;R=0
+		search #ch_clm,1,0;K1$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error "+Str$(E)+" getting new record"
+			goto SPMTDONE
+		Endif
+		K1$[9]="" ! make sure 9 only!
+		Search #ch_clm,4,1;K1$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error "+Str$(E)+" adding new key "+K1$
+			goto SPMTDONE
+		Endif
+		R[1]=R
+	Else ! existing
+		read record #ch_clm,R[1],0;clm.;
+		if clm.ClaimStatus=1
+			returnstatus=0
+			message$="PAYMENT WAS ACCEPTED!"
+			goto SPMTDone
+		Endif
+	Endif
+	clm.RepairOrder=RPORDNO
+	
+	call dxget("PMTNUM",tmp$)
+	clm.VendPayNo$=tmp$+blank$
+	call dxget("DATERECV",tmp$) \ tmp$=trim$(tmp$)
+	if tmp$<>"" let tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	let tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+	clm.DateRecD=tmp1$[3,8] ! drop to yymmdd
+	call dxget("AMTRECV",tmp$)
+	clm.RecvD=tmp$
+	call dxget("PAYDESC1",tmp$)
+	clm.ProbDesc1$=tmp$+blank$
+	call dxget("PAYDESC2",tmp$)
+	clm.ProbDesc2$=tmp$+Blank$
+	! move in main claim data
+	clm.VendNo=cclm.VendNo
+	clm.RoDate=cclm.RoDate
+	clm.DateSent=cclm.DateSent
+	clm.Whse=cclm.Whse
+	clm.RoAmount=cclm.RoAmount
+	clm.ClaimAmount=cclm.ClaimAmount
+	clm.VendClaimNo$=cclm.VendClaimNo$
+	clm.CustName$=cclm.CustName$
+	clm.ProdCode$=cclm.ProdCode$
+	clm.SerialNo$=cclm.SerialNo$
+	clm.SpareNotUsed$[1,50]=blank$
+	write record #ch_clm,R[1],0;clm.;
+	SPMTDONE: ! finished - flag reset
+	Editstatus=0 ! clear FLAG
+	Write #ctlc,20,26;editstatus;
+	SPMTDONE2: ! finished - no reset
+	
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SVPMNT
+! ------------------------------------------------------------------------
+Sub DELPMNT()
+! delete an open payment
+  Try
+	close #CH_CLM ! close read only
+	ch_clm = OpenFile(1472,Intco) \ if ch_clm=-1 Error 42 ! claim file
+	read #ctlc,20,26;editstatus;
+	if editstatus=2 or editstatus=4
+		returnstatus=0
+		if editstatus=2 let message$="JOURNAL "
+		if editstatus=4 let message$="ACCEPT "
+		message$=message$+" IS IN PROCESS"
+		! if editstatus=3 let message$="JOURNAL HAS BEEN RUN"
+		goto DPMTDONE2
+	Endif
+	EDITSTATUS=1
+	close #ctlc ! close read/only
+	CTLC = OpenFile(9999,IntCo) \ if ctlc=-1 error 42
+	Write #ctlc,20,26;editstatus;
+	dim cclm. as claimfle
+	call dxget("RORDER",tmp$)
+	RPORDNO=tmp$
+	if RPORDNO<=0 or RPORDNO>999999 or FRA(RPORDNO)
+		returnstatus=0
+		Message$="Invalid Repair Order"
+		goto DPMTDONE
+	Endif
+	K1$=" ",k1$
+	k1$=RPORDNO Using "######"
+	K1$[7]=""
+	search #ch_clm,2,1;K1$,R[2],E
+	if k1$[7,7]<>"" and k1$[7,8]<>"  " let e=1
+	if e
+		returnstatus=0
+		message$="Master Claim not found"
+		goto DPMTDone
+	Endif
+	read record #ch_clm,r[2],0;cclm.; ! copy of master
+	call dxget("SEQNUM",tmp$)
+	x2=tmp$
+	if x2<=0 or x2>99 or fra(x2)
+		returnstatus=0
+		message$="Invalid Payment Sequence # (1-99)"
+		goto DPMTDone
+	Endif
+	let k1$[7,8]=X2 Using "##"
+	Search #ch_clm,2,1;k1$,R[1],E
+	if not(e)
+		read record #ch_clm,R[1],0;clm.;
+		if clm.ClaimStatus=1
+			returnstatus=0
+			message$="Payment was accepted. Can not delete"
+			goto DPMTDone
+		Endif
+		search #ch_clm,5,1;k1$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error "+Str$(E)+" deleting key "+K1$
+			goto DPMTDone
+		Endif
+		Let E=3;R=R[1]
+		search #ch_clm,1,0;k1$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error "+Str$(E)+" deleting key "+K1$
+			goto DPMTDone
+		Endif
+	Endif ! if not found - just ignore
+	DPMTDone: ! finish w/ flag reset
+	Editstatus=0 ! clear FLAG
+	Write #ctlc,20,26;editstatus;
+	DPMTDone2: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DELPMNT
+! ------------------------------------------------------------------------

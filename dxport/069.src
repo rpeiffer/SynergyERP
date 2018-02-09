@@ -1,0 +1,498 @@
+! 069.dl4 - Update Price & Load costs
+! 1.0 02/02/2010 - initial conversion
+!
+! loadsave -w -n 100,10 -o prog/dxport/069.dl4 src/069.src
+!
+! ERP Scheduler Enabled
+!
+Rem MX069 MATRIX PRICE UPDATE (TO PRODUCT FILE)
+Rem AUTHOR:  REK 9/91
+Rem LAST UPDATE:
+! vst 10/20/05 cct196350 - changed the displacement of where 'PRFAC' is         
+!                      being read in from in the 'commhead' file - this is      
+!                      part of the change for cct167193-expand # of price types !
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: OCT 20, 2005  12:58:48
+Rem /w2/papermaster/r2005//usr/acct/valerie/work/r2005/mx0/mx069.src (univ2) [valerie] {15402}
+Rem  Copyright (c) 2005 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+include "src/copyright.inc"
+include "src/inc/sql_prod.inc"
+include "src/inc/filecosthist.inc" ! cost history
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Function getmsg$,expandarray
+Declare External Function AddToMYReports
+Declare External Sub ERPCronSuccess
+Declare External Function GetParameter$
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,FormatDate2$,getuidinfo$,JDate$
+Declare External Function OpenMySQLMirror
+External Lib "libprod.lib"
+Declare External Sub mkcosthist
+Declare Intrinsic Sub InpBuf,String,Time,programdump,FindF
+!Option Default Dialect IRIS1
+
+try ! main try
+Dim A$[156],A1$[90],A2$[30],C1$[32],PKEY$[20],U3$[60],P9$[50],P60$[50]
+Dim 1%,CNVTU[2],FLAG,SR,SC,PM5[5,4],PFU1[20],TBL,PD1[9],WHPARC[5]
+Dim 2%,A2,A3[2],B[24],C4[8],PFCO[3],R,U2,U4[1],D9[20],WHBLD[2]
+Dim 1%,FChan[5],2%,W7[14],WHSE,DFWH
+Dim 3%,A[33],A1[7],BASE,FIELD,M6[5,3],PFU2[6],U3,CNVTA,PF_LOAD2,R4
+Dim F$[16],IN$[10],WH$[2],WHPROD$[12],W1$[32]
+Dim 3%,X1[9],X4,W3[24],WHLV[2],WHMISC[6],A4
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+dim tmp$[800],tmp1$[800],tmp2$[800],Message$[600],msg$[100],rstr$[2000],webstr$[2000]
+dim action$[30],options$[30],userid$[8],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+Dim ReportDir$[128],BaseName1$[128],Statusfile$[128],action1$[30],action2$[30]
+Dim Blank$[100] \ Blank$=" ",Blank$
+! call dxopen() ! for standalone run
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+
+! If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTIN.hsf\177\";
+Dim 1%,PRFAC,P61$[256],KEYCOMM$[10],U9$[50],J4$[50],X$[10]
+Dim 1%,LM[1],WHLM[1],WHPARC2[3],PRPARC2[3],3%,PREC[1],REC_CMDTY
+Dim 2%,PLC[3],PRD0[2],WHPRD0[1],PCDATE,X9
+Dim 3%,PORGCOST[7],WORGCOST[7],PRPARC[3],PRREDI[1],WHREDI[1]
+Dim PCH. as costhist
+COID=IntCo
+For CT = 2 To 5
+  Read X \ If X = -1 Goto L_540
+  Read #1,88,X;F$[1,16];
+  Open #CT,F$
+L_540: Next CT
+Data "1792","2720","1744","2288"
+Close #3 ! rev9 still uses pricemark!!
+Open #3,"2/SPRICEMARK"+Str$(COID) ! new xrev9/erp file
+Mat Read #1,61,0;P61$;
+Mat Read #1,19,50;P9$; \ Mat Read #1,60,50;P60$;
+Mat Read #1,115,0;D9;
+sqlChan = OpenMySQLMirror(e$)
+!Open #77,"PRTDFLT","USERPORT"
+!Read #78,Spc(6),10;A4; \ If Not(A4) Let A4 = Spc(6)
+!Mat Read #77,A4,0;PD1;
+!Close #77,#78
+!DFWH = PD1[2]
+returnstatus=0
+Gosub GETPCDATE
+!Print 'CS';@0,0;"MX069";@20,0;"PRODUCT FILE UPDATE FROM MARK-UP TABLE"
+!Print @0,4;"Would you like to update your items from the markup table(s) (YES/<CR>)? ";
+!Input Len 16387;""IN$
+!If IN$ <> "YES" Goto OUTEND
+ReportDir$ = "REPORTDIR" \ System 28,ReportDir$
+BaseName1$ = "load_update"+dateusing$(Tim#(0),"YYMMDDHHNNSS")
+StatusFile$ = ReportDir$ + "/"+BaseName1$
+Call FindF(StatusFile$,tmp)
+If tmp Kill StatusFile$
+StatChan = 88 ! FindChannel() ! channel to build text file need fixed channel
+Try Close #88 Else Rem
+Try
+	Build #StatChan,StatusFile$ As "TEXT"
+Else
+	returnstatus=1
+	let message$=messaGE$+"Error in Building Status File "
+	goto outend:
+end TRY
+Try Close #StatChan Else Rem
+Try
+	Open #StatChan,StatusFile$
+else
+	returnstatus=1
+	let message$=message$+"Error in Opening Status File "
+	goto outend:
+end TRY
+Print #StatChan;"Update Process Started..."
+! PAUSE 20
+e = AddToMYReports(BaseName1$) 
+if e<0
+	message$=message$+"Error adding to my reports!" 
+	returnstatus=1
+	goto outend:
+endif
+L_1040: If P9$[32,32] <> "Y" Let WHSE = 0 \ Goto L_1500
+!Print @0,6;"Enter warehouse to update,  0: for main, or  E: to exit: ";'CL';
+!If DFWH < 10 Print Using "#";DFWH; Else Print Using "##";DFWH;
+WHSE = 0;numrec=0
+!Print @60,6;
+!Input Len 16386;""WH$ \ If WH$ = "E" Goto OUTEND
+
+!If WH$ = "" Let WHSE = DFWH \ Goto L_1120
+WHSE = GetParameter$("WHSE")
+L_1120: ! 
+If WHSE < 0 Or WHSE > D9[5] ! Print 'RB'; \ Goto L_1040
+	returnstatus=1
+	e$="Invalid Warehouse"
+	goto err_msg
+Endif
+L_1500: Rem START
+! send message
+returnstatus=0 ! or is it 1?
+message$="Please check under My Reports "+basename1$+" for status and completion"
+Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)     
+Call AddToStr(e$,rstr$,WebStr$)                            
+Call SetOutPut(e$,rstr$)
+PKEY$ = " ",PKEY$
+L_1520: Search #2,3,1;PKEY$,R,E
+If E = 2 Goto L_3000
+If E error 11000
+numrec=numrec+1
+if not(fra(numrec/1000))
+	Print #StatChan;"Checking ";Str$(Numrec);" Product: ";PKey$
+Endif
+! Print @5,10;"Now checking product: ";PKEY$;'CL';
+Mat Read #2,R,0;A$
+Mat Read #2,R,156;B
+Mat Read #2,R,256;A
+Mat Read #2,R,460;A1
+Read #2,R,508;A2
+Mat Read #2,R,512;PFU1
+Mat Read #2,R,554;PFU2
+Mat Read #2,R,596;PRPARC
+Mat Read #2,R,620;LM
+Read #2,R,660;U2
+Mat Read #2,R,670;U4
+Read #2,R,678;U3
+Mat Read #2,R,684;U3$
+Mat Read #2,R,744;A1$
+Mat Read #2,R,834;A3
+Mat Read #2,R,856;C1$
+Mat Read #2,R,894;C4
+Mat Read #2,R,938;PF_LOAD2
+Mat Read #2,R,944;A2$
+Mat Read #2,R,974;PFCO
+Mat Read #2,R,1002;PLC
+Mat Read #2,R,1100;PRPARC2
+Mat Read #2,R,1108;PRREDI
+Mat Read #2,R,1270;PRD0
+PORGCOST[0] = C4[4]
+PORGCOST[1] = B[8]
+PORGCOST[2] = B[10]
+PORGCOST[3] = PF_LOAD2
+PORGCOST[4] = LM[0]
+PORGCOST[5] = LM[1]
+Clear pch.
+LET pch.ProdCode$=A$[140,151]+Blank$
+pch.AccessCode$=Blank$ ! gets in call
+pch.Source$="PTable Upt"
+pch.sOpen$=Blank$
+pch.Blankforkey$=Blank$
+LET pch.CDate=0 
+LET pch.CTime=0 
+LET pch.CostUm=PFU1[11] 
+pch.Whse=0;pch.CstUmFactor=0
+IF pch.CostUm>0                         
+	FOR XCST=0 TO 7                      
+		IF PFU1[XCST]=PFU1[11]             
+			IF XCST=0                        
+				LET pch.CstUmFactor=1                
+			ELSE                             
+				LET pch.CstUmFactor=PFU2[XCST-1]     
+			ENDIF                            
+		ENDIF                              
+	NEXT XCST 
+ENDIF 
+If WHSE Goto L_2500
+TBL = C4[3]
+Gosub L_2000
+If PORGCOST[0]>0 and PORGCOST[0] <> C4[4] ! base cost
+  PFCO[2] = PORGCOST[0];PFCO[3] = PCDATE
+  pch.OldCost=PORGCOST[0]
+  pch.NewCost=C4[4]
+  pch.CType=5
+  call MkCostHist(e$,IntCo,fchan[],pch.)
+End If 
+If PORGCOST[1]>0 and PORGCOST[1] <> B[8] ! load cost
+  PRPARC[1] = PORGCOST[1];PRD0[1] = PCDATE
+  pch.OldCost=PORGCOST[1]
+  pch.NewCost=B[8]
+  pch.CType=1
+  call MkCostHist(e$,IntCo,fchan[],pch.)
+End If 
+If PORGCOST[2]>0 and PORGCOST[2] <> B[10] ! last cost
+  PLC[2] = PORGCOST[2];PLC[3] = PCDATE
+  pch.OldCost=PORGCOST[2]
+  pch.NewCost=B[10]
+  pch.CType=3
+  call MkCostHist(e$,IntCo,fchan[],pch.)
+End If 
+If PORGCOST[3]>0 and PORGCOST[3] <> PF_LOAD2 ! load2/redi cost
+  PRREDI[1] = PORGCOST[3];PRD0[2] = PCDATE
+  pch.OldCost=PORGCOST[3]
+  pch.NewCost=PF_LOAD2
+  pch.CType=2
+  call MkCostHist(e$,IntCo,fchan[],pch.)
+End If 
+If PORGCOST[4]>0 and PORGCOST[4] <> LM[0] ! load table 1 changed
+  PRPARC2[2] = PORGCOST[4];PRD0[1] = PCDATE
+  pch.OldLoadTbl1=PORGCOST[4]
+  pch.NewLoadTbl1=LM[0]
+  pch.CType=8
+  call MkCostHist(e$,IntCo,fchan[],pch.)
+End If 
+If PORGCOST[5]>0 and PORGCOST[5] <> LM[1] ! load table 2 changed
+  PRPARC2[3] = PORGCOST[5];PRD0[2] = PCDATE
+  pch.OldLoadTbl2=PORGCOST[5]
+  pch.NewLoadTbl2=LM[1]
+  pch.CType=9
+  call MkCostHist(e$,IntCo,fchan[],pch.)
+End If 
+Mat Write #2,R,0;A$
+Mat Write #2,R,156;B
+Mat Write #2,R,256;A
+Mat Write #2,R,460;A1
+Write #2,R,508;A2
+Mat Write #2,R,512;PFU1
+Mat Write #2,R,554;PFU2
+Mat Write #2,R,596;PRPARC
+Mat Write #2,R,620;LM
+Write #2,R,660;U2
+Mat Write #2,R,670;U4
+Write #2,R,678;U3
+Mat Write #2,R,684;U3$
+Mat Write #2,R,744;A1$
+Mat Write #2,R,834;A3
+Mat Write #2,R,856;C1$
+Mat Write #2,R,894;C4
+Mat Write #2,R,938;PF_LOAD2
+Mat Write #2,R,944;A2$
+Mat Write #2,R,974;PFCO
+Mat Write #2,R,1002;PLC
+Mat Write #2,R,1100;PRPARC2
+Mat Write #2,R,1108;PRREDI
+Mat Write #2,R,1270;PRD0;
+if sqlChan >= 0 ! MySQL enabled and channel opened
+	e = prod_UpdateSQLFromDL4(e$, intCo, PKey$, sqlChan, 2)
+	if e <> 1 ! returns the number of records add/updated/deleted
+		error 11000 ! search error....
+	end if
+end if
+COUNT = COUNT + 1
+Goto L_1520
+L_2000: Rem CALCULATE LOADED COST & LIST PRICES FROM TABLE
+BASE = C4[4]
+Gosub L_13000
+If C4[3] < 1 Or C4[3] > 999 Or C4[2] <> 1 Goto L_2130
+Mat Read #3,c4[3],18;PM5;
+LET BASE=C4[4]
+
+FOR FIELD=1 TO 6
+	Gosub GetPPMCBASE: ! "get base for prod pricing
+  Gosub L_19000
+  If P61$[50,50] = "Y" Gosub PRICEFAC
+  Let A[19 + FIELD] = X4
+Next FIELD
+L_2130: Return 
+
+GetPPMCBase: ! "per price - get cost base
+Let Base=C4[4] ! "base default
+If PM5[field-1,4]=1 Let BASE=B[10] ! "Last
+If PM5[Field-1,4]=2 Let BASE=B[8] ! "Load
+If PM5[Field-1,4]=3 Let BASE=PF_LOAD2 ! "load2
+If PM5[field-1,4]=4 Let BASE=B[21] ! "average
+If PM5[field-1,4]=5 Let BASE=PRPARC[2] ! "Net PO
+Return
+
+L_2200: Rem CALCULATE LOADS AND LISTS FOR WAREHOUSE RECORD
+BASE = W3[18]
+Gosub L_13100
+If C4[3] < 1 Or C4[3] > 999 Or C4[2] <> 1 Goto L_2330
+Mat Read #3,c4[3],18;PM5;
+LET BASE=W3[18]
+
+FOR FIELD=1 TO 6
+	gosub GetWPMCBase: ! "cost base for whse
+  Gosub L_19000
+  If P61$[50,50] = "Y" Gosub PRICEFAC
+  Let W3[18 + FIELD] = X4
+Next FIELD
+L_2330: Return 
+
+GetWPMCBASE: ! "get the cost base for price for whse prices
+Let BASE=W3[18] ! "Base is default
+If PM5[field-1,4]=1 Let BASE=w3[16] ! last
+If PM5[field-1,4]=2 Let BASE=W3[17] ! load
+If PM5[field-1,4]=3 Let BASE=W3[14] ! load2
+If PM5[field-1,4]=4 Let BASE=W3[15] ! Average
+If PM5[field-1,4]=5 Let BASE=WHMISC[2] ! "Net PO
+Return
+
+L_2500: Rem DO WAREHOUSE
+WHPROD$[1,12] = A$[140,151]
+WHBLD[0] = 4;WHBLD[1] = WHSE;WHBLD[2] = 0
+!Call "GETWHSE",WHPROD$,WHBLD[],W1$,W3[],WHPARC[],WHLV[],W7[],WHMISC[],E
+Call "GETWHSE.dl4",WHPROD$,WHBLD[],W1$,W3[],WHPARC[],WHLV[],W7[],WHMISC[],E,e$,rstr$
+If E Or Not(WHBLD[2]) Goto L_2599
+R4 = WHBLD[2]
+Mat Read #4,R4,842;WHLM
+Mat Read #4,R4,960;WHPARC2
+Mat Read #4,R4,968;WHREDI
+Mat Read #4,R4,1004;WHPRD0
+WORGCOST[0] = W3[18]
+WORGCOST[1] = W3[17]
+WORGCOST[2] = W3[16]
+WORGCOST[3] = W3[14]
+WORGCOST[4] = WHLM[0]
+WORGCOST[5] = WHLM[1]
+PCH.Whse=WHSE ! rest set in prod
+C4[3] = WHPARC[1];TBL = C4[3];R4 = WHBLD[2]
+Gosub L_2200
+If WORGCOST[0]>0 AND WORGCOST[0] <> W3[18] ! base cost
+  W7[4] = WORGCOST[0];W7[5] = PCDATE
+  pch.OldCost=WORGCOST[0]
+  pch.NewCost=W3[18]
+  pch.CType=5
+  call MkCostHist(e$,IntCo,fchan[],pch.)
+End If 
+If WORGCOST[1]>0 AND WORGCOST[1] <> W3[17] ! load cost
+  WHMISC[1] = WORGCOST[1];WHPRD0[0] = PCDATE
+  pch.OldCost=WORGCOST[1]
+  pch.NewCost=W3[17]
+  pch.CType=1
+  call MkCostHist(e$,IntCo,fchan[],pch.)
+End If 
+If WORGCOST[2]>0 AND WORGCOST[2] <> W3[16] ! last cost
+  W7[14] = WORGCOST[2];WHLV[2] = PCDATE
+  pch.OldCost=WORGCOST[2]
+  pch.NewCost=W3[16]
+  pch.CType=3
+  call MkCostHist(e$,IntCo,fchan[],pch.)
+End If 
+If WORGCOST[3]>0 AND WORGCOST[3] <> W3[14] !load 2/redi
+  WHREDI[1] = WORGCOST[3];WHPRD0[1] = PCDATE
+  pch.OldCost=WORGCOST[3]
+  pch.NewCost=W3[14]
+  pch.CType=2
+  call MkCostHist(e$,IntCo,fchan[],pch.)
+End If 
+If WORGCOST[4]>0 AND WORGCOST[4] <> WHLM[0] ! load table 1
+  WHPARC2[2] = WORGCOST[4];WHPRD0[0] = PCDATE
+  pch.OldLoadTbl1=WORGCOST[4]
+  pch.NewLoadTbl1=WHLM[0]
+  pch.CType=8
+  call MkCostHist(e$,IntCo,fchan[],pch.)
+End If 
+If WORGCOST[5]>0 AND WORGCOST[5] <> WHLM[1] ! load table 2
+  WHPARC2[3] = WORGCOST[5];WHPRD0[1] = PCDATE
+  pch.OldLoadTbl2=WORGCOST[5]
+  pch.NewLoadTbl2=WHLM[1]
+  pch.CType=9
+  call MkCostHist(e$,IntCo,fchan[],pch.)
+End If 
+Mat Write #4,R4,78;W3
+Mat Write #4,R4,696;W7
+Mat Write #4,R4,780;WHLV
+Mat Write #4,R4,800;WHMISC
+Mat Write #4,R4,960;WHPARC2
+Mat Write #4,R4,968;WHREDI
+Mat Write #4,R4,1004;WHPRD0;
+COUNT = COUNT + 1
+L_2599: Goto L_1520
+L_3000: Rem DONE!
+! Print @0,15;'RB';"Completed with";COUNT;"products updated!"
+!Print "PLEASE PRESS <CR> TO EXIT ";
+!Input ""IN$
+returnstatus=0
+message$="Complete "+Str$(COUNT)+" products updated"
+Print #StatChan;Message$
+try close #StatChan Else Rem
+Goto OUTEND
+GETPCDATE: Rem GET CURRENT DATE
+U9$ = ""
+J4$ = "JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC"
+Call Time(U9$)
+For X9 = 1 To 12
+  If U9$[1,3] = J4$[X9 * 3 - 2,X9 * 3] Goto L_7940
+Next X9
+!Print @0,23;'CL RB';"DATE ERROR" \ E = 0 \ Gosub ERR_SEARCH
+L_7940: X$ = " ",X$
+X$[3,4] = X9 Using "&&"
+X9 = U9$[11,12] \ X$[1,2] = X9 Using "&&"
+X9 = U9$[5,6] \ X$[5,6] = X9 Using "&&"
+PCDATE = X$[1,6]
+Return 
+
+L_13000: Rem DO LOAD MARKUPS
+If LM[0]
+  OTYPE = 1;WH = 0;LTBL = LM[0];PREC[0] = R;CNVTA = 0
+  Gosub L_13200 \ B[8] = CNVTA
+End If 
+If LM[1]
+  OTYPE = 1;WH = 0;LTBL = LM[1];PREC[0] = R;CNVTA = 0
+  Gosub L_13200 \ PF_LOAD2 = CNVTA
+End If 
+Return 
+L_13100: Rem WHSE LOADS
+If WHLM[0]
+  OTYPE = 1;WH = WHSE;LTBL = WHLM[0];PREC[0] = R;CNVTA = -999
+  Gosub L_13200 \ W3[17] = CNVTA
+End If 
+If WHLM[1]
+  OTYPE = 1;WH = WHSE;LTBL = WHLM[1];PREC[0] = R;CNVTA = -999
+  Gosub L_13200 \ W3[14] = CNVTA
+End If 
+Return 
+L_13200: Rem DO CALL
+! Call "MXLOAD5L",OTYPE,WH,LTBL,PREC[],CNVTA
+Call "MXLOAD5.dl4",OTYPE,WH,LTBL,PREC[],CNVTA,intCO,e$,rstr$
+Return 
+L_19000: Rem MATRIX PRICING, RETURNS X4
+! Call "MX671BRK5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,C4[],FIELD,BASE
+Call "MX671BRK5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,C4[],FIELD,BASE,e$,rstr$
+If FLAG Let E = FLAG \ error 11000
+X4 = CNVTA
+Return 
+L_20000: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)   ! 20040 REM
+If CNVTU[2] = 3 Goto L_20050
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[2] = 0 Goto L_20050
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+L_20050: !
+L_20120: Rem "====== unibasic 5+ logic
+! Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+Call "MXPRCONV5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,e$,rstr$
+If CNVTU[2] = 0 Goto L_20160
+If FLAG Let E = FLAG \ error 11000
+AMOUNT = CNVTA
+L_20160: Return 
+PRICEFAC: Rem round prices based upon pricing factor
+If P61$[50,50] <> "Y" Return 
+KEYCOMM$ = A$[152,155]
+Search #5,2,1;KEYCOMM$,REC_CMDTY,E
+If Not(E)
+  Mat Read #5,REC_CMDTY,40;PRFAC;
+  If PRFAC
+    CNVTA = X4;CNVTU[0] = 0;CNVTU[1] = PFU1[12];CNVTU[2] = 2
+    Gosub L_20000
+    Call "pricernd",PRFAC,AMOUNT
+    CNVTA = AMOUNT;CNVTU[0] = PFU1[12];CNVTU[1] = 0;CNVTU[2] = 2
+    Gosub L_20000
+    X4 = AMOUNT
+  End If 
+End If 
+Return 
+OUTEND: Rem END
+!Close 
+!Chain "MX000"
+!Stop "UH OH!"
+Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)     
+Call AddToStr(e$,rstr$,WebStr$)                            
+Call SetOutPut(e$,rstr$)
+if returnStatus = 0 Call ERPCronSuccess()
+!try Call dxclose() else rem
+End 
+
+ERR_MSG: ! send message                                    
+ReturnStatus = 1 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)    
+Message$ = e$                                              
+Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)     
+Call AddToStr(e$,rstr$,WebStr$)                            
+Call SetOutPut(e$,rstr$)                                   
+End                             
+
+else ! main try
+!
+include "src/callmainerrnet.inc"
+End try

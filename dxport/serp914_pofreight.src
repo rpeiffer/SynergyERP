@@ -1,0 +1,386 @@
+! --- serp914_holiday.dl4
+! Misc. Tables Maintenance program (po freight charge) converted from ut914pf
+!
+! 1.0 10/14/2009 - initial conversion
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp914_pofreight.dl4 src/serp914_pofreight.src
+!
+! From the original code:
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: JUN  8, 2005  13:38:29
+Rem /w2/papermaster/r2005//usr/acct/mary/work/r2005/ut/ut914pf.src (univ2) [mary] {23765}
+Rem  Copyright (c) 2005 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+! include "src/inc/filepofrgth.inc"
+Option Default Dialect IRIS1
+Rem ut914pf Maintain Purchase Order Freight Charge
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,jdate$,Formatdate2$
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[1000],tmp2$[500],b$[200]
+b$=" ",b$
+dim message$[150],webstr$[200]
+!
+! call dxopen()
+!
+! call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+Dim 1%,CH_POFH,CH_POFL
+Dim KEYPOFH$[10],POFH0$[6],POFH1$[30]
+Dim KEYPOFL$[10],POFL$[6],1%,POFL0[2],3%,POFL1[11],POFL2[11],POFL3[11]
+Dim POFL4[11],POFL5[11],P60$[256]
+Dim 1%,POTYPE[6],maxType
+Dim 3%,REC_POFH,REC_POFL
+Dim POTYPE$[7,30]
+
+! po freight: header and line files
+ch_pofh = openfile(9962, intco) \ if ch_pofh=-1 error 42
+ch_pofl = openfile(9952, intco) \ if ch_pofl=-1 error 42
+! cntrl already open (read only) by getsession
+Mat Read #1,60,0;P60$;
+
+!
+! PO order type descriptions
+!
+maxtype = 4
+POTYPE$[1] = "All Purchase Order Types"
+POTYPE$[2] = "Warehouse"
+POTYPE$[3] = "Direct"
+POTYPE$[4] = "Indirect"
+If P60$[46,46] = "Y" ! import flag is on
+	maxType = 7
+	POTYPE$[5] = "Import Warehouse"
+	POTYPE$[6] = "Import Direct"
+	POTYPE$[7] = "Import Indirect"
+End If
+
+!
+! for all actions except "HEADER GETDATA" we are looking
+! to get the header table data
+!
+if action1$ <> "HEADER" OR action2$ <> "GETDATA"
+	call DxGet("TableID", tmp$)
+	tmp$ = rtrim$(tmp$)
+	tmp$ = ucase$(tmp$)
+	KEYPOFH$=tmp$,b$
+	Search #CH_POFH,2,1;KEYPOFH$,REC_POFH,E \ if E> 1 Error 42
+	IF E
+		! record not on file.  this is only valid IF this is a
+		! "HEADER" "SUBMITDATA" indicating a brand new table
+		if action1$ = "HEADER" AND action2$= "SUBMITDATA"
+			! build new record
+			call dxget("TableDesc", tmp$)
+			POFH1$ = tmp$,b$
+			E = 2 \ Search #CH_POFH,1,0;KEYPOFH$,REC_POFH,E \ If E Error 42
+			POFH0$=KEYPOFH$
+			Gosub WRITE_POFH
+			Search #CH_POFH,4,1;KEYPOFH$,REC_POFH,E \ If E Error 42
+		else
+			if E e$ = "Table not on file!" \  error 10000
+		end if
+	else
+		gosub read_pofh
+	end if
+end if
+
+! ----------------------------------------------------
+!* Main logic dispatcher
+! ----------------------------------------------------
+if action1$ = "HEADER"
+	if action2$ = "GETDATA"
+		gosub header_getdata
+		Message$=""
+		goto OutEnd:
+	else if action2$ = "SUBMITDATA"
+		gosub header_submitdata
+		Message$=""
+		goto OutEnd:
+	else if action2$ = "DELETE"
+		gosub header_delete
+		Message$ = "PO freight table deleted."
+		goto OutEnd:
+	else
+		e$ = "Unknown action2: "+action2$ \ Error 10000
+	end if
+else if action1$ = "DETAIL"
+	if action2$ = "GETDATA"
+		gosub detail_getdata
+		Message$=""
+		goto OutEnd:
+	else if action2$ = "SUBMITDATA"
+		gosub detail_submitdata
+		Message$="PO Type table updated."
+		goto OutEnd:
+	else if action2$ = "DELETE"
+		gosub detail_delete
+		Message$ = "PO Type table deleted."
+		goto OutEnd:
+	else
+		e$ = "Unknown action2: "+action2$ \ Error 10000
+	end if
+else
+	e$ = "Unknown action1: "+action1$ \ Error 10000
+end if
+
+! ----------------------------------------------------------------------
+! Nothing below here except subroutines and the exit code
+! ----------------------------------------------------------------------
+
+! *****
+! build a dropdown list of current freight tables and descriptions.
+! *****
+header_getdata:
+	tmp$=bsdel$+"HeaderDroplist"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	! add header for drop list
+	tmp$="ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	KEYPOFH$ = " ",KEYPOFH$
+	do
+		Search #CH_POFH,3,1;KEYPOFH$,REC_POFH,E
+		if e exit do
+		gosub read_pofh
+		tmp$=KEYPOFH$+fdel$+KEYPOFH$+" - "+POFH1$+fdel$+rdel$
+		call addToStr(e$, rstr$, tmp$)
+	loop
+	call addToStr(e$, rstr$, esdel$)
+return
+
+! *****
+! header either selected or this is an add request
+! build po type drop list for return
+! *****
+header_submitdata:
+	! at this point header has been read OR built if not already on
+	! file - just need to get data back to the web
+	! build header data to send back
+	tmp$=bsdel$+"HeaderData"+fdel$+rdel$
+	tmp$=tmp$+"TableID"+fdel$+"TableDesc"+fdel$+rdel$
+	tmp$=tmp$+pofh0$+fdel$+pofh1$+fdel$+rdel$+esdel$
+	call addToStr(e$, rstr$, tmp$)
+	! build list of po order types on file
+	gosub build_potype_list
+return
+
+! *****
+! delete all po type tables for this table code.  Delete the table
+! code header as well.  this is a result of hitting delete button
+! in main header area
+! *****
+header_delete:
+	! the rem statement below from the original Paper Master
+	! code.  note that while it says there should be a check done
+	! there isn't actually a check done!
+	Rem check if freight code is in use by any vendors !!!!
+	! delete all po type tables (lines)
+	KEYPOFL$ = POFH0$[1,6],b$
+	do
+		Search #CH_POFL,3,1;KEYPOFL$,REC_POFL,E \ If E = 2 exit do
+		If E Error 42
+		If KEYPOFL$[1,6] <> POFH0$[1,6] exit do
+		Search #CH_POFL,5,1;KEYPOFL$,REC_POFL,E \ If E Error 42
+		E = 3 \ Search #CH_POFL,1,0;KEYPOFL$,REC_POFL,E \ If E Error 42
+	loop
+	! delete the main record
+	Search #CH_POFH,5,1;KEYPOFH$,REC_POFH,E \ If E Error 42
+	E = 3 \ Search #CH_POFH,1,0;KEYPOFH$,REC_POFH,E \ If E Error 42
+return
+
+
+! *****
+! find all po types on file for pofh1$ - droplist adds to rstr
+! *****
+build_potype_list: !
+	! build section and header
+	tmp$=bsdel$+"POTypeDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	for i = 0 to maxType - 1
+		tmp$=str$(i)+fdel$+potype$[i+1]
+		KEYPOFL$ = pofh0$,b$
+		keypofl$[7,8] = i using "##"
+		Search #CH_POFL,2,1;KEYPOFL$,REC_POFL,E
+		If E tmp$=tmp$+" (NOT ON FILE)"
+		call addToStr(e$, rstr$, tmp$+fdel$+rdel$)
+	next i
+	call addToStr(e$, rstr$, esdel$)
+return
+
+! *****
+! get detail data for a table.   this is a result of a user
+! selecting a po type from the drop down list
+! *****
+detail_getdata:
+	! get the table description and update in case user
+	! changed the description in addition to selecting the
+	! table
+	call DxGet("TableDesc", tmp$)
+	POFH1$ = tmp$,b$
+	Gosub WRITE_POFH
+	! see what what actual po type the user requested
+	call DxGet("POType", tmp$) \ i = tmp$
+	if i < 0 or i > maxType-1 e$="Invalid purchase order type!" \ error 10000
+	KEYPOFL$ = POFH0$[1,6],b$
+	KEYPOFL$[7,8] = i Using "##"
+	Search #CH_POFL,2,1;KEYPOFL$,REC_POFL,E \ IF E>1 Error 42
+	If E
+		! new po order type for this table
+		POFL$[1,6] = POFH0$[1,6]
+		clear pofl0[] \ clear pofl1[] \ clear pofl2[]
+		clear pofl3[] \ clear pofl4[] \ clear pofl5[]
+		pofl0[0] = I
+		E = 2 \ Search #CH_POFL,1,0;KEYPOFL$,REC_POFL,E \ If E Error 42
+		Gosub WRITE_POFL
+		Search #CH_POFL,4,1;KEYPOFL$,REC_POFL,E \ If E Error 42
+	End If
+	! user may have changed the overall table description
+	! make sure to update the record
+	call DxGet("TableDesc", tmp$)
+	pofh1$=tmp$,b$
+	gosub write_pofh
+	! we now either have an record # for the pofl (new or existing), get it
+	gosub read_pofl
+	! finally!!!  time to build the data
+	! line header data
+	tmp$=bsdel$+"LineHeader"+fdel$+rdel$
+	tmp$=tmp$+"CostType"+fdel$+"LevelType"+fdel$+rdel$
+	tmp$=tmp$+str$(pofl0[1])+fdel$+str$(pofl0[2])+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$+esdel$)
+	! line header table data
+	tmp$=bsdel$+"LineData"+fdel$+rdel$
+	tmp$=tmp$+"Maximum"+fdel$+"Cost"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	for i = 0 to 6
+		tmp$=str$(pofl1[i])+fdel$+str$(pofl2[i])+fdel$+rdel$
+		call addToStr(e$, rstr$, tmp$)
+	next i
+	call addToStr(e$, rstr$, esdel$)
+	! drop down list for cost type
+	tmp$=bsdel$+"CostTypeDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	tmp$=tmp$+"0"+fdel$+"Flat Charge"+fdel$+rdel$
+	tmp$=tmp$+"1"+fdel$+"LB"+fdel$+rdel$
+	tmp$=tmp$+"2"+fdel$+"CWT"+fdel$+rdel$
+	tmp$=tmp$+"3"+fdel$+"Cube"+fdel$+rdel$
+	tmp$=tmp$+"4"+fdel$+"Piece"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$+esdel$)
+	! drop down list for level
+	tmp$=bsdel$+"LevelTypeDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	tmp$=tmp$+"1"+fdel$+"Weight"+fdel$+rdel$
+	tmp$=tmp$+"2"+fdel$+"Merch Dollars"+fdel$+rdel$
+	tmp$=tmp$+"3"+fdel$+"Cubes"+fdel$+rdel$
+	tmp$=tmp$+"4"+fdel$+"Pieces"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$+esdel$)
+return
+
+! *****
+! update data for a table.   this is a result of a user
+! submittig a po type table details form
+! *****
+detail_submitdata:
+	! get the table description and update in case user
+	! changed the description in addition to selecting the
+	! table
+	call DxGet("TableDesc", tmp$)
+	POFH1$ = tmp$,b$
+	Gosub WRITE_POFH
+	! see what what actual po type the user requested
+	call DxGet("POType", tmp$) \ i = tmp$
+	KEYPOFL$ = POFH0$[1,6],b$
+	KEYPOFL$[7,8] = i Using "##"
+	Search #CH_POFL,2,1;KEYPOFL$,REC_POFL,E \ IF E>1 Error 42
+	If E e$="PO type table not on file!  Can't update!" \ Error 10000
+	gosub read_pofl
+	! update the contents
+	call DxGet("costtype", tmp$)
+	pofl0[1] = tmp$
+	call DxGet("leveltype", tmp$)
+	pofl0[2] = tmp$
+	for i = 0 to 6
+		call DxGet("maximum"+str$(i+1), tmp$)
+		pofl1[i] = tmp$
+		call DxGet("cost"+str$(i+1), tmp$)
+		pofl2[i] = tmp$
+	next i
+	gosub write_pofl
+	! resend potype list as there are indicators in the list
+	! if the po type table is on file
+	gosub build_potype_list
+return
+
+! *****
+! delete detail data for a table.   this is a result of a user
+! hitting delete button in detail table area
+! *****
+detail_delete:
+	call DxGet("POType", tmp$) \ i = tmp$
+	if i < 0 or i > maxType-1 e$="Invalid purchase order type!" \ error 10000
+	KEYPOFL$ = POFH0$[1,6],b$
+	KEYPOFL$[7,8] = i Using "##"
+	Search #CH_POFL,2,1;KEYPOFL$,REC_POFL,E \ IF E>1 Error 42
+	If not(E)
+		Search #CH_POFL,5,1;KEYPOFL$,REC_POFL,E \ If E Error 42
+		E = 3 \ Search #CH_POFL,1,0;KEYPOFL$,REC_POFL,E \ If E Error 42
+	end if
+	! resend potype list as there are indicators in the list
+	! if the po type table is on file
+	gosub build_potype_list
+return
+
+READ_POFH: Rem read purchase order freight header
+	Mat Read #CH_POFH,REC_POFH,0;POFH0$;
+	Mat Read #CH_POFH,REC_POFH,6;POFH1$
+Return
+
+WRITE_POFH: Rem write purchase order freight header
+	Mat Write #CH_POFH,REC_POFH,0;POFH0$
+	Mat Write #CH_POFH,REC_POFH,6;POFH1$;
+Return
+
+READ_POFL: Rem read purchase order freight line
+	Mat Read #CH_POFL,REC_POFL,0;POFL$;
+	Mat Read #CH_POFL,REC_POFL,6;POFL0;
+	Mat Read #CH_POFL,REC_POFL,12;POFL1;
+	Mat Read #CH_POFL,REC_POFL,84;POFL2;
+	Mat Read #CH_POFL,REC_POFL,156;POFL3;
+	Mat Read #CH_POFL,REC_POFL,228;POFL4;
+	Mat Read #CH_POFL,REC_POFL,300;POFL5
+Return
+WRITE_POFL: Rem write purchase order freight line
+	Mat Write #CH_POFL,REC_POFL,0;POFL$
+	Mat Write #CH_POFL,REC_POFL,6;POFL0
+	Mat Write #CH_POFL,REC_POFL,12;POFL1
+	Mat Write #CH_POFL,REC_POFL,84;POFL2
+	Mat Write #CH_POFL,REC_POFL,156;POFL3
+	Mat Write #CH_POFL,REC_POFL,228;POFL4
+	Mat Write #CH_POFL,REC_POFL,300;POFL5;
+Return
+
+! the end o' da line
+OUTEND: Rem EXIT ROUTINE
+ReturnStatus=1
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call addToStr(e$,rstr$,webstr$)
+call setoutput(e$,rstr$)
+Close
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end

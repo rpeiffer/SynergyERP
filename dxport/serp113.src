@@ -1,0 +1,389 @@
+!"serp113" === description  synergy erp Customer Tax Type
+! 
+! loadsave -w -n 100,10 -o prog/dxport/serp113.dl4 src/serp113.src
+!  08/03/2009 started
+!
+include "src/copyright.inc"
+!
+include "src/inc/filecusttax.inc" ! cust tax
+include "src/inc/fileptaxtype.inc" ! prod tax
+
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,JDate$,FormatDate2$
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian, JulianToDate
+
+! internal subs/function
+Declare Sub OpenFiles,UpdateLog,sndsys
+Declare Sub SndCTax,DelCTax,SbmCTax
+
+
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],X$[20]
+	dim Message$[200],WebStr$[3000],SessionID$[200]
+	Dim A1$[36],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],UA2$[50],K2$[60]
+	Dim Mask34$[10]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,PTX,COMM_LEV,CTX,C2[100]
+	dim 1%,cost_lev[4],Whse,debug,cnvtu[2],2%,Q0[1]
+	Dim 2%,X2[9],UA2[2]
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,TREC
+	Dim 3%,R[99],O1,UB0[16],Amount,CNVTA
+	dim List$[maxcnt,3000] ! for .net (larger size - ZLines)
+	dim slist$[maxcnt,1000] ! second list
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/ctx.log" ! fields for DEBUG
+
+	Dim ctx. as custtax		! we use for droplist - otherwise a1$ & C2[100]
+	dim ptx. as ptaxtype
+
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! call dxopen() ! done in fmmenu - for standalone run
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp113"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	Action2$=UCase$(action2$)
+	Action2$=RTrim$(action2$) ! UC and trimmed
+	if debugdetail
+		dmsg$="SERP113 ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$ 
+		if Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	call OpenFiles() ! open all needed files
+	call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	! P9$[10,10]="N" ! a test only
+	Mask34$="###.####" ! 3.4 mask
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Let Key1$=UserID$+"          " ! space fill it
+	UCC = OpenFile(-9988, intCo) \ if UCC=-1 Error 42
+	Key1$[11]="" ! cut to length
+	Search #UCC,2,1;Key1$,Rec,E
+	If Not(E)
+	  Let SCR=Rec
+	  Mat Read #ucc,scr,200;UA2;
+	  Mat read #ucc,scr,336;Ua2$;
+	  Read #ucc,scr,394;comm_lev;
+	Else
+	  Let SCR=0;comm_lev=0 ! 
+	  UA2[0]=0;UA2$=" ",UA2$
+	Endif
+	Close #UCC
+	! GET additional user data flags
+	REM UNPACK A2[0] TO B0[]                         
+	FOR X1=0 TO 15                                          
+		LET O1=2^X1 \ LET M1=1
+		! CALL $LOGIC,M1,O1,A2[0],B0[X1] ! ub
+		Call Logic(m1,O1,UA2[0],UB0[X1])
+		LET UB0[X1]=SGN(UB0[X1])
+	NEXT X1   
+	! call dxsave(0,"tmp/ctxsv.txt!") ! save web send data
+	ReturnStatus=0
+	Message$="Action 1 not found"
+  select case action1$
+
+    Case "SYSDATA" ! sys flags,droplists					doc=CTAX-GetSysData.doc
+		returnstatus=1
+		message$="OK"
+		Call Sndsys()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent flags & droplists" \ Call updatelog(debug)
+		Endif
+		! end of sysdata
+	Case "GETCTAX" ! table data								doc=CTAX-GetTable.doc
+		returnstatus=1
+		message$="OK"
+		call SndCTax()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent Table # "+Str$(TRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of GETCTAX
+	Case "DELCTAX" ! table delete							doc=CTAX-DeleteTable.doc
+		returnstatus=1
+		message$="OK"
+		call DelCTax()
+		if debugdetail
+			dmsg$="Delete Table # "+Str$(TRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of DELCTAX
+	Case "SBMCTAX" ! table changes							doc=CTAX-SubmitTable.doc
+		returnstatus=1
+		message$="OK"
+		Call SbmCTax()
+		if debugdetail
+			dmsg$="Submit Table # "+Str$(TRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of SBMCTAX
+		! call programdump("tmp/ctxlog1!","")
+
+  End Select
+  Serp113Done: ! finished
+  ! status section                                                       
+  Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)                 
+  Call AddToStr(e$,rstr$,WebStr$)                                        
+  Call SetOutPut(e$,rstr$)       
+  if debugdetail
+		dmsg$="End of Program SERP113" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTX=OpenFile(928,IntCo) \ if CTX = -1 Error 42
+	PTX=OpenFile(-944,IntCo) \ if PTX = -1 Error 42
+
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!
+!------------------------------------------------------------------------------------------
+Sub sndsys()
+! send flags & droplists
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	! first existing CTax Tables
+	List$[0]=bsdel$,"CUSTTAX",fdel$
+	List$[1]="TBLNO",fdel$,"DESC",fdel$
+	row=2
+	x2=chf(ctx)-1
+	if x2<=0 goto noctbl
+	for X=1 to x2
+	  Try
+		Read Record #CTX,X,0;ctx.;
+	  Else
+		Clear ctx.
+	  End try
+	  tmp$=RTrim$(ctx.Desc$)
+	  if tmp$<>""
+		list$[row]=Str$(X),fdel$,tmp$,fdel$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Endif
+	Next X
+	NoCtbl: ! cust tax table done
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! send prod tax desc's
+	Clear List$[]
+	List$[0]=bsdel$,"PRODTAX",fdel$
+	List$[1]="PTXID",fdel$,"DESC",fdel$
+	row=2
+	for x=1 to 100
+	  Try
+		READ RECORD #ptx,x,0;ptx.;
+	  Else
+		clear ptx.
+	  End try
+		tmp$=RTrim$(ptx.desc$)
+		if x<97 and tmp$="" let tmp$="PROD TAX TYPE "+Str$(X)
+		if x>96 and tmp$="" ! fill in hardcode
+			if x=97 let tmp$="OTHER ORDER CHARGES"
+			if x=98 let tmp$="DETAIL ORDER CHARGES"
+			if x=99 let tmp$="FREIGHT"
+			if x=100 let tmp$="LESS ORDER DISCOUNT"
+		Endif
+		List$[row]=Str$(x),fdel$,tmp$,fdel$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Next X
+	list$[row]=esdel$
+	! calling rtn to addtostr
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndsys
+!
+!------------------------------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Sub SndCTax()
+! send ctax table data
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Cust Tax Table # Passed"
+		goto GCtxdone
+	Endif
+	TRec=tmp$
+	if trec<1 or trec>chf(ctx)-1 or fra(trec)
+		returnstatus=0
+		Message$="Invalid Cust Tax Table "+Str$(trec)+" Passed"
+		goto GCtxdone
+	Endif
+	List$[0]=bsdel$,"CUSTTAXDATA",fdel$
+	Webstr$="TBLNO",fdel$,"DESC",fdel$,"REMARK",fdel$
+	
+	List$[1]=webstr$
+	row=2
+	Try
+		read record #CTX,TREC,0;ctx.;
+		mat read #ctx,trec,0;a1$;
+		mat read #ctx,trec,36;C2;
+	Else
+		clear ctx.
+		a1$=blank$
+		clear c2[]
+	End Try
+	Webstr$=Str$(TREC),fdel$,RTrim$(ctx.Desc$),fdel$,RTrim$(ctx.Remarks$),fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	Clear List$[]
+	! second - the list
+	List$[0]=bsdel$,"CTAXFLGS",fdel$
+	List$[1]="PTXID",fdel$,"PTXFLG",fdel$
+	row=2
+	tmpcnt=maxcnt
+	for x=1 to 100
+		tmp$="N" \ if c2[x]>0 let tmp$="Y"
+		webstr$=Str$(X),fdel$,tmp$[1,1],fdel$
+		List$[row]=webstr$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Next X
+	
+	List$[row]=esdel$
+	! caller to addtostr
+	GCtxdone: ! done
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndCTax
+!
+!------------------------------------------------------------------------------------------
+Sub DelCTax()
+! Delete commodity data
+ Try
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Cust Tax Table # Passed"
+		goto DCtxdone
+	Endif
+	TRec=tmp$
+	if trec<1 or trec>chf(ctx)-1 or fra(trec)
+		returnstatus=0
+		Message$="Invalid Cust Tax Table "+Str$(trec)+" Passed"
+		goto DCtxdone
+	Endif
+	a1$=" ",a1$
+	clear c2[]
+	mat write #ctx,trec,0;a1$;
+	mat write #ctx,trec,36;c2;
+  DCtxDone: ! finished
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DelCTax
+!
+!------------------------------------------------------------------------------------------
+Sub SbmCTax()
+! submit cust tax table
+ Try
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Cust Tax Table # Passed"
+		goto SBCtxdone
+	Endif
+	TRec=tmp$
+	if trec<1 or trec>chf(ctx)-1 or fra(trec)
+		returnstatus=0
+		Message$="Invalid Cust Tax Table "+Str$(trec)+" Passed"
+		goto SBCtxdone
+	Endif
+	Try
+		read record #CTX,TREC,0;ctx.;
+		mat read #ctx,trec,0;a1$;
+		mat read #ctx,trec,36;C2;
+	Else
+		clear ctx.
+	End Try
+	a1$=blank$
+	clear c2[]
+	call dxget("DESC",tmp$)
+	if rtrim$(tmp$)=""
+		returnstatus=0
+		Message$="A Description must be entered!"
+		goto SBCtxdone
+	Endif
+	a1$[1,16]=tmp$+Blank$
+	call dxget("REMARK",tmp$)
+	a1$[17,31]=tmp$+Blank$
+	a1$[32,35]=TRec using "####"
+	for x=1 to 100
+		call dxget("PTXFLG"+Str$(X),tmp$)
+		tmp$=UCase$(RTrim$(tmp$))
+		x1=0 \ if tmp$="Y" let x1=1
+		let c2[x]=x1
+	Next X
+	mat write #ctx,trec,0;a1$;
+	mat write #ctx,trec,36;c2;
+  SBCtxDone: ! finished
+ else
+	include "src/callsuberr.inc"
+  end try
+end sub ! SbmCTax
+!
+!------------------------------------------------------------------------------------------

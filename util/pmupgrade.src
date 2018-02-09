@@ -1,0 +1,538 @@
+!"pmupgrade - Paper Master Upgrader - Modified to run under DL4
+!
+! loadsave -w -n 100,10 -o prog/util/pmupgrade.dl4 src/pmupgrade.src
+
+!"Author:  Nate 4/23/98 - 6/9/98
+
+!"Modified: Nate 6/23/98: Check that directories 1-6 are not in /usr/ub.
+
+!"Purpose: To upgrade Paper Master by applying patches as listed in its
+!"         control list.
+
+!------------------------------------------------------------------------+
+! Please refer to the upgrade documentation stored on the office system: |
+! "\\univnt\serverc\doc\prog\pmupgrade documentation" for directions on  |
+! how to create an upgrade patch that will run under pmupgrade.          |
+!------------------------------------------------------------------------+
+
+!"Notes:  CONTROL LIST
+!"        ------------
+!"        Pmupgrade will apply whatever patches it finds listed in its
+!"        control list (upgradelist.txt). The patches are executed in the
+!"        order listed. The format of the control list file is as follows:
+!"        +--------------------------- upgradelist.txt -----------------------+
+!"        |{program}, {coid}, {groupid}, {backup dir}, {stop on error?}       |
+!"        |.                                                                  |
+!"        |.                                                                  |
+!"        |{program}, ...                                                     |
+!"        |<END>                                                              |
+!"        +-------------------------------------------------------------------+
+!"        Each of the fields must be separated by a comma (,).
+!"        Field #1 - Program name. The name of the patch to execute. The patches
+!"                   are executed in descending order.
+!"        Field #2 - Company #. The company to execute the patch under. If
+!"                   you want to run the same patch on multiple companies,
+!"                   you must add another entire entry to the file. It is
+!"                   more work, but it is more flexible too.
+!"        Field #3 - Group #. The group to execute the patch under.
+!"        Field #4 - Backup Directory. The patch will copy which ever files
+!"                   it is updating to this directory or file, if any.
+!"        Field #5 - Stop on error flag. If set to "Y", then the entire
+!"                   upgrade will halt upon an error. If set to "N", the
+!"                   upgrade will continue with the next program on the list.
+!"
+!"        AUDIT TRAIL
+!"        -----------
+!"        Pmupgrade will log all actions it performs during the upgrade
+!"        and any errors to a log file. The log file is named "upgradelog.txt"
+!"        and it is a regular text file that can be viewed by any editor.
+!"        The log includes start, stop and elapsed times for each patch, and
+!"        total times. The patch programs should send all messages to the
+!"        log file, which will be already open on the given channel (ch_log).
+!"        The patch programs should not close this file. The patches should
+!"        use the standard calls to sysfbuild (the data file builder) and
+!"        sysfbackup (the data file archiver).
+!"
+!"        STANDARD ROUTINES THAT CAN BE CALLED BY PATCH PROGRAMS
+!"        ------------------------------------------------------
+!"        There are a few routines that can be called by your patch program
+!"        which streamlines the upgrade process and also makes your life
+!"        much easier. They are the standard archiver, standard file copier,
+!"        standard error routine, and the standard progress routine. These
+!"        are explained in more detail below:
+!"
+!"        STANDARD ARCHIVER
+!"        -----------------
+!"        The standard archiver will allow you to copy a given file to
+!"        another directory or to rename the file for the purpose of
+!"        backing up the file before performing a patch on the file.
+!"        It must be called from within your program. It is named
+!"        sysfbackup. It allows you to copy a file by either passing it
+!"        the file code (as defined in ssup0201) or by giving it the
+!"        actual file name. It allows you to specify the destination directory
+!"        or file name. It also allows you to decide whether or not to move
+!"        the file or to copy the file. Further documentation can be found
+!"        in src/sysfbackup.s.
+!"
+!"        STANDARD FILE BUILDER
+!"        ---------------------
+!"        The standard file builder will allow you to build a file that
+!"        is already defined in ssup0201. You simply pass it the file code,
+!"        company id and group id, and it handles the rest. Further
+!"        documentation can be found in src/sysfbuild.s.
+!"
+!"        STANDARD FILE SIZER
+!"        -------------------
+!"        The standard file sizer attempts to calculate the number of
+!"        active records of the given file. This number can be used in
+!"        your patch program to give a progress report (like a % completed
+!"        indicator). It is an include file named "rtn.pmupgrade.i".
+!"        For further documentation, refer to rtn.pmupgrade.i.
+!"
+!"        PROGRAM TEMPLATES
+!"        -----------------
+!"        There are templates for creating your own patch. There is
+!"        the callee template (the program which pmupgrade calls). It is
+!"        found under /usr/acct/xindist/src/callee.template.i.
+
+Try ! main try
+include "src/utilcopyright.inc"
+Declare Intrinsic Sub InpBuf,env
+Declare Intrinsic Sub String,FindF,Time
+Declare Intrinsic Function FindChannel
+
+Declare External Function ParseArguments
+declare sub GetCommandParameters
+
+declare external function GetCompaniesForInstance
+
+
+call env(2,"DL4PORTDUMP",msc$(1)+"/dump/PMUPGRADE_%DATE%%TIME%%PROGNAME%.wri")
+
+
+DIMENSIONS: Rem---------------- Dimension variables ---------------------------
+Dim 1%,LINEIN$[256],CLEARN$[1],RESP$[80],TM$[80],LOGMSG$[200],DBAK$[200]
+Dim 1%,PATCH$[80],ERROROUT$[1],REC$[256],FIELD$[256],WORK$[200]
+Dim 1%,CH_WORK,fromUpgrade
+Dim 1%,COID,I,TRUE,FALSE,GROUPID,companies[99],companiesForPatch[99],companiesDefined
+Dim 3%,T_START,T_END,T_ELAPSED,P_T_START,P_T_ELAPSED
+dim args$[5,80],e$[300]
+
+INITIALIZATION: Rem------------ Initialization --------------------------------
+
+TRUE = 1;FALSE = Not(TRUE)
+WITHERRORS = FALSE
+gotFatal = FALSE
+T_START = Spc(1)
+CH_WORK = 86
+CH_CNTRL_LIST = 87
+CH_LOG = -1
+
+call GetCommandParameters()
+
+BLD_LOG: Rem------------------- Build log file --------------------------------
+Call FindF("files/1/upgradelog.txt",FOUND)
+If FOUND !"append the existing log to archived version, then allow overwrite
+	System "cat files/1/upgradelog.txt >> files/1/upgradelog.txt.old"
+End If 
+CH_LOG = 85
+Build #CH_LOG, + "files/1/upgradelog.txt!"
+Close #CH_LOG
+Open #CH_LOG,"files/1/upgradelog.txt"
+
+MAIN: Rem---------------------- Main routine ----------------------------------
+LOGMSG$ = "PMUpgrade Initializing"
+Gosub DO_WRITE_LOG
+if not(fromUpgrade)
+	Print 'CS'; Tab (30);"Paper Master Upgrade";
+	Print
+	Call FindF("upgradetitle.txt",FOUND)
+	If FOUND
+		Ropen #CH_WORK,"upgradetitle.txt"
+		DISPLAY_TITLE: Read #CH_WORK;LINEIN$
+		If LINEIN$
+			Print LINEIN$[1,80];
+			Goto DISPLAY_TITLE
+		End If
+		Close #CH_WORK
+	End If
+	Print @0,18;"_______________________________________________________________________________";'CE';
+	Print @0,23;"Doing some checking...";'CL';
+end if
+For I = 1 To 7
+	Call FindF("/usr/ub/"+Str$(I),FOUND)
+	If FOUND
+		LOGMSG$ = "Problem: directory #" + Str$(I) + " exists in /usr/ub"
+		Gosub DO_WRITE_LOG
+		LOGMSG$ = "         which may cause problems with the upgrade"
+		Gosub DO_WRITE_LOG
+		LOGMSG$ = "Please delete directory " + Str$(I) + " from /usr/ub."
+		gotFatal = TRUE
+		Goto OUTEND
+	End If
+Next I
+Call FindF("files/1/upgradelist_dl4.txt",FOUND)
+If Not(FOUND)
+	LOGMSG$ = "files/1/upgradelist_dl4.txt doesn't exist!"
+	if not(fromUpgrade) Print @0,23;LOGMSG$;'CL';
+	gotFatal = TRUE
+	Goto OUTEND
+End If
+ROPEN #CH_CNTRL_LIST,"files/1/upgradelist_dl4.txt"
+LOGMSG$ = "Found control list. It is " + Chf$(800 + CH_CNTRL_LIST)
+Gosub DO_WRITE_LOG
+LOGMSG$ = "Checking validity of the control list..."
+Gosub DO_WRITE_LOG
+TOTAL_PATCHES = 0
+CHK_UPGRD_LIST: Rem"loop through the upgrade list, validating each entry
+	Gosub GET_NEXT_PATCH
+	If LINEIN$ = ""
+		Goto CHK_UPGRD_LIST
+	End If
+	If LINEIN$[1,5] <> "<END>"
+		Call FindF(PATCH$,FOUND)
+		If Not(FOUND)
+			LOGMSG$ = "Problem: Patch " + PATCH$ + " doesn't exist"
+			gotFatal = TRUE
+			Goto OUTEND
+		End If
+		Call FindF(DBAK$,FOUND)
+		If Not(FOUND)
+			LOGMSG$ = "Problem: Patch " + PATCH$ + " wants to archive to " + DBAK$
+			Gosub DO_WRITE_LOG
+			LOGMSG$ = "         which doesn't exist or isn't a directory!"
+			Gosub DO_WRITE_LOG
+			LOGMSG$ = "Detected an invalid archive directory: " + DBAK$
+			gotFatal = TRUE
+			Goto OUTEND
+		End If
+		if not(doingAllCompanies)
+			Call FindF("cntrl/cntrl" + Str$(COID),FOUND)
+			If Not(FOUND)
+				LOGMSG$ = "Problem: Patch " + PATCH$ + " wants to run for non-existant company #" + Str$(COID)
+				gotFatal = TRUE
+				Goto OUTEND
+			End If
+		else
+			if not(companies[0]) ! load array and verify needed for first instance only
+				Call FindF("/usr/ub/bin/get_asp_dirs",FOUND)
+				If Not(FOUND)
+					LOGMSG$ = "Problem: Patch " + PATCH$ + " wants to run for all companies - utility not found"
+					gotFatal = TRUE
+					Goto OUTEND
+				End If
+				companiesDefined = GetCompaniesForInstance(e$,companies[])
+				if not(companiesDefined) ! couldn't find any defined
+					LOGMSG$ = "Problem: Patch " + PATCH$ + " wants to run for all companies - none found"
+					gotFatal = TRUE
+					Goto OUTEND
+				end if
+			end if
+		end if
+		If ERROROUT$ <> "Y" And ERROROUT$ <> "N"
+			LOGMSG$ = "Problem: Patch " + PATCH$ + " doesn't have a valid Y/N flag: " + ERROROUT$
+			gotFatal = TRUE
+			Goto OUTEND
+		End If
+		TOTAL_PATCHES = TOTAL_PATCHES + 1
+		Goto CHK_UPGRD_LIST
+	End If
+! END CHK_UPGRD_LIST LOOP
+
+Close #CH_CNTRL_LIST
+if not(fromUpgrade)
+	Print @0,23;'CL';
+	Print @0,20;"Please remember to load the system file layouts before starting (run ssufmload).";
+	PROMPT_BEGIN: Input Len 16384 + 1;@0,21;"Do you wish to start the upgrade? (Y/N) ";RESP$
+	Print
+	Call String(1,RESP$)
+	If RESP$ <> "Y" And RESP$ <> "N" Goto PROMPT_BEGIN
+else
+	RESP$ = "Y"
+end if
+If RESP$ = "N" !"Upgrade cancelled
+	LOGMSG$ = "Upgrade cancelled"
+	Gosub DO_WRITE_LOG
+	Goto OUTEND
+End If
+LOGMSG$ = "Starting the upgrade..."
+if not(fromUpgrade) Print @0,19;'CE';LOGMSG$
+Gosub DO_WRITE_LOG
+T_START = Spc(1)
+ROPEN #CH_CNTRL_LIST,"files/1/upgradelist_dl4.txt"
+PATCH = 0
+
+LOOP_PATCHES: Rem-------------- Loop Through Each Patch Here -------------------
+	Gosub GET_NEXT_PATCH
+	If LINEIN$[1,5] = "<END>"
+		LOGMSG$ = "Upgrade Finished"
+		If WITHERRORS Let LOGMSG$ = LOGMSG$ + " With Error(s)"
+		if not(fromUpgrade)
+			Print @0,19;'CE';
+			Print LOGMSG$
+		end if
+		Goto OUTEND
+	End If
+	LOGMSG$ = "___________________________________________________"
+	Gosub DO_WRITE_LOG
+	PATCH = PATCH + 1
+	clear companiesForPatch[]
+	companiesDefinedForPatch = companiesDefined
+	if not(doingAllCompanies)
+		let companiesForPatch[0] = COID
+		companiesDefinedForPatch = 1
+	else
+		for i = 0 to 99
+			companiesForPatch[i] = companies[i]
+		next i
+	end if
+	compIdx = 0
+	do
+		if compIdx >= companiesDefinedForPatch exit do ! all done
+		let coid = companiesForPatch[compIdx]
+		let compIdx = compIdx + 1
+		LOGMSG$ = "Executing " + PATCH$ + " for company #" + Str$(COID) + " and group #" + Str$(GROUPID) + ". "
+		Gosub DO_WRITE_LOG
+		if not(fromUpgrade) Print @0,21;'CE';LOGMSG$;
+		LOGMSG$ = "Update #" + Str$(PATCH) + " of " + Str$(TOTAL_PATCHES) + "."
+		Gosub DO_WRITE_LOG
+		Print LOGMSG$;
+		P_T_START = Spc(1)
+		If ERROROUT$ = "N"
+			COREDUMP = 2
+		Else
+			COREDUMP = 0
+		End If
+		E = 0 \ Call PATCH$,COID,GROUPID,DBAK$,CH_LOG,COREDUMP,E,fromUpgrade
+		If E !"patch experienced an error!
+			WITHERRORS = WITHERRORS + 1
+			LOGMSG$ = "Patch " + PATCH$ + " had an error. Please check dump directory."
+			Gosub DO_WRITE_LOG
+			if not(fromUpgrade)
+				For I = 1 To 6 \ Print \ Next I
+				Print @0,18;'CE';"_______________________________________________________________________________";
+			end if
+			If ERROROUT$ = "Y"
+				LOGMSG$ = "Patch is critical to the upgrade. Upgrade Halted."
+				Gosub DO_WRITE_LOG
+				if not (fromUpgrade)
+					Print @0,19;'CE';"Problem: Patch " + PATCH$ + " had an error!"
+					Print
+				end if
+				e$ = LOGMSG$
+				error 10000
+			End If
+		End If
+		P_T_END = Spc(1)
+		P_T_ELAPSED = (P_T_END - P_T_START)
+		LOGMSG$ = "Completed " + PATCH$ + " in "
+		If P_T_ELAPSED < 1
+			LOGMSG$ = LOGMSG$ + "< 1 minute."
+		End If
+		If P_T_ELAPSED = 1
+			LOGMSG$ = LOGMSG$ + "1 minute."
+		End If
+		If P_T_ELAPSED > 1
+			LOGMSG$ = LOGMSG$ + Str$(P_T_ELAPSED) + " minutes."
+		End If
+		Gosub DO_WRITE_LOG
+		try
+			For I = 0 To 79 \ Close #I \ Next I
+			For I = 90 To 99 \ Close #I \ Next I
+		else
+			rem
+		end try
+	loop
+Goto LOOP_PATCHES
+
+GET_NEXT_PATCH: LINEIN$ = " ",LINEIN$
+	Read #CH_CNTRL_LIST;LINEIN$
+	If LINEIN$ = "" Goto GET_NEXT_PATCH
+	Call String(1,LINEIN$)
+	LINEIN$ = LINEIN$ To "#"
+	LINEIN$ = LINEIN$ To "\15\"
+	LINEIN$ = LINEIN$ To "\15\"
+	I = 1
+	LOOP_RM_SPACES: Rem"remove spaces [and tabs]
+	If I <= Len(LINEIN$)
+		If LINEIN$[I,I] = " " !"get rid of those spaces!
+			LINEIN$[I] = LINEIN$[I + 1]
+			Goto LOOP_RM_SPACES
+		End If
+		If LINEIN$[I,I] = "\11\" Or LINEIN$[I,I] = "\170211\" !"get rid of those tabs!
+			LINEIN$[I] = LINEIN$[I + 1]
+			Goto LOOP_RM_SPACES
+		End If
+		I = I + 1
+		Goto LOOP_RM_SPACES
+	End If
+	If LINEIN$ = "" Goto GET_NEXT_PATCH
+	PATCH$ = ""
+	ERROROUT$ = ""
+	COID = 0
+	If LINEIN$[1,5] <> "<END>"
+		REC$ = LINEIN$ \ Gosub GET_NEXT_FIELD \ PATCH$ = FIELD$
+		REC$ = REC$[POS_ + 1] \ Gosub GET_NEXT_FIELD
+		! company ID Field - look for all
+		if ucase$(field$) = "ALL"
+			doingAllCompanies = 1
+			COID = 0
+		else
+			doingAllCompanies = 0
+			COID = FIELD$
+		end if
+		REC$ = REC$[POS_ + 1] \ Gosub GET_NEXT_FIELD \ GROUPID = FIELD$
+		REC$ = REC$[POS_ + 1] \ Gosub GET_NEXT_FIELD \ DBAK$ = FIELD$
+		Call String(2,DBAK$)
+		REC$ = REC$[POS_ + 1] \ Gosub GET_NEXT_FIELD \ ERROROUT$ = FIELD$
+	End If
+Return
+
+GET_NEXT_FIELD: Search REC$,",",POS_
+	If POS_
+		FIELD$ = REC$[1,POS_ - 1]
+	Else
+		FIELD$ = REC$
+	End If
+Return
+
+DO_WRITE_LOG: Rem
+	Call Time(TM$)
+	Print #CH_LOG;TM$;": ";LOGMSG$
+Return
+
+
+OUTEND: Rem"All done
+	WORK$ = LOGMSG$
+	LOGMSG$ = "___________________________________________________"
+	Gosub DO_WRITE_LOG
+	LOGMSG$ = " "
+	Gosub DO_WRITE_LOG
+	LOGMSG$ = WORK$
+	if not(fromUpgrade) Print @0,23;LOGMSG$;'CL';
+	Gosub DO_WRITE_LOG
+	T_END = Spc(1)
+	T_ELAPSED = (T_END - T_START)
+	LOGMSG$ = "The upgrade took " + Str$(T_ELAPSED) + " minutes"
+	Gosub DO_WRITE_LOG
+	if not(fromUpgrade) Print @0,21;'CE';LOGMSG$
+	LOGMSG$ = "PMUpgrade Exiting"
+	If WITHERRORS Let LOGMSG$ = LOGMSG$ + " With " + Str$(WITHERRORS) + " Error"
+	Gosub DO_WRITE_LOG
+	if gotFatal
+		e$ = "Fatal error - pmupgrade aborted!"
+		error 10000
+	else
+		if fromUpgrade
+			LOGMSG$ = ">>> RELEASE_UPGRADE Success <<<"
+			gosub DO_WRITE_LOG
+		end if
+	end if
+	Close
+	Chain ""
+Stop
+
+else ! main try
+	If Spc(8) <> 10000
+		dim msc4$[100] \ msc4$=msc$(4)
+		if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+		call env(2,"PROGNAME",msc4$)
+		if spc(8) = 11000
+			call utilsearcherr(e$, e, Spc(10))
+		else
+			Call utilsuberr(e$,Spc(8),Spc(10),Msc$(2))
+		end if
+		call programdump()
+	End If
+	Call utilmainerr(e$,Spc(8))
+	If ch_log <> -1
+		Print #ch_log;e$
+	End If
+	chain ""
+end try
+
+
+Sub GetCommandParameters()
+try
+	argc = ParseArguments(e$,args$[], msc$(4))
+	! First arg is company
+	args$[1] = ucase$(args$[1])
+	if args$[1] = "RELEASE_UPGRADE"
+		fromUpgrade = 1
+	end if
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+!--------------------------------------------------------------------------------
+!
+! Try to determine what companies are defined for the upgrade in question
+!
+! Paramenters:
+! e$ = error string
+!
+! Returns:
+!
+! Sets "companies" array elements to the companies found, 0 indicates end of list
+!
+! NOTE: company 0 must SPECIFICALLY be run as this routine assumes 0 is learn and will
+!       not load it into the array
+!
+! NOTE: Routine will first try to determine if running in test account or not
+!       and return the appropriate value.  If it cannot
+!       determine whether we are running in test or not, routine will fail
+!       (return "")
+!
+External Function GetCompaniesForInstance(e$,companies[])
+try
+	External Lib "ubsfunc.dl4"
+	Declare External Function RunningInTest
+
+	dim companiesStr$[100],buffer$[100],lookingFor$[20]
+	dim ASPID$[20]
+	dim 3%
+	
+	clear companies[]
+	lookingFor$ = "PM_L_COMPANIES="
+	inTest = RunningInTest(e$)
+	! -1 = couldn't determine if running in test or not, bail out
+	if inTest = -1 exit function compIdx
+	if inTest lookingFor$ = "PM_T_COMPANIES="
+	call env(1,"UBSASPID",ASPID$)
+	pipeCh = FindChannel()
+	try
+		open #pipeCh,"$$/usr/ub/bin/get_asp_dirs "+ASPID$
+	else
+		! couldn't open pipe to program, bail out
+		exit function compIdx
+	end try
+	companiesStr$ = ""
+	do
+		read #pipeCh;buffer$
+		if buffer$[1,len(lookingFor$)] = lookingFor$
+			let companiesStr$ = buffer$[len(lookingFor$)+1,len(buffer$)-1]
+			buffer$ = ""
+		end if
+	loop until buffer$ = ""
+	try close #pipeCh else rem
+	compIdx = 0
+	if companiesStr$ <> "" ! got something here "c1,c2,c3,..."
+		! load the companies array with the results
+		curPos = 1
+		do
+			search companiesStr$[curPos],",",endPos
+			if not(endPos) ! last one
+				companies[compIdx] = companiesStr$[curPos]
+				if companies[compIdx] compIdx = compIdx + 1
+				exit do
+			end if
+			companies[compIdx] = companiesStr$[curPos,curPos+endPos-2]
+			if companies[compIdx] compIdx = compIdx + 1
+			curPos = curPos + endPos
+		loop
+	end if
+else
+	include "src/utilcallsuberr.inc"
+end try
+end Function compIdx

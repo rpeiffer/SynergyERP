@@ -1,0 +1,745 @@
+!Program Name: ubssalesscan
+!
+! loadsave -w -n 100,10 -o prog/dxport/ubssalesscan.dl4 src/ubssalesscan.src
+!                                       
+!Last Updated:                          
+!rce 09/29/05
+!rce 02/22/07 R9 changes
+!
+! called from sfdash.dl4
+
+Declare External Sub SalesList
+Declare Sub updatelog,errTrap,parseWords
+declare intrinsic sub dxsave,dxget 
+
+Include "src/ubssscan.inc"
+! Dim pp.[1000] As SScanInfo
+! Dim s. As SScanVars
+
+! Call SalesList(1,35,1,"files/6/dx.log",s. ,pp.[],ii,ss,600," ")
+! Print ii;ss
+!stop                                                                           
+
+External Sub SalesList(intCo,intSalesMan,debug,dlog$,s. As SScanVars, pp.[] As SScanInfo,ii,ss,iLimit,Key1$, cost_lev[], arrSales[],...)
+
+Try
+
+try
+	enter shipto
+else
+	dim 2%,shipto
+	shipto = -1
+end try
+
+Declare Intrinsic Sub DateToJulian,InpBuf,MiscStr,String,StringSearch
+! Option Default Dialect IRIS1
+
+Declare Intrinsic Function FindChannel,Trim$
+Declare External Function PDate$,OpenFile,WareHouse,XUnit$,Xamount,ReplaceChar$
+Declare External Function Escape$, CheckSlsm
+Declare Intrinsic Sub Logic
+External Lib "ubsfunc.dl4","ubsprconv.dl4"
+
+Include "src/ubsinvoice.inc"
+Include "src/ubsorder.inc"
+Include "src/ubscustomer.inc"
+Include "src/ubsprod.inc"
+
+
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+Def FNN(H) = Int((Abs(H) * 20 + .5) * Sgn(H)) / 20
+
+Dim OHK$[12],IDK$[20],IHK$[16],CUK$[12],SMK$[20],P9$[50],P60$[50],P61$[256]
+Dim HKK$[60],CMK$[4],IDK2$[50],HHK$[60],SRC_DESC$[24]
+
+
+Dim OH. As ORDH
+Dim IH. As INVH
+Dim ID. As INVD
+Dim IT. As INVT
+Dim I2. As INVS2
+Dim CU. As Customer
+Dim PR. As Prod
+Dim CM. As CommCode
+
+Dim 1%,debugDetail
+
+! Variables for Channel#'s
+Dim 2%,IHC,IDC,ITC,ISC,CUC,CTLC,SMC,HKC,ETC,CMC
+! Variables for Search Record#
+Dim 3%,IHR,IDR,ITR,ISR,CUR,CTLR,SMR,ETR,CMR,prr
+! Variables for Search Error
+Dim 2%,IHE,IDE,ITE,ISE,CUE,CTLE,SME,ETE,E,CME
+
+dim 3%,init_inv
+Dim Sales$[35], Temp$[100], DT1$[10],DT2$[10]
+Dim EnteredBy$[10]
+
+Dim 1%,factor,invround,multisls,searchparseflag
+Dim 2%,JToday, d1[1]
+Dim 2%,LastInvDate, X1,X2,H5[16]
+Dim 3%,TOTCOST,TOTRESALE,totGP,CommAmt,GP
+Dim 3%,tot[10],cust,tmp
+
+! Line Buffer for Output XML                                                
+Dim Output$[1024]                                                           
+
+Dim Msg$[256],pgmName$[20]                                                  
+Dim EN$[10], Status$[10], Space$[100]                
+Dim SLS$[3],CO$[2], InvNo$[10], OrgL1$[16], CCD$[14], POSTR$[30]             
+Dim PUNIT1$[10],PUNIT2$[10],P9$[50],P60$[50],SPOInfo$[300],HLD$[100],U5$[50]
+Dim qunit$[4],itemvendcode$[20]
+Dim QMASK$[20],PMASK$[20],EMASK$[20],DEC$[5]                                
+Dim SHIPADDR1$[50],SHIPADDR3$[30],SHIPADDR4$[30]                            
+Dim SOLDADDR3$[30],SOLDADDR4$[30]                                           
+Dim TERM$[16],tmp$[100],tmp1$[100],custom_customer$[30]
+
+
+Dim UOM$[4]                              
+Dim Word$[2,20],Desc$[30]                                      
+
+Dim 1%,baseunit,stockunit,sellunit,purchunit,costunit,priceunit
+Dim 2%, t2                                                     
+Dim 2%, Q0[1]                                                  
+Dim 3%, TotAvl
+dim atimer$[6], 3%,atimer
+
+Print Msc$(0)                                                    
+debugDetail=0                                                        
+pgmName$="saleslist"                                               
+msg$[1,50]="-",msg$ \ Call updatelog(debug)                          
+msg$="start...program "+pgmName$ \ Call updatelog(debug)             
+
+ii=-1
+scan_timeout=60 ! get all you can in 1 minute
+
+space$ = " ",space$
+SLS$=intSalesMan Using "###" ! Passed Salesman                       
+CO$=Str$(intCo) ! Company                                            
+s.strSearch$=Trim$(s.strSearch$)                                         
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+
+! open files
+IHC= OpenFile(-1136,intCo)  \ If IHC=-1 Error 42    ! Invh
+ISC= OpenFile(-1152,intCo)  \ If ISC=-1 Error 42    ! Invs
+ITC= OpenFile(-1168,intCo)  \ If ITC=-1 Error 42    ! Invt
+HKC= OpenFile(-9994,intCo)  \ If HKC=-1 Error 42    ! invhkey
+IDC= OpenFile(-1184,intCo)  \ If IDC=-1 Error 42    ! Invl
+CUC= OpenFile(-1808,intCo)  \ If CUC=-1 Error 42    ! Cust
+CCC= OpenFile(-1728,intCo)  \ If CCC=-1 Error 42    ! ccode
+PRC= OpenFile(-1792,intCo)  \ If PRC=-1 Error 42    ! prod
+SMC= OpenFile(-1824,intCo)  \ If SMC=-1 Error 42    ! SalesMan
+CMC= OpenFile(-2288,intCo)  \ If CMC=-1 Error 42    ! Commodity
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42   ! cntrl
+SRCC= OpenFile(-1216,intCo) \ If SRCC=-1 Error 42   ! order source
+
+	Mat Read #CTLC,19,50;P9$;
+	Mat Read #CTLC,60,50;P60$;
+	Mat Read #CTLC,115,40;Q0; 
+	Mat Read #CTLC,0,108;D1;  ! system date
+	Mat Read #CTLC,115,60;custom_customer$;
+	Custom_customer$=UCASE$(TRIM$(custom_customer$))
+	
+	If not(Q0[1]) let Q0[1]=2                                                
+	Let Dec$="#",Dec$;Qmask$="--------#"                                   
+	If Q0[0] Let Qmask$="--------#.",Dec$[1,Q0[0]]         !qty mask       
+	If Q0[1] Let Pmask$="------------.",Dec$[1,Q0[1]]     !price mask     
+	Let Emask$="-$$$$$$$$$$$$.##"                         !ext. price mask
+
+
+	! For xx=0 to 10 \ tot[xx]=0 \ Next xx
+	clear tot
+	
+	Let LastInvDate=Tim(6)
+	If SLS$="999" Let DT2$="ALL"
+	Let JToday=Tim(6)
+	temp$ = d1[1] using "&&&&&&"
+	call datetojulian(1,temp$,temp$,e)
+	if not(e) let JToday = temp$
+	cust = s.cust$ 
+	if not(cust) shipto = -1 ! no customer - no shipto!
+	searchparseflag=0
+	if len(s.strSearch$)>3
+		if s.strSearch$[1,3]<>"~@~"
+			Call parseWords(s.strSearch$,Word$[])
+			searchparseflag=1
+		else
+			itemvendcode$=s.strSearch$[4]
+		endif
+	endif
+	let hkk$=" ",hkk$;hkk$=jtoday+30 using "######"
+	let hkk$=hkk$+"309999999999"	! Will initialize to invoice number first
+do_init_inv: search #hkc,6,2;hkk$,ihr,e
+	if e
+		init_inv=0
+		if debugdetail
+			msg$="search error initializing inv# "+e \ call updatelog(debug)
+		endif
+	else
+		!init_inv=hkk$[9]
+		if hkk$[7,8]="30"
+			init_inv=hkk$[9]
+		else
+			goto do_init_inv:
+		endif
+	endif 
+
+	! get products prod file record number
+	prr=-1;nonstk=1 ! just in case prod not found
+	if s.product$ <> "" and s.product$[1,1] <> " "
+		tmp$[1,12]=UCase$(s.product$)+"                       "
+		tmp$[13]=""
+		search #prc,2,1;tmp$,prr,e
+		if not(e) 
+			let nonstk=0
+		else
+			if trim$(itemvendcode$)="" 
+				itemvendcode$=s.product$
+			endif
+		endif
+	endif
+	hkk$=""
+	multisls=0  ! going a sales group or only 1 salesman
+	if cust=0 and prr=-1
+		for x=1 to 999
+			if CheckSlsm(arrSales[], intSalesMan, x) then multisls=multisls+1		
+		next x
+	endif
+	if multisls<=1
+		hkk$=intsalesman using "###"
+		hkk$=hkk$+init_inv+1 using "##########"
+		else
+		hkk$="9999999999"
+	endif
+	
+	if cust and prr=-1 
+		hkk$=s.cust$
+		hkk$=hkk$+init_inv+1 using "##########"
+	endif
+	if prr>=0
+		hkk$=prr using "######"
+		hkk$=hkk$+init_inv+1 using "##########"
+	endif
+	cur=0	! customer record
+	smr=0	! salesman record
+	invround=0	! flag for looping back to inv 999999
+	atimer$ = tim(11) using "&&" + tim(12) using "&&" + tim(13) using "&&"
+	atimer = atimer$
+
+
+INTOP: Rem================================================invhkey dir 2
+atimer$ = tim(11) using "&&" + tim(12) using "&&" + tim(13) using "&&"
+If val(atimer$) - atimer > SCAN_TIMEOUT goto loopend:
+! If val(atimer$) - atimer > 30 goto loopend:
+	! we're going backward through the index
+if cust=0 and prr=-1 and multisls>1	! grouped salesman search only
+	search #hkc,6,2;HKK$,ihr,e
+	if e=2 goto loopend:
+endif
+if cust=0 and prr=-1 and multisls<=1	! only searching for salesman
+	Search #IHC,6,3;HKK$,IHR,E
+	if e=2 then invround=1
+	if e>2 goto loopend:
+	tmp=hkk$[1,3]
+	if invround
+		if intSalesMan<>tmp goto loopend: 
+		tmp=hkk$[4,13]
+		if init_inv>=tmp goto loopend:
+	endif
+	tmp=hkk$[1,3]
+	If intSalesMan<>tmp
+		tmp=hkk$[1,3]
+		hkk$=initsalesman using "###"
+		hkk$=hkk$+"~~~~~~~~~~"
+		goto intop:
+	endif
+endif
+if cust and prr=-1	! passed customer, no product
+	search #ihc,6,2;hkk$,ihr,e
+	if e=2 then invround=1
+	if e>2 goto loopend:
+	tmp=hkk$[1,6]
+	if invround
+		if tmp<>cust goto loopend:
+		tmp=hkk$[7,16]
+		if init_inv>=tmp goto loopend:
+	endif
+	tmp=hkk$[1,6]
+	if tmp<>cust 
+		hkk$[1,6]=cust using "######"
+		hkk$[7,16]="~~~~~~~~~~"
+		invround=1
+		goto intop:
+	endif
+endif
+if prr>=0	! good product code got passed in
+	if cust ! loop thru inv's for customer
+		if invchk=0 let invchk=9999999999
+		hhk$=" ",hhk$
+		hhk$=Cust using "######"+invchk using "##########"
+		search #ihc,6,2;hhk$,ihr,e
+		if e goto loopend:
+		tmp=hhk$[1,6] \ if tmp<>cust goto loopend:
+		invchk=hhk$[7]
+		if not(nonstk)
+			hkk$=Prr using "######"+hhk$[7]+"1000"
+			dir=2
+		Else
+			hkk$=hhk$[7]+"1000"
+			dir=1
+		Endif
+	Else
+		dir=2;invchk=0
+	Endif
+	search #idc,6,dir;hkk$,idr,e
+	if e=2 invround=1
+	if e>2 goto loopend:
+	if invchk !
+		if dir=2
+			let tmp=hkk$[1,6];x3=hkk$[7]
+			if tmp<>prr goto intop:
+		Endif
+		if dir=1 let x3=hkk$[1,10]
+		if x3<>invchk goto intop:
+	Endif
+	tmp=hkk$[1,6]
+	if invround and dir=2
+		if prr and tmp<>prr goto loopend:
+		tmp=hkk$[7,16]
+		if init_inv>=tmp goto loopend:
+	endif
+	tmp=hkk$[1,6]
+	if prr and tmp<>prr and dir=2
+		hkk$[1,6]=prr using "######"
+		hkk$[7,16]="~~~~~~~~~~"
+		invround=1
+		goto intop:
+	endif
+	Read Record #IDC,IDR,0;ID.;
+	if nonstk
+		if trim$(s.product$)<>TRIM$(id.l1$[1,13]) AND trim$(itemvendcode$)<>TRIM$(id.S3$[1,20]) goto intop:
+	Endif
+!	if not ((CheckSlsm(arrSales[], intSalesMan, id.L4[1]))) goto intop:
+	tmp=hkk$[7,16]
+	if dir=1 let tmp=hkk$[1,10]
+	ihk$="30"
+	ihk$=ihk$+tmp using "##########"
+	search #ihc,2,1;ihk$,ihr,e
+	if e=1
+		ihk$="31"
+		ihk$=ihk$+tmp using "##########"
+		search #ihc,2,1;ihk$,ihr,e
+		if e=1 goto intop:
+	endif
+
+endif
+if e
+	if e>2 and debugdetail
+		msg$="search error intop loop "+e \ call updatelog(debug)
+	endif
+	goto loopend:	
+endif
+
+
+Read Record #IHC,IHR; IH.;
+MAT READ #ihc,ihr,104;h5;
+	  ! if IH.H0[0]=31 goto intop:
+
+	if cust and IH.H0[4]<>cust goto INTOP:
+
+	  if IH.H0[0]=30 invno$=IH.ORef[1] using "##########" \ factor=1
+	  !if IH.H0[0]=31 invno$=IH.ORef[1] using "##########" \ factor=-1
+	  if IH.H0[0]=31 invno$=IH.H0[7] using "##########" \ factor=-1 ! credits use order number!!
+	  ISR = IH.ORef[4] ! Record Number For Ship to
+	  Read Record #ISC,ISR; I2.;
+
+	  if (shipto <> -1) ! make sure we have a matching shipto
+		! make sure a shipto code was used
+		if (i2.srn[3] <> 1 and i2.srn[3] <> 2) goto INTOP: ! NO
+		! make sure shipto cust matches and shipto code matches
+		if i2.srn[2] <> ih.h0[4] or shipto <> i2.srn[1] goto INTOP: ! NO
+	  end if
+	  ! Checking salesman
+	  ! need arrsales logic
+	  If CheckSlsm(arrSales[], intSalesMan, IH.H0[11]) goto SLSPassed
+
+	  ! If arrSales                                          
+		  ! for x=0 to 999                                   
+			  ! if arrSales[x]=IH.H0[11] goto SLSPassed:      
+			  ! if not(arrSales[x]) counter=999 ! skip to end
+		  ! next x                                           
+	  ! Endif                                                
+	  !                                                        
+	  ! If SLS$<>"999" and Val(SLS$)=IH.H0[11] goto slspassed
+goto INTOP:   !skip
+
+SLSPassed: !
+	! check to see if time max has been hit
+	atimer$ = tim(11) using "&&" + tim(12) using "&&" + tim(13) using "&&"
+	If val(atimer$) - atimer > SCAN_TIMEOUT goto loopend:
+	! If val(atimer$) - atimer > 30 goto loopend:
+	  ITR = IH.ORef[5] ! Record Number To Ord Total record.
+
+	  ! Read Record #ITC,ITR; IT.;
+
+	  !ISR = IH.ORef[4] ! Record Number For Ship to
+
+	  !Read Record #ISC,ISR; I2.;
+
+!=====================Get Customer Info.
+	CUK$=IH.H0[4] USING "######"
+	Temp$=CUK$
+	if cust and cur=0		!! did read here already
+		Search #CUC,2,1;CUK$,CUR,CUE
+		If CUK$[1,6]<>Temp$ Let CUE=22
+
+		!IF CUE Goto INTOP:   ! No Customer On File ??
+		If CUE=0 Then
+   			Read Record #CUC,CUR;CU.;
+   		Else
+	  		Clear CU.
+			CU.A1$[31,60]="-NOF-"
+		End If
+	endif
+
+	Let IDK$=InvNo$
+
+! Get SalesMan
+	SMK$=IH.H0[11] Using "### "
+	Temp$=SMK$
+	if smr=0	! didn't read salesman record yet
+		Search #SMC,2,1;SMK$,SMR,SME
+		If SMK$[1,4] <> Temp$ Let SME=22
+		If SME=0 Then
+			Mat Read #SMC,SMR;Sales$[1,30];
+		Else
+			Sales$="-NOF-"
+		End If
+	endif
+
+	Temp$=Escape$(Sales$)
+	Sales$=temp$
+	! For X1=1 to Len(Temp$)
+		! If Temp$[X1,X1]="'" Then
+			! Sales$=Sales$,"\\"
+		! End If
+		! Sales$=Sales$,Temp$[X1,X1]
+	! Next X1
+
+	if prr>=0 and not(nonStk)
+		let idk$=prr using "######"
+		tmp=invno$
+		Let IDK$=idk$+tmp using "##########"
+	endif
+INVLLoop: Rem=======================================loop invl
+if prr>=0 and not(nonstk)
+	search #idc,3,2;idk$,idr,ide
+	if ide goto intop:
+	tmp=idk$[1,6]
+	If tmp <> PRR or IDK$[7,16] <> InvNo$              
+        idk$[17,19]="   "  ! skip other lines    
+        Goto INTOP                               
+	endif                                    
+else
+	Search #IDC,3,1;IDK$,IDR,IDE
+	If IDK$[1,10]<>InvNo$ LET IDE=22
+	If IDE Goto INTOP: ! next invoic3
+endif
+	If debugDetail
+		msg$="doing...Search #IDC: IDK$="+IDK$+" IDR="+IDR
+		Call updatelog(debug)
+	  	If IDE msg$="error...Search error "+IDE  \ Call updatelog(debug)
+	Endif
+
+	Read Record #IDC,IDR,0;ID.;
+	IF NONSTK AND ID.L3[0]<>1 GOTO INVLLOOP
+
+	! test for search items
+	if trim$(s.product$) <> "" or trim$(itemvendcode$) <> ""
+		if trim$(s.product$)<>TRIM$(id.l1$[1,13]) AND trim$(itemvendcode$)<>TRIM$(id.S3$[1,20]) goto invlloop:
+	Endif
+	
+	if s.strSearch$ <> "" and searchparseflag then
+		got1 = 0
+		for x = 0 to 2
+			if word$[x]<>"" Call stringSearch(UCase$(ID.L6$),UCase$(word$[x]),p)
+			if p>0  got1=got1+1
+		next x
+		if not(got1) goto invlloop
+	Endif
+
+	if s.commcode$ <> "" then
+		Call stringSearch(UCase$(ID.L1$[17,20]),s.commcode$,p)
+		if p=-1 goto invlloop  ! not found
+	Endif
+
+	If (IH.H5[7]=21 or IH.H5[7]=22) And IDK$[11,13]="   " Let ID.S2[0]=3
+	!If ID.S2[0]=3 Goto invlLoop:
+	If ID.L3[2]>900 Goto invlLoop:
+
+
+	  ! Validate UM Selections??
+	  N2[2]=3
+	  If N2[2]=3 Goto IIDetOK:
+	  If N2[2]=2 IF ID.L3[0] Goto IIDetOK:
+	  If N2[2]=1 If NOT(ID.L3[0]) Goto IIDetOK:
+	  Goto invlLoop:
+
+IIDetOK: Rem===========continue                               
+	If ID.L3[0] and ID.S2[0]=3 let Zline=1 else let Zline=0       
+	If Zline Goto LoadMe:                                         
+	If ID.L3[0] let NonStock=1 else NonStock=0                    
+
+	If ID.L3[0] Then                                              
+		Clear PR.    
+	
+		Let OrgL1$[1,16]=ID.L1$[1,16]                             
+		If ID.S3$[1,16]=Space$[1,16] Let ID.L1$[1,16]=ID.S3$[1,16]
+	Else                                                        
+		Read Record #PRC,ID.L4[0];PR.;                            
+	End If
+		rem The old Gosub L_30000:                                  
+		REM ===== set units for conversions (stock/nonstock version)
+		LET PR.A[6]=ID.L6[4]                                       
+		LET PR.A[5]=ID.UNF[5]                                      
+		IF NOT(PR.A[5]) THEN                                       
+			LET PR.A[5]=1                                            
+			LET ID.UNF[5]=1                                          
+		END IF                                                     
+		LET PR.PFU1[0]=ID.EUN[0]    
+		LET PR.PFU1[1]=ID.UN[0]     
+		LET PR.PFU1[2]=ID.UN[1]     
+		LET PR.PFU1[3]=ID.UN[2]     
+		LET PR.PFU1[4]=ID.EUN[1]    
+		LET PR.PFU1[5]=0            
+		LET PR.PFU1[6]=0            
+		LET PR.PFU1[7]=0            
+		LET PR.PFU1[8]=ID.UN[0]     
+		LET PR.PFU1[9]=ID.UN[0]     
+		LET PR.PFU1[10]=ID.EUN[1]   
+		LET PR.PFU1[11]=ID.UN[2]    
+		LET PR.PFU1[12]=ID.UN[1]    
+		IF ID.L3[0]=0               
+			LET PR.PFU1[13]=ID.UN[0]  
+			LET PR.PFU1[16]=ID.EUN[0] 
+			LET PR.PFU1[17]=ID.EUN[0] 
+			LET PR.PFU1[15]=ID.CTWT   
+			LET PR.PFU1[18]=ID.UN[0]  
+			LET PR.PFU1[19]=ID.UN[0]  
+		END IF                      
+		LET PR.PFU2[0]=ID.UNF[0] 
+		LET PR.PFU2[1]=ID.UNF[1] 
+		LET PR.PFU2[2]=ID.UNF[2] 
+		LET PR.PFU2[3]=ID.UNF[3] 
+		LET PR.PFU2[4]=0         
+		LET PR.PFU2[5]=0         
+		LET PR.PFU2[6]=0         
+		FOR X1=1 TO 4                                            
+				FOR X2=0 TO X1-1                                       
+				IF PR.PFU1[X1]=PR.PFU1[X2] THEN                      
+						PR.PFU1[X1]=0                                  
+						PR.PFU2[X1-1]=0                                    
+				END IF                                               
+				NEXT X2                                                
+		NEXT X1                                                  
+
+
+If ID.L5[3] Then
+	Let GPP=FNR((ABS(ID.L5[3]-ID.S3[12])/ID.L5[3])*100)       
+Else
+	Let GPP=0
+End If
+
+CVTFIG: REM "==== OLD L_3500: ======================== convert figures
+n2[3]=3  ! selling unit off of invoice
+LET CNVTA=ID.L7[2]
+LET CNVTU[0]=0
+LET CNVTU[1]=ID.UN[0]
+IF ID.S2[1] LET CNVTA=CNVTA*ID.S2[1]
+IF N2[3]=1 LET CNVTU[1]=PR.PFU1[8]
+IF N2[3]=2 LET CNVTU[1]=PR.PFU1[9]
+IF N2[3]=3 LET CNVTU[1]=ID.UN[0]
+LET CNVTU[2]=1
+LET QORD=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+LET CNVTA=ID.L7[2]            !ID.L7[2]-ID.L7[4]-ID.L7[0]-ID.L7[3]
+IF ID.S2[1] LET CNVTA=CNVTA*ID.S2[1]
+LET QOPN=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+LET CNVTA=ID.L7[4]            !+ ID.L7[0] ! Was just shipped/
+IF ID.S2[1] LET CNVTA=CNVTA*ID.S2[1]
+LET QSHP=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+LET CNVTA=ID.L7[3]
+IF ID.S2[1] LET CNVTA=CNVTA*ID.S2[1]
+LET QBOR=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+Rem  Now do some other UM Conversion for the unit cost/unit resale
+
+IF ID.UN[1]=-1 Then
+	Let PR.A[6]=ID.L6[4]
+	Let PR.A[5]=ID.UNF[5]
+End if
+Let CHBase=0
+If ID.S3[8]=-3 THEN
+	LET CHBase=(ID.S3[0]/ID.L7[2])
+Else
+	LET CHBase=ID.S3[0]
+End If
+If ID.UN[1]>0 AND ID.S2[1] Then
+	Let CNVTA=((ID.L5[2]-ID.L6[1])/ID.S2[1]) + (CHBase/ID.S2[1])
+Else
+	Let CNVTA=ID.L5[2]-ID.L6[1] + CHBase
+End If
+
+Let CNVTA=CNVTA-(CNVTA*(ID.L6[0]/100))
+Let CNVTA=CNVTA+(CNVTA*(ID.L7[8]/100))
+Let CNVTU[0]=0
+Let CNVTU[1]=ID.UN[1]
+Let CNVTU[2]=2
+LET ID.OLM[3]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+LET PUNIT1$=XUNIT$(ID.UN[1],CCC)
+LET qUNIT$=XUNIT$(ID.UN[0],CCC)
+
+IF Cost_Lev[1] Then
+	! ADD CUTTING?
+	IF ID.S2[1]=0 OR ID.S3[1]=0 THEN
+		LET Temp$=""
+	ELSE
+		ChBase=0
+		IF ID.S3[11]=-3 AND ID.L7[2] THEN
+			CHBase=(ID.S3[1]/ID.L7[2])
+		ELSE
+			CHBase=ID.S3[1]
+		END IF
+		IF CHBASE AND ID.S2[1] THEN
+			LET CNVTA=CHBase/ID.S2[1]
+		ELSE
+			LET CNVTA=0
+		END IF
+		IF ID.S3[11]=-1 AND ID.UN[2]=-1 AND CHBase LET CNVTA=CHBase
+		IF CHBase AND ID.UN[2]<0 LET CNVTA=CHBase
+		!LET CNVTU[0]=0
+		!!LET CNVTU[1]=ID.UN[2]
+		!LET CNVTU[2]=2
+	! LET ID.L5[1]=ID.L5[1] + XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+		! LET ID.L5[1]=ID.L5[1] + CHBASE
+	END IF
+	LET CNVTU[0]=0
+	LET CNVTU[1]=ID.UN[2]
+	LET CNVTU[2]=2
+	LET CNVTA=ID.L5[1]
+	LET ID.L5[1]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+	LET PUNIT2$=XUNIT$(ID.UN[2],CCC)
+END IF
+
+
+!=====================Get Commodity Info
+	CMK$=ID.L1$[17,20]
+	Temp$=CMK$
+
+Search #CMC,2,1;CMK$,CMR,CME
+	If CMK$[1,4]<>Temp$ Let CME=22
+
+	If CME=0 Then
+   		Read Record #CMC,CMR;CM.;
+   	Else
+	  	Clear CM.
+		CM.D$[1,16]="-NOF-",space$
+	End If
+
+LoadMe: !
+If ii < iLimit Then
+    Try
+		mat read #SRCC,h5[9];SRC_DESC$;
+	Else
+		clear src_desc$
+	end try
+	SRC_DESC$ = rtrim$(src_desc$)
+	if src_desc$ = ""
+		if h5[9] = 95
+			src_desc$ = "SALESPRO"
+		else
+			src_desc$ = str$(h5[9])
+		end if
+	end if
+	Let ii=ii+1
+	If IH.H0[0]=31 LET qshp=0-QSHP ! show "-"
+	pp.[ii].slsno$=IH.H0[11]
+	pp.[ii].slsname$=sales$
+	pp.[ii].Product$=ID.L1$[1,12]
+	pp.[ii].Description1$=ID.L6$[1,30]
+	pp.[ii].Description2$=ID.L6$[31,60]
+	pp.[ii].CommCode$=ID.L1$[17,20]
+	pp.[ii].Commodity$=CM.D$[1,16]   
+	pp.[ii].Cust$=str$(IH.H0[4])
+	pp.[ii].Custname$=I2.S1$[1,30]
+	If IH.H0[0]=30 pp.[ii].type$="INV"
+	If IH.H0[0]=31 pp.[ii].type$="C/M"
+	If IH.H0[0]=30 pp.[ii].refnum$=IH.ORef[1] using "##########"
+	!If IH.H0[0]=31 pp.[ii].refnum$=IH.ORef[1] using "##########"
+	If IH.H0[0]=31 pp.[ii].refnum$=IH.H0[7] using "##########"
+	pp.[ii].orddate$=PDate$(IH.H0[10])
+	pp.[ii].qty$=QSHP Using Qmask$ 
+	!pp.[ii].ordqty$=QORD Using Qmask$
+	!pp.[ii].boqty$=QBOR Using Qmask$
+	pp.[ii].qunit$= qunit$
+	pp.[ii].price$=ID.OLM[3] Using Pmask$
+	pp.[ii].punit$= PUnit1$
+	pp.[ii].cost$=ID.L5[1] using pmask$
+	pp.[ii].cunit$=Punit2$
+	pp.[ii].extprice$=ID.L5[3] using QMask$
+	pp.[ii].extcost$=ID.S3[12] using QMask$
+	pp.[ii].gpp$=GPP using QMask$
+	!pp.[ii].source$=SRC_DESC$
+	if ii=ilimit goto IIEND:
+	goto INVLLoop:  ! get next line
+else
+
+End if
+
+IIEND: !  all done
+LoopEnd: !=======================================================
+	Close #IHC,#ISC,#ITC,#HKC,#IDC,#CUC,#CCC,#PRC,#SMC,#CTLC
+	msg$="doing...end of "+pgmName$ \ Call updatelog(debug)          
+	ss=0                                                             
+	Print Msc$(0)                                                    
+	Exit Sub                                                         
+Else                                                             
+	Temp$=""                                                       
+	Call errTrap(pgmName$)                                         
+End Try                                                          
+
+Sub updatelog(debug)                                        
+	If Not(debug) Exit Sub                                    
+	System "echo ''" + Msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub                                                     
+
+Sub parseWords(strSearch$,Word$[])                          
+	If Len(strSearch$) <= 0 Exit Sub                          
+	strSearch$ = Trim$(strSearch$);max = Len(strSearch$)      
+	If strSearch$[max] < " " Let strSearch$[max] = ""         
+	For I = 0 To 1                                            
+		Word$[I] = ""                                           
+	Next I                                                    
+	I = 0;position = 0                                        
+	
+	findWords: !                                                  
+	temp$ = ""                                                
+	Let temp$ = strSearch$[position + 1] To " " : position    
+	If Len(temp$)                                             
+		Word$[I] = temp$;I = I + 1                              
+	End If                                                    
+	If position <> 0 And I <> 2 Goto findWords                
+End Sub  !parseWords
+
+Sub errTrap(pgmName$)                                                   
+	msg$ = "error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+	Call updatelog(1)                                                     
+End Sub                                                                 
+
+ss=0        
+!ss=spc(10) 
+
+End Sub  ! saleslist
+

@@ -1,0 +1,1060 @@
+!! im57352 - start working on image indexing pieces
+
+! loadsave -w -n 100,10 -o prog/dxport/im472auto.dl4 src/im472auto.src
+
+! inputs are
+! Call dxget("StationNum",tmp$)
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,BuildSort
+Declare Intrinsic Sub DateToJulian,JulianToDate
+
+External Lib "libgeneral.lib"
+Declare Intrinsic Sub programdump,findf,fileinfo
+Declare Intrinsic Function findchannel
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Sub suberr,mainerr,searcherr
+Declare External Function expandarray 
+
+External Lib "libedittrack.lib"    
+Declare External Sub MakeEdittrack 
+
+Declare Intrinsic Function Trim$
+Declare Intrinsic Sub dxopen,dxget,dxset,dxclose,dxsave,programdump,env
+
+Declare Sub BUILD_DEBUG,PARSE_SCANNER_INDEX,StoreOrderImage,FND_ORDER,put_to_imload
+Declare Sub createedittrack,Remove_folder,process_via_scan_index,TYPE_DROPDOWN,check_pending_manuals
+Declare Sub check_pending_barcodes,get_manual_list,get_image_type_num,imagesave,update_imidx
+
+Def Struct imstore
+ Member Description$[20] : Item 0	! IMSTO$[1,20]              
+ Member Path$[20] : Item 20		! IMSTO$[21,40]    
+ Member DeviceType$[1,4] : Item 40	! IMSTO$[41,44]   
+ Member 3%,NumPlatters : Item 44	! IMSTO[0]              
+ Member 3%,MaxBlocks : Item 50		! IMSTO[1]              
+ Member 3%,NumDocuments : Item 56	! IMSTO[2]              
+ Member 3%,NumPages : Item 62		! IMSTO[3]              
+ Member 3%,NumBlocks : Item 68		! IMSTO[4]  
+end def
+
+Def Struct imindex
+ Member PREFIX$[2] : Item 0			!IMI$[1,2]                
+ Member IKEY$[28] :   Item 2			!IMI$[3,30]  TYPE-SPECIFIC 
+ Member COMMENT$[30] : Item 30		!IMI$[31,60]                
+ Member PLATTER$[6]  : Item 60		!IMI$[61,66]                
+ Member 3%,SEQNUMBER :	Item 66			!IMI1                 
+ Member 1%,LOCATION : Item 72			!IMI2[0]  Ctrl rec 177  
+ Member 1%,PAGES : Item 74				!IMI2[1]                
+ Member 1%,ROTATION : Item 76			!IMI2[2]                
+ Member 1%,EXTRA1   : Item 78			!IMI2[3]                
+ Member 2%,STOREDATE : Item 80			!IMI3[0]                 
+ Member 2%,LASTACCESS : Item 84			!IMI3[1]                
+ Member 2%,EXTRA2 : Item 88				!IMI3[2]                
+end def
+
+Def Struct imtype
+ Member 3%,SAVE_SEQ_NUM			: item 0	! ImSeq[0]  Stored docs     
+ Member 3%,LOAD_SEQ_NUM			: item 6	! ImSeq[1]  Scanned docs    
+ Member 3%,SCAN_BATCH_COUNT		: item 12	! ImSeq[2]  WAITING INDEXING
+ Member 1%,ROTATION				: item 18	! ImRot     0,90,180,270    
+ Member 2%,BARCODE_TYPES		: item 20	! ImBCode[0]       
+ Member 2%,BARCODE_DIRECTION	: item 24	! ImBCode[1]       
+ Member 2%,BC_AREA_TOP			: item 28	! ImBCode[2]                  
+ Member 2%,BC_AREA_LEFT			: item 32	! ImBCode[3]                  
+ Member 2%,BC_AREA_BOTTOM		: item 36	! ImBCode[4]                  
+ Member 2%,BC_AREA_RIGHT		: item 40	! ImBCode[5]                  
+ Member 1%,INIT_LOCATION		: item 44	! Iminit                  
+end def
+
+Include "src/inc/fileordhead.inc"
+
+Include "src/inc/fileedittrack.inc"
+
+include "src/inc/dim.imsettype.i"
+
+TRY
+
+	!IF ERR 0 GOSUB Err_Trap:
+
+	dim ims. as imstore
+	dim imt. as imtype
+	Dim roh. As roh ! order header 
+	DIM etr. as edittrack
+	dim imdx. as imindex
+
+	Dim 1%,IntCo,intSls,ctlc,cpflg,ch_imstore,ch_imtype,ch_list,debug,imtable[12]
+	DIM 2%
+	DIM 3%,barcode,farray[50],TMP
+	DIM f$[16],tmp$[200],loaddir$[200],LISTTMP$[40],Index$[70],linein$[80],image$[100]
+	dim debug$[100],mess$[80],pre$[10],Station_type$[30],imbatch$[50]
+	DIM prefix$[2],P60$[50],P176$[256],List$[20,1000]
+
+	DIM Key_ImIdx$[50],spaces$[80],jdate$[10],key1_roh$[30],key1_invwrk$[30]
+	dim imi$[10],comment$[30],work$[60],imsto$[44],savedir$[100],page$[4]
+	dim saveimage$[50],ext$[4],scandir$[50],Key_ImLIdx$[50],Key1_ROHH$[50]
+	DIM comment$[30],reference1$[16],reference2$[16]
+
+	dim userid$[8],DRIVERDIR$[70]
+	Dim action$[20],action1$[20],options$[20],Action2$[20],e$[500],blockid$[8]
+	Dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[3000]
+	dim Message$[200],WebStr$[2000]
+
+	spaces$=" ",spaces$
+
+	debug=1  
+	Call dxopen()  
+	Call dxget("S_USER.AppID",tmp$) !company #               
+	Try Let IntCo = Val(tmp$) Else Let IntCo = 1 !company #  
+	!call dxclose()  
+	ctlc = 1
+	try 
+		ropen #ctlc,(IntCo Using "files/cntrl/cntrl#")
+		cntrlflag=1
+	else
+		cntrlflag=0
+	end try
+	!ctlc = OpenFile(-9999,IntCo) \ If ctlc = -1 Error 42 !control
+	Call GetSession(e$,ctlc,options$,action$,userid$,IntCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,Action2$)                                        
+	
+	MAT  READ #CTLC,60,50;P60$;
+	MAT  READ #CTLC,176,0;P176$;
+	IF P176$[2,2]="Y" LET EXT$=".imd"
+	IF P176$[3,3]="Y" LET EXT$=".tif"
+	IF P176$[1,1]="Y" LET LOADINVWRK=1 ELSE  LET LOADINVWRK=0
+	mat read #ctlc,177,0;imtable;   !! what images type saved
+
+	CALL dxget("action",tmp$)
+	action$=ucase$(rtrim$(tmp$))
+	call dxget("image",tmp$)
+	image$=lcase$(rtrim$(tmp$))
+	call dxget("6080",tmp$)
+	reference1$=tmp$+spaces$
+	call dxget("reference2",tmp$)
+	reference2$=tmp$+spaces$
+	call dxget("comment",tmp$)
+	comment$=tmp$+spaces$
+	Call dxget("StationNum",tmp$)
+	sn=tmp$
+
+!! UNTIL UBSFUNC GETS IMAGING ADDED, NEED TO OPEN THE FILES OLD SCHOOL
+	F$="6/imstore" + Str$(IntCo)
+	ch_imstore = findchannel()
+	open #ch_imstore,f$
+	F$="6/imtype" + Str$(IntCo)
+	ch_imtype = findchannel()
+	open #ch_imtype,f$
+	F$="6/imindex" + Str$(IntCo)
+	ch_imidx = findchannel()
+	open #CH_ImIdx,f$
+	f$="6/imloadidx" + str$(IntCo)
+	ch_imLIdx = findchannel()
+	open #CH_ImLIdx,f$
+
+
+action$=ucase$("MANUAL")
+image$=lcase$("pl000002")
+reference1$="12345123"+spaces$
+reference2$="ref-two"+spaces$
+comment$="comment from front"+spaces$
+if action$[3,6]="AUTO"
+	prefix$=lcase$(action$[1,2])
+	if sn<1 or sn>9
+		station_type$="/Station1-"+prefix$
+	else
+		station_type$="/Station"+(sn using "#")+"-"+prefix$
+	endif
+endif
+
+
+stop
+
+
+select case Action$
+	case "INITIAL"
+		call TYPE_DROPDOWN()
+		if row>2 
+			call check_pending_manuals() ! check whats in imloadidx
+			call check_pending_barcodes()  ! check for batches
+		endif
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		call get_manual_list()  ! get list of pending manuals in imloadidx
+		ReturnStatus=1 \ message$="Initial values set"
+	case "DRAUTO" , "PDAUTO" , "OSAUTO" , "PLAUTO" , "VIAUTO", "VDAUTO", "VSAUTO" , "MIAUTO" ,"CDAUTO", "CTAUTO"
+		call process_via_scan_index()
+		ReturnStatus=1 \ message$="Auto barcode processed"
+	case "MANUAL"
+		if len(image$)>2
+			if debug CALL build_debug()
+			Read Record #ch_imstore,0,0;ims.;	! read load location info
+			!! load for load folder
+			loaddir$=trim$(ims.path$)
+			Call findf(loaddir$+"/"+image$,e)
+			IF NOT(E) error 42  ! image not there
+			prefix$=image$[1,2]
+			select case prefix$
+				case "dr" , "pd" , "os"
+					barcode=reference1$
+					if barcode<1 or barcode>999999 
+						PRINT #ch_debug;"barcode ";barcode;" to large for an order"
+					else
+						ch_roh = OpenFile(-1840,IntCo)
+						Key_ImIdx$=" ",Key_ImIdx$
+						Key_ImIdx$[1,2] = prefix$   ! "DR"  "PD"
+						!! reference1 and 2 can't be used in the key, will cause search problems
+						!! DR ley assumes order/customer/date or order only
+						CALL StoreOrderImage()
+						close #ch_roh
+						tmp$=image$+spaces$
+						SEARCH #ch_imlidx,5,1;tmp$,rec_imlidx,e
+					endif
+
+				case "vi","vd","vs"
+					call get_image_type_num()
+					!! vendor checking needed
+					VMC = OpenFile(-2400,intCo) \ If VMC = -1 Error 42 !vend  
+					TMP=REFERENCE1$
+					if tmp   !! convert to number
+						TMP$=" ",TMP$
+						TMP$=tmp using "######"
+						search #vmc,2,1;tmp$,vmc_rec,e
+						if not(e)   !! vendor found
+							key_imidx$=" ",key_imidx$
+							key_imidx$=prefix$
+							key_imidx$[3]=tmp$
+							key_imidx$[9]=reference2$,spaces$
+							call update_imidx()  !! also moves the image
+							close #vmc
+							tmp$=image$+spaces$
+							SEARCH #ch_imlidx,5,1;tmp$,rec_imlidx,e
+						endif
+					endif 
+
+				case "cd"
+					call get_image_type_num()
+					!! customer checking needed
+					CMF = OpenFile(-1808,intCo) \ If CMF = -1 Error 42 !vend  
+					TMP=REFERENCE1$
+					if tmp   !! convert to number
+						TMP$=" ",TMP$
+						TMP$=tmp using "######"
+						search #CMF,2,1;tmp$,cmf_rec,e
+						if not(e)   !! customer found
+							key_imidx$=" ",key_imidx$
+							key_imidx$=prefix$
+							key_imidx$[3]=tmp$
+							key_imidx$[9]=reference2$,spaces$
+							call update_imidx()  !! also moves the image
+							close #CMF
+							tmp$=image$+spaces$
+							SEARCH #ch_imlidx,5,1;tmp$,rec_imlidx,e
+						endif
+					endif 
+		!		case "ct"    !! scan date and order number
+		!			call get_image_type_num()
+		!			tmp=reference1$
+		!			if tmp
+		!				CALL Fnd_Order(tmp)
+		!				if  Not(FoundFlag)
+		!				key_imidx$=" ",key_imidx$
+		!				key_imidx$=prefix$
+		!				
+		!				
+		!				Let Key_ImIdx$[9] = Spaces$                    
+		!	Let Key_ImIdx$[31] = ""
+		!else
+		!	Let JDate$=" ",JDate$;JDate$=roh.orddate Using "&&&&&&" 
+		!	Call DateToJulian(1,JDATE$,JDATE$,E)
+		!	if e then jdate$="0"
+		!	Let JDate=JDate$  
+		!	Key_ImIdx$[3] = barcode Using "######"  
+		!	Key_ImIdx$[15] = JDate Using "######"       
+		!	Key_ImIdx$[21] = Spaces$
+		!	Key_ImIdx$[31] = ""
+		!endif
+
+				case "md"
+					call get_image_type_num()
+					!! msds checking needed
+					MSF = OpenFile(-672,intCo) \ If MSF = -1 Error 42 !vend  
+					TMP=REFERENCE1$
+					if tmp   !! convert to number
+						TMP$=" ",TMP$
+						TMP$=tmp using "#########"
+						search #MSF,2,1;tmp$,MSf_rec,e
+						if not(e)   !! MSDS found
+							key_imidx$=" ",key_imidx$
+							key_imidx$=prefix$
+							key_imidx$[3]=tmp$
+							!key_imidx$[9]=reference2$,spaces$
+							call update_imidx()  !! also moves the image
+							close #MSF
+							tmp$=image$+spaces$
+							SEARCH #ch_imlidx,5,1;tmp$,rec_imlidx,e
+						endif
+					endif 
+
+				case "pl"
+					call get_image_type_num()
+					!! PRODUCT checking needed
+					PMF = OpenFile(-1792,intCo) \ If PMF = -1 Error 42 !vend  
+					TMP$=trim$(REFERENCE1$)
+					tmp=len(tmp$)
+					if tmp   !! check if got some string
+						TMP$=" ",TMP$
+						TMP$[1,tmp]= trim$(REFERENCE1$)
+						search #PMF,2,1;tmp$,pmf_rec,e
+						if not(e)   !! customer found
+							key_imidx$=" ",key_imidx$
+							key_imidx$=prefix$
+							key_imidx$[3,14]=tmp$
+							key_imidx$[15]=trim$(reference2$),spaces$
+							call update_imidx()  !! also moves the image
+							close #PMF
+							tmp$=image$+spaces$
+							SEARCH #ch_imlidx,5,1;tmp$,rec_imlidx,e
+						endif
+					endif 
+
+				case "mi"    !! misc, no matching key in other files
+					call get_image_type_num()
+					key_imidx$=" ",key_imidx$
+					key_imidx$=prefix$
+					key_imidx$[3,14]=trim$(reference1$)+spaces$
+					key_imidx$[15]=trim$(reference2$),spaces$
+					call update_imidx()  !! also moves the image
+					tmp$=image$+spaces$
+					SEARCH #ch_imlidx,5,1;tmp$,rec_imlidx,e
+				case else
+			end select
+		endif  ! len image
+	case else
+end select
+
+OutEnd: !
+if cntrlflag and ctlc then close #ctlc
+Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)                 
+Call AddToStr(e$,rstr$,WebStr$)                                        
+Call SetOutPut(e$,rstr$)    
+end
+
+include "src/inc/imsettype.i"
+
+else
+	include "src/callsuberr.inc"
+end try
+
+sub TYPE_DROPDOWN()
+try
+	clear list$[]
+	List$[0]=bsdel$,"IMAGETYPE",fdel$
+	List$[1]="TYPE",fdel$,"NAME",fdel$
+	row=2
+	for type=0 to 12
+		if imtable[type]
+			select case type
+				case 0                                 
+					LET list$[row]="dr",fdel$,"Delivery receipt",fdel$   
+					!LET DTINDEX1$="Order number"            
+					!LET DTINDEX2$= customer and date                       
+					!LET DTIMODE$="B"   barcode             
+					row=row+1
+				case 1
+                    LET list$[row]="pl",fdel$,"Product literature",fdel$ 
+					!LET DTINDEX1$="Item code"               
+					!LET DTINDEX2$="Reference code"          
+					!LET DTIMODE$="M"   manual                       
+					row=row+1
+				case 2
+					LET list$[row]="cd",fdel$,"Customer document",fdel$  
+					!LET DTINDEX1$="Customer#"               
+					!LET DTINDEX2$="Reference code"       
+					!LET DTIMODE$="M"         
+					row=row+1
+                 case 3                              
+					LET list$[row]="vi",fdel$,"Vendor invoice",fdel$  
+					!LET DTINDEX1$="Vendor code"          
+					!LET DTINDEX2$="Vendor invoice no."   
+					!LET DTIMODE$="M"                     
+					row=row+1
+				case 4                              
+					let list$[row]="vs",fdel$,"Vendor statement",fdel$
+					!LET DTINDEX1$="Vendor code"          
+					!LET DTINDEX2$="reference code"   
+					!LET DTIMODE$="M"
+					row=row+1
+				case 5                               
+					let list$[row]="vd",fdel$,"Vendor document",fdel$  
+                    !LET DTINDEX1$="Vendor code"          
+					!LET DTINDEX2$="Reference code"        
+					!LET DTIMODE$="M"                      
+					row=row+1   
+				case 6
+                    let list$[row]="md",fdel$,"MSDS Sheet",fdel$                            
+					!LET DTINDEX1$="MSDS Number"           
+					!LET DTINDEX2$=""                      
+					!LET DTIMODE$="M"
+					row=row+1
+                case 7
+					LET list$[row]="pd",fdel$,"Picking document",fdel$	                   
+					!LET DTINDEX1$="Order number"          
+					!LET DTINDEX2$="cust  date"                      
+					!LET DTIMODE$="B"  
+					row=row+1
+				case 8                 
+					LET list$[row]="mi",fdel$,"Misc. document",fdel$                       
+					!LET DTINDEX1$="+subtype"              
+					!LET DTINDEX2$="reference code"                   
+					!LET DTIMODE$="M"                      
+					row=row+1
+				case 10
+                    LET list$[row]="ct",fdel$,"Concrete ticket",fdel$  
+                    !LET DTINDEX1$="Date (yymmdd)"         
+					!LET DTINDEX2$="Concrete ticket#"      
+					!LET DTIMODE$="B"  
+					row=row+1
+				case 11                               
+					LET list$[row]="os",fdel$,"Order source",fdel$  
+					!LET DTINDEX1$="Order number"       
+					!LET DTINDEX2$=""                   
+					!LET DTIMODE$="M"                   
+					row=row+1                         
+				case else
+			end select
+		endif
+	next type
+else
+	include "src/callsuberr.inc"
+end try
+
+END SUB !TYPE_DROPDOWN
+
+sub get_image_type_num()
+try
+	select case prefix$
+		case  "dr"
+			type = 0
+		case "pl"
+			type = 1
+		case "cd"
+			type = 2
+		case "vi"
+			type = 3                              
+		case "vs"
+			type = 4                              
+		case "vd"
+			type = 5                               
+		case "md"
+			type = 6
+        case "pd"
+			type = 7
+		case "mi"
+			type = 8                 
+		case "ct"
+			type = 10
+		case "os"
+			type = 11                               
+        case else
+			type = 0
+	end select
+else
+	include "src/callsuberr.inc"
+end try
+end sub  ! get_image_type_num
+
+sub check_pending_manuals()
+try
+List$[1]=list$[1],"ManualCount",fdel$
+for i=2 to (row-1)
+	cnt=0
+	tmp$=" ",tmp$
+	tmp$=list$[i][1,2]  !! prefix
+cpm_loop: search #ch_imlidx,3,1;tmp$,rec_imlidx,e
+	if not(e) and tmp$[1,2]=list$[i][1,2]
+		cnt=cnt+1
+		goto cpm_loop:
+	endif
+	list$[i]=list$[i],cnt,fdel$
+next i
+else
+	include "src/callsuberr.inc"
+end try
+
+END SUB !check_pending_manuals
+
+
+sub check_pending_barcodes()
+try
+Read Record #ch_imstore,0,0;ims.;	! read load location info
+	!! load for load folder
+loaddir$=trim$(ims.path$)
+List$[1]=list$[1],"BarcodeCount",fdel$
+for i=2 to (row-1)
+	cnt=0
+	tmp$=list$[i][1,2]  !! prefix
+	if tmp$="dr" or tmp$="pd" 
+cpb_loop: LET LISTTMP$="/tmp/scanld"+STR$(SPC(6)) 
+		SYSTEM "cd "+loadDIR$+" ; ls | sort | grep "+station_type$[2,10]+tmp$+" > "+LISTTMP$+" 2> /dev/null"
+		ch_list = findchannel()
+		open #ch_list,listtmp$
+cpb_loop2: READ #CH_LIST;Imbatch$
+		IF Imbatch$ AND ASC(Imbatch$)<>141                
+			LET Imbatch$[LEN(Imbatch$)]="" ! knock-off CR 
+			search imbatch$,station_type$[2,10]+tmp$,e
+			if e  !! station type found in string
+				cnt=cnt+1
+			endif
+			goto cpb_loop2
+		endif
+		close #ch_list
+	endif
+	list$[i]=list$[i],cnt,fdel$
+next i
+else
+	include "src/callsuberr.inc"
+end try
+end sub !check_pending_barcodes
+
+
+sub get_manual_list()
+try
+	clear list$[]
+	List$[0]=bsdel$,"MANUALIMAGES",fdel$
+	List$[1]="NAME",fdel$
+	row=2 \ tmpcnt=20
+	TMP$=" ",TMP$
+gml_loop: search #ch_imlidx,3,1;tmp$,rec_imlidx,e
+	if not(e) and tmp$[1,2]<>"!!" and tmp$[1,2]<>"**" and tmp$[1,2]<>"##"
+		list$[row]=trim$(tmp$),fdel$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		goto gml_loop
+	endif
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+else
+	include "src/callsuberr.inc"
+end try
+end sub !get_manual_list
+
+
+sub process_via_scan_index()
+TRY
+	if debug CALL build_debug()
+	if debug
+		PRINT #ch_debug;"hour/min/sec "+(tim(11) using "&&/")+(tim(12) using "&&/")+(tim(13) using "&&")
+		PRINT #ch_debug;"IM files open"
+	ENDIF
+	Read Record #ch_imstore,0,0;ims.;	! read load location info
+
+	!! load for load folder
+	loaddir$=trim$(ims.path$)
+	E=0
+	Call findf(loaddir$,e)
+	IF NOT(E) error 42  ! load dir not found
+
+	!! look for starion/type folders
+	if debug PRINT #ch_debug;"look for ";station_type$
+sub_dir_loop: LET LISTTMP$="/tmp/scanld"+STR$(SPC(6)) 
+	SYSTEM "cd "+loadDIR$+" ; ls | sort | grep "+station_type$[2]+" > "+LISTTMP$+" 2> /dev/null"
+	ch_list = findchannel()
+	open #ch_list,listtmp$
+	if debug PRINT #ch_debug;"open ";listtmp$;" for station/type checking"
+	rewind #ch_list
+	READ #CH_LIST;Imbatch$
+	close #ch_list
+	IF Imbatch$ AND ASC(Imbatch$)<>141                
+		LET Imbatch$[LEN(Imbatch$)]="" ! knock-off CR 
+		Call findf(loaddir$+"/"+imbatch$,e)
+		if e   !! scanner made batch dir found
+			!! look for index files from scanner
+			if debug PRINT #ch_debug;"look for indexes from scanner in ";loaddir$;"/";imbatch$ 
+			SYSTEM "cd "+loadDIR$+"/"+imbatch$+" ; ls | sort | grep INDEX > "+LISTTMP$+" 2> /dev/null"
+			open #ch_list,listtmp$
+			if debug PRINT #ch_debug;"open "+listtmp$
+			rewind #ch_list
+indexListLOOP: READ #CH_LIST;Index$
+			IF INDEX$ AND ASC(INDEX$)<>141                
+				LET INDEX$[LEN(INDEX$)]="" ! knock-off CR  
+				Call findf(loaddir$+"/"+imbatch$+"/"+index$,e)
+				if e
+					!tmp$ = "chmod go+rw " + loaddir$+"/"+imbatch$     
+					!System tmp$                            
+					ch_idx = findchannel()
+					open #ch_idx,loaddir$+"/"+imbatch$+"/"+index$
+					if debug PRINT #ch_debug;"open index file "+index$
+indx_entry:			CALL PARSE_SCANNER_INDEX()
+
+					Select Case pre$ 
+					Case "OrdImg" !
+						call get_image_type_num()  !! returns type value
+						if barcode
+							ch_roh = OpenFile(-1840,IntCo)
+							Key_ImIdx$=" ",Key_ImIdx$
+							Key_ImIdx$[1,2] = prefix$  ! "DR"  "PD"
+							CALL StoreOrderImage()
+							close #ch_roh
+						else
+							! remove unindexed image??
+							call put_to_imload()
+						endif
+					case "PrdImg","CstDoc","VdrInv","VdrStm","VdrDoc","MSDSht","MisDoc","PurOrd","ConTkt"
+						call get_image_type_num()  !! returns type value
+						call put_to_imload()   !! put into imloadidx and load dir
+					case "exit"
+						close #ch_idx
+						call Remove_folder(loaddir$+"/"+imbatch$)
+						GOTO INDEXListLOOP
+					case else
+						if debug PRINT #ch_debug;"no image type found"
+					end select
+					goto indx_entry
+				endif   !! look for next one in index
+			endif
+		ENDIF
+		goto sub_dir_loop:
+	endif
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! process_via_scan_index
+
+
+sub StoreOrderImage()
+TRY 
+	if barcode<1 or barcode>999999 
+		PRINT #ch_debug;"barcode ";barcode;" to large for an order"
+		call put_to_imload()
+		exit sub  !! too big for order number
+	endif
+	If (Key_ImIdx$[1,2] = "dr" or Key_ImIdx$[1,2] = "pd") 
+		CALL Fnd_Order(barcode)
+		if  Not(FoundFlag)
+			Let Key_ImIdx$[3] = barcode Using "######" 
+			Let Key_ImIdx$[9] = Spaces$                    
+			Let Key_ImIdx$[31] = ""
+		else
+			Let JDate$=" ",JDate$;JDate$=roh.orddate Using "&&&&&&" 
+			Call DateToJulian(1,JDATE$,JDATE$,E)
+			if e then jdate$="0"
+			Let JDate=JDate$  
+			Key_ImIdx$[3] = barcode Using "######"  
+			Key_ImIdx$[9] = roh.CUSTNUM Using "######"        
+			Key_ImIdx$[15] = JDate Using "######"       
+			Key_ImIdx$[21] = Spaces$
+			Key_ImIdx$[31] = ""
+		endif
+	Endif
+	if Key_ImIdx$[1,2] = "os"
+		Let Key_ImIdx$[3] = barcode Using "######" 
+		Let Key_ImIdx$[9] = Spaces$                    
+		Let Key_ImIdx$[31] = ""
+	endif
+	if debug PRINT #ch_debug;"build imdex key ";key_imidx$
+
+	If Prefix$ = "dr"
+		If LoadInvWrk = 1
+			! --- invoice work file ----------
+			! make sure order is at status 1 - 4
+			Let FoundFlag=0
+			For Stat = 1 to 4
+				Let Key1_ROH$[1,2]=Stat Using "##"
+				Let Key1_ROH$[3,8]=barcode Using "######"
+				Search #CH_ROH,2,1;Key1_ROH$,Rec_ROH,E 
+				If Not(E) 
+				   Let FoundFlag=1
+				   Goto FoundIt:
+			    Endif
+			Next Stat
+
+			! see if at edit statuses
+			FoundFlag=0 
+			Key1_ROH$ = barcode Using "  ######"
+			For X1=1 to 90                                                      
+				Key1_ROH$[1,2]=X1 Using "##"                                    
+				Search #CH_ROH,2,1;Key1_ROH$,Rec_ROH,E 
+				If Not(E)                                                        
+					! found it                                                  
+					read record #ch_roh,rec_roh,0;roh.; 
+					IF roh.orgstatus>=1 AND roh.orgstatus<=4 LET FOUNDFLAG=1
+  					X1 = 100 ! break-out of loop                 
+				Endif                                                           
+			Next X1    
+			
+			FoundIt: !
+			If FoundFlag
+				read record #ch_roh,rec_roh,0;roh.;    
+				Unlock #CH_ROH          
+				ch_INVWRK = OpenFile(3056,IntCo)
+				! ====== insert key into invoice work file =========
+				Key1_InvWrk$[1,2]=ROH.DIV Using "&#"
+				Key1_InvWrk$[3,4]=ROH.WH Using "&#"
+				Key1_InvWrk$[5,10]=BARCODE Using "######"
+				if debug PRINT #ch_debug;"load invwork ";key1_InvWrk$
+				Search #CH_InvWrk,4,1;Key1_InvWrk$,Rec_InvWrk,E
+				!IF E>1 Gosub Client_SE:	! if already there, don't worry
+				close #ch_invwrk
+			Endif
+		Endif
+		!* if it's out there, mark it as scanned
+		CALL Fnd_Order(BARCODE)
+		IF P60$[44,44]="Y" 
+			CALL CreateEdittrack()
+			if debug PRINT #ch_debug;"create edittrack record"
+		endif
+	Endif
+	call update_imidx()
+else
+	include "src/callsuberr.inc"
+end try
+
+END SUB !storeorderimage
+
+
+sub update_imidx()
+try
+	KEY_IMIDX$ = UCASE$(KEY_IMIDX$)                                            
+	SEARCH #CH_IMIDX,2,1;KEY_IMIDX$,REC_IMIDX,E 
+	IF E=1 LET EXIST=0 ELSE  LET EXIST=1                            
+	If Not(Exist)
+		! Add new entry to index
+		E=2 \ Search #CH_ImIdx,1,0;Key_ImIdx$,Rec_ImIdx,E 
+		!If E Gosub Client_SE:
+
+		! get document sequence #
+		Read record #CH_ImType,Type,0; imt.
+		IMT.SAVE_SEQ_NUM = IMT.SAVE_SEQ_NUM + 1
+		Write record #CH_ImType,Type,0; imt.;
+
+		! Set-up record
+		IMDX.PREFIX$ = KEY_IMIDX$[1,2]
+		IMDX.IKEY$ = Key_ImIdx$[3] + Spaces$
+		IMDX.COMMENT$ = Comment$
+		IMDX.SEQNUMBER = IMT.SAVE_SEQ_NUM
+		IMDX.LOCATION = imt.init_location	! initial location
+		IMDX.PAGES = 0			! pages
+
+		write record #ch_imidx,rec_imidx,0;imdx.
+		! insert image key
+		Search #CH_ImIdx,4,1;Key_ImIdx$,Rec_ImIdx,E 
+		if e exit sub  !! don't move or delete image if key exists
+		if debug PRINT #ch_debug;"create imidex record ";key_imidx$
+	Else
+		read record #ch_imidx,rec_imidx,0;imdx.
+		if debug PRINT #ch_debug;"read imidex record ";key_imidx$
+	Endif
+	call imagesave()
+else
+	include "src/callsuberr.inc"
+end try
+
+END SUB !update_imidx
+
+
+sub ImageSave()  !
+try
+	imdx.pages = imdx.pages + 1	! pages
+	imdx.storedate = Tim(6)		! scan date
+	imdx.lastaccess = Tim(6)	! last access date
+
+	write record #ch_imidx,rec_imidx,0;imdx.;
+	Last_ImIdx = Rec_ImIdx
+
+	! -----Get storage location-----------
+	Rec_ImSto = imdx.location
+	read record #ch_imstore,rec_imsto,0;ims. 
+	Work$ = ims.path$
+	SaveDir$ = TRIM$(Work$)
+
+	! set-up save file name
+	If P176$[6,6]="Y"
+		Page$ = imdx.pages Using "&&&&"
+	Else
+		Page$ = Imdx.pages Using "&&"
+	Endif
+	SaveImage$ = SaveDir$ + "/" + Prefix$ + "/" + Str$(Imdx.seqnumber) + Page$ + Ext$
+
+	! Make sure there's not already one 
+	Call findf(SAVEIMAGE$,e)
+	If E
+		! It's already there... kill the existing one!
+		Kill SaveImage$
+	Endif
+
+	! move document to storage location
+	if imbatch$
+		if debug 
+			PRINT #ch_debug;"set to move image ";loaddir$ + "/" + imbatch$ + "/" + image$
+			PRINT #ch_debug;"to ";saveimage$
+		endif
+		Modify loaddir$ + "/" + imbatch$ + "/" + image$ + " " + SaveImage$
+	else
+		if debug 
+			PRINT #ch_debug;"set to move image ";loaddir$ + "/" + image$
+			PRINT #ch_debug;"to ";saveimage$
+		endif
+		Modify loaddir$ + "/" + image$ + " " + SaveImage$
+	endif
+
+
+	! ---- update location totals ------------
+
+	! Update document count if first page
+	If IMDX.PAGES=1 Let IMS.NUMDOCUMENTS=IMS.NUMDOCUMENTS+1
+
+	IMS.NUMPAGES=IMS.NUMPAGES+1	! page count
+
+	! update disk space used
+	!Call 127,Work$,FArray,SaveImage$,1
+	Call fileinfo(work$,farray[],saveimage$,1)
+	ims.numblocks=Ims.numblocks+FArray[6]
+	write record #ch_imstore,rec_imsto,0;ims.
+	
+	! Update waiting to index count
+	read record #ch_imType,type,0;imt.
+	Imt.scan_batch_count = Imt.scan_batch_count - 1
+	If Imt.scan_batch_count<0 Let Imt.scan_batch_count=0	! just in case
+	write record #CH_ImType,Type,0;Imt.;
+
+else
+	include "src/callsuberr.inc"
+end try
+
+END SUB !imagesave
+
+
+
+
+
+SUB Fnd_Order(ordnum)  !==================================================
+FoundFlag=0
+If Prefix$ <> "dr" and Prefix$ <> "pd" and prefix$<>"os" Return
+
+! make sure order exists                                            
+roh.status=0;FoundFlag=0
+!IF CUSTOM_CUSTOMER$="MAYFIELD" 
+!  LET IAGE=30*18               
+!ELSE                           
+   LET IAGE=180                 
+!ENDIF                          
+! first check active order file  
+Key1_ROH$ = ordnum Using "  ######"
+For X1=1 to 99                                                      
+	If X1=30 Let X1=90  ! skip unused statuses                      
+	Key1_ROH$[1,2]=X1 Using "##"                                    
+	Search #CH_ROH,2,1;Key1_ROH$,Rec_ROH,E 
+	If Not(E)                                                        
+		! found it                                                  
+		read record #ch_roh,rec_roh,0;roh.;                                        
+		Unlock #CH_ROH                                              
+  	    FoundFlag=1;X1 = 100 ! break-out of loop                 
+	Endif                                                           
+Next X1                                                             
+
+If Not(FoundFlag)
+	ch_rohH = OpenFile(-1136,IntCo)
+   ! try invoice history file - extra index
+   ! dir 3 - order number / Inv #
+   Key1_ROHH$ = ordnum Using "######"
+   Next_ROHH: Search #CH_ROHH,3,3;Key1_ROHH$,Rec_ROHH,E  
+   If Not(E) and Val(Key1_ROHH$[1,6])=ordnum 
+	   read record #ch_rohh,rec_rohh,0;roh.;
+	   Let JDate$=" ",JDate$;JDate$=ROH.OrdDate USING "&&&&&&"    
+	   Call DateToJulian(1,JDATE$,JDATE$,E)                    
+	   If E jdate$="0"
+	   Let JDate=JDate$;Today=TIM(6)                 
+	   If Abs(Today - JDate) <= iage 
+	      Let FoundFlag=1 
+		    CLOSE #CH_ROHH
+			goto fnd_order_exit:
+	   Else
+			LET JDATE$=" ",JDATE$;JDATE$=roh.InvDate USING "&&&&&&"
+			Call DateToJulian(1,JDATE$,JDATE$,E)
+			!CALL 25,1,JDATE$,JDATE$,E                        
+			IF E=0                            
+				LET JDATE=JDATE$;TODAY=TIM(6)                    
+				IF ABS(TODAY-JDATE)<= iage                        
+					foundflag=1
+					CLOSE #CH_ROHH
+					goto fnd_order_exit:
+				endif
+			endif
+		endif
+		Goto Next_ROHH:
+   Endif
+   CLOSE #CH_ROHH
+Endif
+fnd_order_exit: 
+END SUB
+
+
+SUB PARSE_SCANNER_INDEX()
+TRY
+	image$=" ",image$
+	pre$="exit"
+	barcode=0
+	indexLineLoop: read #ch_idx;linein$
+	IF LINEIN$ AND ASC(LINEIN$)<>141                
+		LET LINEIN$[LEN(LINEIN$)]="" ! knock-off CR   
+		search linein$,"</page>",e
+		if e exit sub  !! end of image section
+		search linein$,"File name",e
+		if e
+			search linein$,"value=",e
+			if e
+				search linein$,".tif",i
+				if i
+					image$=linein$[e+7,i+3]  !! cust out image name
+					if debug PRINT #ch_debug;"index has image named "+image$
+					Call findf(loaddir$+"/"+imbatch$+"/"+image$,e)
+					IF not(E) ! image file not found
+						if debug PRINT #ch_debug;"image "+image$+" does exists in load dir"
+						image$=" ",image$
+						pre$=" ",pre$
+					else
+						pre$=image$[1,6]
+					endif
+				endif
+			endif
+		endif   !! file name parse
+		
+		search linein$,"item name=''Barcode''",e
+		if e
+			search linein$,"value=",e
+			if e
+				barcode=linein$[e+7]   ! get barcode from line
+			endif
+		endif   !! get barcode
+		GOTO IndexLineLoop
+	ENDIF	
+else
+	include "src/callsuberr.inc"
+end try
+
+END SUB ! PARSE_SCANNER_INDEX
+
+SUB build_debug()
+rem build the debug file
+TRY
+	tmp$=(tim(9) using "&&")
+	ch_debug = findchannel()
+	debug$="/tmp/imdebug"
+	debug$=debug$+(SPC(6) using "&&&&&&")
+	debug$=debug$+(tim(10) using "&&") !! day of month
+	Call findf(debug$,e)
+	IF E
+		open #ch_debug,debug$
+		read #ch_debug;linein$
+		if linein$="" or linein$[1,2]<>tmp$[1,2]
+			close #ch_debug
+			kill debug$
+			e=0
+		endif
+	endif
+	!! need to check e rather than use else since e can change
+	if not(e)
+		system "touch "+debug$
+		open #ch_debug,debug$
+		PRINT #ch_debug;tmp$   !! month marker
+	endif
+	debugToEnd: read #ch_debug;linein$
+	if linein$<>"" goto debugToEnd:
+else
+	include "src/callsuberr.inc"
+end try
+
+END SUB ! BUILD_DEBUG
+
+
+Sub createedittrack()                            
+Try                           
+	FChan[0] = -1;FChan[1] = -1 ! no files open - etrack/usercntrl 
+	if foundflag
+		LET ETR.PRINTER=0                                    
+		LET ETR.ORDNUM=ROH.ORDNUM                                
+		LET ETR.STATUS=ROH.STATUS                                 
+		LET ETR.INVNUM=ROH.INVNUM                  
+		LET ETR.CUSTNUM=ROH.CUSTNUM                                 
+		LET etr.OrgOrdTot=0                                  
+		LET ETR.ETACTION=7 !* set action to "order scanned"           
+		LET ETR.LINENUM=0                                     
+		LET etr.prodcode$="            " ! no product          
+		LET etr.OrgQtyOrd = 0
+		LET etr.NewQtyOrd = 0              
+		LET etr.OrgQtyShip = 0
+		LET etr.NewQtyShip = 0          
+		LET etr.OrgQtyBO = 0
+		LET etr.NewQtyBO = 0                  
+        LET etr.AccessCode$ = Userid$ + spaces$                                   
+		LET etr.UMSell = 0                                             
+		LET etr.NstkFlag = 0                                         
+		LET etr.Slsm = roh.SlsmNum                                               
+		LET etr.OrgUnitPrice = 0    
+		LET etr.NewUnitPrice = 0 ! UnitPrice                         
+		LET etr.umprice = 0                                           
+		LET etr.umcost = 0                                             
+		LET etr.OrgLoadCost = 0                                      
+		LET etr.NewLoadCost = 0                                      
+		LET etr.UnitNetWgt = 0                                        
+		LET etr.NetWgtFact = 0                                      
+		LET etr.SpareNu$ = SPACES$                                     
+		LET etr.NewUnitPrice = 0                                
+		LET etr.NewLoadCost = 0                             
+                                                              
+		Call MakeEdittrack(e$,IntCo,FChan[],etr.)                            
+	ENDIF                        
+Else                           
+	Include "src/callsuberr.inc"  
+End Try             
+End Sub ! createedittrack
+
+
+sub put_to_imload()
+	!! put in load dir and imload for manual indexing
+try
+	if image$[1,5]<>"     "
+		if debug PRINT #ch_debug;"move image to old style load folder "
+		! get document sequence #
+		Read record #CH_ImType,Type,0; imt.
+		IMT.LOAD_SEQ_NUM = IMT.LOAD_SEQ_NUM + 1
+		Write record #CH_ImType,Type,0; imt.;
+		tmp$ = prefix$ + (IMT.LOAD_SEQ_NUM using "&&&&&#")
+		if debug 
+			PRINT #ch_debug;"move ";loaddir$ + "/" + imbatch$ + "/" + image$
+			PRINT #ch_debug;"to ";loaddir$+"/"+tmp$
+		endif
+		modify loaddir$ + "/" + imbatch$ + "/" + image$ + " " + loaddir$+"/"+tmp$
+		SEARCH #ch_imlidx,4,1;tmp$,IMT.LOAD_SEQ_NUM,e		
+	endif
+else
+	Include "src/callsuberr.inc"  
+End Try             
+end Sub !put_to_imload
+
+
+sub Remove_folder(rmfolder$)
+	!! see id we can remove folder we think we are done with
+try
+	tmp$ = "cd "+rmfolder$+" ; ls | sort | grep "+ext$  + " > /tmp/rmfolder" +(spc(6) using "&&&&&&")+" 2> /dev/null"
+
+	SYSTEM tmp$
+	ch_rm = findchannel()
+	open #ch_rm,"/tmp/rmfolder"+(spc(6) using "&&&&&&")
+rmLoop: read #ch_rm;linein$
+	IF LINEIN$ AND ASC(LINEIN$)<>141                
+		LET LINEIN$[LEN(LINEIN$)]="" ! knock-off CR   
+		image$=linein$
+		call put_to_imload()
+		goto rmloop:
+	endif
+	system "rm -r "+rmfolder$
+	close #ch_rm
+	tmp$ = "/tmp/rmfolder" +(spc(6) using "&&&&&&")
+	kill tmp$
+else
+	Include "src/callsuberr.inc"  
+End Try 
+end sub
+
+stop
+

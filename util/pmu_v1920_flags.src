@@ -1,0 +1,289 @@
+! PMUPGRADER ROUTINE
+!  for revision after v1.9.1.0
+!
+! loadsave -w -n 100,10 -o prog/util/pmu_v1920_flags.dl4 src/pmu_v1920_flags.src
+!
+
+
+Declare Intrinsic Sub InpBuf,String,Time,findf
+Option Default Dialect IRIS1
+include "src/utilcopyright.inc"
+dim e$[300]
+
+! Make sure MySQL flags are set and the flags dependent
+! on them are set properly.  No check to see if it's
+! already done as this program can be safely run
+! multiple times
+
+Enter COID,GROUPID,DBAK$,CH_LOG,COREDUMP,E,...
+! if "fromUpgrade" don't send print statements with
+! control strings as this is being executed via
+! a job not attached to terminal.  Be sure to send
+! all output to ch_log as this will be reviewed and
+! sent back to software repository
+try
+	enter fromUpgrade
+else
+	dim 1%,fromUpgrade
+end try
+try ! main try
+E = 99
+include "src/dim.pmupgrade.i"
+Dim Ftemp$[16],BLANK$[80],P61$[256],custom_customer$[30]
+dim 1%,archhist,Ct[5],countFreq[11]
+Dim 2%,CLASS[12],UDC[24]
+dim 3%
+BLANK$ = " ",BLANK$
+TRUE = 1;FALSE = Not(TRUE)
+open #1,"cntrl/cntrl" + Str$(COID)
+ROW = 22;COL = 0
+! dim field desc field
+DIM 1%,FD1,FD2,FD3,FD4$[20],FD5$[10],FD6$[10],FD7$[10],FD8$[10]  
+DIM FD9$[20],FD10$[20],RD$[40],b$[20]
+let b$ = " ",b$
+
+DIM 1%,R[3],3%,FDREC,FDREC0,begDisp
+DIM KEYFD$[60],K2$[60]                                                  
+
+mat read #1,115,60;custom_customer$;
+let custom_customer$=UCase$(trim$(custom_customer$))
+
+!-----------------system flag section--------------------------------
+Mat Read #1,61,0;P61$;
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+! screen 3/page 3 33> Commission Amalg"
+if p61$[129,129]<>"B" and p61$[129,129]<>"S" Let P61$[129,129]="B" ! B=original program
+! screen 3/page 3 34> PO NS Copy Use SO WH ! task #53110
+if p61$[130,130]<>"Y" and p61$[130,130]<>"N" let p61$[130,130]="N" ! 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+Mat Write #1,61,0;P61$;
+
+!-----------initialize field in the control file---------------------
+
+!--------------- add fields to fielddesc file --------------------------
+
+ROPEN #2,"cntrl/fielddes"
+let keyfd$ = " ",keyfd$
+LET KEYFD$[1,3]=" 70"
+SEARCH #2,2,1;KEYFD$,FDREC,E
+IF NOT(E)
+	READ #2,FDREC,0;R[0],R[1],RD$;       
+	LET LOGMSG$="Control 70 desc already done - skipping!"
+	GOSUB DO_WRITE_LOG:
+	if R[0] >= 55 goto skip_cntrl70:
+end if
+close #2
+
+Let FCode$="FIELDDES"
+LET OWRITE$="ne '_1920'"
+LET MODE=0 ! "copy existing file
+GOSUB DO_BACKUP: ! "ALWAYS BACKUP EXISTING!!!
+
+LET LOGMSG$="Creating desc for control rec 70..."
+GOSUB DO_WRITE_LOG:
+OPEN #2,"cntrl/fielddes"
+! TASK 49939 - ADD REC 70 (SAME AS 69 WITH LOC FIELDS DROPPED / CHANGED)
+KEYFD$=" ",KEYFD$;FONE=0
+LET KEYFD$[1,3]=" 69"
+LET KEYFD$[4]="" ! CUT SO SPACE IS NEXT!!
+LOOPFD1: ! FIRST LOOP THRU (IF MORE THAN 1)
+	SEARCH #2,3,1;KEYFD$,FDREC,E \ IF E GOTO FDLOOP1DONE
+	LET X3=KEYFD$[1,3] \ IF X3<>69 GOTO FDLOOP1DONE  
+	IF KEYFD$[4,6]="   " ! MAIN REC        
+		READ #2,FDREC,0;R[0],R[1],RD$;       
+		LET K2$=KEYFD$;K2$[1,3]=" 70"  ! CHANGE TO REC 70    
+		GOSUB GETNEWFDREC ! RETURNS NEW RECORD R2
+		RD$="INVENTORY CLASS 2" ! NEW RECORD 70 DESCRIPTION
+		WRITE #2,R2;R[0],R[1],RD$;  
+		FDREC0=R2 ! RETAIN FOR LATER
+		GOTO LOOPFD1 ! DONE                   
+	ENDIF 
+	REM REST OF FIELDS (LINES 1-40 ON REC 69)                               
+	READ #2,FDREC,0;R[0]; ! GET TYPE ONLY                                
+	IF R[0]   ! 1+ = PRECISION                                         
+		READ #2,FDREC,0;R[1],R[2],R[3],FD4$,FD5$,FD6$,FD7$,FD8$; 
+	ELSE  ! CHAR / TEXT                                      
+		READ #2,FDREC,0;R[1],R[2],R[3],FD4$,FD9$,FD10$;        
+	ENDIF  
+	! NEED CHECK IF RERUN OR FIRST RUN!!
+	LET K2$=KEYFD$;K2$[1,3]=" 70" ! NEW REC               
+	X1=KEYFD$[4] ! LINE # FROM REC 69
+	IF R[0]=0 AND X1=14 ! FIRST REC CHANGED IN 69
+		IF FD4$[1,9]="DFLT RECV" LET FONE=1 ELSE LET FONE=0
+	ENDIF
+	IF FONE ! FIRST RUN THRU
+		IF X1>38 GOTO LOOPFD1 ! WE DROP THESE IN 70 (39=DEF CM & 40=NS LOC ONLY IN REC 69!)
+		IF X1=14 ! CHANGE TO CLASS RECS
+			LET R[1]=1;R[2]=52;R[3]=1;FD4$="INV CLASS 1 TYPE"
+			! KEEP SAME KEY
+			LET K2$=KEYFD$;K2$[1,3]=" 70" ! NEW REC               
+			GOSUB GETNEWFDREC ! RETURNS NEW RECORD R2
+			IF R[0]                                            
+				WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD5$,FD6$,FD7$,FD8$;
+			ELSE     ! TEXT                                          
+				WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD9$,FD10$;         
+			ENDIF
+			! INSERT 5 MORE 1% LINES!
+			LET R[1]=1;R[2]=54;R[3]=1;FD4$="INV CLASS 2 TYPE"
+			! CHANGE KEY
+			LET K2$=" ",K2$;K2$[1,6]=" 70 15" ! NEW REC               
+			GOSUB GETNEWFDREC ! RETURNS NEW RECORD R2
+			IF R[0]                                            
+				WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD5$,FD6$,FD7$,FD8$;
+			ELSE     ! TEXT                                          
+				WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD9$,FD10$;         
+			ENDIF 
+			! NEW REC 16
+			LET R[1]=1;R[2]=56;R[3]=3;FD4$="CLASS 1 MIN DAYS"
+			! CHANGE KEY
+			LET K2$=" ",K2$;K2$[1,6]=" 70 16" ! NEW REC               
+			GOSUB GETNEWFDREC ! RETURNS NEW RECORD R2
+			IF R[0]                                            
+				WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD5$,FD6$,FD7$,FD8$;
+			ELSE     ! TEXT                                          
+				WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD9$,FD10$;         
+			ENDIF  
+			! 4th NEW REC 17
+			LET R[1]=1;R[2]=58;R[3]=3;FD4$="CLASS 2 MIN DAYS"
+			! CHANGE KEY
+			LET K2$=" ",K2$;K2$[1,6]=" 70 17" ! NEW REC               
+			GOSUB GETNEWFDREC ! RETURNS NEW RECORD R2
+			IF R[0]                                            
+				WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD5$,FD6$,FD7$,FD8$;
+			ELSE     ! TEXT                                          
+				WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD9$,FD10$;         
+			ENDIF  
+			! 5th NEW REC 18
+			LET R[1]=1;R[2]=60;R[3]=1;FD4$="CLASS 1 RANK TYPE"
+			! CHANGE KEY
+			LET K2$=" ",K2$;K2$[1,6]=" 70 18" ! NEW REC               
+			GOSUB GETNEWFDREC ! RETURNS NEW RECORD R2
+			IF R[0]                                            
+				WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD5$,FD6$,FD7$,FD8$;
+			ELSE     ! TEXT                                          
+				WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD9$,FD10$;         
+			ENDIF  
+			! 6th NEW REC 19
+			LET R[1]=1;R[2]=62;R[3]=1;FD4$="CLASS 2 RANK TYPE"
+			! CHANGE KEY
+			LET K2$=" ",K2$;K2$[1,6]=" 70 19" ! NEW REC               
+			GOSUB GETNEWFDREC ! RETURNS NEW RECORD R2
+			IF R[0]                                            
+				WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD5$,FD6$,FD7$,FD8$;
+			ELSE     ! TEXT                                          
+				WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD9$,FD10$;         
+			ENDIF  
+			GOTO LOOPFD1
+		ENDIF ! DO NOT FALL THROUGH - GET NEXT RECORD (STILL ON 14 WITH DATA FROM NEW 17)
+		IF X1>=15 ! INSERTED 5 ROWS - ADJUST KEY OF ALL FOLLOWING LINES - NEW RUN ONLY!
+			X1=X1+5 ! 15 BECOMES 20 AND SO ON
+			LET K2$[4]=X1 USING "###" ! NEW RECORD
+		ENDIF ! FALLS THROUGH
+	ENDIF ! OF FIRST RUN THROUGH - RERUN JUST XFERS WHAT IS THERE!
+	GOSUB GETNEWFDREC ! RETURNS WITH NEW/EXIST RECORD R2
+	! LINE # ONLY STORED IN THE KEY!
+	IF R[0]                                            
+		WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD5$,FD6$,FD7$,FD8$;
+	ELSE     ! TEXT                                          
+		WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD9$,FD10$;         
+	ENDIF                                              
+GOTO LOOPFD1
+FDLOOP1DONE: ! NEXT? OR EXIT 
+READ #2,FDREC0,0;R[0],R[1],RD$ ! ADJUST # ROWS!
+LET R[0]=43 ! NOW 43 ROWS
+WRITE #2,FDREC0,0;R[0],R[1],RD$; ! MAIN RECORD VALUES/DESC
+!
+! add additional cycle count fields
+!
+begDisp = 160
+for x1 = 44 to 55
+	LET R[1] = 1 ! type = S
+	LET R[2] = begDisp + ((x1-44) * 2) ! displacement
+	LET R[3] = 2 ! length
+	LET FD4$ = "CLASS "+str$(x1-43)+" COUNT FREQ"+b$
+	LET FD5$ = "0"+b$ ! default value
+	LET FD6$ = "0"+b$ ! min value
+	LET FD7$ = "52"+b$ ! max value
+	LET FD8$ = b$ ! comment
+	k2$ = " ",k2$
+	k2$[1,3] = " 70"
+	k2$[4,6] = x1 using "###"
+	gosub GETNEWFDREC
+	WRITE #2,R2,0;R[1],R[2],R[3],FD4$,FD5$,FD6$,FD7$,FD8$;
+next x1
+READ #2,FDREC0,0;R[0],R[1],RD$ ! ADJUST # ROWS!
+LET R[0]=55 ! NOW 55 ROWS
+WRITE #2,FDREC,0;R[0],R[1],RD$; ! MAIN RECORD VALUES/DESC
+
+if FOne ! first - also init CNTRL# fields
+	LET LOGMSG$="Initializing control rec 70..."
+	GOSUB DO_WRITE_LOG:
+	clear CLASS[]
+	clear UDC[]
+	clear countFreq[]
+	ct[0]=0;ct[2]=180 ! original - avgcost method & 180 days
+	ct[1]=0;ct[3]=0 ! new - nothing loaded
+	CT[4]=0;CT[5]=0 ! both - rank on item count (orig way)
+	MAT WRITE #1,70,52;CT;
+	Mat Write #1,70,0;CLASS;
+	Mat Write #1,70,64;UDC;
+	Mat Write #1,70,160;countFreq;
+Endif  ! not first run thru - may have stuff loaded - do not change
+skip_cntrl70: ! already there
+goto DO_EXIT
+
+GETNEWFDREC: ! 
+	SEARCH #2,2,1;K2$,R2,E  \ IF E>1 ERROR 11000           
+	IF NOT(E) RETURN  ! ALREADY THERE! 
+	LET E=2;R2=0                       
+	SEARCH #2,1,0;K2$,R2,E \ IF E ERROR 11000 
+	SEARCH #2,4,1;K2$,R2,E \ IF E ERROR 11000
+RETURN                             
+
+DO_EXIT: Rem---------------- Exit the upgrade -----------------------------------
+E = 0
+Try
+	CLOSE #2
+ELSE
+	REM FILE NOT OPEN
+END TRY
+Goto OUTEND
+
+DO_BACKUP: Rem"Backup the given file
+	Call "sysfbackup",FCODE$,COID,GROUPID,ORIG$,DBAK$,OWRITE$,MODE,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+	If E Goto OUTEND
+Return
+DO_BUILD: Rem"Build the given file
+	Call "Sysfbuild",FCODE$,COID,GROUPID,PTH$,OWRITE$,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+	If E Goto OUTEND
+Return
+
+include "src/rtn.pmupgrade.i"
+
+
+OUTEND: Rem"Final exit (be sure to set e=0 if successful before branching here)
+	try ! "close any possible file opened herein
+		Close #1
+		Close #2
+	else
+		rem
+	end try
+End
+
+else ! main try
+	If Spc(8) <> 10000
+		dim msc4$[100] \ msc4$=msc$(4)
+		if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+		call env(2,"PROGNAME",msc4$)
+		if spc(8) = 11000
+			call utilsearcherr(e$, e, Spc(10))
+		else
+			Call utilsuberr(e$,Spc(8),Spc(10),Msc$(2))
+		end if
+		call programdump()
+	End If
+	Call utilmainerr(e$,Spc(8))
+	If ch_log <> -1
+		Print #ch_log;e$
+	End If
+end try

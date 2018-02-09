@@ -1,0 +1,1353 @@
+! >>> Program 296
+!
+! description Management report
+!
+! loadsave -w -n 100,10 -o prog/dxport/296.dl4 src/296.src
+!
+! ERPScheduler Enabled
+!
+! 1.0 mm/dd/yyyy change??
+!
+include "src/copyright.inc" ! dx
+Rem mx296 - daily management report
+Rem          mx013r4
+Rem          Daily Management Report
+!					rce 110795
+!
+! Last Updated: 
+! jliu 3/31/99 cct121264 add prompt-using the load cost or glcost 
+!      for the net cost of sales
+! jliu 7/22/99 cct121264 goto the add_prompt after searching the ORH file
+! zyc 10/23/00 cct141013 close the printer channel before the question
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: OCT 28, 2008  12:43:57
+Rem /w2/papermaster/r2005//usr/acct/jcs/work/custom/xrev9/mx296.src (univ2) [jcs] {35288}
+Rem  Copyright (c) 2008 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+!#comment
+!	climat holds grand total for all divisions for each client
+!	divmat holds the totals for either the WH or DIV
+!	(if divWHSort is used, divmat holds grand total for all wh in div)
+!	whmat[20,6] holds the totals for the warehouse in the event divWHSort is selected
+!	climat[20,6]  &  divmat[20,6]  (totmat is grand total of all)
+!	this year		last year
+!	stock	direct	other	stock	direct	other
+!	1	  2	  3	  4	  5	  6	
+!	
+!			 	  daily		mtd		ytd
+!	invoices		0		 7		 14
+!	credits			1		 8		 15
+!	net sales		2		 9 		 16
+!	load cost  		3		 10		 17
+!	net profitload		4		 11		 18
+!	g/l cost		5		 12		 19
+!	tot pieces 	 	6		 13		 20
+!#endcomment
+Declare Intrinsic Sub FindF,InpBuf,String,Time
+Declare Intrinsic sub programdump,env
+Declare Intrinsic function findchannel
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub suberr,mainerr,GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Sub ERPCronSuccess
+Declare External Function GetParameter$
+External Lib "ubsfunc.dl4"
+Declare External Function getuidrec,getuidinfo$
+
+Declare External Function OpenMySQLBrowserOutput,GetMySQLReportHeader
+Declare External Sub AddMySQLReportColumnHeadings
+Declare External Function AddMySQLReportData
+Declare External Sub FinishMySQLReport
+
+! Option Default Dialect IRIS1
+
+Dim 1%,MySQL_ch,reportAborted
+Dim 3%,J,MySQLQueueID
+
+Dim 1%,JTL[2],JTL2,C[17],TOTFLAG,CLFLAG,MANYDIV,MANYCLIENT,P0[1023]
+Dim 2%,STARTCHAN,C2,CLIENT,S[8],COST,3%,R[99],UIDREC[1]
+Dim 3%,JTL1[14],REC_JSDETL,REC_SORT,REC_CLIENT,GPTOP,GPBOT,GPTOT
+dim 4%,msize
+Dim 4%,CLIMAT[21,6],DIVMAT[21,6],TOTMAT[21,6],PRMAT[21,6],WHMAT[21,6],3%
+Dim FILE$[75],KEY_JSDETL$[8],KEY_OLD$[25],KEY_SORT$[25],C$[50],P8$[7],P9$[50]
+Dim CNAME$[30],T9$[26],CLIENT$[40],KEY_CLIENT$[8],DNAME$[24],WNAME$[30]
+Dim OTYPE1$[12],OTYPE2$[12],MASK1$[20],MASK2$[20],ANS$[2],KEY_ORDH$[30]
+Dim K1$[50],USR$[40],mask3$[13],mask4$[13]
+Dim P60$[50],TMPFNAME$[50],4%,TMPCOST[7],ICOST[7]
+Dim KEYPRWH$[30],1%,W1[2],3%,W3[24],WHMISC[6]
+Dim KEYFIFO$[30],1%,FL1[2],3%,FL3[10]
+Dim KEYPROD$[30],2%,B[24],3%,A[33],PRPARC[3],2%,PR_C4[10],3%,PF_LOAD2,A$[156]
+GLOVER = 0 ! this is custom code AND NOT DONE FOR BROWSER!!!
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp$[1200],tmp1$[1200],TMP2$[1000],msg$[200],Message$[600],WebStr$[600],rstr$[1000]
+Dim action$[30],options$[30],userid$[8],b$[200],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+B$=" ",B$
+call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+! If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTIN.hsf\177\";
+INITS: Rem -------------------------------------------------------------------
+! CALL DXSAVE(0,"/tmp/296in.txt!")! from web save
+MASK1$ = "---------#.##";MASK2$ = "-----------#"
+T9$ = "" \ Call Time(T9$)
+CLFLAG = 0;TOTFLAG = 0;MANYDIV = 0;MANYCLIENT = 0
+C2 = Intco ! Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64)
+Read #1,3;CNAME$;
+If Err 0 Let J8 = Spc(8)
+J8 = 0 \ J9 = Chf(0) \ If Err 0 Gosub ERR_TRAP
+If J8 If J8 <> 49 Goto ERR_TRAP
+J9 = 60 ! \ 
+If J8 ! Let J9 = 19
+	!returnstatus=1
+	!e$="Can not run to browser" ! we can now!
+	!goto Err_msg
+	!<section>
+	MySQL_ch = OpenMySQLBrowserOutput(e$)
+	if MySQL_ch <> -1
+		MySQLQueueID = GetMySQLReportHeader(e$,MySQL_ch,"296","DAILY_MANAGEMENT")
+		if MySQLQueueID = 0
+			e$ = "Could not get MySQL report header!"
+			error 10000
+		end if
+	else
+		tmp$ = bsdel$,"296",fdel$,rdel$
+		Call addtostr(e$,rstr$,tmp$)
+	end if
+Endif
+J1 = 70
+Read #1,19,50;P9$;
+Read #1,52,60;P8$; \ Mat Read #1,52,0;S;
+! P8$[7,7]="W" ! to try it out -------------------- TEST ONLY ------------
+Mat Read #1,51,0;C;
+Read #1,62,0;OTYPE1$; \ Read #1,62,20;OTYPE2$; ! desc of ordtype kept
+CHECK_PROCESS: Rem-----------------------------------------------------------
+e$="";eflg=0
+!Call "getuidrec",UIDREC[1]
+UIDREC[1]=GetUIDRec(e$,IntCo,Userid$)
+Mat Read #1,120;P0;
+If P0[226] <> 0 ! " p0[k1]=7
+	R = P0[226]
+	!Call "getuidinfo",R,USR$
+	USR$=GetUIDInfo$(e$,IntCo,R)
+	e$=e$+"Invoice Journal Running by User "+USR$[21]+" "
+	Eflg=eflg+1
+End If 
+If P0[227] <> 0 ! "p0[k1]=8
+	R = P0[227]
+	!Call "getuidinfo",R,USR$
+	USR$=GetUIDInfo$(e$,IntCo,R)
+	e$=e$+"Invoice Accept Running by User "+USR$[21]+" "
+	Eflg=eflg+1
+End If 
+If P0[246] <> 0 ! "p0[k1]=11
+	R = P0[246]
+	!Call "getuidinfo",R,USR$
+	USR$=GetUIDInfo$(e$,IntCo,R)
+	e$=e$+"Credit Journal Running by User "+USR$[21]+" "
+	Eflg=eflg+1
+End If 
+If P0[247] <> 0 ! "p0[k1]=12
+	R = P0[247]
+	!Call "getuidinfo",R,USR$
+	USR$=GetUIDInfo$(e$,IntCo,R)
+	e$=e$+"Credit Accept Running by User "+USR$[21]+" "
+	Eflg=eflg+1
+End If 
+!STARTCHAN = 99
+!Gosub GET_CHAN \ CH_ORDH = STARTCHAN
+ch_ordh=findchannel()
+Read #1,88,1840;C$; \ Ropen #CH_ORDH,C$
+KEY_ORDH$ = " ",KEY_ORDH$;KEY_ORDH$[1,2] = " 7"
+Search #CH_ORDH,3,1;KEY_ORDH$,R,E \ If E = 2 Goto ADD_PROMPT
+If E Gosub ERR_SEARCH
+If KEY_ORDH$[1,2] = " 7"
+	e$=e$+"Invoices need to be accepted!!! "
+	Eflg=eflg+1
+End If 
+KEY_ORDH$ = " ",KEY_ORDH$;KEY_ORDH$[1,2] = "11"
+Search #CH_ORDH,3,1;KEY_ORDH$,R,E \ If E = 2 Goto ADD_PROMPT
+If E Gosub ERR_SEARCH
+If KEY_ORDH$[1,2] = "11"
+	e$=e$+"Credits need to be accepted!!! "
+	Eflg=eflg+1
+End If 
+ADD_PROMPT: Rem-----add prompt that select the cost (lost cost or glcost)
+
+!Print 'CS';@0,0;"MX296";@22,0;"  Daily Management Report ";@55,0;Msc$(3)
+!Print @0,8;"ENTER COST TO USE:  1: LOAD COST  2: GL COST 3: BOTH COSTS  E: EXIT ";
+!Input Len (16384 + 1);""K1$
+k1$ = GetParameter$("PCOST")
+! Call String(1,K1$) \ If K1$ = "E" Or K1$ = "e" Goto OUTEND
+If K1$ <> "1" And K1$ <> "2" And K1$ <> "3"
+	e$=e$+"Invalid Cost Selection (1-3)  "
+	Eflg=eflg+1
+End If 
+COST = K1$
+tmp$ = GetParameter$("CLRDAILY") ! ask up front if clear daily totals Y/N
+clrdt=0 \ if UCase$(RTrim$(tmp$))="Y" let clrdt=1
+tmp$ = ucase$(GetParameter$("DIVWHSORT"))
+divWHSort = 0 \ if tmp$ = "Y" divWHSort = 1
+if divWHSort AND P8$[7,7] = "W"
+	e$=e$+"Client set up as warehouse, division / warehouse sort option can't be used!"
+	Eflg=Eflg+1
+end if
+if eflg goto Err_msg ! something is preventing
+
+OPENS: Rem ------------------------------------------------------------------
+If J8 = 0 or MySQLQueueID !if pdf or print, new method, after edits,setouput,dxclose
+	Call setoutput(e$,rstr$,2) !2 flag puts 0 status section in w/print in process msg, puts </page> in
+End If 
+!Gosub GET_CHAN
+CH_JSDETL = findchannel() ! STARTCHAN
+C$ = "3/jsdetl"+Str$(C2) !  Using "3/jsdetl#" \ If C2 > 9 Let C$ = C2 Using "3/jsdetl##"
+Open #CH_JSDETL,C$
+!Gosub GET_CHAN \ CH_ACF = STARTCHAN \ 
+ch_acf=findchannel()
+Read #1,88,48;C$; \ Ropen #CH_ACF,C$
+If P8$[7,7] = "W" Or P8$[7,7] = "D"
+	CLFLAG = 99
+	!Gosub GET_CHAN \ CH_CLIENT = STARTCHAN
+	CH_Client=findchannel()
+	If P8$[7,7] = "D"
+		Read #1,88,688;C$;
+		Ropen #CH_CLIENT,C$
+		DIV = 99;WH = 0
+		if divWHSort
+			ch_div = ch_client
+			CH_wh=findchannel()
+			Read #1,88,2768;C$; ! division
+			Ropen #CH_WH,C$
+		end if
+	End If 
+	If P8$[7,7] = "W"
+		Read #1,88,2768;C$;
+		Ropen #CH_CLIENT,C$
+		WH = 99;DIV = 0
+	End If 
+Else 
+	CLFLAG = 0
+	CLIENT = 0
+	CH_Client=findchannel()
+	Read #1,88,2768;C$; ! whseinfo
+	Ropen #CH_CLIENT,C$
+	if divWHSort
+		CH_WH=CH_CLIENT
+		CH_DIV=findchannel()
+		Read #1,88,688;C$; ! division
+		Ropen #CH_DIV,C$
+	end if
+End If
+If GLOVER ! for inventory value cct#182556
+	!Gosub GET_CHAN
+	CH_PROD = findchannel() ! STARTCHAN
+	Read #1,88,1792;C$; \ Ropen #CH_PROD,C$
+	!Gosub GET_CHAN
+	CH_PRWH = findchannel() ! STARTCHAN
+	Read #1,88,1744;C$; \ Ropen #CH_PRWH,C$
+	Mat Read #1,60,50;P60$;
+	If P60$[9,9] = "F" Or P60$[9,9] = "L"
+		!Gosub GET_CHAN
+		CH_FIFO = findchannel() ! STARTCHAN
+		Read #1,88,3008;C$; \ Ropen #CH_FIFO,C$
+	End If 
+	Rem build tmp file to calculate inventory value
+	TMPFNAME$ = "6/TMP296WORK" + Str$(Spc(6))
+	Call FindF(TMPFNAME$,A9)
+	If A9
+		Kill TMPFNAME$
+	End If 
+	FILE$ = "[101:64] ",TMPFNAME$
+	!Gosub GET_CHAN \ CH_TMP = STARTCHAN
+	ch_tmp=findchannel()
+	Build #CH_TMP,FILE$
+	For X = 0 To 7 \ TMPCOST[X] = 0 \ Next X
+	For REC = 0 To 100 \ Mat Write #CH_TMP,REC,0;TMPCOST; \ Next REC
+End If 
+
+BUILD_SORT: Rem "======== create indexed sort file for various functions
+C$ = Spc(6) Using "6/SORTWORK&&&&"
+Try Kill C$ Else Rem
+FILE$ = "[1:1] ",C$
+!Gosub GET_CHAN \ CH_SORT = STARTCHAN
+ch_sort=findchannel()
+Build #CH_SORT,FILE$
+R[9] = 25 \ Search #CH_SORT,0,1;C$,R[9],E \ If E Gosub ERR_SEARCH
+R[9] = 1 \ Search #CH_SORT,0,0;C$,R[9],E \ If E Gosub ERR_SEARCH
+R[9] = 0 \ Search #CH_SORT,1,0;C$,R[9],E \ If E Gosub ERR_SEARCH
+if J8 ! dx xml headings
+	tmp$="WHSE",fdel$
+	if div let tmp$="DIV",fdel$
+	if clflag tmp$=tmp$,"CLIENT",fdel$
+	tmp$=tmp$,"SALES",fdel$
+	tmp$=tmp$,"TY ",OType1$,fdel$,"TY ",OType2$,fdel$
+	tmp$=tmp$,"TY OTHER",FDEL$,"TY TOTALS",FDEL$
+	tmp$=tmp$,"LY ",OType1$,fdel$,"LY ",OType2$,fdel$
+	tmp$=tmp$,"LY OTHER",FDEL$,"LY TOTALS",FDEL$
+	!
+	if MySQLQueueID
+		call AddMySQLReportColumnHeadings(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$)
+	else
+		call addtostr(e$,rstr$,tmp$+rdel$)
+	end if
+Endif
+MAIN: Rem--------------------------------------------------------------------
+WRITE_TO_SORT: Rem
+
+KEY_JSDETL$ = " ",KEY_JSDETL$ \ KEY_JSDETL$[1,2] = " 2"
+WRITE_LOOP: Rem __loop trough jsdetl file and build keys for sort file_____
+	Search #CH_JSDETL,3,1;KEY_JSDETL$,REC_JSDETL,E \ If E > 2 Gosub ERR_SEARCH
+	If E = 2 Goto END_LOOP
+	REC_CLIENT = KEY_JSDETL$[3,4] ! default warehouse
+	TIEBREAKER = KEY_JSDETL$[5,6]
+	If WH Read #CH_CLIENT,REC_CLIENT,844;CLIENT;
+	If DIV or divWHSort
+		REC_CLIENT = KEY_JSDETL$[5,6]
+		TIEBREAKER = KEY_JSDETL$[3,4]
+		if DIV Read #CH_CLIENT,REC_CLIENT,76;CLIENT;
+	End If 
+	If Not(CLIENT) Let CLIENT = S[0] ! client from cntrl52
+	! SORT KEY:
+	! 1-4:   CLIENT #
+	! 5-6:   CLIENT RECORD (EITHER WHINFO OR DIV)
+	! 7-8:   WAREHOUSE # (only used if divWHSort)
+	! 9-10:  ORDER TYPE
+	! 11-12: 99-CODE: CODE = 2(mtd), 3(ytd), 4(last ytd), 30(invoice), 31(credit memo)
+	! 13-14: TIEBREAKER (either WH or DIV record (opposite of 5-6)
+	KEY_SORT$ = " ",KEY_SORT$ \ KEY_SORT$[1,4] = CLIENT Using "####"
+	KEY_SORT$[5,6] = REC_CLIENT Using "##"
+	if divWHSort KEY_SORT$[7,8] = KEY_JSDETL$[3,4]
+	KEY_SORT$[9,10] = KEY_JSDETL$[7,8]
+	KEY_SORT$[11,12] = 99 - Val(KEY_JSDETL$[1,2]) Using "##"
+	KEY_SORT$[13] = TIEBREAKER Using "##"
+	Search #CH_SORT,4,1;KEY_SORT$,REC_JSDETL,E \ If E Gosub ERR_SEARCH
+	Goto WRITE_LOOP
+END_LOOP: Rem --------------------------------------------------------------
+
+If GLOVER ! cct#182556
+	Gosub SORTINVENTORY
+End If 
+REC_JSDETL = 0
+READ_SORT: Rem --------------------------------------------------------------
+KEY_SORT$ = " ",KEY_SORT$
+READ_LOOP: Rem                                            here's the loop
+	Search #CH_SORT,3,1;KEY_SORT$,REC_JSDETL,E \ If E > 2 Gosub ERR_SEARCH
+	If E = 2 Goto TOTAL_GRAND
+	If KEY_SORT$[9,10] = "16" Goto READ_LOOP ! skip transfers
+	If CLFLAG If KEY_SORT$[1,4] <> KEY_OLD$[1,4] Gosub TOTAL_CLIENT
+	If KEY_SORT$[5,6] <> KEY_OLD$[5,6] Gosub TOTAL_DIV ! could be WH or DIV
+	if divWHSort AND KEY_SORT$[7,8] <> KEY_OLD$[7,8] Gosub TOTAL_WH
+	Mat Read #CH_JSDETL,REC_JSDETL,0;JTL;
+	Mat Read #CH_JSDETL,REC_JSDETL,6;JTL1;
+	Mat Read #CH_JSDETL,REC_JSDETL,126;JTL2;
+	If (99 - Val(KEY_SORT$[11,12])) = 30 Or (99 - Val(KEY_SORT$[11,12])) = 31 ! daily
+		X = 1;Y = JTL[2]
+		If Y > 2 Let Y = 3
+	End If 
+	If (99 - Val(KEY_SORT$[11,12])) = 2 ! mtd
+		X = 8;Y = JTL[2]
+		If Y > 2 Let Y = 3
+	End If 
+	If (99 - Val(KEY_SORT$[11,12])) = 3 ! ytd
+		X = 15;Y = JTL[2]
+		If Y > 2 Let Y = 3
+	End If 
+	If (99 - Val(KEY_SORT$[11,12])) = 4 ! last ytd
+		X = 15;Y = JTL[2] + 3
+		If Y > 5 Let Y = 6
+	End If 
+	WHMAT[X,Y] = WHMAT[X,Y] + JTL1[10]
+	WHMAT[X + 1,Y] = WHMAT[X + 1,Y] + JTL1[13]
+	WHMAT[X + 2,Y] = WHMAT[X + 2,Y] + JTL1[1]
+	WHMAT[X + 3,Y] = WHMAT[X + 3,Y] + JTL1[6]
+	WHMAT[X + 4,Y] = WHMAT[X + 4,Y] + JTL1[1] - JTL1[6]
+	WHMAT[X + 5,Y] = WHMAT[X + 5,Y] + JTL1[14]
+	WHMAT[X + 6,Y] = WHMAT[X + 6,Y] + JTL1[12]
+	DIVMAT[X,Y] = DIVMAT[X,Y] + JTL1[10]
+	DIVMAT[X + 1,Y] = DIVMAT[X + 1,Y] + JTL1[13]
+	DIVMAT[X + 2,Y] = DIVMAT[X + 2,Y] + JTL1[1]
+	DIVMAT[X + 3,Y] = DIVMAT[X + 3,Y] + JTL1[6]
+	DIVMAT[X + 4,Y] = DIVMAT[X + 4,Y] + JTL1[1] - JTL1[6]
+	DIVMAT[X + 5,Y] = DIVMAT[X + 5,Y] + JTL1[14]
+	DIVMAT[X + 6,Y] = DIVMAT[X + 6,Y] + JTL1[12]
+	CLIMAT[X,Y] = CLIMAT[X,Y] + JTL1[10]
+	CLIMAT[X + 1,Y] = CLIMAT[X + 1,Y] + JTL1[13]
+	CLIMAT[X + 2,Y] = CLIMAT[X + 2,Y] + JTL1[1]
+	CLIMAT[X + 3,Y] = CLIMAT[X + 3,Y] + JTL1[6]
+	CLIMAT[X + 4,Y] = CLIMAT[X + 4,Y] + JTL1[1] - JTL1[6]
+	CLIMAT[X + 5,Y] = CLIMAT[X + 5,Y] + JTL1[14]
+	CLIMAT[X + 6,Y] = CLIMAT[X + 6,Y] + JTL1[12]
+	TOTMAT[X,Y] = TOTMAT[X,Y] + JTL1[10]
+	TOTMAT[X + 1,Y] = TOTMAT[X + 1,Y] + JTL1[13]
+	TOTMAT[X + 2,Y] = TOTMAT[X + 2,Y] + JTL1[1]
+	TOTMAT[X + 3,Y] = TOTMAT[X + 3,Y] + JTL1[6]
+	TOTMAT[X + 4,Y] = TOTMAT[X + 4,Y] + JTL1[1] - JTL1[6]
+	TOTMAT[X + 5,Y] = TOTMAT[X + 5,Y] + JTL1[14]
+	TOTMAT[X + 6,Y] = TOTMAT[X + 6,Y] + JTL1[12]
+	KEY_OLD$ = KEY_SORT$
+Goto READ_LOOP
+GET_CHAN: Rem
+!Call "utchan5",STARTCHAN
+!Signal 6,-3,X,X
+Return 
+
+HEADER: Rem --------------------------------------------------------------------
+	if j8 return ! xml
+	J2 = J2 + 1 \ J1 = 6
+	!Print @0,0;'CS'
+	If Not(J8) Print #0;"\15\"; !\ Print @0,22;"Printing...please wait";'CE'; \ Signal 3,0
+	!If Err 0 Gosub ERR_ESCAPE
+	Print #0;T9$;
+	Print #0; Tab (64 - Len(CNAME$) / 2);CNAME$; Tab 120;"PAGE";J2
+	Print #0;"-mx296- "
+	Print #0; Tab 51;"DAILY MANAGEMENT STATUS REPORT"
+	Print #0;" "
+	If Not(TOTFLAG)
+		If Not(HEADFLAG)
+			If (DIV and not(divWHSort)) or (divWHSort and not(doingWH))
+				DNAME = " ",DNAME$
+				if divWHSort ! force the divsion file
+					Mat Read #CH_DIV,JTL[1],0;DNAME$;
+				else
+					Mat Read #CH_CLIENT,JTL[1],0;DNAME$;
+				end if
+				Print #0; Using " DIVISION: ##"; Tab 26;JTL[1];" ";DNAME$;
+			Else 
+				WNAME = " ",WNAME$
+				Try
+					if divWHSort
+						Mat Read #CH_WH,JTL[0]-1,4;WNAME$; ! whse rec is 1 less!
+					else
+						Mat Read #CH_CLIENT,JTL[0]-1,4;WNAME$; ! whse rec is 1 less!
+					end if
+				Else
+					WNAME = " ",WNAME$
+				End try
+				if divWHSort print #0;"  (DIVISION ";jtl[1];") ";
+				Print #0; Using "WAREHOUSE: ##"; Tab 20;JTL[0];" ";WNAME$;
+			End If 
+		End If 
+		If CLFLAG Print #0; Tab 70;"CLIENT:";CLIENT;" ";CLIENT$
+		If CLIFLAG Print #0; Tab 55;"CLIENT TOTALS"
+	End If 
+	If TOTFLAG Print #0; Tab 57;"GRAND TOTALS";
+	Print #0;""
+	Print #0; Tab 40;"THIS YEAR"; Tab 95;"LAST YEAR"
+	Print #0;""
+	Print #0;"SALES";
+	Print #0; Tab 25 + (12 - Len(OTYPE1$));OTYPE1$[1,Len(OTYPE1$)];
+	Print #0; Tab 38 + (12 - Len(OTYPE2$));OTYPE2$[1,Len(OTYPE2$)];
+	Print #0; Tab 58;"OTHER";
+	Print #0; Tab 71;"TOTAL";
+	Print #0; Tab 78 + (12 - Len(OTYPE1$));OTYPE1$[1,Len(OTYPE1$)];
+	Print #0; Tab 91 + (12 - Len(OTYPE2$));OTYPE2$[1,Len(OTYPE2$)];
+	Print #0; Tab 111;"OTHER";
+	Print #0; Tab 126;"TOTAL"
+Return 
+
+TOTAL_CLIENT: Rem
+	If Not(JTL[2]) Goto END_CLIENT
+	If MANYDIV !  print last div then client total
+		Gosub TOTAL_DIV
+		HEADFLAG = 99
+	End If 
+	Mat PRMAT = Zer
+	Mat PRMAT = CLIMAT
+	Gosub TOTAL_MAT
+	If MAT_TOTAL <> 0 !added BBD 5/9/08
+		CLIFLAG = 99 \ Gosub HEADER \ CLIFLAG = 0
+		Gosub PRINT_BODY
+	End If ! added BBD 5/9/08
+	MANYCLIENT = 99
+	END_CLIENT: Rem
+	KEY_CLIENT$ = " ",KEY_CLIENT$;KEY_CLIENT$[3,6] = KEY_SORT$[1,4]
+	CLIENT$ = " ",CLIENT$
+	Search #CH_ACF,2,1;KEY_CLIENT$,REC_CLIENT,E \ If E > 2 Gosub ERR_SEARCH
+	If E Let CLIENT$ = " ",CLIENT$;CLIENT$ = "NO NAME ASSIGNED"
+	Read #CH_ACF,REC_CLIENT,10;CLIENT$;
+	Mat DIVMAT = Zer
+	Mat CLIMAT = Zer
+	Mat PRMAT = Zer
+	KEY_OLD$ = KEY_SORT$;CLIENT = KEY_SORT$[1,4]
+	MANYDIV = 0;HEADFLAG = 0
+Return 
+
+TOTAL_DIV: Rem
+	If Not(JTL[2]) Goto END_DIV
+	If MANYWH !  print last WH then div total
+		Gosub TOTAL_WH
+	End If 
+	Mat PRMAT = Zer
+	Mat PRMAT = DIVMAT
+	Gosub TOTAL_MAT
+	If MAT_TOTAL <> 0 ! added BBD 5/9/08
+		Gosub HEADER
+		Gosub PRINT_BODY
+	End If ! added BBD 5/9/08
+	MANYDIV = 99
+	END_DIV: Rem
+	Mat DIVMAT = Zer
+	KEY_OLD$ = KEY_SORT$
+	MANYWH = 0
+Return 
+
+TOTAL_WH: Rem
+	If Not(JTL[2]) Goto END_WH
+	Mat PRMAT = Zer
+	Mat PRMAT = WHMAT
+	Gosub TOTAL_MAT
+	If MAT_TOTAL <> 0 ! added BBD 5/9/08
+		doingWH  = 1 \ Gosub HEADER \ doingWH = 0
+		Gosub PRINT_BODY
+	End If ! added BBD 5/9/08
+	MANYWH = 99
+	END_WH: Rem
+	Mat WHMAT = Zer
+	KEY_OLD$ = KEY_SORT$
+Return 
+
+
+TOTAL_GRAND: Rem
+	If MANYCLIENT
+		Gosub TOTAL_CLIENT
+	End If 
+	If MANYDIV
+		Gosub TOTAL_DIV
+	End If 
+	If MANYWH
+		Gosub TOTAL_WH
+	End If 
+	TOTFLAG = 99
+	Mat PRMAT = Zer
+	Mat PRMAT = TOTMAT
+	Gosub TOTAL_MAT
+	If MAT_TOTAL <> 0 ! added BBD 5/9/08
+		Gosub HEADER
+		Gosub PRINT_BODY
+	End If ! added BBD 5/9/08
+	Try Close #0 Else Rem
+	! If Err 0 Gosub ERR_TRAP
+	If clrdt Gosub CLEAR_FILE
+Goto Outend 
+
+CLEAR_FILE: Rem delete daily records from the jsdetl file---------------
+	!Print @0,23;"Clear daily records from journal file? (Y/N) ";'CL';
+	!Input Len (16384 + 1);""ANS$
+	!Call String(1,ANS$)
+	!If ANS$[1,1] = "N" Return 
+	!If ANS$[1,1] <> "Y" Goto CLEAR_FILE
+	KEY_JSDETL$ = " ",KEY_JSDETL$;REC_JSDETL = 0
+	KEY_JSDETL$[1,2] = "30"
+	CLEAR_LOOP: Rem
+		Search #CH_JSDETL,3,1;KEY_JSDETL$,REC_JSDETL,E
+		If E
+			If E <> 2 Gosub ERR_SEARCH Else Return 
+		End If 
+		If KEY_JSDETL$[1,2] <> "30" And KEY_JSDETL$[1,2] <> "31" Return 
+		Search #CH_JSDETL,5,1;KEY_JSDETL$,REC_JSDETL,E \ If E Gosub ERR_SEARCH
+		E = 3
+		Search #CH_JSDETL,1,0;KEY_JSDETL$,REC_JSDETL,E \ If E Gosub ERR_SEARCH
+Goto CLEAR_LOOP
+
+PRINT_BODY: Rem -----------------------------------------------------------
+	if j8 goto print_body_xml
+	X = 0
+	For Z = 0 To 2
+		If Z Let X = X + 7
+		Print #0; Tab 4;"INVOICES";
+		Print #0; Using MASK2$; Tab 25;PRMAT[X + 1,1]; Tab 38;PRMAT[X + 1,2];
+		Print #0; Using MASK2$; Tab 51;PRMAT[X + 1,3];
+		Print #0; Using MASK2$; Tab 64;PRMAT[X + 1,1] + PRMAT[X + 1,2] + PRMAT[X + 1,3];
+		If Z = 2 ! last year
+			Print #0; Using MASK2$; Tab 78;PRMAT[X + 1,4]; Tab 91;PRMAT[X + 1,5];
+			Print #0; Using MASK2$; Tab 104;PRMAT[X + 1,6];
+			Print #0; Using MASK2$; Tab 117;PRMAT[X + 1,4] + PRMAT[X + 1,5] + PRMAT[X + 1,6]
+		Else 
+			Print #0;""
+		End If 
+		If Not(Z) Print #0; Tab 0;"D";
+		Print #0; Tab 4;"CREDITS";
+		Print #0; Using MASK2$; Tab 25;PRMAT[X + 2,1]; Tab 38;PRMAT[X + 2,2];
+		Print #0; Using MASK2$; Tab 51;PRMAT[X + 2,3];
+		Print #0; Using MASK2$; Tab 64;PRMAT[X + 2,1] + PRMAT[X + 2,2] + PRMAT[X + 2,3];
+		If Z = 2 ! last year
+			Print #0; Using MASK2$; Tab 78;PRMAT[X + 2,4]; Tab 91;PRMAT[X + 2,5];
+			Print #0; Using MASK2$; Tab 104;PRMAT[X + 2,6];
+			Print #0; Using MASK2$; Tab 117;PRMAT[X + 2,4] + PRMAT[X + 2,5] + PRMAT[X + 2,6]
+		Else 
+			Print #0;""
+		End If 
+		If Z = 0 Print #0; Tab 0;"A";
+		If Z = 1 Print #0; Tab 0;"M";
+		If Z = 2 Print #0; Tab 0;"Y";
+		Print #0; Tab 4;"NET SALES";
+		msize=prmat[x+3,1] \ gosub masksize:
+		print #0; using mask3$; tab 25; prmat[x+3,1]; 
+		msize=prmat[x+3,2] \ gosub masksize:
+		print #0; using mask3$; tab 38; prmat[x+3,2];
+		msize=prmat[x+3,3] \ gosub masksize: 
+		print #0; using mask3$; tab 51; prmat[x+3,3];
+		msize=prmat[x+3,1]+prmat[x+3,2]+prmat[x+3,3] \ gosub masksize: 
+		print #0; using mask3$; tab 64;prmat[x+3,1]+prmat[x+3,2]+prmat[x+3,3];
+		If Z = 2 ! last year
+			msize=prmat[x+3,4] \ gosub masksize:
+			print #0; using mask3$; tab 78; prmat[x+3,4]; 
+			msize=prmat[x+3,5] \ gosub masksize:
+			print #0; using mask3$; tab 91; prmat[x+3,5];
+			msize=prmat[x+3,6] \ gosub masksize:
+			print #0; using mask3$; tab 104; prmat[x+3,6];
+			msize= prmat[x+3,4]+prmat[x+3,5]+prmat[x+3,6] \ gosub masksize:
+			print #0; using mask3$; tab 117;prmat[x+3,4]+prmat[x+3,5]+prmat[x+3,6]
+		Else 
+			Print #0;""
+		End If 
+		If COST = 1 Or COST = 3 ! we are printing the load cost
+			If Not(Z) Print #0; Tab 0;"I";
+			If Z Print #0; Tab 0;"T";
+			Print #0; Tab 4;"--- LOAD COST ---"
+			If Not(Z) Print #0; Tab 0;"L";
+			If Z Print #0; Tab 0;"D";
+			Print #0; Tab 4;"NET COST OF SALES";
+			msize= prmat[x+4,1] \ gosub masksize:
+			print #0; using mask3$; tab 25; prmat[x+4,1]; 
+			msize= prmat[x+4,2] \ gosub masksize:
+			print #0; using mask3$; tab 38; prmat[x+4,2];
+			msize= prmat[x+4,3] \ gosub masksize:
+			print #0; using mask3$; tab 51; prmat[x+4,3];
+			msize= prmat[x+4,1]+prmat[x+4,2]+prmat[x+4,3] \ gosub masksize:
+			print #0; using mask3$; tab 64;prmat[x+4,1]+prmat[x+4,2]+prmat[x+4,3];
+			If Z = 2 ! last year
+				msize= prmat[x+4,4] \ gosub masksize:
+				print #0; using mask3$; tab 78; prmat[x+4,4]; 
+				msize= prmat[x+4,5] \ gosub masksize:
+				print #0; using mask3$; tab 91; prmat[x+4,5];
+				msize= prmat[x+4,6] \ gosub masksize:
+				print #0; using mask3$; tab 104; prmat[x+4,6];
+				msize= prmat[x+4,4]+prmat[x+4,5]+prmat[x+4,6] \ gosub masksize:
+				print #0; using mask3$; tab 117;prmat[x+4,4]+prmat[x+4,5]+prmat[x+4,6]
+			Else 
+				Print #0;""
+			End If 
+			If Not(Z) Print #0; Tab 0;"Y";
+			Print #0; Tab 4;"NET PROFIT";
+			msize= prmat[x+5,1] \ gosub masksize: 
+			print #0; using mask3$; tab 25; prmat[x+5,1]; 
+			msize= prmat[x+5,2] \ gosub masksize:
+			print #0; using mask3$; tab 38; prmat[x+5,2];
+			msize= prmat[x+5,3] \ gosub masksize:
+			print #0; using mask3$; tab 51; prmat[x+5,3];
+			msize= prmat[x+5,1]+prmat[x+5,2]+prmat[x+5,3] \ gosub masksize:
+			print #0; using mask3$; tab 64;prmat[x+5,1]+prmat[x+5,2]+prmat[x+5,3];
+			If Z = 2 ! last year
+				msize= prmat[x+5,4] \ gosub masksize:
+				print #0; using mask3$; tab 78; prmat[x+5,4]; 
+				msize= prmat[x+5,5] \ gosub masksize:
+				print #0; using mask3$; tab 91; prmat[x+5,5];
+				msize= prmat[x+5,6] \ gosub masksize:
+				print #0; using mask3$; tab 104; prmat[x+5,6];
+				msize= prmat[x+5,4]+prmat[x+5,5]+prmat[x+5,6] \ gosub masksize:
+				print #0; using mask3$; tab 117;prmat[x+5,4]+prmat[x+5,5]+prmat[x+5,6]
+			Else 
+				Print #0;""
+			End If 
+			Print #0; Tab 4;"GP%";
+			If PRMAT[X + 3,1]
+				GPTOT = (PRMAT[X + 5,1] / PRMAT[X + 3,1]) * 100
+			Else 
+				GPTOT = 0
+			End If 
+			Print #0; Using MASK1$; Tab 24;GPTOT;
+			If PRMAT[X + 3,2]
+				GPTOT = (PRMAT[X + 5,2] / PRMAT[X + 3,2]) * 100
+			Else 
+				GPTOT = 0
+			End If 
+			Print #0; Using MASK1$; Tab 36;GPTOT;
+			If PRMAT[X + 3,3]
+				GPTOT = (PRMAT[X + 5,3] / PRMAT[X + 3,3]) * 100
+			Else 
+				GPTOT = 0
+			End If 
+			Print #0; Using MASK1$; Tab 49;GPTOT;
+			GPBOT = PRMAT[X + 3,1] + PRMAT[X + 3,2] + PRMAT[X + 3,3]
+			GPTOP = PRMAT[X + 5,1] + PRMAT[X + 5,2] + PRMAT[X + 5,3]
+			If GPBOT Let GPTOT = (GPTOP / GPBOT) * 100 Else Let GPTOT = 0
+			Print #0; Using MASK1$; Tab 62;GPTOT;
+			If Z = 2 ! last year
+				If PRMAT[X + 3,4]
+					GPTOT = (PRMAT[X + 5,4] / PRMAT[X + 3,4]) * 100
+				Else 
+					GPTOT = 0
+				End If 
+				Print #0; Using MASK2$; Tab 78;GPTOT;
+				If PRMAT[X + 3,5]
+					GPTOT = (PRMAT[X + 5,5] / PRMAT[X + 3,5]) * 100
+				Else 
+					GPTOT = 0
+				End If 
+				Print #0; Using MASK2$; Tab 91;GPTOT;
+				If PRMAT[X + 3,6]
+					GPTOT = (PRMAT[X + 5,6] / PRMAT[X + 3,6]) * 100
+				Else 
+					GPTOT = 0
+				End If 
+				Print #0; Using MASK2$; Tab 104;GPTOT;
+				GPTOP = PRMAT[X + 5,4] + PRMAT[X + 5,5] + PRMAT[X + 5,6]
+				GPBOT = PRMAT[X + 3,4] + PRMAT[X + 3,5] + PRMAT[X + 3,6]
+				If GPBOT Let GPTOT = (GPTOP / GPBOT) * 100 Else Let GPTOT = 0
+				Print #0; Using MASK2$; Tab 117;GPTOT
+			Else 
+				Print #0;""
+			End If 
+		End If ! if cost = 1 or cost = 3 
+		If COST = 2 Or COST = 3 ! we are printing the gl cost
+			If COST = 2 ! gl cost only
+				If Not(Z) Print #0; Tab 0;"I";
+				If Z Print #0; Tab 0;"T";
+			End If 
+			Print #0; Tab 4;"--- G/L COST ---"
+			If COST = 2 ! gl cost only
+				If Not(Z) Print #0; Tab 0;"L";
+				If Z Print #0; Tab 0;"D";
+			End If 
+			Print #0; Tab 4;"NET COST OF SALES";
+			msize= prmat[x+6,1] \ gosub masksize: 
+			print #0; using mask3$; tab 25; prmat[x+6,1]; 
+			msize= prmat[x+6,2] \ gosub masksize:
+			print #0; using mask3$; tab 38; prmat[x+6,2];
+			msize= prmat[x+6,3] \ gosub masksize:
+			print #0; using mask3$; tab 51; prmat[x+6,3];
+			msize= prmat[x+6,1]+prmat[x+6,2]+prmat[x+6,3] \ gosub masksize:
+			print #0; using mask3$; tab 64;prmat[x+6,1]+prmat[x+6,2]+prmat[x+6,3];
+			If Z = 2 ! last year
+				msize= prmat[x+6,4] \ gosub masksize:
+				print #0; using mask3$; tab 78; prmat[x+6,4]; 
+				msize= prmat[x+6,5] \ gosub masksize:
+				print #0; using mask3$; tab 91; prmat[x+6,5];
+				msize= prmat[x+6,6] \ gosub masksize:
+				print #0; using mask3$; tab 104; prmat[x+6,6];
+				msize= prmat[x+6,4]+prmat[x+6,5]+prmat[x+6,6] \ gosub masksize:
+				print #0; using mask3$; tab 117;prmat[x+6,4]+prmat[x+6,5]+prmat[x+6,6]
+			Else 
+				Print #0;""
+			End If 
+			If COST = 2
+				If Not(Z) Print #0; Tab 0;"Y";
+			End If 
+			Print #0; Tab 4;"NET PROFIT";
+			msize= prmat[x+3,1]-prmat[x+6,1] \ gosub masksize: 
+			print #0; using mask3$; tab 25; prmat[x+3,1]-prmat[x+6,1]; 
+			msize= prmat[x+3,2]-prmat[x+6,2] \ gosub masksize:
+			print #0; using mask3$; tab 38; prmat[x+3,2]-prmat[x+6,2];
+			msize= prmat[x+3,3]-prmat[x+6,3] \ gosub masksize:
+			print #0; using mask3$; tab 51; prmat[x+3,3]-prmat[x+6,3];
+			GPTOT = 0
+			For CTR = 1 To 3
+				GPTOT = GPTOT + PRMAT[X + 3,CTR] - PRMAT[X + 6,CTR]
+			Next CTR
+			Print #0; Using MASK1$; Tab 62;GPTOT;
+			If Z = 2 ! last year
+				msize= prmat[x+3,4]-prmat[x+6,4] \ gosub masksize:
+				print #0; using mask3$; tab 78; prmat[x+3,4]-prmat[x+6,4]; 
+				msize= prmat[x+3,5]-prmat[x+6,5] \ gosub masksize:
+				print #0; using mask3$; tab 91; prmat[x+3,5]-prmat[x+6,5];
+				msize= prmat[x+3,6]-prmat[x+6,6] \ gosub masksize:
+				print #0; using mask3$; tab 104; prmat[x+3,6]-prmat[x+6,6];
+				GPTOT = 0
+				For CTR = 4 To 6
+					GPTOT = GPTOT + PRMAT[X + 3,CTR] - PRMAT[X + 6,CTR]
+				Next CTR
+				Print #0; Using MASK2$; Tab 117;GPTOT
+			Else 
+				Print #0;""
+			End If 
+			Print #0; Tab 4;"GP%";
+			If PRMAT[X + 3,1]
+				GPTOT = ((PRMAT[X + 3,1] - PRMAT[X + 6,1]) / PRMAT[X + 3,1]) * 100
+			Else 
+				GPTOT = 0
+			End If 
+			Print #0; Using MASK1$; Tab 24;GPTOT;
+			If PRMAT[X + 3,2]
+				GPTOT = ((PRMAT[X + 3,2] - PRMAT[X + 6,2]) / PRMAT[X + 3,2]) * 100
+			Else 
+				GPTOT = 0
+			End If 
+			Print #0; Using MASK1$; Tab 36;GPTOT;
+			If PRMAT[X + 3,3]
+				GPTOT = ((PRMAT[X + 3,3] - PRMAT[X + 6,3]) / PRMAT[X + 3,3]) * 100
+			Else 
+				GPTOT = 0
+			End If 
+			Print #0; Using MASK1$; Tab 49;GPTOT;
+			GPBOT = PRMAT[X + 3,1] + PRMAT[X + 3,2] + PRMAT[X + 3,3]
+			GPTOP = PRMAT[X + 6,1] + PRMAT[X + 6,2] + PRMAT[X + 6,3]
+			If GPBOT Let GPTOT = ((GPBOT - GPTOP) / GPBOT) * 100 Else Let GPTOT = 0
+			Print #0; Using MASK1$; Tab 62;GPTOT;
+			If Z = 2 ! last year
+				If PRMAT[X + 3,4]
+					GPTOT = ((PRMAT[X + 3,4] - PRMAT[X + 6,4]) / PRMAT[X + 3,4]) * 100
+				Else 
+					GPTOT = 0
+				End If 
+				Print #0; Using MASK2$; Tab 78;GPTOT;
+				If PRMAT[X + 3,5]
+					GPTOT = ((PRMAT[X + 3,5] - PRMAT[X + 6,5]) / PRMAT[X + 3,5]) * 100
+				Else 
+					GPTOT = 0
+				End If 
+				Print #0; Using MASK2$; Tab 91;GPTOT;
+				If PRMAT[X + 3,6]
+					GPTOT = ((PRMAT[X + 3,6] - PRMAT[X + 6,6]) / PRMAT[X + 3,6]) * 100
+				Else 
+					GPTOT = 0
+				End If 
+				Print #0; Using MASK2$; Tab 104;GPTOT;
+				GPTOP = PRMAT[X + 6,4] + PRMAT[X + 6,5] + PRMAT[X + 6,6]
+				GPBOT = PRMAT[X + 3,4] + PRMAT[X + 3,5] + PRMAT[X + 3,6]
+				If GPBOT Let GPTOT = ((GPBOT - GPTOP) / GPBOT) * 100 Else Let GPTOT = 0
+				Print #0; Using MASK2$; Tab 117;GPTOT
+			Else 
+				Print #0;""
+			End If 
+		End If ! if cost = 2 or cost = 3 
+		Print #0; Tab 4;"TOTAL PIECES";
+		Print #0; Using MASK2$; Tab 25;PRMAT[X + 7,1]; Tab 38;PRMAT[X + 7,2];
+		Print #0; Using MASK2$; Tab 51;PRMAT[X + 7,3];
+		Print #0; Using MASK2$; Tab 64;PRMAT[X + 7,1] + PRMAT[X + 7,2] + PRMAT[X + 7,3];
+		If Z = 2 ! last year
+			Print #0; Using MASK2$; Tab 78;PRMAT[X + 7,4]; Tab 91;PRMAT[X + 7,5];
+			Print #0; Using MASK2$; Tab 104;PRMAT[X + 7,6];
+			Print #0; Using MASK2$; Tab 117;PRMAT[X + 7,4] + PRMAT[X + 7,5] + PRMAT[X + 7,6]
+		Else 
+			Print #0;""
+		End If 
+		Print #0;""
+	Next Z
+	If GLOVER ! cct#182556
+		If Not(DIV)
+			If Not(TOTFLAG)
+				REC = JTL[0]
+				If REC > 99 Let REC = 99
+			Else 
+				REC = 100
+			End If 
+			Mat Read #CH_TMP,REC,0;TMPCOST;
+			Rem headings
+			Print #0; Tab 28;"LOAD";
+			Print #0; Tab 48;"BASE";
+			Print #0; Tab 65;"AVERAGE";
+			Print #0; Tab 88;"LAST";
+			If P60$[9,9] = "F"
+				Print #0; Tab 108;"FIFO";
+			End If 
+			If P60$[9,9] = "L"
+				Print #0; Tab 108;"LIFO";
+			End If 
+			Print #0;""
+			Print #0;"INVENTORY VALUE:";
+			Print #0; Using "---,---,---,---.##"; Tab 17;TMPCOST[1];
+			Print #0; Using "---,---,---,---.##"; Tab 37;TMPCOST[2];
+			Print #0; Using "---,---,---,---.##"; Tab 57;TMPCOST[3];
+			Print #0; Using "---,---,---,---.##"; Tab 77;TMPCOST[4];
+			If P60$[9,9] = "F" Or P60$[9,9] = "L"
+				Print #0; Using "---,---,---,---.##"; Tab 97;TMPCOST[0];
+			End If 
+		End If 
+	End If 
+	If Not(TOTFLAG) Print #0;"\14\"
+Return 
+
+Print_Body_xml: ! xml
+	if not(totFlag)
+		If DIV
+			DNAME = " ",DNAME$
+			Mat Read #CH_CLIENT,JTL[1],0;DNAME$;
+			tmp$=Str$(JTL[1])," ",DNAME$,fdel$
+		Else 
+			WNAME = " ",WNAME$
+			! If WH Mat Read #CH_CLIENT,JTL[0],4;WNAME$;
+			if jtl[0]=0 let jtl[0]=1
+			try
+				Mat Read #CH_CLIENT,JTL[0]-1,4;WNAME$; ! whse rec is 1 less!
+			Else
+				WNAME = " ",WNAME$
+			End try
+			tmp$=Str$(JTL[0])," ",RTrim$(WNAME$),fdel$
+		End If 
+	Else ! is totals
+		tmp$="GRAND TOTALS",fdel$
+	Endif
+	If CLFLAG 
+		if not(cliflag) tmp$=tmp$,Str$(CLIENT)," ",CLIENT$,fdel$
+		If CLIFLAG tmp$=tmp$,"CLIENT TOTALS",fdel$
+	Endif
+	TMP2$=TMP$ ! FIRST FIELDS on ALL LINES
+	X = 0
+	For Z = 0 To 2
+		If Z Let X = X + 7
+		TMP$=TMP2$ ! 1st fields
+		tmp1$="DAILY"
+		IF Z=1 tmp1$="MTD"
+		if z=2 tmp1$="YTD"
+		tmp$=tmp$,TMP1$," INVOICES",fdel$
+		tmp$=tmp$,LTrim$(PRMAT[X + 1,1] using mask2$),fdel$
+		tmp$=tmp$,LTrim$(PRMAT[X + 1,2] using mask2$),fdel$
+		tmp$=tmp$,LTrim$(PRMAT[X + 1,3] using mask2$),fdel$
+		tmp$=tmp$,LTrim$(PRMAT[X + 1,1] + PRMAT[X + 1,2] + PRMAT[X + 1,3] using mask2$),fdel$
+		If Z = 2 ! last year
+			tmp$=tmp$,LTrim$(PRMAT[X + 1,4] using mask2$),fdel$ 
+			tmp$=tmp$,LTrim$(PRMAT[X + 1,5] using mask2$),fdel$
+			tmp$=tmp$,LTrim$(PRMAT[X + 1,6] using mask2$),fdel$
+			tmp$=tmp$,LTrim$(PRMAT[X + 1,4] + PRMAT[X + 1,5] + PRMAT[X + 1,6] using mask2$),fdel$
+		Else 
+			tmp$=tmp$,fdel$,fdel$,fdel$,fdel$
+		End If 
+		!
+		if MySQLQueueID
+			if not(AddMySQLReportData(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$))
+				! possible user abort - report deleted exit now
+				reportAborted = 1
+			end if
+		else
+			call addtostr(e$,rstr$,tmp$+rdel$)! end line 1
+		end if
+		tmp$=tmp2$,tmp1$ ! 
+		tmp$=tmp$," CREDITS",fdel$
+		tmp$=tmp$,LTrim$(PRMAT[X + 2,1] using mask2$),fdel$ 
+		tmp$=tmp$,LTrim$(PRMAT[X + 2,2] using mask2$),fdel$
+		tmp$=tmp$,LTrim$(PRMAT[X + 2,3] using mask2$),fdel$
+		tmp$=tmp$,LTrim$(PRMAT[X + 2,1] + PRMAT[X + 2,2] + PRMAT[X + 2,3] using mask2$),fdel$
+		If Z = 2 ! last year
+			tmp$=tmp$,LTrim$(PRMAT[X + 2,4] using mask2$),fdel$ 
+			tmp$=tmp$,LTrim$(PRMAT[X + 2,5] using mask2$),fdel$
+			tmp$=tmp$,LTrim$(PRMAT[X + 2,6] using mask2$),fdel$
+			tmp$=tmp$,LTrim$(PRMAT[X + 2,4] + PRMAT[X + 2,5] + PRMAT[X + 2,6] using mask2$),fdel$
+		Else 
+			tmp$=tmp$,fdel$,fdel$,fdel$,fdel$
+		End If
+		!
+		if MySQLQueueID
+			if not(AddMySQLReportData(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$))
+				! possible user abort - report deleted exit now
+				reportAborted = 1
+			end if
+		else
+			call addtostr(e$,rstr$,tmp$+rdel$)! end line 2
+		end if
+		tmp$=tmp2$,tmp1$ ! 
+		tmp$=tmp$," NET SALES",fdel$
+		tmp$=tmp$,LTrim$(PRMAT[X + 3,1] using mask1$),fdel$ 
+		tmp$=tmp$,LTrim$(PRMAT[X + 3,2] using mask1$),fdel$ 
+		tmp$=tmp$,LTrim$(PRMAT[X + 3,3] using mask1$),fdel$ 
+		tmp$=tmp$,LTrim$(PRMAT[X + 3,1] + PRMAT[X + 3,2] + PRMAT[X + 3,3] using mask1$),fdel$ 
+		If Z = 2 ! last year
+			tmp$=tmp$,LTrim$(PRMAT[X + 3,4] using mask1$),fdel$  
+			tmp$=tmp$,LTrim$(PRMAT[X + 3,5] using mask1$),fdel$ 
+			tmp$=tmp$,LTrim$(PRMAT[X + 3,6] using mask1$),fdel$ 
+			tmp$=tmp$,LTrim$(PRMAT[X + 3,4] + PRMAT[X + 3,5] + PRMAT[X + 3,6] using mask1$),fdel$ 
+		Else 
+			tmp$=tmp$,fdel$,fdel$,fdel$,fdel$
+		End If 
+		!
+		if MySQLQueueID
+			if not(AddMySQLReportData(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$))
+				! possible user abort - report deleted exit now
+				reportAborted = 1
+			end if
+		else
+			call addtostr(e$,rstr$,tmp$+rdel$)! end line 3
+		end if
+		If COST = 1 Or COST = 3 ! we are printing the load cost
+			tmp$=tmp2$,tmp1$ ! 
+			tmp$=tmp$," LDCOST "
+			tmp$=tmp$,"NET COST OF SALES",fdel$
+			tmp$=tmp$,LTrim$(PRMAT[X + 4,1] using mask1$),fdel$  
+			tmp$=tmp$,LTrim$(PRMAT[X + 4,2] using mask1$),fdel$ 
+			tmp$=tmp$,LTrim$(PRMAT[X + 4,3] using mask1$),fdel$ 
+			tmp$=tmp$,LTrim$(PRMAT[X + 4,1] + PRMAT[X + 4,2] + PRMAT[X + 4,3] using mask1$),fdel$ 
+			If Z = 2 ! last year
+				tmp$=tmp$,LTrim$(PRMAT[X + 4,4] using mask1$),fdel$  
+				tmp$=tmp$,LTrim$(PRMAT[X + 4,5] using mask1$),fdel$ 
+				tmp$=tmp$,LTrim$(PRMAT[X + 4,6] using mask1$),fdel$ 
+				tmp$=tmp$,LTrim$(PRMAT[X + 4,4] + PRMAT[X + 4,5] + PRMAT[X + 4,6] using mask1$),fdel$ 
+			Else 
+				tmp$=tmp$,fdel$,fdel$,fdel$,fdel$
+			End If 
+			!
+			if MySQLQueueID
+				if not(AddMySQLReportData(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$))
+					! possible user abort - report deleted exit now
+					reportAborted = 1
+				end if
+			else
+				call addtostr(e$,rstr$,tmp$+rdel$)! end line 4
+			end if
+			tmp$=tmp2$,tmp1$ ! 
+			tmp$=tmp$," LDCOST "
+			tmp$=tmp$,"NET PROFIT",fdel$
+			tmp$=tmp$,LTrim$(PRMAT[X + 5,1] using mask1$),fdel$   
+			tmp$=tmp$,LTrim$(PRMAT[X + 5,2] using mask1$),fdel$  
+			tmp$=tmp$,LTrim$(PRMAT[X + 5,3] using mask1$),fdel$  
+			tmp$=tmp$,LTrim$(PRMAT[X + 5,1] + PRMAT[X + 5,2] + PRMAT[X + 5,3] using mask1$),fdel$  
+			If Z = 2 ! last year
+				tmp$=tmp$,LTrim$(PRMAT[X + 5,4] using mask1$),fdel$   
+				tmp$=tmp$,LTrim$(PRMAT[X + 5,5] using mask1$),fdel$  
+				tmp$=tmp$,LTrim$(PRMAT[X + 5,6] using mask1$),fdel$  
+				tmp$=tmp$,LTrim$(PRMAT[X + 5,4] + PRMAT[X + 5,5] + PRMAT[X + 5,6] using mask1$),fdel$  
+			Else 
+				tmp$=tmp$,fdel$,fdel$,fdel$,fdel$
+			End If 
+			!
+			if MySQLQueueID
+				if not(AddMySQLReportData(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$))
+					! possible user abort - report deleted exit now
+					reportAborted = 1
+				end if
+			else
+				call addtostr(e$,rstr$,tmp$+rdel$)! end line 5
+			end if
+			tmp$=tmp2$,tmp1$ ! 
+			tmp$=tmp$," LDCOST "
+			tmp$=tmp$,"GP%",fdel$
+			If PRMAT[X + 3,1]
+				GPTOT = (PRMAT[X + 5,1] / PRMAT[X + 3,1]) * 100
+			Else 
+				GPTOT = 0
+			End If 
+			tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+			If PRMAT[X + 3,2]
+				GPTOT = (PRMAT[X + 5,2] / PRMAT[X + 3,2]) * 100
+			Else 
+				GPTOT = 0
+			End If 
+			tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+			If PRMAT[X + 3,3]
+				GPTOT = (PRMAT[X + 5,3] / PRMAT[X + 3,3]) * 100
+			Else 
+				GPTOT = 0
+			End If 
+			tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+			GPBOT = PRMAT[X + 3,1] + PRMAT[X + 3,2] + PRMAT[X + 3,3]
+			GPTOP = PRMAT[X + 5,1] + PRMAT[X + 5,2] + PRMAT[X + 5,3]
+			If GPBOT Let GPTOT = (GPTOP / GPBOT) * 100 Else Let GPTOT = 0
+			tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+			If Z = 2 ! last year
+				If PRMAT[X + 3,4]
+					GPTOT = (PRMAT[X + 5,4] / PRMAT[X + 3,4]) * 100
+				Else 
+					GPTOT = 0
+				End If 
+				tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+				If PRMAT[X + 3,5]
+					GPTOT = (PRMAT[X + 5,5] / PRMAT[X + 3,5]) * 100
+				Else 
+					GPTOT = 0
+				End If 
+				tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+				If PRMAT[X + 3,6]
+					GPTOT = (PRMAT[X + 5,6] / PRMAT[X + 3,6]) * 100
+				Else 
+					GPTOT = 0
+				End If 
+				tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+				GPTOP = PRMAT[X + 5,4] + PRMAT[X + 5,5] + PRMAT[X + 5,6]
+				GPBOT = PRMAT[X + 3,4] + PRMAT[X + 3,5] + PRMAT[X + 3,6]
+				If GPBOT Let GPTOT = (GPTOP / GPBOT) * 100 Else Let GPTOT = 0
+				tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+			Else 
+				tmp$=tmp$,fdel$,fdel$,fdel$,fdel$
+			End If
+			if MySQLQueueID
+				if not(AddMySQLReportData(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$))
+					! possible user abort - report deleted exit now
+					reportAborted = 1
+				end if
+			else
+				call addtostr(e$,rstr$,tmp$+rdel$)! end line 6
+			end if
+		End If ! if cost = 1 or cost = 3
+		If COST = 2 Or COST = 3 ! we are printing the gl cost
+			tmp$=tmp2$,tmp1$ ! 
+			tmp$=tmp$," G/L COST "
+			tmp$=tmp$,"NET COST OF SALES",fdel$
+			tmp$=tmp$,LTrim$(PRMAT[X + 6,1] using mask1$),fdel$ 
+			tmp$=tmp$,LTrim$(PRMAT[X + 6,2] using mask1$),fdel$
+			tmp$=tmp$,LTrim$(PRMAT[X + 6,3] using mask1$),fdel$
+			tmp$=tmp$,LTrim$(PRMAT[X + 6,1] + PRMAT[X + 6,2] + PRMAT[X + 6,3] using mask1$),fdel$
+			If Z = 2 ! last year
+				tmp$=tmp$,LTrim$(PRMAT[X + 6,4] using mask1$),fdel$ 
+				tmp$=tmp$,LTrim$(PRMAT[X + 6,5] using mask1$),fdel$
+				tmp$=tmp$,LTrim$(PRMAT[X + 6,6] using mask1$),fdel$
+				tmp$=tmp$,LTrim$(PRMAT[X + 6,4] + PRMAT[X + 6,5] + PRMAT[X + 4,6] using mask1$),fdel$
+			Else 
+				tmp$=tmp$,fdel$,fdel$,fdel$,fdel$
+			End If
+			if MySQLQueueID
+				if not(AddMySQLReportData(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$))
+					! possible user abort - report deleted exit now
+					reportAborted = 1
+				end if
+			else
+				call addtostr(e$,rstr$,tmp$+rdel$)! end line 7
+			end if
+			tmp$=tmp2$,tmp1$ ! 
+			tmp$=tmp$," G/L COST "
+			tmp$=tmp$,"NET PROFIT",fdel$
+			tmp$=tmp$,LTrim$(PRMAT[X + 3,1] - PRMAT[X + 6,1] using mask1$),fdel$
+			tmp$=tmp$,LTrim$(PRMAT[X + 3,2] - PRMAT[X + 6,2] using mask1$),fdel$
+			tmp$=tmp$,LTrim$(PRMAT[X + 3,3] - PRMAT[X + 6,3] using mask1$),fdel$
+			GPTOT = 0
+			For CTR = 1 To 3
+				GPTOT = GPTOT + PRMAT[X + 3,CTR] - PRMAT[X + 6,CTR]
+			Next CTR
+			tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+			If Z = 2 ! last year
+				tmp$=tmp$,LTrim$(PRMAT[X + 3,4] - PRMAT[X + 6,4] using mask1$),fdel$
+				tmp$=tmp$,LTrim$(PRMAT[X + 3,5] - PRMAT[X + 6,5] using mask1$),fdel$
+				tmp$=tmp$,LTrim$(PRMAT[X + 3,6] - PRMAT[X + 6,6] using mask1$),fdel$
+				GPTOT = 0
+				For CTR = 4 To 6
+					GPTOT = GPTOT + PRMAT[X + 3,CTR] - PRMAT[X + 6,CTR]
+				Next CTR
+				tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+			Else 
+				tmp$=tmp$,fdel$,fdel$,fdel$,fdel$
+			End If 
+			if MySQLQueueID
+				if not(AddMySQLReportData(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$))
+					! possible user abort - report deleted exit now
+					reportAborted = 1
+				end if
+			else
+				call addtostr(e$,rstr$,tmp$+rdel$)! end line 8
+			end if
+			tmp$=tmp2$,tmp1$ ! 
+			tmp$=tmp$," G/L COST "
+			tmp$=tmp$,"GP%",fdel$
+			If PRMAT[X + 3,1]
+				GPTOT = ((PRMAT[X + 3,1] - PRMAT[X + 6,1]) / PRMAT[X + 3,1]) * 100
+			Else 
+				GPTOT = 0
+			End If 
+			tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+			If PRMAT[X + 3,2]
+				GPTOT = ((PRMAT[X + 3,2] - PRMAT[X + 6,2]) / PRMAT[X + 3,2]) * 100
+			Else 
+				GPTOT = 0
+			End If 
+			tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+			If PRMAT[X + 3,3]
+				GPTOT = ((PRMAT[X + 3,3] - PRMAT[X + 6,3]) / PRMAT[X + 3,3]) * 100
+			Else 
+				GPTOT = 0
+			End If 
+			tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+			GPBOT = PRMAT[X + 3,1] + PRMAT[X + 3,2] + PRMAT[X + 3,3]
+			GPTOP = PRMAT[X + 6,1] + PRMAT[X + 6,2] + PRMAT[X + 6,3]
+			If GPBOT Let GPTOT = ((GPBOT - GPTOP) / GPBOT) * 100 Else Let GPTOT = 0
+			tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+			If Z = 2 ! last year
+				If PRMAT[X + 3,4]
+					GPTOT = ((PRMAT[X + 3,4] - PRMAT[X + 6,4]) / PRMAT[X + 3,4]) * 100
+				Else 
+					GPTOT = 0
+				End If 
+				tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+				If PRMAT[X + 3,5]
+					GPTOT = ((PRMAT[X + 3,5] - PRMAT[X + 6,5]) / PRMAT[X + 3,5]) * 100
+				Else 
+					GPTOT = 0
+				End If 
+				tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+				If PRMAT[X + 3,6]
+					GPTOT = ((PRMAT[X + 5,6] - PRMAT[X + 6,6]) / PRMAT[X + 3,6]) * 100
+				Else 
+					GPTOT = 0
+				End If 
+				tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+				GPTOP = PRMAT[X + 6,4] + PRMAT[X + 6,5] + PRMAT[X + 6,6]
+				GPBOT = PRMAT[X + 3,4] + PRMAT[X + 3,5] + PRMAT[X + 3,6]
+				If GPBOT Let GPTOT = ((GPBOT - GPTOP) / GPBOT) * 100 Else Let GPTOT = 0
+				tmp$=tmp$,LTrim$(GPTOT using mask1$),fdel$
+			Else 
+				tmp$=tmp$,fdel$,fdel$,fdel$,fdel$
+			End If
+			if MySQLQueueID
+				if not(AddMySQLReportData(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$))
+					! possible user abort - report deleted exit now
+					reportAborted = 1
+				end if
+			else
+				call addtostr(e$,rstr$,tmp$+rdel$)! end line 9
+			end if
+		End If ! if cost = 2 or cost = 3 
+		tmp$=tmp2$,tmp1$ ! 
+		tmp$=tmp$," TOTAL PIECES",fdel$
+		tmp$=tmp$,LTrim$(PRMAT[X + 7,1] using mask2$),fdel$ 
+		tmp$=tmp$,LTrim$(PRMAT[X + 7,2] using mask2$),fdel$ 
+		tmp$=tmp$,LTrim$(PRMAT[X + 7,3] using mask2$),fdel$ 
+		tmp$=tmp$,LTrim$(PRMAT[X + 7,1] + PRMAT[X + 7,2] + PRMAT[X + 7,3] using mask2$),fdel$ 
+		If Z = 2 ! last year
+			tmp$=tmp$,LTrim$(PRMAT[X + 7,4] using mask2$),fdel$  
+			tmp$=tmp$,LTrim$(PRMAT[X + 7,5] using mask2$),fdel$ 
+			tmp$=tmp$,LTrim$(PRMAT[X + 7,6] using mask2$),fdel$ 
+			tmp$=tmp$,LTrim$(PRMAT[X + 7,4] + PRMAT[X + 7,5] + PRMAT[X + 7,6] using mask2$),fdel$ 
+		Else 
+			tmp$=tmp$,fdel$,fdel$,fdel$,fdel$
+		End If 
+		if MySQLQueueID
+			if not(AddMySQLReportData(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$))
+				! possible user abort - report deleted exit now
+				reportAborted = 1
+			end if
+		else
+			call addtostr(e$,rstr$,tmp$+rdel$)! end line 10
+		end if
+	Next Z ! on to next group (daily, mtd, ytd)
+	! bad programmming, but I need to abort
+	if reportAborted goto OUTEND
+Return
+
+TOTAL_MAT: Rem-------------------------------------------------------------
+	MAT_TOTAL = PRMAT[7,1] + PRMAT[7,2] + PRMAT[7,3]
+	MAT_TOTAL = MAT_TOTAL + PRMAT[14,1] + PRMAT[14,2] + PRMAT[14,3]
+	MAT_TOTAL = MAT_TOTAL + PRMAT[21,1] + PRMAT[21,2] + PRMAT[21,3]
+Return 
+
+SORTINVENTORY: Rem get inventory value by warehouse custom glover cct#182556
+	If Not(GLOVER) Return 
+	If DIV Return 
+	!If Err 0 Gosub ERR_ESCAPE
+	TOTREC = 0
+	!Print @0,23;'CL';"Calculating Inventory Value...Please Wait....";
+	KEYPROD$ = " ",KEYPROD$
+	SEARCHPROD: Rem search product file
+		Search #CH_PROD,3,1;KEYPROD$,REC_PROD,E \ If E = 2 Return 
+		If E Gosub ERR_SEARCH
+		TOTREC = TOTREC + 1
+		!If Not(Fra(TOTREC / 500))
+		!  Print Using "#########";@46,23;'CL';"Records Process: ";TOTREC;
+		!End If 
+		Mat Read #CH_PROD,REC_PROD,0;A$;
+		If A$[152,155] = "MACH" Or A$[152,155] = "TIME" Or A$[152,155] = "LABR" Goto GETFIFOCOST
+		Mat Read #CH_PROD,REC_PROD,156;B
+		Mat Read #CH_PROD,REC_PROD,256;A
+		Mat Read #CH_PROD,REC_PROD,596;PRPARC
+		Mat Read #CH_PROD,REC_PROD,894;PR_C4
+		Read #CH_PROD,REC_PROD,938;PF_LOAD2;
+		KEYPRWH$ = " ",KEYPRWH$;KEYPRWH$[1,12] = KEYPROD$[1,12]
+		SRCHPRWH: Rem search product warehouse file
+			Search #CH_PRWH,3,1;KEYPRWH$,REC_PRWH,E \ If E = 2 Goto GETFIFOCOST
+			If E Gosub ERR_SEARCH
+			If KEYPRWH$[1,12] <> KEYPROD$[1,12] Goto GETFIFOCOST
+			Mat Read #CH_PRWH,REC_PRWH,78;W3
+			If Not(W3[0]) Goto SRCHPRWH
+			Mat Read #CH_PRWH,REC_PRWH,32;W1
+			Mat Read #CH_PRWH,REC_PRWH,800;WHMISC;
+			ICOST[1] = B[8]
+			ICOST[2] = PR_C4[4]
+			ICOST[3] = B[21]
+			ICOST[4] = B[10]
+			ICOST[5] = PF_LOAD2
+			ICOST[6] = PRPARC[2]
+			If P9$[32,32] = "Y" ! warehouse pricing turned on
+				If W3[17] Let ICOST[1] = W3[17]
+				If W3[18] Let ICOST[2] = W3[18]
+				If W3[15] Let ICOST[3] = W3[15]
+				If W3[16] Let ICOST[4] = W3[16]
+				If W3[14] Let ICOST[5] = W3[14]
+				If WHMISC[2] Let ICOST[6] = WHMISC[2]
+			End If 
+			REC = W1[0] \ If W1[0] > 99 Let REC = 99
+			Mat Read #CH_TMP,REC,0;TMPCOST
+			For CTR = 1 To 6
+				TMPCOST[CTR] = TMPCOST[CTR] + FNR(W3[0] * ICOST[CTR])
+			Next CTR
+			Mat Write #CH_TMP,REC,0;TMPCOST;
+			REC = 100
+			Mat Read #CH_TMP,REC,0;TMPCOST
+			For CTR = 1 To 6
+				TMPCOST[CTR] = TMPCOST[CTR] + FNR(W3[0] * ICOST[CTR])
+			Next CTR
+			Mat Write #CH_TMP,REC,0;TMPCOST;
+		Goto SRCHPRWH
+		GETFIFOCOST: Rem get fifo inventory value
+		If P60$[9,9] = "F" Or P60$[9,9] = "L"
+			KEYFIFO$ = " ",KEYFIFO$;KEYFIFO$[1,12] = KEYPROD$[1,12]
+			SRCHFIFOLOT: Rem search to find fifo inventory value
+				Search #CH_FIFO,3,1;KEYFIFO$,REC_FIFO,E \ If E = 2 Goto ENDFIFOCOST
+				If E Gosub ERR_SEARCH
+				If KEYFIFO$[1,12] <> KEYPROD$[1,12] Goto ENDFIFOCOST
+				Mat Read #CH_FIFO,REC_FIFO,102;FL3;
+				If Not(FL3[0] - FL3[1]) Goto SRCHFIFOLOT
+				If Not(FL3[6]) Goto SRCHFIFOLOT
+				Mat Read #CH_FIFO,REC_FIFO,0;FL1;
+				REC = FL1[0] \ If FL1[0] > 99 Let REC = 99
+				Mat Read #CH_TMP,REC,0;TMPCOST
+				TMPCOST[0] = TMPCOST + FNR((FL3[0] - FL3[1]) * FL3[6])
+				Mat Write #CH_TMP,REC,0;TMPCOST;
+				REC = 100
+				Mat Read #CH_TMP,REC,0;TMPCOST
+				TMPCOST[0] = TMPCOST + FNR((FL3[0] - FL3[1]) * FL3[6])
+				Mat Write #CH_TMP,REC,0;TMPCOST;
+				Goto SRCHFIFOLOT
+			ENDFIFOCOST: Rem end of getting fifo value
+		End If 
+	Goto SEARCHPROD
+
+OUTEND: Rem-------------------------------------------------------------
+! Close 
+If GLOVER ! cct#182556
+	Try Close #ch_tmp Else Rem
+	Call FindF(TMPFNAME$,A9)
+	If A9
+		Kill TMPFNAME$
+	End If 
+End If 
+If j8 ! dx xml
+	if MySQLQueueID and not(reportAborted)
+		call FinishMySQLReport(e$,MySQL_ch,MySQLQueueID)
+	else
+		Call addtostr(e$,rstr$,esdel$) !end section
+		Call setoutput(e$,rstr$,1) !1 flag puts 0 status seciton in, puts </page> in
+	end if
+End If
+call ERPCronSuccess()
+END
+
+masksize: !! tune mask size (max 12)
+	mask3$=mask1$
+	mask4$=msize using mask3$
+	if mask4$[2,2]="*"
+		if mask4$[1,1]="-"
+			mask3$="-----------#"
+		else
+			mask3$="#########.##"
+			mask4$=msize using mask3$ 
+			if mask4$[1,1]="*" then mask3$="#",mask3$
+		endif
+	endif
+return
+
+
+Rem {begin rtn.error.s}
+ERR_SEARCH: Rem
+If Msg$<>"" let e$=msg$ \ goto err_msg ! Error 10000 ! sent reason
+ENUM = E ;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+e$ = "RETURN STATUS",(E + (CTERR * .001))
+e$ = e$,"/ STATEMENT",ELINE," IN PROGRAM "+Msc$(4)
+call programdump("tmp/dmr296se!","")
+goto err_msg ! Error 10000
+Return ! End
+ERR_MSG: ! send message
+ReturnStatus=1 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)
+Message$=E$
+	  call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  call SetOutPut(e$,rstr$)
+End
+ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+!
+include "src/callmainerrnet.inc"
+
+End ! the whole program

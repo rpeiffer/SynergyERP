@@ -1,0 +1,440 @@
+! --- serp237
+! description Invoice Hold Release
+!
+! 1.0 mm/dd/yyyy change??
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp237.dl4 src/serp237.src
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+Include "src/inc/filecust.inc" ! custome
+include "src/inc/fileordhead.inc" ! combined ros,rot,roh
+include "src/inc/fileprod.inc" ! product file
+include "src/inc/filerolz.inc" ! order lines
+include "src/inc/fileedittrack.inc" ! edit tracker
+!
+External Lib "libedittrack.lib"
+Declare External Sub MakeEdittrack
+!
+! *declare additional dl4 intrinsic subs & functions
+!
+Declare Intrinsic sub programdump,env
+!
+! *declare additional external libs & subs & functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,JDate$,PDate$
+
+!
+External Lib "libcustlist.lib"
+Declare External Sub CustList
+!
+!
+! **main procedure
+Declare Sub OpenFiles,getcust,OrderList,submitorderlist,chkuptinv
+!
+!
+! dim variables used by program
+!
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+	Option String Redim is legal ! in case subs dim/use same names
+	OPTION GOSUB NESTING 12  ! Default is 8
+
+	dim action$[30],options$[30],userid$[8],b$[200],3%
+	dim action1$[30],action2$[30],action3$[30] ! actions for programs
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1000] ! .net delimiters
+	Dim WebStr$[1000],Message$[200],dblog$[50],tmp$[200],blank$[100]
+	Dim Cust$[60],p9$[50],p60$[50],p61$[256],K$[60],custom_customer$[30]
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2],UCA5[10]
+	Dim 2%,Q0[1],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size
+	dim 1%,X1[9],Chans[20]
+	Dim 2%,CustNo,x2[9],sysdate
+	Dim 1%,ttlords,schn[2]
+	Dim 2%,ORDNo,s9[9],INVDATE
+	Dim 3%,CFin[8]
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR,SHR,SDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99]
+ blank$=" ",blank$
+ Dim cust. as cust ! customer
+ dim roh. as roh ! order header
+ dim ros. as ros ! order ship to file
+ dim rot. as rot ! order total file
+ DIM PR. as prod ! prodfile
+ dim rol. as rolnew ! order lines
+ Dim ETR. as edittrack ! EDITTRACKING
+ !
+ ! call dxopen()  - DONE IN OEMENU!
+ !
+ call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+ !
+ ! open files - may add a check to see if user can run an action/program
+ !
+ Action1$=UCase$(action1$)
+ action1$=RTrim$(action1$) ! UPPERCASE & TRIMMED
+ !etc for all files needed
+ !close #1 ! getsession opens it as READONLY!
+ !
+ Call OpenFiles() ! open any/all files (include ctlc
+ mat read #ctlc,19,50;p9$;
+ mat read #ctlc,60,50;p60$;
+ mat read #ctlc,61,0;p61$;
+ MAT READ #CTLC,0,182;INVDATE;
+ mat read #ctlc,115,60;custom_customer$; ! ALT
+ custom_customer$=UCase$(Trim$(custom_customer$))
+ SCHN[0]=OHC;SCHN[1]=OSC;SCHN[2]=OTC
+ ReturnStatus=0
+ debugdetail=0
+ Message$="ACTION1 NOT FOUND"  ! action is used for menu routing
+ select case action1$ ! go to various programs based on action
+   case "GETCUST" ! customer Data							doc=IHR-GetCust.doc
+		returnstatus=1
+		message$="OK"
+		Call DXGet("CUSTID",tmp$)
+		CustNo=tmp$
+		If CustNo<=0 Or CustNo>999999
+			Message$="INVALID CUSTOMER NUMBER"
+			ReturnStatus=0
+			Goto GCDone
+		Endif
+		Cust$=CustNO Using "######"
+		Call GetCust()
+		If CUR<0 
+			Message$="INVALID CUSTOMER NUMBER"
+			ReturnStatus=0
+			Goto GCDone
+		Endif
+		clear list$[]
+		list$[0]=bsdel$,"CUSTINFO",fdel$
+		List$[1]="CUSTID",fdel$,"NAME",fdel$
+		List$[2]=Cust$,fdel$,RTrim$(cust.name$),fdel$
+		list$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		!
+		GCDone: ! done
+		! end of getcust
+	case "GETINVLIST" ! list of invoices for Cust			doc=IHR-GetCustInvList.doc
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		tmpcnt=maxcnt
+		List$[0]=bsdel$,"INVOICELIST",fdel$
+		WebStr$="ORDERID",fdel$,"INVOICE",fdel$,"FROMPO",fdel$,"INVDATE",fdel$,"CUSTPO",fdel$
+		WebStr$=WebStr$,"ORDSTATUS",fdel$,"ONHOLD",fdel$,"SHIPNAME",fdel$
+		List$[1]=webStr$
+		Row=2
+		Call DXGet("CUSTID",tmp$)
+		CustNo=tmp$
+		If CustNo<=0 Or CustNo>999999
+			Message$="INVALID CUSTOMER NUMBER"
+			ReturnStatus=0
+			Goto ORLDone
+		Endif
+		Cust$=CustNO Using "######"
+		Call GetCust()
+		If CUR<0 
+			Message$="INVALID CUSTOMER NUMBER"
+			ReturnStatus=0
+			Goto ORLDone
+		Endif
+		! ok - start the list
+		Call OrderList()
+		
+		ORLDone: ! finished
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+
+	! end of getordlist
+	case "SUBMITINVLST" ! submit orders						doc=IHR-SubmitCustInvList.doc
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		tmpcnt=maxcnt
+		List$[0]=bsdel$,"SUBMORDLIST",fdel$
+		WebStr$="ORDERID",fdel$,"INVNUM",fdel$,"STATUS",fdel$
+		List$[1]=webStr$
+		Row=2
+		Call DXGet("CUSTID",tmp$)
+		CustNo=tmp$
+		If CustNo<=0 Or CustNo>999999
+			Message$="INVALID CUSTOMER NUMBER"
+			ReturnStatus=0
+			Goto SOLDone
+		Endif
+		Cust$=CustNO Using "######"
+		Call GetCust()
+		If CUR<0 
+			Message$="INVALID CUSTOMER NUMBER"
+			ReturnStatus=0
+			Goto SOLDone
+		Endif
+		! ok - start the list
+		Call SubmitOrderList()
+		SOLDone: ! finished
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+	! end of submitordlist
+	case "SUBMITORDER" ! Single order submit				doc=IHR-SubmitOrder.doc
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		tmpcnt=maxcnt
+		List$[0]=bsdel$,"SUBMITORDER",fdel$
+		WebStr$="ORDERID",fdel$,"INVNUM",fdel$,"STATUS",fdel$
+		List$[1]=webStr$
+		Row=2
+		Call dxget("ORDERID",tmp$)
+		let x2=tmp$
+		If x2<=0 or x2>999999 or fra(x2) 
+			ReturnStatus=0
+			Message$="INVALID ORDER NUMBER"
+			goto soidng
+		Endif
+		OrdNo=X2
+		K$=" ",K$
+		for x=5 to 59 ! 4 ! check all status?
+			k$[1,2]=X Using "##"
+			K$[3]=OrdNo Using "######"
+			OHR=filegetrohz(e$,SCHN[],"=",1,k$,roh.,ros., rot.)
+			If OHR>0 ! found
+				Cust$=roh.CustNum using "######"
+				call getcust()
+				if cur<0
+					Message$="INVALID CUSTOMER NUMBER ON ORDER"
+					ReturnStatus=0
+					Goto SOidng
+				Endif
+				CustNo=cust$
+				Call chkuptinv() ! all processing done here
+				Goto soidng
+			Endif
+		Next X
+		ReturnStatus=0
+		Message$="INVALID ORDER or STATUS" ! "ORDER NUMBER NOT ON FILE OR AVAILABLE TO INVOICE"
+			
+	  sOIDNG: ! bad number or found order
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+	
+	! end of submitorder
+ end select  !action options
+ 
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+ 
+ !call dxclose()
+else
+ include "src/callmainerrnet.inc"
+end try
+end ! of main program
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC=OpenFile(-9999,IntCo) \ if ctlc=-1 Error 42 ! control file read/write
+	CUC=OpenFile(-1808,IntCo) \ If CUC=-1 Error 42 ! customer
+	PRC=OpenFile(-1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(-1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	OHC=OpenFile(1840,IntCo) \ if OHC=-1 Error 42 ! order header
+	OSC=OpenFile(1856,IntCo) \ if OSC=-1 Error 42 ! order shipto
+	OTC=OpenFile(1872,IntCo) \ if OTC=-1 Error 42 ! order Totals
+	OLC=OpenFile(-1888,IntCo) \ if OLC=-1 Error 42 ! order lines
+	SNC=OpenFile(-2944,IntCo) \ if SNC=-1 Error 42 ! serial numbers
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub GetCust()
+! get Customer data - 
+! PASS IN CUST$
+  Try
+	Dim Ckey$[60]
+	Dim 2%,PRTYPE
+	Dim 3%,CUR
+	ckey$=" ",cKey$
+	cKey$=Cust$
+	
+		CUR=filegetcust(e$,CUC,"=",1,CKey$,cust.)
+		If CUR<0
+			clear cust.
+			cust.Name$="CUSTOMER NOT FOUND"+Blank$
+		Endif
+
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetCust
+! 
+!--------------------------------------------------------------------
+Sub OrderList()
+! generate a list of orders for a customer
+! Use CustNo as customer
+  Try
+	Dim KOHC$[60],Statd$[80],hokey$[60]
+	Dim 3%,OHR
+	
+	Statd$="INV ENT'DINV PRT'DINV REG'D"  ! ONLY ONE NEEDED/USED!
+	KOHC$=" ",KOHC$
+	KOHC$[1,6]=CustNo Using "######"
+	hokey$=KOHC$[1,6]
+	Do
+		OHR=filegetrohz(e$,SCHN[],">",2,kohc$,roh.,ros., rot.)
+		If OHR<=0 or kohc$[1,6]<>hokey$ Exit do ! not in range
+		If roh.status<5 OR roh.status>7 goto NVOrd ! ONLY STATUS 5 6 7!!
+		if rot.holdcode=0 or roh.HoldOver goto NVOrd ! not on hold - no list
+		! PM only lists orders on hold and status 5-7
+		WebStr$=Str$(roh.OrdNum),fdel$,sTR$(roh.InvNum),fdel$ ! order #
+		tmp$="" \ if roh.PoCopyNum let tmp$=Str$(roh.PoCopyNum)
+		webstr$=webstr$,tmp$,fdel$
+		tmp$=PDate$(roh.InvDate)
+		WebStr$=WebStr$,tmp$,fdel$ ! inv date
+		webStr$=WebStr$,RTrim$(roh.CustPO$),fdel$ ! PO
+		x1=roh.status
+		tmp$=Statd$[(x1-5)*9+1,(x1-5)*9+9]
+		WebStr$=WebStr$,Str$(roh.status)," ",tmp$,fdel$ ! status
+		tmp$=" " \ if rot.HoldCode let tmp$="Y"
+		if roh.HoldOver let tmp$=" " ! override!
+		WebStr$=WebStr$,tmp$,fdel$ ! on hold
+		WebStr$=WebStr$,RTrim$(ros.Name$),fdel$ ! shipto name
+		! that's all folks
+		List$[row]=WebStr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  NVOrd: ! not in range or 
+	Loop
+	! add the esdel$ upon return
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! orderlist
+! 
+!--------------------------------------------------------------------
+
+Sub SubmitOrderList()
+! generate Invoices from a list of orders for a customer
+! Use CustNo as customer
+  Try
+	Dim KOHC$[60]
+	Dim 1%,ttlords
+	Dim 3%
+	
+	Call dxget("TTLORDS",tmp$)
+	x2=tmp$
+	if x2<=0 or x2>7000 or fra(X2) goto olsdone
+	ttlords=x2
+	For X1=1 to ttlords
+		Call dxget("ORDID"+Str$(X1),tmp$)
+		let x2=tmp$
+		If x2<=0 or x2>999999 or fra(x2) goto oidng
+		OrdNo=X2
+		KOHC$=" ",KOHC$
+		KOHC$=CustNo Using "######"
+		KOHC$[7]=OrdNo Using "######"
+		OHR=filegetrohz(e$,SCHN[],"=",2,kohc$,roh.,ros., rot.)
+		if ohr<=0 clear roh. ! goto OIDNG does in chpupt
+		Call chkuptinv() ! all processing done here
+	  OIDNG: ! bad number
+	Next X1
+	OLSDone: ! no more orders
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SubmitOrderList
+! 
+!--------------------------------------------------------------------
+sub chkuptinv()
+! a routine used by list & single orders
+  Try
+	Dim KBOW$[60],KBT$[60]
+	Dim 3%
+	OTR=roh.TotRec
+	If OHR<0 ! no good
+		WebStr$=Str$(ORDNO),fdel$
+		WebStr$=WebStr$,Str$(roh.InvNum),fdel$ ! INVOICE
+		WebStr$=WebStr$,"ORDER NOT FOUND",fdel$
+		Goto ONINV
+	Endif
+	If OTR<=0 ! bad totals rec?
+		WebStr$=Str$(ORDNO),fdel$
+		WebStr$=WebStr$,Str$(roh.InvNum),fdel$ ! INVOICE
+		WebStr$=WebStr$,"ORDER TOTALS RECORD",fdel$
+		Goto ONINV
+	Endif
+	If roh.status<5 or roh.status>58 ! ONLY STATUS 5-7!!
+		WebStr$=Str$(ORDNO),fdel$
+		WebStr$=WebStr$,Str$(roh.InvNum),fdel$ ! INVOICE
+		WebStr$=WebStr$,"ORDER WRONG STATUS",fdel$
+		Goto ONINV
+	Endif
+	If rot.HoldCode=0 or roh.HoldOver
+		WebStr$=Str$(ORDNO),fdel$
+		WebStr$=WebStr$,Str$(roh.InvNum),fdel$ ! INVOICE
+		WebStr$=WebStr$,"INVOICE NOT ON HOLD",fdel$
+		Goto ONINV
+	Endif
+		
+	KBT$=" ",KBT$
+	KBT$=cust.CustomerBillTo using "######"
+	Search #cuc,2,1;KBT$,r[1],E
+	If E
+		WebStr$=Str$(ORDNO),fdel$
+		WebStr$=WebStr$,Str$(roh.InvNum),fdel$ ! INVOICE
+		WebStr$=WebStr$,"BILL TO CUSTOMER NOT FOUND",fdel$
+		Goto ONINV
+	Endif
+		! OK - MADE IT THRU - RELEASE THE HOLDS
+		
+	IF P60$[44,44]="Y" ! edittrack init
+		clear ETR.  ! edit tracking
+		etr.OrgQtyOrd=rot.holdcode
+	Endif
+	let rot.holdcode=0
+	if custom_customer$<>"MORRISETTE"
+		roh.InvDate=Invdate
+	Endif ! morrisette doesn't
+	WebStr$=Str$(ORDNO),fdel$
+	WebStr$=WebStr$,Str$(roh.InvNum),fdel$ ! INVOICE
+	webstr$=webstr$,"HOLD WAS RELEASED",fdel$
+	IF P60$[44,44]="Y" ! edittrack record
+		etr.NewQtyOrd=rot.holdcode
+		LET ETR.Printer=0
+		LET ETR.OrdNum=roh.Ordnum ! H0[7]
+		LET ETR.Status=roh.Status ! H6[2]
+		LET ETR.InvNum=roh.InvNum ! OREF[1]
+		LET ETR.CustNum=roh.CustNum ! H0[4]
+		LET ETR.OrgOrdTot=rot.OrdTot ! T2[0]
+		LET etr.EtAction=12
+		LET ETR.LineNum=0
+		etr.AccessCode$=Userid$+Blank$
+		LET ETR.ProdCode$=237 USING "###" ! +Blank$ ?
+		LET ETR.UMSell=0;ETR.NstkFlag=0 
+		etr.SpareNU$=Blank$
+		if etr.OrgQtyOrd<>etr.NewQtyOrd
+			x2[0]=-1;x2[1]=-1 ! no files open
+			Call MakeEdittrack(e$,IntCo,X2[],etr.)
+		Endif
+	Endif
+	write record #OHC,OHR,0;roh.;
+	write record #OTC,OTR,0;rot.;
+	ONINV: ! not updated
+	List$[row]=WebStr$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+else
+    include "src/callsuberr.inc"
+  end try
+end sub ! chkuptinv
+! 
+!--------------------------------------------------------------------

@@ -1,0 +1,289 @@
+! librasl.lib
+!
+! supporting library of rasl routines
+!
+! 1.0 03/07/08
+!
+! loadsave -w -n 100,10 -o prog/dxport/librasl.lib src/librasl.src
+!
+include "src/copyright.inc"
+!
+! sub & functions for list library
+!
+!   S	Allocordlot			creates sordlot/sprodlot entries to NONE/STOCK locations
+!   S   ChkWHRasl			get Rasl flags for a whse
+!	
+!
+
+include "src/inc/fileordhead.inc" ! Order header, ROS, ROT (not fileroh, a DL4 thing)
+include "src/inc/filerolz.inc" ! Order Line
+include "src/inc/filesordlotz.inc" ! Sordlot (fix dir's version)
+include "src/inc/filesprodlot.inc" ! Sprodlot
+include "src/inc/filewhinfoz.inc" ! wh info (modified & corrected vers)
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+
+!-------------------------------------------------------------------------------------
+External Sub Allocordlot(e$,intCo,AType,Ch[],Rec[],Rasl,Status)
+Rem ALLOCORDLOT - Allocate a single line to NONE/STOCK          
+Rem ONLY FOR USE ON NEW ADDED LINE! THIS IS NOT MX201L/MXRASL!!!
+Rem pass in: e$ (errormessage) intCo: company id#
+Rem pass in: channel: ROH,ROL,SORDL,PRODLOT                     
+Rem Pass in: Record#: ROH,ROL   RASL-Y/N(1/0)                   
+Rem Pass in: AType: 0=Order/Invoice,1=Credit                           
+Rem HEADER & LINE MUST BE WRITTEN TO!!!                         
+Rem Pass back: all above + Rec of sordlot Rec[2]/sprod lot Rec[3]
+Rem Pass back: status - 0(zero)=okay  1+=error
+try
+    !
+	Dim WORK$[80],SPACES$[256],mode$[2]
+	Dim errmsg$[256],custom_customer$[30]
+	Dim 1%,CH_ROH,CH_ROL,CH_ORDL,CH_PRLT    
+	Dim 3%,REC_ROH,REC_ROL,REC_ORDL,REC_PRLT
+	Dim 1%,X[9],Type
+	Dim 3%,X3[9]
+	
+	Dim ROH. as roh
+	Dim ROL. as rolnew
+	Dim Ordl. as sordlot
+	Dim Prlt. as sprodlot
+
+	CH_ROH = CH[0];REC_ROH = REC[0] 
+	CH_ROL = CH[1];REC_ROL = REC[1] 
+	CH_ORDL = CH[2]                 
+	CH_PRLT = CH[3]                 
+	SPACES$ = " ",SPACES$;STATUS = 1 ! unknown
+	If CH_ROH<=0 ! no file passed, open one
+	  CH_ROH = OpenFile(-1840,intCo) \ If CH_ROH = -1 Error 42 !roh
+	Endif
+	If CH_ROL<=0 ! no line file passed, open one
+	  CH_ROL = OpenFile(-1888,intCo) \ If CH_ROl = -1 Error 42 !rol
+	Endif
+	If CH_ORDL<=0 ! no file passed, open one
+	  CH_ORDL = OpenFile(2320,intCo) \ If CH_ordl = -1 Error 42 !ordlot
+	Endif
+	If CH_PRLT<=0 ! no line file passed, open one
+	  CH_PRLT = OpenFile(2528,intCo) \ If CH_PRLT = -1 Error 42 !sprodlot
+	Endif
+	If Rec_roh<=0 Let Status=10 \ goto Allocexit ! a gotta have
+	If Rec_rol<=0 Let Status=11 \ goto Allocexit ! also a gotta have
+	call dxget("u_custom_customer", custom_customer$)
+	!mat read #1,115,60;custom_customer$; ! ALT
+	custom_customer$=RTrim$(UCase$(custom_customer$))
+	! okay we're starting
+	read record #ch_roh,rec_roh,0;roh.; ! read header
+	If roh.OrdType=2 or roh.OrdType=20
+		status=-2
+		goto AllocDone ! these can't possibly have allocations
+	Endif
+	read record #ch_rol,rec_rol,0;rol.; ! read lines
+	If rol.QtyOrd=0 and rol.QtyBO=0 and rol.QtyShip=0
+		status=-3
+		goto AllocDone ! nothin to allocate
+	Endif
+	If rol.NStkItem let status=-4 \ goto AllocDone ! can't do non-stocks
+	If Not(rol.UpdtStk) let status=-5 \ goto AllocDone ! it doesn't affect stock
+	IF roh.ordtype=15
+		IF roh.BOCTR<>0 LET rol.QtyShip=0 ELSE  LET rol.QtyShip=rol.QtyOrd
+	ENDIF
+	if custom_customer$="MORRISETTE"
+		If roh.ordtype=4 Let rol.QtyOrd=0;rol.QtyBO=0 ! "cct 129415 - Only Shipping qty
+	Endif
+	TYPE = 2 ! order is the default
+	If AType<>0 Let TYPE = 3 ! its a credit
+	If roh.OrdType = 12 Let TYPE = 5
+	! start the sordlot load
+	WHSE=rol.whse \ if roh.ordtype=7 let whse=roh.ConsWh
+	if whse<1 or whse>99 let whse=roh.wh
+	CLEAR ordl.
+	ordl.ProdCode$=spaces$
+	ordl.LotNum$=spaces$
+	ordl.ProdWo$=spaces$
+	ordl.NU$=spaces$
+	ordl.Stock$=spaces$
+	ordl.Loc$=Spaces$
+	ordl.ProdCode$=rol.ProdCode$+spaces$
+	ordl.LotNum$=Whse Using "STOCK&&"+spaces$
+	ordl.WoSoLine=rol.LineNum
+	ordl.OrdType=Type ! as set above
+	ordl.Whse=Whse
+	ordl.OrdNum = roh.OrdNum
+	ordl.DateUsed = roh.OrdDate
+	ordl.CustNum = roh.CustNum
+	ordl.QtyReq = rol.QtyOrd
+	ordl.QtyAlloc = rol.QtyShip
+	ordl.UnitCost = rol.UnitCost
+	ordl.QtyOnBO = rol.QtyBO
+	If RASL                          
+		ordl.Loc$ = "NONE" + SPACES$ 
+	Else                             
+		ordl.Loc$ = "STOCK" + SPACES$
+	End If 
+	if roh.ordtype=7 let ordl.Loc$ = "STOCK" + SPACES$
+	If RASL And rol.QtyShip = 0 And rol.QtyBO <> 0 Let ordl.Loc$ = "STOCK" + SPACES$
+	! see if already there, if yes, exit
+	WORK$ = " ",WORK$                   
+	WORK$[1,12] = ordl.ProdCode$             
+	WORK$[13,18] = ordl.OrdNum Using "######"
+	WORK$[19,21] = ordl.WoSoLine Using "###"   
+	WORK$[22,23] = ordl.Whse Using "##"    
+	WORK$[24,29] = ordl.Loc$          
+	WORK$[30,41] = ordl.LotNum$           
+	WORK$[42,51] = ordl.Stock$           
+	WORK$[52,52] = " "
+	Work$[53]="" ! cut it at maximum for search
+	mode$="=";keyno=1
+	REC_ORDL = filegetsordlotz(e$,ch_ordl,mode$,keyno,Work$,ordl.)
+	If Rec_Ordl>0 let status=-6 \ Goto AllocDone ! already have a record - bypass
+	REC_ORDL = 0 ; Mode$="a" ! add new record,keys,data
+	Rec_Ordl = fileupdatesordlotz(e$,ch_ordl,mode$,rcdno,ordl.)
+	If Rec_ordl<0 ! an error occurred
+	 ! what happens? lets record it!
+	 ErrMsg$="Search Error "+Str$(rec_ordl)+" update sordlot in librasl.lib"
+	 system "echo ''" + msc$(0)+" "+ errMsg$ + "'' >> files/1/erp.errlog"
+		status=10
+		dim msc4$[100] \ msc4$=msc$(4)
+		if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+		call env(2,"PROGNAME",msc4$)
+		call programdump()
+	  goto allocdone ! can't continue
+	Endif
+	! now do sprodlot
+	clear prlt.
+	prlt.ProdCode$= SPACES$;prlt.LotNum$ = SPACES$                                         
+	prlt.Comment$= SPACES$;prlt.Stock$ = SPACES$
+	prlt.NotUsed$= SPACES$;prlt.Loc$ = SPACES$                                                 
+	prlt.QtyOnXfer  = 0                                                               
+	prlt.ProdCode$ = rol.ProdCode$ + SPACES$                                       
+	prlt.LotNum$ = Whse Using "STOCK&&"+spaces$
+	prlt.Whse=Whse
+	prlt.SrcType = 3                                                              
+	prlt.DateRcvd = roh.OrdDate  
+	if type<>3 ! not a credit
+		If rol.QtyShip>0 let prlt.QtyAlloc = rol.QtyShip
+		prlt.QtyBO = rol.QtyBO
+	Endif
+	If RASL                                                                
+		prlt.Loc$ = "NONE" + SPACES$                                        
+	Else                                                                   
+		prlt.Loc$ = "STOCK" + SPACES$                                       
+	End If                                                                 
+	If RASL And rol.QtyShip = 0 And rol.QtyBO <> 0 Let prlt.Loc$ = "STOCK" + SPACES$
+	! setup and see if exists
+	WORK$ = " ",WORK$
+	WORK$[1,12] = prlt.LotNum$      
+	WORK$[13,22] = prlt.Stock$
+	WORK$[23,24] = prlt.Whse Using "##"
+	WORK$[25,30] = prlt.Loc$      
+	WORK$[31,42] = prlt.ProdCode$
+	Work$[43]="" ! cut it at maximum for search
+	mode$="=";keyno=1;Rec_PRLT=0
+	Rec_Prlt= filegetsprodlot(e$,ch_prlt,mode$,keyno,Work$,prlt.)
+	If Rec_Prlt<0 ! did not find
+		let mode$="a";Rec_Prlt=0 ! add new record,keys,data
+		Rec_prlt = fileupdatesprodlot(e$,ch_prlt,mode$,rcdno,prlt.)
+		If Rec_prlt<0 ! an error occurred
+		  ! what happens - lets record it
+		  ErrMsg$="Search Error "+Str$(Rec_prlt)+" update sprodlot in librasl.lib"
+		 system "echo ''" + msc$(0)+" "+ errMsg$ + "'' >> files/1/erp.errlog"
+		 status=10
+			dim msc4$[100] \ msc4$=msc$(4)
+			if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+			call env(2,"PROGNAME",msc4$)
+			call programdump()
+		 goto allocdone ! can't continue
+		Endif
+	Else ! did find an existing record - JUST UPDATE QTY's
+	  If type<>3 ! not a credit
+		if rol.qtyship>0
+			prlt.QtyAlloc = prlt.QtyAlloc + rol.QtyShip
+		Endif
+		prlt.QtyBO = prlt.QtyBO + rol.QtyBO
+		Write record #ch_prlt,rec_prlt,0;prlt.; ! write sprodlot
+	  Endif
+	Endif ! of sprodlot
+	status=0 ! okay
+	AllocDone: ! finished
+	if status<>0 and status<>10 ! 10's record already
+		errmsg$="issue "+Str$(status)+" ORDER "+Str$(roh.OrdNum)+"-"+Str$(rol.LineNum)+" in librasl.lib"
+		system "echo ''" + msc$(0)+" "+ errMsg$ + "'' >> files/1/erp.errlog"
+		if status<0 let status=0 ! no stk to update
+	Endif
+	! STATUS = 0 
+	REC[2] = REC_ORDL
+	REC[3] = REC_PRLT
+	AllocExit: ! exit
+	If CH[0]<=0 Close #CH_ROH
+	If CH[1]<=0 Close #CH_ROL
+	If CH[2]<=0 Close #CH_ORDL
+	If CH[3]<=0 Close #CH_PRLT
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! Allocordlot
+!
+!--------------------------------------------------------------------
+External Sub ChkWhRasl(e$,intco,Ctlc,WHCh,Whse,RASL[])
+! Created to make it easy to get warehouse controlled RASL
+! Flag instead of adding code to programs that use P9$[41,41]
+! RASL has subscripts that can be used
+!   RASL[0] - RASL 0 or 1 - N or Y
+!   RASL[1] = N1[6] - RASL Allocation Type
+! Pass in: e$ - Error Message holder
+!		intco - company #
+!		ctlc - control file channel
+!		WHCh - WHInfo Channel
+!		Whse - Warehouse # to check
+!		RASL[] - see above
+  try
+	Dim Fle$[20],P9$[50]
+	Dim 1%,WHC,RaslAlloc
+	Dim 3%,WhRec
+	Dim WHI. as whinfo
+	Try ! see if cntrl actually open
+	  Mat read #ctlc,19,50;P9$; ! system flags
+	Else
+	  Ctlc=0
+	End try
+	If ctlc<=0 ! no control file channel
+	  CTLC=OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !cntrl file
+	Endif
+	Mat read #ctlc,19,50;P9$; ! system flags
+	Let RASL[0]=0 ! "default is NO!
+	Let RaslAlloc=0 ! "Default=Primary, then as WHLoc specs
+	If P9$[41,41]="Y" Let RASL[0]=9 ! "Systemwide  says "Y"
+	If Whse<1 Or Whse>99 Goto OutEnd ! "not valid Warehouse
+	If WHCh<=0 ! no channel whinfo open on
+	   WHC = OpenFile(-2768,IntCo) \ if whc = -1 Error 42 ! whinfo file
+	Else ! channel passed
+		WHC=WHCH
+	Endif
+	Let WHRec=Whse-1
+	If WHRec<0 Or WHRec>98 Goto OutDone
+	Read Record #WHC,WHRec,0;WHI.;
+	Let RASL[0]=WHI.UseRasl ! N1[4]
+	Let RaslAlloc=WHI.RaslAlloc ! N1[6]
+	If P9$[41,41]<>"W" ! "not whse controlled - use SystemWide
+		If P9$[41,41]="Y" Let RASL[0]=9
+		If P9$[41,41]="N" Let RASL[0]=0;RaslAlloc=0
+	Endif
+	OutDone: ! finito
+	If WHCh<=0 Close #WHC ! we opened it
+	
+	OutEnd: ! we are done finish it
+	try 
+	  Rasl[1]=RaslAlloc! if only dimmed as RASL in calling program - do not send both
+	else
+	end try
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ChkWhRasl
+!
+!--------------------------------------------------------------------

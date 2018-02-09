@@ -1,0 +1,841 @@
+! --- serpcpi_cbr.dl4
+!
+! CPI Storage Chargeback Report
+!
+!
+! loadsave -w -n 100,10 -o prog/dxport/serpcpi_cbr.dl4 src/serpcpi_cbr.src
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus,ERPCronSuccess
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+include "src/inc/filecpihead.inc"
+include "src/inc/filecpidet.inc"
+include "src/inc/filecpicust.inc"
+include "src/inc/filecpicbtbl.inc"
+include "src/inc/filesslsm.inc"
+include "src/inc/filefifolot.inc"
+include "src/inc/filecpicbhist.inc"
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+Include "src/inc/filecust.inc"
+Include "src/inc/filespecprice.inc"
+
+!
+Declare Intrinsic Sub InpBuf,String,Findf,programdump,DateToJulian,JulianToDate
+Declare Intrinsic Sub Time
+!Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,getuidrec,buildsort
+declare external function GetUIDSalesrep
+
+External Lib "ubsprconv.dl4"
+Declare External Function xunit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "libcpi.lib"
+Declare External Function CPIFindPrimaryCust
+
+! Internal Subroutines and Functions
+Declare Sub OpenFiles,PrintHeader,SalesrepTotals
+Declare Sub SortContractLines,ProcessSortFile
+Declare Sub ProcessContractLine,ProcessFifoRecord
+Declare Sub CalcChargeback,PrintChargeback,UpdateCBFifoHistory
+Declare Sub CreateCommissionAdjustment
+Declare Function FifoRecordAlreadyProcessed
+Declare External Function GetNextRefNumber
+
+dim 1%,user
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200],List$[50,200],3%
+b$=" ",b$
+dim message$[150],webstr$[200]
+
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+! call dxsave(0,"cpicbr.in!")
+USER=GetUIDRec(e$,IntCo,Userid$)
+
+! record structures
+dim cpih. as cpihead
+dim cpid. as cpidet
+dim sd. as specprice
+dim cpicb. as cpicbtbl
+dim fifo. as fifolot
+dim sr. as sslsm
+dim cpicbh. as cpicbhist
+Dim PR. as prod ! product file
+Dim PW. as prodwhse ! prodwhse file
+dim cust. as cust
+
+! keys
+dim K_cpih$[50],K_cpid$[50],K_cpicb$[50],K_cpicbh$[50],K_fifo$[50]
+dim K_pr$[50],K_pw$[50],K_sr$[50],K_comm$[16],K_comm2$[18],K_comma1$[28],K_comma2$[32]
+dim K_cust$[50],K_sort$[50],K_sd$[50],K_sort_tiers$[50],blockid$[10]
+! record numbers
+dim 3%,R_cpih,R_cpid,R_cpicb,R_cpicbh,R_fifo,R_pr,R_pw,R_sr,R_comm,R_comma,R_sd
+! specific commission variables
+dim 1%,s4[1],SplitFlag,SplitType,cnvtu[2]
+dim 2%,s1[3],s3[1]
+dim 3%,s2[1],s6[1],s7[2],cs9[3],commsrvchg,ocs1[3],commSeq[9999],cnvta,invLevel
+dim smat$[2]
+Dim 3%,AORIGCOMM
+Dim 1%,AS1[3],AS4[1],USER
+Dim 2%,AS2[1]
+Dim 3%,AS3[5],AS_$[60],SOURCE$[10],AS5[5]
+
+! everything else
+dim P9$[50],mode$[1],pageHeading$[132],ageDatePrint$[8],contractUnit$[4]
+dim p61$[256],custom_customer$[30]
+dim 1%,currSales,cbtDay[9],ARMONTH,repSecurity
+dim 2%,fifoAge,D5,ageDate,ftcbtPenalty[9],contractDiv
+dim 2%,pageNo,lineNo,maxLines,jdate
+dim 3%,repTotal
+
+!
+! M A I N   L O G I C
+!
+Mat Read #1,19,50;P9$;
+mat read #1,61,0;p61$;
+if p61$[111,111]<>"Y"
+	e$ = "CPI is not active."
+	error 10000
+	end
+Endif
+repSecurity = GetUIDSalesrep(e$)
+if repSecurity < 0
+	e$="User ID not on file!"
+	error 10000
+end if
+MAT  READ #1,115,60;CUSTOM_CUSTOMER$;
+Custom_customer$=UCase$(Trim$(custom_customer$))
+READ #1,3,172;D5 ! system date YYMMDD
+tmp$ = D5 using "&&&&&&"
+call DateToJulian(1,tmp$)
+ageDate = tmp$
+Read #1,0,120;ARMONTH;
+call OpenFiles() ! open after the check
+
+
+!
+! get parameters from block ID
+!
+blockid$ = rtrim$(GetParameter$("BLOCKID"))
+exemptVersion = 0 \ if blockid$ = "CPICBXMT" let exemptVersion = 1
+
+begRep = GetParameter$("BEGREP")
+endRep = GetParameter$("ENDREP")
+if not(endRep) let endRep = 999
+if repSecurity
+	begRep = repSecurity
+	endRep = repSecurity
+end if
+
+! add # of days looking forward to age date:
+! IE I want to see what the charegbacks would be 7 days from now.
+daysForward = GetParameter$("DAYSFORWARD")
+ageDate = ageDate + daysForward
+! calculate new YYMMDD value for ageDate (will be stored with history
+! if update option is selected.
+tmp$ = ageDate
+call JulianToDate(1, tmp$)
+ageDateYYMMDD = (Val(tmp$[7,8]) * 10000) + (Val(tmp$[1,2]) * 100) + Val(tmp$[4,5])
+ageDatePrint$ = tmp$[1,2]+"/"+tmp$[4,5]+"/"+tmp$[7,8]
+
+auditOnly = GetParameter$("AUDITONLY")
+if repSecurity auditOnly = 1 ! force if this is a rep running their own
+if exemptVersion AuditOnly = 1 ! exempt report is audit only
+if daysForward and not(auditOnly)
+	e$ = "Cannot specify a number days forward unless in audit mode!"
+	error 10000
+end if
+
+if exemptVersion ! additonal parameters for this one
+	exemptTable = GetParameter$("EXEMPTTABLE")
+	useTable = GetParameter$("USETABLE")
+	if not(exemptTable) or not(useTable)
+		e$ = "You must specify both an exempt and use table number!"
+		error 10000
+	end if
+end if
+
+
+pageHeading$ = "CPI Charge Back Report "
+if exemptVersion
+	pageHeading = pageHeading$+"(EXEMPT) "
+end if
+pageHeading$ = pageHeading$ +"- Age Date: "+ageDatePrint$
+pageHeading$ = pageHeading$ +"  Audit Only: "
+if auditOnly
+	pageHeading$ = pageHeading$ + "YES"
+else
+	pageHeading$ = pageHeading$ + "NO"
+end if
+
+toBrowser = 0
+try
+	i = Chf(0)
+else
+	toBrowser = spc(8)
+end try
+if toBrowser and toBrowser <> 49 error toBrowser
+
+if toBrowser
+	!<section>
+	tmp$ = bsdel$,"CPICBRPT",fdel$,rdel$
+	Call addtostr(e$,rstr$,tmp$)
+	tmp$ = "SALESREP",fdel$
+	tmp$ = tmp$,"CONTRACT",fdel$
+	tmp$ = tmp$,"CUSTOMER",fdel$,"DIVISION",fdel$
+	tmp$ = tmp$,"PRODUCT",fdel$
+	tmp$ = tmp$,"WAREHOUSE",fdel$,"LOT ID",fdel$
+	tmp$ = tmp$,"AGE",fdel$,"INVENTORY LEVEL",fdel$
+	tmp$ = tmp$,"COST",fdel$,"PENALTY",fdel$
+	tmp$ = tmp$,"AMOUNT",fdel$
+	call addtostr(e$,rstr$,tmp$+rdel$)
+else
+	maxLines = 60
+	call setoutput(e$,rstr$, 2)
+end if
+
+call SortContractLines()
+call ProcessSortFile()
+
+
+OutEnd: !
+If toBrowser
+	Call addtostr(e$,rstr$,esdel$) !end section
+	call setoutput(e$,rstr$,1)
+else
+	call ERPCronSuccess()
+End If
+try Close else rem
+! 
+! 
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end
+
+
+! ***********************************************************************
+! Nobody but us subroutines down here
+! ***********************************************************************
+
+Sub OpenFiles()
+Try
+	CH_CPIH=OpenFile(-9929,IntCo) \ if ch_cpih=-1 Error 42 ! cpi header
+	CH_CPID=OpenFile(-9928,IntCo) \ if ch_cpid=-1 Error 42 ! cpi detail
+	CH_CPIC=OpenFile(-9927,IntCo) \ if ch_cpic=-1 Error 42 ! cpi customer
+	CH_CPICB=OpenFile(-9919,IntCo) \ if ch_cpicb=-1 Error 42 ! cpi chargeback table
+	CH_CPICBH=OpenFile(9918,IntCo) \ if ch_cpicbh=-1 Error 42 ! cpi chargeback history
+	CH_FIFO=OpenFile(-3008,IntCo) \ if ch_fifo=-1 Error 42 ! fifo lot file
+	CH_SR=OpenFile(-1824,IntCo) \ if ch_sr=-1 Error 42 ! salesrep
+	CH_PR=OpenFile(-1792,IntCo) \ if ch_pr=-1 Error 42 ! product
+	CH_PW=OpenFile(-1744,IntCo) \ if ch_pw=-1 Error 42 ! product wh
+	CH_CC=OpenFile(-1728,IntCo) \ if ch_cc=-1 Error 42 ! u/m codes
+	CH_COMM=OpenFile(2240,IntCo) \ if ch_comm=-1 Error 42 ! commission
+	CH_COMMA=OpenFile(9931,IntCo) \ if ch_comma=-1 error 42 ! commission audit
+	CH_CUST=OpenFile(-1808,IntC) \ if ch_cust=-1 error 42 ! customer
+	CH_SD=OpenFile(-1936,IntC) \ if ch_sd=-1 error 42 ! specprice
+	CH_SORT = buildsort(e$,25,0) \ if ch_sort=-1 error 42
+	ch_commh = openfile(-9932) \ if ch_commh=-1 error 42
+	CH_SORT_TIERS = buildsort(e$,25,0,-1,"serp358") \ if ch_sort_tiers=-1 error 42
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! openfiles
+
+sub SortContractLines()
+try
+	! KEY SORT
+	! 1-3 - Salesrep Number
+	! 4-9 - Primary Customer Number
+	! 10-21 - Product Code
+	! 22-27 - Contract Line Start Date (DDDDD)
+	! 28-32 - Contract Number (tie breaker)
+	K_cpih$ = " ",K_cpih$
+	do
+		R_cpih = filegetcpihead(e$,CH_CPIH,">",1,K_cpih$,cpih.)
+		if R_cpih <= 0 exit do
+		if cpih.Salesman<begRep or cpih.Salesman>endRep goto skipContract
+		priCust = CPIFindPrimaryCust(e$,intco,ch_cpic,cpih.ContractNumber)
+		! loop through contract details
+		K_cpid$=" ",K_cpid$
+		K_cpid$[1,6] = K_cpih$[1,6]
+		do
+			R_cpid = filegetcpidet(e$,CH_CPID,">",1,K_cpid$,cpid.)
+			if R_cpid <=0 exit do
+			if K_cpid$[1,6] <> K_cpih$[1,6] exit do
+			if exemptVersion and cpid.ChargebackTable <> exemptTable goto skipContractLine
+			K_sd$ = K_cpid$
+			R_sd = filegetspecprice(e$,CH_SD,"=",1,K_sd$,sd.)
+			if R_sd <= 0 error 11000
+			jsDate = 0 ! default really old
+			if sd.StartDate<>0
+				tmp$ = sd.StartDate using "&&&&&&"
+				call DateToJulian(1,tmp$)
+				jsDate = tmp$
+			end if
+			K_sort$ = " ",K_sort$
+			K_sort$[1,3] = cpih.Salesman using "###"
+			K_sort$[4,9] = priCust using "######"
+			K_sort$[10,21] = cpid.ProductID$
+			K_sort$[22,27] = jsDate using "#####"
+			K_sort$[28,32] = cpid.ContractNumber using "#####"
+			search #CH_SORT,4,1;K_sort$,R_cpid,e \ if e error 11000
+		skipContractLine: !
+		loop
+		skipContract: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! SortContractLines
+
+sub ProcessSortFile()
+try
+	! loop through the CPI contracts - use salesrep index
+	K_sort$ = " ",K_sort$
+	K_cpih$ = " ",K_cpih$
+	do
+		search #CH_SORT,3,1;K_sort$,R_cpid,e \ if e>2 error 11000
+		if e exit do
+		read record #CH_CPID,R_cpid,0;cpid.;
+		K_sd$ = " ",K_sd$
+		K_sd$[1,6] = cpid.ContractNumber using "C#####"
+		K_sd$[7,18] = cpid.ProductID$
+		R_sd = filegetspecprice(e$,CH_SD,"=",1,K_sd$,sd.)
+		if R_sd <= 0 error 11000
+		let K_cpih$[1,6] = cpid.ContractNumber using "C#####"
+		R_cpih = filegetcpihead(e$,CH_CPIH,"=",1,K_cpih$,cpih.)
+		if R_cpih <= 0 error 11000 ! detail record with no header!
+		! check for break in salesrep here
+		if not(currSales) or currSales <> cpih.Salesman
+			! do salesrep totals
+			if not(toBrowser) call SalesrepTotals()
+			currSales = cpih.Salesman
+			repTotal = 0
+			repLines = 0
+			clear commSeq[]
+			K_sr$ = " ",K_sr$
+			K_sr$[1,3] = cpih.Salesman using "###"
+			R_sr = filegetsslsm(e$,CH_SR,"=",1,K_sr$,sr.)
+			if R_sr <= 0
+				clear sr.
+				sr.Name$ = "NOT ON FILE!"
+			end if
+			lineNo = maxLines + 1 ! make sure next line we print prints header
+		end if
+		contractDiv = 0 ! none
+		clear cust.
+		cust.Name$ = "NOT ON FILE!"
+		priCust = K_sort$[4,9]
+		if (priCust)
+			K_cust$ = " ",K_cust$
+			K_cust$[1,6] = priCust using "######"
+			R_cust = filegetcust(e$,ch_cust,"=",1,K_cust$,cust.)
+			if R_cust > 0
+				contractDiv = cust.Division
+			end if
+		end if
+		call ProcessContractLine()
+	loop
+	if repLines
+		call SalesrepTotals()
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! SortContractLines
+
+Sub ProcessContractLine()
+Try
+	if not(cpid.ChargebackTable) exit sub ! no chargeback table assigned
+	! read the appropriate chargeback table
+	K_cpicb$ = " ",K_cpicb$
+	if exemptVersion
+		! swap out the table which is exempt with the table
+		! to use to figure out "what it would have been"
+		K_cpicb$ = useTable using "######"
+	else
+		K_cpicb$ = cpid.ChargebackTable using "######"
+	end if
+	R_cpicb = filegetcpicbtbl(e$,CH_CPICB,"=",1,K_cpicb$,cpicb.)
+	if R_cpicb <= 0 exit sub ! table not found - can't do anything
+	if not(cpicb.Day0) exit sub ! first CB level not defined
+	! OK - loop through the fifo lots for this product
+	lineChargeback = 0
+	K_fifo$ = " ",K_fifo$
+	K_fifo$ = cpid.ProductID$+b$
+	do
+		R_fifo = filegetfifolot(e$,CH_FIFO,">",1,K_fifo$,fifo.)
+		if R_fifo <= 0 exit do
+		if fifo.ProductCode$ <> cpid.ProductID$ exit do
+		if (fifo.OrigQtyRecd - fifo.QtyUsed) > 0
+			call ProcessFifoRecord()
+		end if
+	loop
+	if lineChargeback call CreateCommissionAdjustment()
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ProcessContractLine
+
+Sub ProcessFifoRecord()
+Try
+	if (FifoRecordAlreadyProcessed()) exit sub
+	! Determine if this fifo record meets minimum age
+	fifoAge = ageDate - fifo.OriginDate ! stock age in days
+	if fifoAge < cpicb.Day0 exit sub ! stock is not old enough for CB
+	! OK it meets the minimum - convert variables to arrays
+	i = 0
+	cbtDay[i] = cpicb.Day0 \ cbtPenalty[i] = cpicb.Penalty0 \ i = i + 1
+	cbtDay[i] = cpicb.Day1 \ cbtPenalty[i] = cpicb.Penalty1 \ i = i + 1
+	cbtDay[i] = cpicb.Day2 \ cbtPenalty[i] = cpicb.Penalty2 \ i = i + 1
+	cbtDay[i] = cpicb.Day3 \ cbtPenalty[i] = cpicb.Penalty3 \ i = i + 1
+	cbtDay[i] = cpicb.Day4 \ cbtPenalty[i] = cpicb.Penalty4 \ i = i + 1
+	cbtDay[i] = cpicb.Day5 \ cbtPenalty[i] = cpicb.Penalty5 \ i = i + 1
+	cbtDay[i] = cpicb.Day6 \ cbtPenalty[i] = cpicb.Penalty6 \ i = i + 1
+	cbtDay[i] = cpicb.Day7 \ cbtPenalty[i] = cpicb.Penalty7 \ i = i + 1
+	cbtDay[i] = cpicb.Day8 \ cbtPenalty[i] = cpicb.Penalty8 \ i = i + 1
+	cbtDay[i] = cpicb.Day9 \ cbtPenalty[i] = cpicb.Penalty9 \ i = i + 1
+	! figure out which level to use for chargeback (based on age)
+	cbtLastLevel = 0
+	for i = 0 to 9
+		if not(cbtDay[i])
+			i = 10 ! last level was THE last level defined
+		else
+			cbtLastLevel = i
+		end if
+	next i
+	cbtLevel = 0
+	for i = 0 to cbtLastLevel
+		if not(cbtDay[i]) or fifoAge < cbtDay[i]
+			! end of table or last level was the right one
+			i = 10 ! end of table
+		else
+			! fifoage greater than this level
+			cbtLevel = i
+		end if
+	next i
+	call CalcChargeback()
+	if generateChargeback ! actually produced a chargeback
+		call PrintChargeback()
+		! add to salesrep totals
+		lineChargeback = lineChargeback + cpicbh.TotalChargeback
+		repTotal = repTotal + cpicbh.TotalChargeback
+		repLines = repLines + 1
+		if not(auditOnly) call UpdateCBFifoHistory()
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ProcessFifoRecord
+
+Function FifoRecordAlreadyProcessed()
+try
+	retval = 0
+	K_sort_tiers$ = " ",K_sort_tiers$
+	k_sort_tiers$ = fifo.TransactionNumber using "######"
+	search #CH_SORT_TIERS,2,1;K_sort_tiers$,R_st,e \ if e>1 error 11000
+	if e ! not processed yet
+		search #CH_SORT_TIERS,4,1;K_sort_tiers$,R_st,e \ if e error 11000
+	else ! already processed
+		retval = 1
+	end if
+	
+else
+	include "src/callsuberr.inc"
+end try
+end Function retval ! ProcessFifoRecord
+
+Sub CalcChargeback()
+Try
+	! generate chargeback will be set to 1 and a cpicbh. structure
+	! filled if we actually generate a chargback here
+	generateChargeback = 0
+	! cbtLevel contains the index of the arrays for the chargeback
+	! table to try to apply
+	!
+	! STEP 1 - find out if this level has already been charged
+	!
+	K_cpicbh$ = " ",K_cpicbh$
+	K_cpicbh$[1,6] = cpih.ContractNumber using "C#####"
+	K_cpicbh$[7,18] = cpid.ProductID$
+	K_cpicbh$[19,24] = fifo.TransactionNumber using "######"
+	K_cpicbh$[25,30] = "999999" ! start at last one and work back in time
+	tmp$ = K_cpicbh$ !
+	do
+		R_cpicbh = filegetcpicbhist(e$,CH_CPICBH,"<",1,K_cpicbh$,cpicbh.)
+		if R_cpicbh <= 0 or K_cpicbh$[1,24] <> tmp$[1,24]
+			! didn't find a chargeback generated for this table
+			! for this level - do it!
+			generateChargeback = 1
+			exit do
+		end if
+		if cpicbh.CBTApplied = cpicb.TABLENUM
+			! this table has been applied, but 
+			! has this level already been applied?
+			! (index starts at 0, level we store starts at 1)
+			if cpicbh.CBTLev = cbtLevel + 1
+				! found that this level has been
+				! charged, but...
+				! Is this a re-occurring entry?  If
+				! this table is defined to be re-occurring
+				! AND this is the last entry defined AND
+				! the last time we charged it is further
+				! in the past then the re-occurrence
+				! definition, we need to do it.
+				if cbtLevel <> cbtLastLevel
+					! NOT last level and we've already
+					! charged it back - normally, don't
+					! charge again except for PIEDMONT
+					if custom_customer$ = "PIEDMONT" generateChargeback = 2
+					exit do
+				end if
+				if not(cpicb.RecurDays) exit do
+				! we are into recurring - NORMALLY: check the date
+				! since last chargeback.  if it is old enough
+				! that it should be charged again, do it.
+				! except for PIEDMONT, just do it no matter what
+				if custom_customer$ = "PIEDMONT" generateChargeback = 2 \ exit do
+				tmp$ = cpicbh.DateApplied using "&&&&&&"
+				call DateToJulian(1,tmp$) \ let jdate = tmp$
+				jdate = jdate + cpicb.RecurDays
+				if ageDate >= jdate generateChargeback = 1
+				exit do
+			end if
+		end if
+	loop
+	if not(generateChargeback) exit sub ! already done
+	! need to generate a new chargback
+	clear cpicbh.
+	cpicbh.CPIContract = cpih.ContractNumber
+	cpicbh.CPIProd$ = cpid.ProductID$
+	cpicbh.FIFOLot = fifo.TransactionNumber
+	cpicbh.CBTApplied = cpicb.TABLENUM   ! chargeback table #
+	cpicbh.DateApplied = ageDateYYMMDD
+	cpicbh.CBTLev = cbtLevel + 1     ! row of chargback (starts at 1)
+	cpicbh.CBTAge = cbtDay[cbtLevel] ! cb days entry
+	cpicbh.CBTPenalty = cbtPenalty[cbtLevel]
+	cpicbh.InventoryAge = fifoAge
+	cpicbh.InventoryLevel = fifo.OrigQtyRecd - fifo.QtyUsed
+	cpicbh.spare$ = "  " ! don't init all the way to end
+	! OK determine where to get the cost and actually
+	! get it.
+	! first get the product record
+	K_pr$ = " ",k_pr$
+	K_pr$ = cpid.ProductID$
+	R_pr = filegetprod(e$,CH_PR,"=",1,K_pr$,pr.)
+	contractUnit$ = xunit$(sd.UMQty,CH_CC)
+	if R_pr <= 0
+		e$ = "Product: "+cpid.ProductID$+" not on file!"
+		error 10000
+	end if
+	let cnvtu[0] = 0;cnvtu[1]=sd.UMQty;cnvtu[2]=1;cnvta=cpicbh.InventoryLevel !convertqty
+	invLevel=ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+	clear pw.
+	If P9$[32,32]="Y"
+		K_pw$ = " ",k_pw$
+		K_pw$ = cpid.ProductID$+fifo.WarehouseNumber using "##"
+		R_pw = filegetprodwhse(e$,CH_PW,"=",1,K_pw$,PW.)
+		If R_pw<0
+			e = R_pw
+			error 11000
+		end if
+	end if
+	if pw.costavg > 0
+		cpicbh.InventoryCost = pw.costavg
+	else
+		cpicbh.InventoryCost = pr.costavg
+	end if
+	cpicbh.TotalChargeback = FNR((cpicbh.InventoryLevel * cpicbh.InventoryCost) * (cpicbh.CBTPenalty / 100))
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CalcChargeback
+
+Sub UpdateCBFifoHistory()
+Try
+	if generateChargeback = 2
+		mode$ = "c" ! already on file
+		E=fileupdatecpicbhist(e$,CH_CPICBH,mode$,R_cpicbh,cpicbh.)
+		if e<>0 
+			e = abs(e)
+			error 11000
+		end if
+	else
+		mode$ = "a"
+		E=fileupdatecpicbhist(e$,CH_CPICBH,mode$,R_cpicbh,cpicbh.)
+		if e<=0 
+			e = abs(e)
+			error 11000
+		end if
+	end if
+	R_cpicbh = 0
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! UpdateCBFifoHistory
+
+
+Sub PrintHeader()
+Try
+	if lineNo < maxLines - 1 exit sub ! no need to print a header
+	! need to print one
+	if pageNo > 0 print #0;"\14\" ! form feed
+	pageNo = pageNo + 1
+	Print #0;" - CPICBRPT -"; Tab (Int(66 - (Len(pageHeading$) / 2)));pageHeading$
+	tmp$ = "" \ Call Time(tmp$)
+	Print #0; Tab 1;"DATE ";tmp$;
+	tmp$ = "FOR SALESREP: "+ltrim$(sr.SlsmNum$)+" - "+rtrim$(sr.Name$)
+	Print #0;Tab (Int(66 - (Len(tmp$) / 2)));tmp$;
+	Print #0; Using "PAGE ###"; Tab 119;pageNo
+	Print #0;" "
+	Print #0; "CNT #";Tab 6;"CUST #";Tab 13;"CUSTOMER NAME";
+	Print #0;tab 31;"ITEM #";tab 43;"DESCRIPTION";tab 70;
+	Print #0;"DIV";tab 74;"WH";tab 77;"AGE";tab 81;"INVENTORY";
+	print #0;tab 91;"UOM";tab 96;"EXT COST";tab 107;"";
+	print #0;tab 115;"PENALTY";tab 126;"LOT ID";
+	print #0;""
+	lineNo = 6
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintHeader
+
+Sub PrintChargeback()
+Try
+	invCost = cpicbh.InventoryCost * cpicbh.InventoryLevel
+	if toBrowser
+		tmp$ = ""
+		tmp$ = tmp$,ltrim$(sr.SlsmNum$)+" - "+rtrim$(sr.Name$),fdel$
+		tmp$ =  tmp$,str$(cpih.ContractNumber),fdel$
+		tmp$ =  tmp$,str$(cust.CustomerCode)," - ",rtrim$(cust.Name$),fdel$
+		tmp$ =  tmp$,str$(contractDiv),fdel$
+		tmp$ =  tmp$,rtrim$(cpid.ProductID$)," - ",rtrim$(pr.Desc1$),fdel$
+		tmp$ =  tmp$,str$(fifo.WarehouseNumber),fdel$
+		tmp$ =  tmp$,str$(cpicbh.FIFOLot),fdel$
+		tmp$ =  tmp$,str$(cpicbh.InventoryAge),fdel$
+		tmp$ =  tmp$,str$(invLevel)," ",contractUnit$,fdel$
+		tmp$ =  tmp$,str$(invCost),fdel$
+		tmp$ =  tmp$,str$(cpicbh.CBTPenalty),fdel$
+		tmp$ =  tmp$,str$(cpicbh.TotalChargeback),fdel$
+		call addtostr(e$,rstr$,tmp$+rdel$)
+		exit sub
+	end if
+	call PrintHeader()
+	print #0; cpih.ContractNumber using "#####";
+	print #0; Tab 6;str$(cust.CustomerCode);tab 13;
+	print #0;cust.Name$[1,17];tab 31;cpid.ProductID$;tab 43;
+	print #0;pr.Desc1$[1,25];tab 70;contractDiv using "###";
+	print #0;tab 74;fifo.WarehouseNumber using "##";tab 77;
+	print #0;cpicbh.InventoryAge using "###";tab 81;
+	print #0;invLevel using "#,###,###";tab 91;contractUnit$;
+	print #0;tab 96;invCost using "######&.&&";tab 107;
+	print #0;cpicbh.CBTPenalty using "##&.&&%";tab 115;
+	print #0;cpicbh.TotalChargeback using "######&.&&";
+	print #0;tab 126;cpicbh.FIFOLot using "######";
+	print #0;""
+	lineNo = lineNo + 1
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintChargeback
+
+
+Sub SalesrepTotals()
+Try
+	if not(repLines) exit sub ! no charge backs for this rep
+	if lineNo >= maxLines lineNo = maxLines + 1 ! need 2 lines here
+	call PrintHeader()
+	print #0;""
+	print #0;tab 10;"*** TOTALS FOR SALESREP: "+ltrim$(sr.SlsmNum$)+" - "+rtrim$(sr.Name$);
+	print #0;tab 105;repTotal using "$-#,###,##&.&&"
+	lineNo = lineNo + 1
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! SalesrepTotals
+
+Sub CreateCommissionAdjustment()
+Try
+	if auditOnly exit sub ! don't actually do it.
+	if commSeq[contractDiv] = 0
+		! write the initial record out for this rep
+		clear s1[] \ clear s2[] \ clear s3[]
+		clear s4[] \ clear s6[]
+		let smat$ = " ",smat$
+		clear s7[] \ clear cs9[]
+		let commsrvchg = 0
+		clear ocs1[]
+		let SplitType = 0
+		let SplitFlag = 0
+		s1[0] = cpih.Salesman
+		s1[3] = ageDateYYMMDD
+		s4[0] = ARMONTH
+		! create commission chargeback for this specific
+		! contract line (actually create a zero dollar commission
+		! with an adjustment showing the comment / etc)
+		K_comm$ = " ",K_comm$
+		K_comm$[1,3] =  s1[0] using "###"
+		K_comm$[4,13] = 0 using "##########"
+		K_comm$[14,14] = "9"
+		commSeq[contractDiv] = GetNextRefNumber(e$, ch_comm, ch_commh, K_comm$)
+		k_comm$[4,13] = commSeq[contractDiv] using "##########"
+		s7[1] = commSeq[contractDiv]
+		E = 2 \ search #ch_comm,1,0;k_comm$,R_comm,E
+		If E error 11000
+		Search #ch_comm,4,1;k_comm$,R_comm,E
+		If E error 11000
+		K_comm2$ = " ",K_comm2$
+		K_comm2$[1,4] = contractDiv using "####"
+		K_comm2$[5] = K_comm$
+		Search #ch_comm,4,2;k_comm2$,R_comm,E
+		If E error 11000
+		Mat Write #ch_comm,R_comm;S1
+		Mat Write #ch_comm,R_comm,16;S2
+		Mat Write #ch_comm,R_comm,28;S3
+		Mat Write #ch_comm,R_comm,36;S4
+		Mat Write #ch_comm,R_comm,40;S6
+		Mat Write #ch_comm,R_comm,52;SMAT$
+		Mat Write #ch_comm,R_comm,54;S7
+		Mat Write #ch_comm,R_comm,72;CS9
+		mat write #ch_comm,R_comm,100;commsrvchg
+		Mat Write #ch_comm,R_comm,112;OCS1
+		Mat Write #ch_comm,R_comm,136;SplitFlag
+		Mat Write #ch_comm,R_comm,138;SplitType
+		Mat Write #ch_comm,R_comm,140;contractDiv;
+	end if
+	k_comm$ = " ",k_comm$
+	K_comm$[1,3] =  cpih.Salesman using "###"
+	K_comm$[4] = commSeq[contractDiv] using "##########"
+	K_comm$[14,14] = "9"
+	search #ch_comm,2,1;k_comm$,R_comm,e
+	if e error 11000 ! has to exist at this point
+	Mat Read #ch_comm,R_comm,16;S2
+	!
+	! Create AUDIT adjustment
+	!
+	k_comma1$ = " ",k_comma1$
+	K_comma1$[1,13] = k_comm$[1,13]
+	K_comma1$[26,26] = k_comm$[14,14]
+	i=0
+	do
+		k_comma1$[14,15] = Tim(8) Using "&&"
+		k_comma1$[16,17] = Tim(9) Using "&&"
+		k_comma1$[18,19] = Tim(10) Using "&&"
+		k_comma1$[20,21] = Tim(11) Using "&&"
+		k_comma1$[22,23] = Tim(12) Using "&&"
+		k_comma1$[24,25] = Tim(13) Using "&&"
+		Search #ch_comma,2,1;k_comma1$,R_comma,E
+		If Not(E)
+			i=i+1
+			Signal 3,20 ! pause for new tims
+			IF X9>10 error 11000
+		else
+			exit do
+		Endif
+	loop
+	E = 2 \ Search #ch_comma,1,0;k_comma1$,R_comma,E
+	If E error 11000
+	Search #ch_comma,4,1;k_comma1$,R_comma,E
+	If E error 11000
+	k_comma2$ = " ",k_comma2$
+	k_comma2$[1,6] = 0 Using "######"
+	k_comma2$[7,29] = K_comma1$[4,26]
+	k_comma2$[30,32] = k_comma1$[1,3]
+	Search #ch_comma,4,2;k_comma2$,R_comma,E \ If E Error 11000
+	AS1[0] = cpih.Salesman
+	AS1[1] = 9;AS1[2] = 0;AS1[3] = Spc(6)
+	AS2[0] = 0
+	AS2[1] = USER
+	AS3[0] = S2[1]
+	s2[1] = s2[1] + lineChargeback
+	Mat Write #ch_comm,R_comm,16;S2;
+	AS3[1] = S2[1]
+	AS3[2] = commSeq[contractDiv]
+	AS3[3] = 0
+	AS3[4] = K_comma1$[14,19]
+	AS3[5] = K_comma1$[20,25]
+	AORIGCOMM = 0
+	AS4[0] = 6
+	AS4[1] = 0
+	AS5[0] = 0
+	AS5[1] = 0
+	AS5[2] = 0
+	AS5[3] = 0
+	AS5[4] = 0
+	AS5[5] = 0
+	SOURCE$ = "CPI_CB"
+	AS_$="CNTRCT/PROD/CUST "+str$(cpid.ContractNumber)+"/"
+	AS_$=AS_$+rtrim$(cpid.ProductID$)+"/"+str$(priCust)
+	AS_$=AS_$+" Amount: "
+	AS_$=AS_$+ltrim$((as3[0] - as3[1]) using "-------#.##")+b$
+	Mat Write #ch_comma,R_comma;AS1
+	Mat Write #ch_comma,R_comma,8;AS2
+	Mat Write #ch_comma,R_comma,16;AS3
+	Mat Write #ch_comma,R_comma,52;SOURCE$
+	Mat Write #ch_comma,R_comma,62;AS_$
+	Write #ch_comma,R_comma,122;AORIGCOMM
+	Mat Write #ch_comma,R_comma,128;AS4
+	Mat Write #ch_comma,R_comma,132;AS5;
+
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CreateCommissionAdjustment
+
+external function GetNextRefNumber(e$,ch_comm,ch_commh,keyVal$)
+try
+	dim keyCheck$[100]
+	dim 3%,retval
+	dim 3%
+	! find highest value in history
+	retval = keyVal$[4,13]
+	keyCheck$ = keyVal$
+	do
+		search #ch_commh,3,1;keyCheck$,r_check,e
+		if e exit do
+		if keyCheck$[1,3] <> keyVal$[1,3] exit do
+		if keyCheck$[14,14] = keyVal$[14,14]
+			! got one
+			if val(keyCheck$[4,13]) > retval retval = keyCheck$[4,13]
+		end if
+	loop
+	! make sure we are above any value in current
+	keyCheck$ = keyVal$
+	do
+		search #ch_comm,3,1;keyCheck$,r_check,e
+		if e exit do
+		if keyCheck$[1,3] <> keyVal$[1,3] exit do
+		if keyCheck$[14,14] = keyVal$[14,14]
+			! got one
+			if val(keyCheck$[4,13]) > retval retval = keyCheck$[4,13]
+		end if
+	loop
+	! retval = current highest
+	! go 1 more
+	retval = retval + 1
+	if retval > 9999999999
+		e$ = "Cannot find a new reference number of commission record!"
+		error 10000
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end function retval
+
+end

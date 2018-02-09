@@ -1,0 +1,281 @@
+! nsload -- calculate a load from load markup table for nonstocks
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: JAN 14, 2005  12:33:22
+!loadsave -w -n 100,10 -o prog/dxport/nsload.dl4 src/nsload.src
+Rem /w/papermaster/r2002//usr/acct/jcs/work/devl/misc/nsload.src (univ2) [jcs] {56882}
+Rem  Copyright (c) 2005 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+Declare Intrinsic Sub FindF,InpBuf,String
+!Option Default Dialect IRIS1
+Declare Intrinsic Sub getglobals
+Declare Intrinsic sub programdump,env
+Declare Intrinsic function findchannel
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub suberr,mainerr,GetSession,AddToStr,SetOutput,CreateNetStatus
+External Lib "ubsfunc.dl4"
+Declare External Function Openfile
+Rem nsload.s - calculate a load from load markup table for nonstocks
+Rem rev: 8/22/96 -kmm- created.
+Rem parameters:  ch[1] = load markup table file channel
+Try
+	Enter CH[],PARM[],COST,STAT
+	! start here
+	dim action$[30],options$[30],userid$[8],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+	dim e$[500],message$[600]
+	Dim msg$[100]
+	Dim buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+	Dim tmp$[800],tmp1$[200],nextblockid$[8],WebStr$[600],blockid$[100]
+
+	! endif here
+	Dim 1%,CH_LMTBL,CH_ROL
+	Dim 1%,CHNL,CHNLFREE,DEBUG,LM1[37,5],LM3[37,3]
+	Dim 2%,LM2[37,3],Q0[1],LM4[37,3]
+	Dim 3%,REC_LMTBL,COST,SCR,COSTWORK,MKUPOPT,MKUPVAL
+	Dim SCRATCH$[80],P9$[50]
+	Rem {begin srcdevl/inc/dim.rol.i}
+	Dim 1%,L3[3],PL[1],UN[2],S2[1],EUN[2],OWHS,LPRINTED,CTWT[1]
+	Dim 2%,L2[1],L4[3],L6[5],L9[1],LCO[1],LTAX2,LP_DATE,LP_TIME
+	Dim 3%,L5[3],L7[12],S3[17],OLM[6],UNF[6],CST[0],LTAX1,INVNO,QPB,ROL0
+	Dim L6$[60],L1$[20],MT$[2],S3$[33],fname$[16]
+	Rem {end dim.rol.i}
+	Rem {begin srcdevl/inc/dim.prod.i      ! vars needed for convers}
+Dim A$[156],HZ$[90],PR_A2$[30],C1$[32],PSN$[20],U3$[60]
+Dim PRFLG$[10],PRMKUPTYP$[4],PIC$[50]
+Dim 1%,LLC,PFTB[3],PFU1[20],LM[1],UPCT,PR_PO[1]
+Dim 1%,PRBASE,PRPARC2[3],PRD1
+Dim 2%,A2,A3[2],B[24],PR_C4[10],PFCO[3],PLC[3],PSN[1],U2,U4[1]
+Dim 2%,STK[2],FDT[1],PRMKUP[3],PRD0[2]
+Dim 3%,A1[7],A[33],PF_LOAD2,PFU2[6],PLV[1],PRPARC[3],U3,PFN[1]
+Dim 3%,LBSORD,FUT[1],PRREDI[1]
+Rem {end dim.prod.i      ! vars needed for conversion}}
+! If Err 0 Gosub ERR_TRAP
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+Def FNN(H) = Int(Abs(H) * 10 ^ Q0[1] + .5) * 10 ^ - Q0[1] * Sgn(H)
+Def FNT(H) = Int(Abs(H) * 10 ^ Q0[1]) * 10 ^ - Q0[1] * Sgn(H)
+Def FNV(H) = Int(Abs(H) * 10 ^ Q0[1] + .9999999) * 10 ^ - Q0[1] * Sgn(H)
+Def FNU(H) = Int(Abs(H) + Sgn(Fra(Abs(H)))) * Sgn(H)
+ctlc=ch[0]
+CH_LMTBL = Abs(CH[1])
+CH_ROL = Abs(CH[2])
+if not (ch[0]) ! cntrl file
+	ctlc = OpenFile(9999,intCo) \ If ctlc = -1 Error 42 !control 
+else
+	let ctlc=abs(ch[0])
+endif
+IF NOT (ch_lmtbl)
+	READ #ctlc,150,32;fName$;
+	ch_Lmtbl = FindChannel()
+	Ropen #ch_lmtbl,fname$
+endif
+if not(ch_rol) 
+	if parm[0]<>281 
+		READ #ctlc,88,1888;fName$;
+		ch_rol = FindChannel()
+		Ropen #ch_rol,fname$
+	else
+		READ #ctlc,88,1344;fName$;
+		ch_rol = FindChannel()
+		Ropen #ch_rol,fname$
+	endif
+endif	
+	
+REC_LMTBL = PARM[1]
+REC_ROL = PARM[2]
+DEBUG = STAT
+STAT = 0
+OTYP = PARM[3]
+If OTYP < 1 Or OTYP > 38 Let STAT = 3
+! Gosub OPEN_FILES
+Mat Read #ctlc,19,50;P9$;
+Mat Read #ctlc,115,40;Q0;
+Gosub GET_LMTBL
+Gosub GET_ROL
+Gosub SET_UNITS
+MAIN: Rem
+CNVTU[0] = 0;CNVTU[1] = PFU1[11];CNVTU[2] = 2;CNVTA = COST
+Gosub CONVERT \ COSTWORK = AMOUNT
+For COUNT = 0 To 7
+  If COUNT <= 3 ! "first (original) group
+    MKUPVAL = LM2[OTYP - 1,COUNT]
+    MKUPOPT = LM1[OTYP - 1,COUNT]
+  Else ! "second new group (4-7 which in file is 0-3)
+    MKUPVAL = LM4[OTYP - 1,COUNT - 4]
+    MKUPOPT = LM3[OTYP - 1,COUNT - 4]
+  End If 
+  If MKUPVAL
+    If MKUPOPT = 1 Let COSTWORK = COSTWORK + (MKUPVAL)
+    If Not(MKUPOPT) Let COSTWORK = COSTWORK + (COSTWORK * (MKUPVAL / 100))
+    If MKUPOPT = 2 Let COSTWORK = (COSTWORK / (100 - MKUPVAL)) * 100
+    If MKUPOPT = 3 ! hundred weight
+      CNVTU[0] = -1;CNVTU[1] = PFU1[11];CNVTU[2] = 2;CNVTA = MKUPVAL
+      Gosub CONVERT
+      COSTWORK = COSTWORK + AMOUNT
+    End If 
+  End If 
+Next COUNT
+If P9$[42,42] = "N" Let CNVTA = FNN(COSTWORK)
+If P9$[42,42] = "T" Let CNVTA = FNT(COSTWORK)
+If P9$[42,42] = "U" Let CNVTA = FNV(COSTWORK)
+CNVTU[0] = PFU1[11];CNVTU[1] = 0;CNVTU[2] = 2
+Gosub CONVERT
+COST = AMOUNT
+Goto DONE
+DEBUG_WINDOW: Rem
+Return ! cannot be used 
+!Window Open @10,10; Size 50,10; Using "NONSTOCK LOAD CALC ERROR"
+!Print 'CS';
+!Print @0,0;"ERROR STATUS: ";STAT;
+If STAT = 1 Let SCRATCH$ = "bad load markup table #"
+If STAT = 2 Let SCRATCH$ = "bad order line record #"
+If STAT = 3 Let SCRATCH$ = "bad order type sent"
+If STAT = 4 Let SCRATCH$ = "table has noncalc base"
+!Print @5,2;SCRATCH$;
+!Print @0,8;"<OK> ";
+!Input ""SCRATCH$
+!Window Close 
+Return 
+ 
+GET_LMTBL: Rem
+STAT = 1
+If REC_LMTBL < 0 Or REC_LMTBL > Chf(CH_LMTBL) - 1 Goto DONE
+!If Err 0 Goto DONE
+Try 
+	Mat Read #CH_LMTBL,REC_LMTBL,24;LM1;
+Else
+	goto DONE:
+End Try
+!If Err 0 Gosub ERR_TRAP
+STAT = 0
+Mat Read #CH_LMTBL,REC_LMTBL,480;LM2;
+Mat Read #CH_LMTBL,REC_LMTBL,1100;LM3;
+Mat Read #CH_LMTBL,REC_LMTBL,1404;LM4;
+BASE = LM1[OTYP - 1,4]
+STAT = 4
+If BASE = 5 If COST <= 0 Goto DONE
+STAT = 0
+Return 
+GET_ROL: Rem
+if not(rec_rol) and parm[0]=208 return
+Try ! If Err 0 Let STAT = 2
+Rem {begin srcdevl/inc/read.rol.i}
+Mat Read #CH_ROL,REC_ROL,0;L2
+Mat Read #CH_ROL,REC_ROL,8;L3
+Mat Read #CH_ROL,REC_ROL,16;L4
+Mat Read #CH_ROL,REC_ROL,32;L5
+Mat Read #CH_ROL,REC_ROL,56;L6
+Mat Read #CH_ROL,REC_ROL,80;L6$
+Mat Read #CH_ROL,REC_ROL,140;L1$
+Mat Read #CH_ROL,REC_ROL,160;L9
+Mat Read #CH_ROL,REC_ROL,168;L7
+Mat Read #CH_ROL,REC_ROL,246;PL
+Mat Read #CH_ROL,REC_ROL,250;UN
+Mat Read #CH_ROL,REC_ROL,256;S2
+Mat Read #CH_ROL,REC_ROL,260;S3
+Mat Read #CH_ROL,REC_ROL,368;MT$
+Mat Read #CH_ROL,REC_ROL,370;S3$
+Mat Read #CH_ROL,REC_ROL,404;OLM
+Mat Read #CH_ROL,REC_ROL,446;EUN
+Mat Read #CH_ROL,REC_ROL,452;UNF
+Mat Read #CH_ROL,REC_ROL,494;LCO
+Mat Read #CH_ROL,REC_ROL,502;CST
+Mat Read #CH_ROL,REC_ROL,508;LTAX1
+Mat Read #CH_ROL,REC_ROL,514;CTWT
+Mat Read #CH_ROL,REC_ROL,518;INVNO
+Mat Read #CH_ROL,REC_ROL,538;LTAX2
+Mat Read #CH_ROL,REC_ROL,542;QPB
+Read #CH_ROL,REC_ROL,548;LPRINTED
+Read #CH_ROL,REC_ROL,550;OWHS
+Read #CH_ROL,REC_ROL,552;LP_DATE
+Read #CH_ROL,REC_ROL,556;LP_TIME
+Read #CH_ROL,REC_ROL,564;ROL0
+Rem {end read.rol.i}
+Else
+	Let STAT = 2
+end try
+! If Err 0 Gosub ERR_TRAP
+Return 
+SET_UNITS: Rem set units for conversions (nonstock version)
+A[6] = L6[4];A[5] = UNF[5]
+If Not(A[5]) Let A[5] = 1;UNF[5] = 1
+B[23] = L6[2];A1[3] = UNF[4]
+If Not(A1[3]) Let A1[3] = 1;UNF[4] = 1
+PFU1[0] = EUN[0];PFU1[1] = UN[0]
+PFU1[2] = UN[1];PFU1[3] = UN[2]
+PFU1[4] = EUN[1]
+PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+PFU1[8] = UN[0];PFU1[9] = UN[0];PFU1[10] = EUN[1]
+PFU1[11] = UN[2];PFU1[12] = UN[1]
+PFU1[13] = UN[0];PFU1[16] = EUN[0];PFU1[17] = EUN[0]
+PFU1[15] = CTWT
+PFU1[18] = UN[0];PFU1[19] = UN[0]
+PFU2[0] = UNF[0];PFU2[1] = UNF[1]
+PFU2[2] = UNF[2];PFU2[3] = UNF[3]
+PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+For X1 = 1 To 4
+  For X2 = 0 To X1 - 1
+    If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+  Next X2
+Next X1
+Return 
+Rem {begin rtn.convert.s}
+CONVERT: Rem "UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)   ! 20040 REM
+If CNVTU[2] = 3 Or CNVTU[2] = 4 Goto CVTSTARTA
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto CVTDONE
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto CVTDONE
+If CNVTU[2] = 0 Goto CVTSTARTA
+If Not(CNVTA) Let AMOUNT = 0 \ Goto CVTDONE
+CVTSTARTA: !  If Spc(4) > 1280 Goto CVTSTARTB
+CVTSTARTB: Rem "====== unibasic 5+ logic
+Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+If CNVTU[2] = 0 Goto CVTDONE
+If FLAG Let E = FLAG \ Gosub ERR_SEARCH
+AMOUNT = CNVTA
+CVTDONE: Return 
+
+ERR_SEARCH: Rem                         
+ENUM = E;ELINE = Spc(16);CTERR = 0           
+If E = 5 Let CTERR = Err(8)                  
+msg$ = "RETURN STATUS",(E + (CTERR * .001))  
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "
+e$ = msg$ \ Error 10000                      
+Return ! End                                 
+If Msg$<>"" let e$=msg$ !  Error 10000 ! sent reason
+ENUM = E ;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+e$ = "RETURN STATUS",(E + (CTERR * .001))
+e$ = e$,"/ STATEMENT",ELINE," IN PROGRAM "
+call programdump("/tmp/nsload!","")
+call programdump()
+! goto err_msg ! Error 10000
+Error 10000
+Return ! End
+
+ERR_MSG: ! send message
+ReturnStatus=0! need report to print still
+Message$=E$
+call programdump()
+End
+OUTEND: Rem "the 'std' exit name
+DONE: Rem
+!If DEBUG And STAT Gosub DEBUG_WINDOW
+
+if not(ch[0])
+	try close #ctlc else rem
+endif
+if not (ch[1])
+	try close #CH_LMTBL else rem
+endif
+If not(CH[2])
+	try close #ch_rol else rem
+endif
+!If DEBUG And STAT Gosub DEBUG_WINDOW
+
+
+else
+!
+!include "src/callmainerrnet.inc"
+end try
+End ! the whole program
+
+

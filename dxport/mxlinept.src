@@ -1,0 +1,377 @@
+! --- mxlinept
+! description check for low stock
+!
+! 1.0 mm/dd/yyyy change??
+!
+! loadsave -w -n 100,10 -o prog/dxport/mxlinept.dl4 src/mxlinept.src
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Rem MXLINEPT - See if Any Order Lines are Below LinePoint
+Rem Author: cct 139784 - Oct. 10, 2000
+Rem Last Update:
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: OCT 21, 2002  09:42:56
+Rem /w/papermaster/r2002//usr/acct/jcs/work/r2002/misc/mxlinept.src (univ2) [jcs] {46881}
+Rem  Copyright (c) 2002 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+! variables passed:
+!   CHAN[] = Channel #'s   was 2%,H0[12]  - Order header data(Let's read HERE!)
+!   S9[] = S9[2] = Order Header Record #
+!   IntCo = Coid ID # - PASS IT!!
+!
+! NOTHING PASSED BACK!!! SENDS MESSAGE TO SYSTEM.
+!
+Declare Intrinsic Sub FindF,InpBuf,String
+! Option Default Dialect IRIS1
+Declare Intrinsic sub programdump,env
+!
+! *declare additional external libs & subs & functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,JDate$,PDate$,buildsort
+Try
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+Dim rstr$[500],webstr$[500]
+Dim action$[30],options$[30],userid$[10],b$[200],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+B$=" ",B$
+Enter CHAN[],S9[],IntCo
+
+Rem {begin src/inc/dim.getchan.i}
+Dim 1%,CHNL
+Dim 3%,CHNLSCR,CHNLFREE
+Rem {end dim.getchan.i}
+Dim KEYLINE$[30],KEYSLOT$[70],KEYOLOT$[70],KEY1$[70]
+Dim KEYPRWH$[40],L1$[20],USER$[10],MESSAGE$[200],KEYPROD$[12]
+Dim SPACES$[50],Dirto$[40],tmp$[200],HMDir$[80]
+Dim P9$[50],P60$[50],P61$[256],FILE$[30],CMD$[255]
+Dim 1%,CH_ROH,CH_ROL,CH_PRWH,CH_SLOT,CH_OLOT,CH_BUYER
+Dim 1%,CH_PROD,COID,CH_PLPT,CH_TRANSL,CH_TRANSH,WHSE
+Dim 1%,CH_BUYER,TRL1[10],TR1[13],CH_USERCNTRL
+Dim 1%,L3[3],S2[1],H4[2],W0[3],W1[2],OL1[3],ARMTH,MTHDAYS
+Dim 2%,H0[12],H5[16],L4[3],W7[14],OL2[3],B[24],W2[9],BDAYS[24]
+Dim 3%,A[33],W3[24],L7[12],REC[99],R[99]
+Dim 3%,P3[4],OL3[5],TRL3[21],QTYTTL,DMNDDAY,LDTM
+Dim 3%,AVAIL,ONBO,ONPO,ONTRANS,TRIGGER
+Dim 3%,Passinfo[9],PChan[9],MSG$[400] ! for new alert call
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+COID = IntCo ! Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64)
+Try
+	FILE$ = Chf(1)
+Else
+	Rec=49
+End try
+If REC = 49
+  FILE$ = "cntrl/cntrl" + Str$(COID)
+  Open #1,FILE$
+End If 
+Mat Read #1,19,50;P9$;
+Mat Read #1,60,50;P60$;
+Mat Read #1,61,0;P61$;
+MAT READ #1,0,120;ARMTH;
+MAT READ #1,11,0;BDAYS;
+MTHDAYS=BDAYS[ARMTH]
+IF MTHDAYS<=0 LET MTHDAYS=21
+DEF FNR(X)=SGN(X)*(INT(ABS(X)*100)*.01)
+DEF FNI(X)=SGN(X)*(INT(ABS(X)+.5))
+CH_ROH =CHAN[8];CH_ROL =CHAN[10];CH_SLOT =CHAN[15];CH_OLOT =CHAN[16]
+CH_PROD =CHAN[3];CH_PRWH =CHAN[6]
+SPACES$ = " ",SPACES$
+CHNL = 98 \ Gosub GETCHAN
+If CHNL > 1 Let CH_BUYER = CHNL Else Goto OUTEND
+Ropen #CH_BUYER,"2/BUYERS"
+CHNL = 98 \ Gosub GETCHAN
+If CHNL > 1 Let CH_USERCNTRL = CHNL Else Goto OUTEND
+Ropen #CH_USERCNTRL,"cntrl/usercntrl"
+CHNL = 98 \ Gosub GETCHAN
+If CHNL > 1 Let CH_TRANSH = CHNL Else Goto OUTEND
+Read #1,88,848;FILE$[1,16];
+Ropen #CH_TRANSH,FILE$
+CHNL = 98 \ Gosub GETCHAN
+If CHNL > 1 Let CH_TRANSL = CHNL Else Goto OUTEND
+Read #1,88,1360;FILE$[1,16];
+Ropen #CH_TRANSL,FILE$
+CHNL = 98 \ Gosub GETCHAN
+If CHNL > 1 Let CH_PLPT = CHNL Else Goto OUTEND
+MESSAGE$ = " ",MESSAGE$;MESSAGE$ = "";MSGNO = 1
+REC[CH_ROH] = S9[2]
+Gosub READ_ROH
+If H0[0] > 7 And H0[0] < 14 Goto OUTDONE ! cm
+If H5[7] = 2 Or H5[7] = 7 Goto OUTDONE ! direct/billing 
+WHSE = H4[2]
+FILE$ = "6/PLINEPT" + Str$(COID);FOUND = 0
+Call FindF(FILE$,FOUND)
+If Not(FOUND) ! "gotta build it
+  CMD$ = "[1:256] " + FILE$
+  Build #CH_PLPT,CMD$
+  REC = 12 ! " KeySize 12 Wrds/24Chars(ppppppppppppwwuuuuuuuuuu)
+  Search #CH_PLPT,0,1;KEY1$,REC,E \ If E Gosub ERR_SEARCH
+  REC = 1000
+  Search #CH_PLPT,0,0;KEY1$,REC,E \ If E Gosub ERR_SEARCH
+  Close #CH_PLPT
+  CMD$="chmod go+rw files/"+LCASE$(File$)+"*" ! 6/plinept1* (to get .idx also)
+  system cmd$ ! as socket permission is rw by user ONLY
+End If 
+Open #CH_PLPT,FILE$
+IF CH_OLOT<=0
+	CHNL=98 \ GOSUB GETCHAN
+	IF CHNL>1 LET CH_OLOT=CHNL ELSE GOTO OUTDONE
+	READ #1,88,2320;FILE$[1,16];
+	RoPEN #CH_OLOT,FILE$
+Endif
+if ch_slot<=0
+	CHNL=98 \ GOSUB GETCHAN
+	IF CHNL>1 LET CH_SLOT=CHNL ELSE GOTO OUTDONE
+	READ #1,88,2528;FILE$[1,16];
+	RoPEN #CH_SLOT,FILE$
+Endif
+tmp$="HOME" \ System 28,tmp$
+if tmp$[1,4]<>"HOME" and tmp$<>"" ! got it?
+	HMDir$=tmp$+"/" ! add trailing /
+Endif
+Dirto$=HMDir$+"alerts/"  ! where alerts are stored
+file$=Dirto$;found=0
+call findf(file$,found)
+if not(found) ! missing directory
+	cmd$="mkdir "+HMDir$+"alerts" ! should be above less trailing /
+	system cmd$,x2
+	cmd$="chmod go+rwx "+HMDir$+"alerts"
+	system cmd$,x2
+Endif
+
+! call programdump("tmp/lnpt01!","")
+KEYLINE$ = " ",KEYLINE$
+KEYLINE$[1,6] = H0[7] Using "######"
+LINELOOP: Rem "thru all lines for Products
+Search #CH_ROL,3,1;KEYLINE$,REC[CH_ROL],E \ If E = 2 Goto LINESDONE
+If E Gosub ERR_SEARCH
+X2 = KEYLINE$[1,6] \ If X2 <> H0[7] Goto LINESDONE
+Gosub READ_ROL
+If L3[0] = 1 Goto LINELOOP ! non-stk
+If L3[1] = 0 Goto LINELOOP ! no stk updt
+If S2[0] = 3 Goto LINELOOP ! message
+If L7[2] <= 0 Goto LINELOOP  ! no ord qty
+KEYPROD$ = " ",KEYPROD$
+!call programdump("tmp/lnpt02!","")
+KEYPROD$ = L1$[1,12]
+Search #CH_PROD,2,1;KEYPROD$,REC[CH_PROD],E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Goto LINELOOP
+If REC[CH_PROD] <> L4[0] Goto LINELOOP
+Gosub READ_PROD
+KEYPRWH$ = " ",KEYPRWH$
+KEYPRWH$ = KEYPROD$[1,12];KEYPRWH$[13] = WHSE Using "##"
+Search #CH_PRWH,2,1;KEYPRWH$,REC[CH_PRWH],E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Goto LINELOOP
+Gosub READ_PRWH
+!call programdump("tmp/lnpt03!","")
+If W0[0] = 1 Goto LINELOOP ! "DO NOT REORDER! = Yes
+If W1[2] = 0 Goto LINELOOP ! NO BUYER
+If W1[2] < 1 Or W1[2] > 999 Or Fra(W1[2]) Goto LINELOOP
+PRIMVEND = W2[3] \ If PRIMVEND <= 0 Let PRIMVEND = B[24]
+AVAIL = W3[0] + W3[1] - W3[2] ! "avail=On hand-On Order+On PO
+TRIGGER = 0
+If W7[12] = 6 Let TRIGGER = W3[3] Else Let TRIGGER = W3[5] ! this is below min/linept
+! we also need low/no stock (via S9[]?)
+ONBO = 0;ONTRANS = 0
+Gosub GET_BACKORDER
+Gosub GET_TRANSFERS
+QTYTTL = AVAIL + ONTRANS - ONBO
+!call programdump("tmp/lnpt0!","")
+If QTYTTL < TRIGGER ! "less than Line Point/Minimum
+  BUYER = W1[2]
+  Mat Read #CH_BUYER,BUYER,30;USER$; ! buyer's access code
+  If USER$[1,1] <> "" And USER$[1,5] <> "     "
+    KEY1$ = " ",KEY1$;KEY1$ = USER$[1,10]
+    Search #CH_USERCNTRL,2,1;KEY1$,R1,E \ If E > 1 Gosub ERR_SEARCH
+    If Not(E) ! "okay to send - it's a valid User
+      MESSAGE$ = " ",MESSAGE$;MESSAGE$ = "";MSGNO = 1
+      KEY1$ = " ",KEY1$
+      KEY1$ = KEYPRWH$ + USER$ ! "check if prod/whse/user already got message today
+      Search #CH_PLPT,2,1;KEY1$,REC[CH_PRWH],E \ If E > 1 Gosub ERR_SEARCH
+      If Not(E) Goto LINELOOP
+      KEY1$ = " ",KEY1$;KEY1$ = KEYPRWH$ + USER$
+      Search #CH_PLPT,4,1;KEY1$,REC[CH_PRWH],E \ If E > 1 Gosub ERR_SEARCH
+	  ! GENERATE MESSAGE & SEND IT OUT
+	  ! per ERR:
+	  !Low Stock: 
+	  ! Prod Id - KSC103W (KSC PLASTIC WHITE FORKS 100 PER PACK), 
+	  ! Cust Id - 12828 (LOBSTER SHANTY), 
+	  ! Order 123455, Ln 3, OrdDate 08/18/09
+	  ! OrdQty 100, Avail 200, Min 150, 
+	  ! ShipDate 08/20/09, OnPO 200, Due 08/19/09 
+      MESSAGE$[MSGNO] = "Item " + RTrim$(KEYPROD$) + " in Whse " + Str$(WHSE)
+      MESSAGE$ = MESSAGE$ + " IS BELOW "
+      If W7[12] <> 6 Let MESSAGE$ = MESSAGE$ + "LINE POINT."
+      If W7[12] = 6 Let MESSAGE$ = MESSAGE$ + "MINIMUM."
+      !MESSAGE$ = MESSAGE$ + SPACES$;MSGNO = 51
+	  !message$[msgno]="" ! so starts here next
+      If PRIMVEND > 0 ! "tell 'em the vendor for Product
+        MESSAGE$ = Message$+" VENDOR " + Str$(PRIMVEND)
+      End If 
+	  ! ADD LEADTIME/DAYS AVL
+	  LDTM=FNI(W2[0]*MTHDAYS) ! LDTIME MTHS*#DAYS IN MONTH
+	  IF W3[9]<=0 LET W3[9]=W3[8] ! demand = usage rate?
+	  DMNDDAY=FNR(W3[9]/MTHDAYS) ! DEMAND / #DAYS
+	  IF DMNDDAY<=0 LET SUPPDAY=0
+	  IF DMNDDAY>0 LET SUPPDAY=FNI(QTYTTL/DMNDDAY)
+	  MESSAGE$=MESSAGE$+" LEAD TIME "+STR$(LDTM)+" days"
+	  If suppday
+		message$=message$+" DAYS SUPPLY "+Str$(SUPPDAY)
+	  Else
+		message$=message$+" DAYS SUPPLY UNKNOWN"
+	  End if
+	  ! generate web string
+	  ! Webstr$="<page>",bsdel$,"ALERT",fdel$,rdel$
+	  Webstr$=bsdel$,"ALERT",fdel$,rdel$
+	  webstr$=webstr$,"FRMUSER",fdel$,"TOUSER",fdel$,"BUYER",fdel$,"ALERTID",fdel$
+	  webstr$=webstr$,"MESSAGE",fdel$,rdel$
+	  webstr$=webstr$,RTrim$(userid$),fdel$,RTrim$(user$),fdel$,Str$(BUYER),fdel$,"11",fdel$
+	  webstr$=webstr$,RTrim$(MESSAGE$),fdel$,rdel$,esdel$ ! ,"</page>"
+      !Call "SENDMAIL",USER$,MESSAGE$
+	  ! whatever they come up with
+	  cmd$=HmDir$+"alerts/"+rtrim$(keyprod$)+Str$(whse)+RTrim$(USER$)
+	  !System "echo ''"+webstr$+"'' >> " + cmd$ + " &" ! append to file sent (if send files)
+	  ! at first send uid & message (for demo to curr user (userid$) - now to BUYER(user$))
+	  tmp$="''"+RTrim$(Message$)+"''"
+	  !CMD$=HMDir$+"alerts/synergyalert.pl "+RTRIM$(userid$)+" "+tmp$+" &" ! run in background
+	  CMD$=HMDir$+"alerts/synergyalert.pl "+RTRIM$(user$)+" "+tmp$+" &" ! run in background
+	  ! system CMD$ ! no longer a message by perl script - now uses alert file!
+	  !call programdump("tmp/lnpt1!","")
+    End If ! valid user
+  End If ! user on buyer
+  ! here is the new "alert" code - sends even if no/invalid buyer
+  Passinfo[0]=11;passinfo[1]=buyer ! alert # / buyer on file
+  passinfo[2]=rec[ch_prod];passinfo[3]=rec[ch_prwh] ! rec prod/prwh
+  passinfo[4]=trigger ! min/lpt
+  PChan[1]=1;PChan[2]=CH_Prod;PChan[3]=ch_prwh
+  Msg$=RTrim$(message$)
+  call "libalertproc.lib",Passinfo[],Pchan[],msg$
+  !call programdump("tmp/mxlp.txt!","")
+End If ! of triggered
+Goto LINELOOP
+GET_BACKORDER: Rem "
+KEYSLOT$ = " ",KEYSLOT$
+KEYSLOT$[1,12] = KEYPROD$[1,12] \ KEYSLOT$[13,14] = WHSE Using "##"
+L_4550: Search #CH_SLOT,3,4;KEYSLOT$,REC[CH_SLOT],E \ If E > 2 Gosub ERR_SEARCH
+If E Goto L_4630
+If KEYSLOT$[1,12] <> KEYPROD$[1,12] Goto L_4630
+X2 = KEYSLOT$[13,14] \ If X2 <> WHSE Goto L_4630
+Mat Read #CH_SLOT,REC[CH_SLOT],82;P3;
+ONBO = ONBO + P3[4]
+Goto L_4550
+L_4630: Return 
+GET_TRANSFERS: Rem on Consignment?
+KEYOLOT$ = " ",KEYOLOT$
+KEYOLOT$[1,12] = KEYPROD$[1,12]
+L_4715: Search #CH_OLOT,3,1;KEYOLOT$,REC[CH_OLOT],E \ If E = 2 Goto L_4795
+If E Gosub ERR_SEARCH
+If KEYOLOT$[1,12] <> KEYPROD$[1,12] Goto L_4795
+try
+	Mat Read #CH_OLOT,REC[CH_OLOT],36;OL1; ! this get BE 52 on occasion
+Else
+	goto L_4715
+End try
+If OL1[2] <> WHSE Goto L_4715
+If OL1[1] <> 2 Goto L_4715
+Mat Read #CH_OLOT,REC[CH_OLOT],60;OL3; \ If Not(OL3[4]) Goto L_4715
+Mat Read #CH_OLOT,REC[CH_OLOT],44;OL2;
+KEY1$ = " ",KEY1$ \ KEY1$[1,6] = OL2[2] Using "######"
+KEY1$[7,12] = OL2[0] Using "######"
+Search #CH_ROH,2,2;KEY1$,R[8],E \ If E Goto L_4715
+Mat Read #CH_ROH,R[8],104;H5; \ If H5[7] <> 16 Goto L_4715
+ONTRANS = ONTRANS + OL3[4]
+Goto L_4715
+L_4795: Rem check Transfer Files
+KEY1$ = " ",KEY1$ \ KEY1$[1,12] = KEYPROD$[1,12]
+L_4810: Search #CH_TRANSL,3,2;KEY1$,R[12],E \ If E = 2 Goto L_4895
+If E Gosub ERR_SEARCH
+If KEY1$[1,12] <> KEYPROD$[1,12] Goto L_4895
+Mat Read #CH_TRANSL,R[12],0;TRL1;
+If TRL1[0] = 2 Goto L_4810
+If TRL1[7] <> 0 Goto L_4810
+Mat Read #CH_TRANSL,R[12],22;TRL3;
+Mat Read #CH_TRANSH,TRL3[1],0;TR1;
+If COID <> TR1[4] Goto L_4810
+If WHSE <> TR1[5] Goto L_4810
+If TR1[1] <> 2 Goto L_4810
+ONTRANS = ONTRANS + TRL3[3]
+Goto L_4810
+L_4895: Return 
+READ_ROH: Rem "Header
+Mat Read #CH_ROH,Rec[ch_roh],0;H0;
+Mat Read #CH_ROH,REC[CH_ROH],78;H4;
+Mat Read #CH_ROH,REC[CH_ROH],104;H5;
+Return 
+READ_ROL: Rem "Order Line
+Mat Read #CH_ROL,REC[CH_ROL],8;L3;
+Mat Read #CH_ROL,REC[CH_ROL],16;L4;
+Mat Read #CH_ROL,REC[CH_ROL],140;L1$;
+Mat Read #CH_ROL,REC[CH_ROL],168;L7;
+Mat Read #CH_ROL,REC[CH_ROL],256;S2;
+Return 
+READ_PROD: Rem "Product File
+Mat Read #CH_PROD,REC[CH_PROD],156;B;
+Mat Read #CH_PROD,REC[CH_PROD],256;A;
+Return 
+READ_PRWH: Rem "ProdWhse File
+Mat Read #CH_PRWH,REC[CH_PRWH],32;W1;
+Mat Read #CH_PRWH,REC[CH_PRWH],38;W2;
+Mat Read #CH_PRWH,REC[CH_PRWH],78;W3;
+Mat Read #CH_PRWH,REC[CH_PRWH],420;W0;
+Mat Read #CH_PRWH,REC[CH_PRWH],696;W7;
+Return 
+
+Rem {begin src/inc/rtn.getchan.i}
+GETCHAN: Rem search for open channel (counts down from supplied chnl #)
+For SCR = CHNL To 1 Step -1
+  CHNL = SCR
+  Gosub CHNLFREE
+  If CHNLFREE
+    SCR = 1
+  Else 
+    CHNL = 0
+  End If 
+Next SCR
+Return 
+CHNLFREE: Rem check to see if a channel is being used
+
+CHNLFREE = 0
+Try 
+	CHNLSCR = Chf(CHNL)
+Else
+	CHNLFREE=49
+End try
+END_CHNLFREE: Rem
+Return 
+Rem {end rtn.getchan.i}
+ERR_SEARCH: Rem
+ENUM = E ;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+e$ = "RETURN STATUS",(E + (CTERR * .001))
+e$ = e$,"/ STATEMENT",ELINE," IN PROGRAM "+msc$(4)
+call programdump("tmp/lnpntse!","")
+goto err_msg ! Error 10000
+Return ! End
+ERR_MSG: ! send message
+ReturnStatus=1 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)
+Message$=E$
+	  call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  call SetOutPut(e$,rstr$)
+End
+LINESDONE: Rem "done
+OUTDONE: Rem "done, cleanup anything
+
+Try Close #CH_BUYER  Else Rem
+Try Close #CH_USERCNTRL  Else Rem
+Try Close #CH_TRANSL  Else Rem
+Try Close #CH_TRANSH Else Rem
+Try Close #CH_PLPT Else Rem
+OUTEND: Rem "done
+Else
+!
+include "src/callmainerrnet.inc"
+End try
+End
+Rem {end rtn.error.s}

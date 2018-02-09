@@ -1,0 +1,825 @@
+!
+! loadsave -w -n 100,10 -o prog/dxport/utillib.lib src/utillib.src
+!
+! This is a set of libraries for general purpose use in utilities that are not
+! run from DynamicX (typically cron jobs or internal utilities used by programming
+! staff)
+!
+! Typically usage:
+! include "src/utilcopyright"
+! encapsulate main logic with try that on error includes "src/utilcallmainerror"
+! encapsulate sub and function logic with try that on error includes "src/utilcallsuberror"
+! call SetUtilSession in the very beginning
+!
+
+!
+! List of Subs and functions for Library
+!
+!   S   SetUtilSession    should be called on startup - sets globals for later use
+!   S   AddSessionParameter Add a parameter to session globals
+!   S   UpdateSessionParameter Update a parameter in session globals
+!   F   GetSessionParameter Retrieve a parameter in session globals
+!   S   UtilMainErr       used in the main TRY error routine include "utilcallmainerror.inc"
+!   S   UtilSubErr        used in the sub TRY error routine include "utilcallsuberror.inc"
+!   S   UtilSearchErrErr  used in the sub TRY error routine include "utilcallsuberror.inc"
+!   F   ParseArguments    parse command line arguments
+!   F   OpenEmail         Open email channel for output
+!   F   OpenLog           Open log (text file) channel for output, build if needed
+!   S   WriteLog          Append to log (text file)
+!   F   UtilOpenMySQLChan Open MySQL channel - requires SetUtilSession to be run first
+!   F   EA_ParseArguments    parse command line arguments for erp assistant
+
+Option Default Dialect IRIS1
+include "src/utilcopyright.inc"
+include "src/inc/mysql_lib.inc"
+
+Declare Intrinsic Function FindChannel,callstat$
+Declare Intrinsic Sub findf,time,StringSearch
+Declare External Sub AddSessionParameter,UpdateSessionParameter
+
+! SetUtilSession
+!
+! pass standard error message variable e$
+! pass the company number you are working with
+! optional - tell session setup to parse parameters asap
+!    to try and deduce which user to run as
+!
+! Set up same environment as GetSession
+!
+! Set Identifier: "UtilSessionParameters"
+!                 "UtilSessionValues"
+!  Works like EAParameters and EAValues, the
+!  first set item in the "Names" is the total
+!  number of values.
+!
+!
+external sub SetUtilSession(e$,intCo,...)
+Try enter ParseParameters else rem
+try
+	declare external function GetSessionParameter$,EA_ParseArguments
+	dim tmp$[100],p61$[256],nam$[30],fieldname$[80],value$[80]
+	dim mysql_db$[50],mysql_server$[100],mysql_user$[50],mysql_password$[50]
+	dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],ASPID$[20]
+	
+	Dim v1$[64],filename$[100],tmp2$[100],sessionid$[200]
+	Dim groupid$[1]
+	dim 1%,a5[10],2%,decimal,apdate,ardate,shipdate,NoUpper$[10,50]
+	
+	dim 1%,MySQL,chan
+	dim 3%,totalValues
+	
+	call env(2,"DL4PORTDUMP",msc$(1)+"/dump/%DATE%%TIME%%PORTNO%%PROGNAME%.txt")
+	call SetGlobals("UtilSessionParameters",1,1) ! set total values
+	call env(1,"UBSASPID",ASPID$)
+	ASPID$ = rtrim$(ASPID$)
+	if intCo<1 or intCo>99
+		e$ = "SetUtilSession: invalid company number passed!"
+		error 10000
+	end if
+	if intCo < 10
+		tmp$ = "cntrl/cntrl#"
+	else
+		tmp$ = "cntrl/cntrl##"
+	end if
+	ropen #1,intCo using tmp$
+	ctlc = 1
+	!
+	! define parameters that should not have there "case" messed with
+	let NoUpper$[1] = "imgsvrip"
+	let NoUpper$[2] = "mysql_server"
+	let NoUpper$[3] = "mysql_user"
+	let NoUpper$[4] = "mysql_password"
+	let NoUpper$[5] = "mysql_db"
+	let NoUpper$[6] = "webpath"
+	let NoUpper$[7] = "mysql_erpsched_user"
+	let NoUpper$[8] = "mysql_erpsched_password"
+	mat read #1,61,0;p61$;
+	Mat Read #1,3,0;nam$
+	MySQL = 0 \ if p61$[107,107] = "Y" MySQL = 1
+	call AddSessionParameter(e$,"COMPANYID",str$(intco))
+	Call AddSessionParameter(e$,"S_USER.AppID",str$(intco)) !company # again
+	call AddSessionParameter(e$,"COMPANYNAME",rtrim$(nam$))
+	call AddSessionParameter(e$,"MYSQLFLAG",str$(MySQL))
+	if ParseParameters
+		! load now to see if a user id was specificed
+		if not(EA_ParseArguments(e$))
+			e$ = "Could not parse arguments!"
+			error 10000
+		end if
+	end if
+	tmp$ = trim$(ucase$(GetSessionParameter$("USERID")))
+	if tmp$ = "" tmp$ = "S8" ! default S8 if not specified
+	Call AddSessionParameter(e$,"S_USER.ID",tmp$) ! use system user id for cron jobs
+	
+	FileName$="cntrl/usercntrl"
+	Chan=FindChannel()
+	ropen #Chan,FileName$
+	!
+	V1$=GetSessionParameter$("S_USER.ID"),"          "
+	search #Chan,2,1;V1$,r1,e1
+	if e1=0
+		mat read #chan,r1,300;PortNo;
+		call AddSessionParameter(e$,"U_PORT",str$(PortNo))
+		mat read #chan,r1,386;a5; !cost lvels
+		tmp$=""
+		for i=0 to 3
+			tmp$=tmp$,str$(a5[i])
+		next i
+		call AddSessionParameter(e$,"u_costlevels",tmp$)
+	else
+		try close #Chan else rem
+		e$="Can't find User Id ",V1$," in ",FileName$ \ error 10000
+	endif
+	close #Chan
+
+	!set u_ fields
+	!read sfsystem & sfsystemcustom files
+	!path$=getprogrampath$()  !current program path, where dxport resides
+	For file=0 to 1
+		FileName$="sfsystem.txt"
+		if file let filename$="sfsystemcustom.txt"
+		Chan=FindChannel()
+		ropen #Chan,FileName$ as "profile"
+		!systemwide option flags for salespro
+		try
+			search #Chan;"salespro" !search for salespro section, case insensitive
+			mode=-2
+			Do
+				read #chan,mode;fieldname$,value$
+				mode=-1
+				if len(value$)>1
+					if value$[len(value$)]="\15\" let value$=value$[1,len(value$)-1]
+				end if
+				let DoUpper = 1
+				for i = 1 to 10
+					if fieldname$ = NoUpper$[i]
+						let DoUpper= 0
+						let i = 10
+					end if
+				next i
+				! MySQL database - take into account asp and multi-company
+				if fieldname$ = "mysql_db" and value$ <> ""
+					if ASPID$<>"" let value$ = value$,"_",ASPID$
+					! NOPE - EACH COMPANY MUST HAVE THEIR OWN INSTANCE (ASPID)
+					! if intCo > 1 let value$ = value$,str$(intCo)
+				end if
+				if DoUpper
+					Call AddSessionParameter(e$,"u_"+fieldname$,UCase$(value$))
+				else
+					Call AddSessionParameter(e$,"u_"+fieldname$,value$)
+				end if
+			Loop
+		else
+			if spc(8)<>52
+				include "src/utilcallsuberr.inc"
+			end if
+		end try
+		close #chan
+	next file
+	!end salespro fields ---------------------------
+	if MySQL
+		if GetSessionParameter$("U_MYSQL_DB") = ""
+			! flag set, but no database defined, set flag to off again
+			call UpdateSessionParameter(e$,"MYSQLFLAG","0")
+		end if
+	end if
+	!set default round and decimal flags
+	read #ctlc,115,44;decimal; \ if decimal=0 let decimal=2 !default
+	call AddSessionParameter(e$,"u_decimal",str$(decimal))
+	read #ctlc,19,50;tmp$; \ tmp$=tmp$[42,42]
+	call AddSessionParameter(e$,"u_round",tmp$)
+	let groupid$="0" ! default to always to 0... for ap files
+	call AddSessionParameter(e$,"u_group",groupid$)
+	call AddSessionParameter(e$,"u_promptdefaults","Y") ! allowed to save new promptdefaults to block defs
+	read #ctlc,0,134;apdate; !current ap date yymmdd format
+	tmp$=apdate using "&&&&&&" \tmp2$=tmp$[3,4],"/",tmp$[1,2] !mm/yy
+	call AddSessionParameter(e$,"u_apdate",tmp2$)
+	yy=tmp$[1,2]\mm=tmp$[3,4]\mm=mm+1\if mm>12 let mm=1\let yy=yy+1
+	tmp2$=mm using "&&","/",yy using "&&"
+	call AddSessionParameter(e$,"u_nextapdate",tmp2$)
+	read #ctlc,0,108;ardate; !ar aging datte yymmddd
+	tmp$=ardate using "&&&&&&" \tmp2$=tmp$[3,4],"/",tmp$[5,6],"/",tmp$[1,2]
+	call AddSessionParameter(e$,"u_ardate",tmp2$)
+	read #ctlc,03,188;shipdate;
+	tmp$=shipdate using "&&&&&&" \tmp2$=tmp$[3,4],"/",tmp$[5,6],"/",tmp$[1,2]
+	call AddSessionParameter(e$,"u_shipdate",tmp2$)
+	call env(2,"DRIVERDIR","$/usr/ub/sys/") !directory of printer drivers
+	call env(2,"REPORTDIR","files/reports")       !directory for disk reports
+	call env(2,"IMGSVRIP",GetSessionParameter$("u_imgsvrip"))  !image server ip for pdf's
+	tmp$ = GetSessionParameter$("u_webpath")
+	if tmp$="" let tmp$="/u/image/imvu"
+	call env(2,"WEBPATH",tmp$)  !path on image server to pdf's
+	call env(2,"DL4EMAILSERVER","127.0.0.1")
+	call env(2,"EMAILFROM","system@ubsys.com")
+	call env(2,"EMAILTO","dl4@ubsys.com")
+	call env(2,"LOCALCODE","9,")
+	!
+	! delimiters
+	bsdel$="<section>" ! beginning section
+	esdel$="</section>" ! ending section
+	rdel$="</eor>" ! end of row 
+	fdel$="</eof>" ! end of field
+	!
+	! set environment variables for .net
+	call env(2,"BSDEL",bsdel$)
+	call env(2,"ESDEL",esdel$)
+	call env(2,"RDEL",rdel$)
+	call env(2,"FDEL",fdel$)
+
+else
+	include "src/utilcallsuberr.inc"
+end try
+end sub
+
+external sub AddSessionParameter(e$,paramName$,paramValue$)
+try
+	dim 3%,lastValue
+
+	call GetGlobals("UtilSessionParameters",1,lastValue)
+	lastValue = lastValue + 1
+	call SetGlobals("UtilSessionParameters",1,lastValue)
+	call SetGlobals("UtilSessionParameters",lastValue,ucase$(paramName$))
+	call SetGlobals("UtilSessionValues",lastValue,paramValue$)
+else
+	include "src/utilcallsuberr.inc"
+end try
+end sub
+
+external sub UpdateSessionParameter(e$,paramName$,paramValue$)
+try
+	dim pName$[100]
+	dim 3%
+
+	call GetGlobals("UtilSessionParameters",1,eol)
+	for i = 2 to eol
+		call GetGlobals("UtilSessionParameters",i,pName$)
+		if ucase$(paramName$) = pName$
+			call SetGlobals("UtilSessionValues",i,paramValue$)
+			i = eol
+		end if
+	next i
+else
+	include "src/utilcallsuberr.inc"
+end try
+end sub
+
+!
+! GetSessionParameter$
+!
+! Find the value of the parameter passed in as an argument.
+!
+! Searches globals "UtilSessionParameters" and "UtilSessionValues" (ucase'd).
+! The first element of EAParameters is the total parameters
+! loaded.
+!
+! Returns value of parameter, NULL if not found.
+!
+external function GetSessionParameter$(paramName$)
+	dim paramValue$[1024],tmp$[100]
+	dim 3%
+
+	paramValue$ = ""
+	call GetGlobals("UtilSessionParameters",1,eol)
+	for i = 2 to eol
+		call GetGlobals("UtilSessionParameters",i,tmp$)
+		if ucase$(paramName$) = tmp$
+			call GetGlobals("UtilSessionValues",i,paramValue$)
+			i = eol
+		end if
+	next i
+end function paramValue$
+
+external sub UtilMainErr(e$,spc8,...)
+	!
+	! call from /try/else of main routines (assumes suberr already executed)
+	! pass spc(8) value, buttonlist and nextlist
+	! pass optional rstr$, passed it is assumed to return .net status string
+	! return
+	!
+	try enter noClose else dim %1,noClose
+	dim optiondir$[60],from$[100],too$[100],pdumpdir$[200],fname$[60],holdfname$[200],userid$[8],subj$[150],slash$[2]
+	dim i$[1],sessionid$[20],callingprogramname$[60],errtype$[10],orgName$[30]
+
+	try ! to email error out
+		if len(e$)>8 if e$[1,8]="syserror" !disruptive error, log it & email it   syserror or syserrorfile
+			userid$ = "UBS UTIL"
+			orgName$ = GetSessionParameter$("COMPANYNAME")
+			!
+			!email error
+			emailchan=findchannel()
+			from$ = "system@ubsys.com"
+			too$ = "dl4@ubsys.com"
+			subj$="Error report - Company: ",orgName$," - ",dateusing$(tim#(0),"YYYY/MM/DD HH:NN:SS")," Userid ",userid$
+			open #emailchan,"(From="+from$+",subject="+subj$+",AttachAs=Mime) "+too$   as "email"
+			print #emailchan;subj$
+			print #emailchan;
+			print #emailchan;e$
+			print #emailchan;
+			!
+			!find the last dump for this user id to attach to email
+			call env(1,"DL4PORTDUMP",pdumpdir$)
+			slashpos=pos(pdumpdir$, = "/",-1)  \slash$="/" !finds last forward slash(unix)
+			if slashpos=0 let slashpos=pos(pdumpdir$,="\\\\",-1) \slash$="\\" !or double back slash(win)
+			pdumpchan=findchannel()
+			open #pdumpchan,pdumpdir$[1,slashpos-1] as "sorted directory"
+			do
+				read #pdumpchan;fname$
+				if fname$="" exit do
+				if len(fname$)>6 if fname$[1,6]=dateusing$(tim#(0),"YYMMDD") if pos(fname$,=rtrim$(ucase$(userid$))) let holdfname$=pdumpdir$[1,slashpos-1],slash$,fname$
+			loop
+			if holdfname$<>"" add #emailchan;holdfname$ else print #emailchan;"No programdump file found"
+			close #emailchan
+			skip:
+			!
+		end if
+	else
+		e$=e$,"  Email of Error Failed!"
+	end try
+	print e$
+	print
+ 	if len(e$)>8 if e$[1,8]="syserror"
+		print ""
+		print "*** Program dumped!"
+	end if
+end sub ! UtilMainErr
+
+
+!
+! ---------------------------------------------------------
+external sub UtilSubErr(e$,spc8,spc10,msc2$,...)
+	try
+		enter addlMsg$
+	else
+		dim addlMsg$[1]
+		addlMsg$ = ""
+	end try
+	!
+	! call from try/else of subroutines to populate e$ error string
+	! pass spc(8) value, spc(10) value, msc$(2) value
+	! returns populated e$
+	!
+
+	dim errtype$[10]
+	dim tmp$[100],saveAddl$[100]
+	dim pname$[100]
+	dim userid$[10]
+	dim 2%,idrec,cterr
+	dim 3%,offdate
+
+	saveAddl$ = addlMsg$ ! never know, might have passed in same var as referenced in e$
+	if spc8 < 10000
+		let e$ = "syserror ",spc8," ",msc2$," at ",str$(spc10)," in "
+		try
+			for callstack=1 to 10
+				e$=e$,callstat$(callstack,errtype$),":",errtype$,";"
+			next callstack
+		else
+		end try
+		if saveAddl$ <> "" e$=e$," ",saveAddl$
+	end if
+	if spc8 <> 10000
+		!
+		! log error to standard error log if possible
+		!
+		el_ch = findchannel()
+		try
+			open #el_ch,"1/errorlog"
+			pname$=callstat$(1,errtype$)
+			bpos = 1
+			do
+				search pname$[bpos],"/",pos1 ! "just parse out name
+				if not(pos1) exit do
+				let bpos=(bpos+pos1)
+			loop
+			search pname$[bpos],":",pos1
+			if pos1 pname$[bpos+ pos1 - 1] = ""
+			intCo = GetSessionParameter$("COMPANYID")
+			if not(intCo) let intCo = 1
+			userid$="UBS UTIL  "
+			idRec = 0
+			cterr = 0
+			! base year in unibasic is 1980, but in dl4 it is 1988
+			! just to be extra safe will calculate needed offset for dl4
+			! based on unibasic never changing its base year
+			offdate=1980-spc(20)
+			if offdate>0
+				offdate=offdate*12*31*24
+				! 12 months * 31 days(language assumes 31 day months) * 24 hours
+			else
+				offdate=0
+			endif
+			if enum=157 let cterr=err(8) ! "indexed file error
+			! write error out to formatted file:
+			! note: ERP errors are err number + 2000
+			! progname,error number,error line,company ID,
+			! user ID rec, date, time, ctree error
+			write #el_ch,chf(el_ch);pname$[bpos],spc8+2000,spc10,intCo,idRec,spc(2)+offdate,spc(3),cterr;
+			close #el_ch
+		else
+			e$=e$,"  Couldn't log error!"
+		end try
+	end if
+end sub
+
+external sub UtilSearchErr(e$, se, spc10,...)
+	try
+		enter addlMsg$
+	else
+		dim addlMsg$[1]
+		addlMsg$ = ""
+	end try
+	!
+	! try / else error 11000 (search error)
+	!
+	! se (search error number) (NOTE, if this is set to 0, we will consider
+	! it an UNKOWN value)
+	!
+	! spc(10) value
+	!
+	dim errtype$[11]
+	dim tmp$[100],saveAddl$[100]
+	dim pname$[100]
+	dim userid$[10]
+	dim 2%,idrec,cterr
+	dim 3%,offdate
+
+	saveAddl$ = addlMsg$ ! never know, might have passed in same var as referenced in e$
+	errtype$ = "* UNKNOWN *"
+	if se errtype$ = str$(se)
+	let e$ = "syserror SEARCH ERROR ",errtype$," at ",str$(spc10)," in "
+	try
+		for callstack=1 to 10
+			e$=e$,callstat$(callstack,errtype$),":",errtype$,";"
+		next callstack
+	else
+	end try
+	if saveAddl$ <> "" e$=e$," ",saveAddl$
+	!
+	! log error to standard error log if possible
+	!
+	el_ch = findchannel()
+	try
+		open #el_ch,"1/errorlog"
+		pname$=callstat$(1,errtype$)
+		bpos = 1
+		do
+			search pname$[bpos],"/",pos1 ! "just parse out name
+			if not(pos1) exit do
+			let bpos=(bpos+pos1)
+		loop
+		search pname$[bpos],":",pos1
+		if pos1 pname$[bpos + pos1 - 1] = ""
+		intCo = GetSessionParameter$("COMPANYID")
+		if not(intCo) let intCo = 1
+		userid$="UBS UTIL  "
+		idRec = 0
+		cterr = 0
+		if enum=157 let cterr=err(8) ! "indexed file error
+		! base year in unibasic is 1980, but in dl4 it is 1988
+		! just to be extra safe will calculate needed offset for dl4
+		! based on unibasic never changing its base year
+		offdate=1980-spc(20)
+		if offdate>0
+			offdate=offdate*12*31*24
+			! 12 months * 31 days(language assumes 31 day months) * 24 hours
+		else
+			offdate=0
+		endif
+		! write error out to formatted file:
+		! note: ERP search errors are err number + 3000
+		! progname,error number,error line,company ID,
+		! user ID rec, date, time, ctree error
+		write #el_ch,chf(el_ch);pname$[bpos],se+3000,spc10,intCo,idRec,spc(2)+offdate,spc(3),cterr;
+		close #el_ch
+	else
+		e$=e$,"  Couldn't log error!"
+	end try
+end sub
+
+!
+! ParseArguments
+!
+! Parse out command line arguments.  Converts to lower case.  Discards
+! "run" argument and anything containing the actual program name we
+! are running.
+!
+! NOTE: MUST be called before any print or other input statements
+!
+!
+! args$[1-argc] - parsed out arguments that were separated by spaces (out)
+! curProg (usually msc$(4) - current program (passed in)
+!
+! Returns argument count (maximum 5) (not including run and anything
+! containing the active program name)
+
+External Function ParseArguments(e$, args$[], curProg$)
+try
+	dim runProg$[100],argv$[255]
+	dim %1,i,j,k,lastOne,argc
+	
+	Input (0,i)argv$ ! get command line
+	call StringSearch(curProg$,len(curProg$) * -1,"/",i)
+	if i = -1 let i = 0
+	runProg$ = lcase$(curProg$[i+1])
+	i = 1
+	lastOne = 0
+	argc = 0
+	do
+		search argv$[i]," ",J
+		if not(j)
+			lastOne = 1
+			! last arg - at a minimum we have the program name
+			! itself, so there will always be 1
+			args$[argc+1] = lcase$(argv$[i])
+		else
+			args$[argc+1] = lcase$(argv$[i, i+j-2])
+		end if
+		if args$[argc+1] <> "run"
+			search args$[argc+1],runProg$,l
+			if not(l)
+				argc = argc + 1
+			else
+				args$[argc+1] = ""
+			end if
+		else
+			args$[argc+1] = ""
+		end if
+		i = i+j
+		if argc >= 5 or lastOne exit do
+	loop
+else
+	include "src/utilcallsuberr.inc"
+end try
+end Function argc
+
+
+!
+! OpenEmail
+!
+! Open email channel with the ability to add files
+!
+! from$, too$, subject$ (need I say more)
+! optional: cc1$, cc2$
+!
+! Returns channel that output can be sent to for body.
+!
+External function OpenEmail(e$, from$, too$, subject$,...)
+try
+	try
+		enter cc1$,...
+	else
+		dim cc1$[1]
+	end try
+	try
+		enter cc2$,...
+	else
+		dim cc2$[1]
+	end try
+
+	dim addresses$[255]
+	dim %1,emailchan
+	
+	addresses$ = too$
+	if cc1$ <> "" addresses$ = addresses$ + " " + cc1$
+	if cc2$ <> "" addresses$ = addresses$ + " " + cc2$
+
+	emailchan=findchannel()
+	open #emailchan,"(From="+from$+",subject="+subject$+",AttachAs=Mime) "+addresses$   as "email"
+	print #emailchan;subject$
+	print #emailchan;
+	! example of attaching a file
+	!    slashpos=pos(pdumpdir$, = "/",-1)  \slash$="/" !finds last forward slash(unix) 
+	!    if slashpos=0 let slashpos=pos(pdumpdir$,="\\\\",-1) \slash$="\\" !or double back slash(win)
+	!    pdumpchan=findchannel()
+	!    open #pdumpchan,pdumpdir$[1,slashpos-1] as "sorted directory"
+	!    do
+	!      read #pdumpchan;fname$
+	! 	 if fname$="" exit do
+	! 	 if len(fname$)>6 if fname$[1,6]=dateusing$(tim#(0),"YYMMDD") if pos(fname$,=rtrim$(ucase$(userid$))) let holdfname$=pdumpdir$[1,slashpos-1],slash$,fname$
+	!    loop
+	!    if holdfname$<>"" add #emailchan;holdfname$ else print #emailchan;"No programdump file found"
+	!    close #emailchan
+	!    skip:
+	!    !
+else
+	include "src/utilcallsuberr.inc"
+end try
+End Function emailchan
+
+!
+! OpenLog
+!
+! Open log file (text) channel - will build file if it
+! does not already exist unless explicitly told not to.
+! positions it for appending
+!
+! filename$
+! optional DontBuild - set if file must exist
+!
+! Returns channel that output can be sent to.
+! NOTE: to append to this file, print directly or use WriteLog
+! which can place timestamps
+!
+External function OpenLog(e$,filename$,...)
+try
+	try
+		enter DontBuild,...
+	else
+		dim %1,DontBuild
+	end try
+
+	dim %1,logchan,estatus
+	
+	if filename$ = "" exit function -1
+	logchan=findchannel()
+	call findf(filename$,estatus)
+	if not(estatus)
+		if DontBuild exit function -1
+		try
+			build #logchan,filename$ as "Text"
+		else
+			exit function -1
+		end try
+		! bug in dl4 - close so changes are saved
+		close #logchan
+	end if
+	try
+		open #logchan,filename$ as "Text"
+	else
+		exit function -1
+	end try
+	setfp #logchan,chf(400+logchan)/512,chf(400+logchan) MOD 512;
+	! position to end of file
+else
+	include "src/utilcallsuberr.inc"
+end try
+End Function logchan
+
+!
+! WriteLog
+!
+! Write to a log file (text) channel
+!
+! filechannel
+! msg$
+!
+External sub WriteLog(e$, filechan, msg$,...)
+try
+	try
+		enter DateStamp,...
+	else
+		dim %1,DateStamp
+	end try
+	dim stamp$[100]
+	if DateStamp
+		call time(stamp$)
+		print #filechan;stamp$;" ";
+	end if
+	print #filechan;msg$
+else
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+External Function UtilOpenMySQLChan(e$, sqlUser$, sqlPassword$,...)
+try enter do_rtrim else do_rtrim = 0
+try	
+	dim tmp$[100],mysql_db$[50],mysql_server$[100],mysql_user$[50],mysql_password$[50]
+	dim 1%,ch_sql,MySQLFlag
+	dim 3%
+	
+	ch_sql = -1
+	MySQLFlag = GetSessionParameter$("MYSQLFLAG")
+	if not(MySQLFlag) exit function ch_sql ! no MySQL, nothing to do!
+	mysql_db$ = GetSessionParameter$("U_MYSQL_DB")
+	mysql_server$ = GetSessionParameter$("U_MYSQL_SERVER")
+	mysql_port = GetSessionParameter$("U_MYSQL_PORT")
+	mysql_user$ = GetSessionParameter$("U_MYSQL_USER")
+	mysql_password$ = GetSessionParameter$("U_MYSQL_PASSWORD")
+	if sqlUser$ = "" ! special case - open as template user
+		let ch_sql = MySQLOpen(-1,mysql_db$,0,mysql_user$,mysql_password$,mysql_server$,mysql_port)
+		if (ch_sql < 0) ! parameters defined for open, but failed!
+			error 42
+		end if
+		exit function ch_sql
+	end if
+	ch_sql = MySQLOpen(-1,mysql_db$, do_rtrim, sqlUser$, sqlPassword$, mysql_server$, mysql_port)
+	if ch_sql<0 ! user not defined as having sql database access?
+		! using template user access:
+		! create the new user and reattempt
+		! (NOTE, this will also update the password if the user
+		! id already exists in the event that is really the issue)
+		let ch_sql = MySQLOpen(-1,mysql_db$,0,mysql_user$,mysql_password$,mysql_server$,mysql_port)
+		if (ch_sql < 0) ! parameters defined for open, but failed for template user!
+			error 42
+		end if
+		search #ch_sql;"CALL adderpid(''"+sqlUser$+"'',''"+sqlPassword$+"'',''Y'')"
+		tmp = chf(ch_sql)
+		if tmp < 1
+			e$ = "Error creating user id in MySQL Database!"
+			error 10000
+		end if
+		read #ch_sql;idAdd,tmp$
+		if idAdd = 0
+			e$ = "Error creating user id in MySQL Database - "+tmp$
+			error 10000
+		end if
+		close #ch_sql
+		let ch_sql = MySQLOpen(-1,mysql_db$,do_rtrim,sqlUser$,sqlPassword$,mysql_server$,mysql_portNo)
+		if ch_sql < 0 error 42
+	end if
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+end function ch_sql
+
+!
+! EA_ParseArguments
+!
+! Parse out command line arguments for erp assistant and add them to the
+! session globals.
+!
+! NOTE: MUST be called before any print or other input statements
+!
+! Returns argument count, 0 if error occurred.
+
+
+External Function EA_ParseArguments(e$)
+try
+	dim argv$[8192],paramName$[100],paramValue$[1024]
+	dim 3%,parametersPassed,lastValue
+
+	Input (0,i)argv$ ! get command line
+	! first part of command line is program that is being run
+	! throw it out.
+	idx = 1
+	search argv$," ",begIdx
+	if not(begIdx)
+		print "No arguments passed in at all - exiting!"
+		exit function 0
+	end if	
+	idx = idx + begIdx
+	programFound = 0
+	! from here forward what we should see is in the format
+	! "|Parameter_NAME=Parameter_VALUE||Parameter_NAME=Parameter_VALUE|
+	do
+		search argv$[idx],"|",begIdx
+		if not(begIdx)
+			! no more args
+			if not(programFound)
+				print "Program to run not found - exiting!"
+				exit function 0
+			end if
+			exit do
+		end if
+		! found opening "|"
+		! look for "="
+		idx = idx + begIdx
+		if idx > len(argv$)
+			print "Corrupted parameter list - exiting!"
+			exit function 0
+		end if
+		search argv$[idx],"=",begIdx
+		if not(begIdx)
+			! not good - corrupted parameters
+			print "Missing '=' in Parameter list - exiting!"
+			exit function 0
+		end if
+		if (begIdx < 2)
+			! not good - null parameter name
+			print "Null parameter name found in list - exiting!"
+			exit function 0
+		end if
+		paramName$ = trim$(ucase$(argv$[idx, idx+begIdx-2]))
+		! got parameter name - look for value
+		idx = idx + begIdx
+		if idx > len(argv$)
+			print "Corrupted parameter list - exiting!"
+			exit function 0
+		end if
+		search argv$[idx],"|",begIdx
+		if not(begIdx)
+			! not good - no closing value
+			print "Couldn't determine parameter value for "+paramName$+" - exiting!"
+			exit function 0
+		end if
+		if begIdx = 1
+			paramValue$ = "" ! no value passed
+		else
+			paramValue$ = trim$(ucase$(argv$[idx,idx+begIdx-2]))
+		end if
+		idx = idx + begIdx
+		parametersPassed = parametersPassed + 1
+		call AddSessionParameter(e$,paramName$,paramValue$)
+		if paramName$ = "PROGRAM" programFound = 1
+		if idx > len(argv$) exit do ! end of argv string
+	loop
+	if not(programFound)
+		print "Could not determine which program to run - exiting!"
+		exit function 0
+	end if
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+end function parametersPassed
+

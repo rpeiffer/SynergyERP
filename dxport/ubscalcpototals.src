@@ -1,0 +1,373 @@
+!Program Name: ubscalcpototals                                   
+!                                                  
+!Last Updated:                                     
+!
+! loadsave -w -s -n 100,10 -o prog/dxport/ubscalcpototals.dl4 src/ubscalcpototals.src
+!
+!Sub CalcPOTotals() 
+                                                 	  
+include "src/copyright.inc"
+include "src/inc/fileprod.inc" ! product
+
+!include "src/inc/filepohead.inc" ! po header
+include "src/inc/filepoline.inc" ! po lines file
+include "src/inc/fileprodwhse.inc" ! prod warehouse
+include "src/inc/filenstkdesc.inc" ! non stock file
+
+External Lib "libprodconv.lib"           
+Declare External Function ConvProdAmount 
+
+Declare Sub CalcExtAmt
+Declare Function CalcExtWgt,calcextcube
+
+
+!loadsave -w -s -n 100,10 -o prog/dxport/ubscalcpototals.dl4 src/ubscalcpototals.src
+!specs[0]=cntrl file
+!specs[1]=poline file
+!specs[2]=prod file
+!specs[3]=nonstock file
+!returns
+!specs[5]=totordamt or total received
+!specs[6]=totordwgt or total received
+!specs[7]=totordcube or total received
+!specs[8]=totordqty or total received
+
+Enter source,specs[]
+
+try
+
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H) ! rounding to nearest penny
+
+dim pol. as poline ! po line file
+dim prod. as prod ! prod
+dim nstk. as  nstkdesc
+
+dim keypol$[50],mode$[5],keychk$[50],e$[500],p61$[256],rstr$[1000]
+dim 1%,numlines,dir,chkrecv,cnvtu[10],k,flags[11]
+dim 1%,ch_pol,ch_prod,ch_nstk,ctlc
+dim 2%,lineum,lbsunit
+dim 3%,totordamt,totrordqty,totordwgt,totordcube,totrcvdamt,totrcvdqty,totrcvdwgt,totrcvdcube
+dim 3%,VALUE_RECV,WEIGHT_RECV,CUBES_RECV,QTY_RECV,x2,cnvta,lineqty,linecost,lineextamt
+dim 3%,lbsfact,tmp3,recv_qty,recv_qty1
+dim 3%,rec_pol,multcurr,currfact
+
+for i=0 to 3
+	if specs[i]<=0 
+		for j=0 to 10 \ specs[j]=0 \ next j
+		goto outend:  
+		! will not open any files at this point in development of the program
+	endif
+next i
+ctlc=specs[0]  ! cntrl
+mat read #ctlc,61,0;p61$;
+ch_pol=specs[1]
+ch_prod=specs[2]
+ch_nstk=specs[3]
+poh_status=specs[5] ! PO STATUS
+poh_purchaseOrder=specs[6] ! PO NUMBER
+poh_oldstatus=specs[7]  ! old status 
+let multcurr=specs[10]
+for j=3 to 10 \ specs[j]=0 \ next j
+!iF POH_STATUS<>7 !LET poh.TotAmt=0 ! "only recalc if po is open              
+!poh.TotWeight=0
+NumLines=0                                                    
+!poh.TotCubes=0
+!poh.TotPieces=0
+totordamt=0
+totrordqty=0
+totordwgt=0
+totordcube=0
+let totrcvdamt=0
+let totrcvdqty=0
+let totrcvdwgt=0
+let totrcvdcube=0
+LET VALUE_RECV=0;WEIGHT_RECV=0;CUBES_RECV=0;QTY_RECV=0                    
+let keypol$=" ",keypol$
+let keypol$[1,6]=poh_PurchaseOrder using "######"
+let keychk$=" ",keychk$
+let keychk$[1,6]=keypol$[1,6]
+let mode$=">"
+let dir=1
+CHKRECV=0
+Do
+	Rec_pol=FileGetPoline(e$,Ch_Pol,mode$,dir,keypol$,pol.)
+	if rec_pol<0 exit do
+	if keypol$[1,6]<>keychk$[1,6] exit do
+	! unpack flags                  
+	LET X2=pol.flags 
+	FOR K=0 TO 11                           
+		LET FLAGS[K]=SGN(FRA(X2/2)) \ LET X2=INT(X2/2) 
+	NEXT K  
+	IF FLAGS[1]<>0 LET CHKRECV=99 ! *** CLOSED SHORT ****
+	if not(flags[2]) ! not a message line                                                               
+		if not (flags[0]) ! stock item
+			read record #ch_prod,pol.ProdDescRec;prod.;
+		else ! nonstock item
+			read record #ch_nstk,pol.ProdDescRec;nstk.;
+			clear prod.
+			let rec_nstk=pol.ProdDescRec
+			read record #ch_nstk,rec_nstk;nstk.;
+			clear prod.                                                           
+			prod.baseum=nstk.BaseUM ! nsd1[2]
+			prod.um2=nstk.CostUM !    nsd1[3]
+			prod.um3=nstk.PurchUM !nsd1[4]
+			prod.um4=nstk.StockUM !nsd1[5]
+			prod.UMStkDefault = nstk.StockUM ! NSD1[5]
+			prod.UMPurchDefault=nstk.PurchUM ! NSD1[4]
+			prod.UMCostDefault= nstk.CostUM  ! NSD1[3]
+			prod.UM2Fact=nstk.CostFact !nsd3[3]
+			prod.UM3Fact=nstk.POFact !nsd3[4]
+			prod.UM4Fact=nstk.StkFact !nsd3[5]                                             
+			prod.LbsFact=nstk.WgtFact !NSD3[7]
+			prod.LbsUnit=nstk.Wgt  !NSD3[6]  
+		endif		
+		! calculate totals
+		NumLines=NumLines+1
+		if source=371 or source=381
+			if pol.currqtyrcvd<>0
+			
+			let cnvta=pol.currqtyrcvd
+			If source=381 let cnvta=pol.currqtyrcvd+pol.freeqtyrcvd
+			let amount=0
+			if cnvta<>0
+				CNVTU[0] = 0;CNVTU[1] = prod.UMPurchDefault;CNVTU[2] = 1         
+				Amount = ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PRod.)
+				totrcvdqty=totrcvdqty+amount
+			endif                          
+			lineqty = pol.currqtyrcvd-pol.freeqtyrcvd 
+			if pol.currqtyrcvd<>0 LET CHKRECV=99
+			if pol.freeqtyrcvd<>0 let chkrecv=99
+			If source=381 let lineqty=pol.currqtyrcvd
+			lineum = pol.CostUM                                                 
+			linecost = pol.netcost                                              
+			lineextamt = 0                                                      
+			LbsUnit = pol.LbsUnit                                               
+			LbsFact = pol.LbsFactor  
+			if lineqty<>0 and linecost<>0 
+				let currfact=0
+				if multcurr<>0 and pol.currid<>0 and pol.currfact<>0
+					let currfact=pol.currfact
+				endif
+				Call CalcExtAmt(lineqty,lineum,linecost,lineextamt,LbsUnit,LbsFact,Currfact) 
+				totrcvdamt = totrcvdamt+ lineextamt
+			endif
+			lineqty = pol.currqtyrcvd
+			If source=381 let lineqty=pol.currqtyrcvd+pol.freeqtyrcvd
+			tmp3 = calcextwgt(lineqty,pol.LbsUnit,pol.LbsFactor) 
+			totrcvdwgt=totrcvdwgt+tmp3
+			tmp3 = calcextcube(lineqty,pol.cbfunit,pol.cbffactor)
+			totrcvdcube=totrcvdcube+tmp3
+			endif
+		endif
+		if source=370
+			let recv_qty=0; recv_qty1=0
+			if POH_STATUS<>5 and poh_OldStatus<>5                                               
+				RECV_QTY1=(pol.QtyRcvdToDate-pol.Totfreeqtyrcvd);RECV_QTY=pol.QtyRcvdToDate
+			else
+				ReCV_QTY1=(pol.CurrQtyRcvd-pol.Freeqtyrcvd);RECV_QTY=pol.CurrQtyRcvd	
+			endif                               
+                                   
+					
+			let cnvta=RECV_QTY ! with free goods
+			let amount=0
+			if cnvta<>0
+				CNVTU[0] = 0;CNVTU[1] = prod.UMPurchDefault;CNVTU[2] = 1         
+				Amount = ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PRod.)
+				totrcvdqty=totrcvdqty+amount
+			endif  
+			lineqty = RECV_QTY1 ! without the free goods
+			lineum = pol.CostUM                                                 
+			linecost = pol.netcost                                              
+			lineextamt = 0                                                      
+			LbsUnit = pol.LbsUnit                                               
+			LbsFact = pol.LbsFactor  
+			if lineqty<>0 and linecost<>0 
+				let currfact=0
+				if multcurr<>0 and pol.currid<>0 and pol.currfact<>0
+					let currfact=pol.currfact
+				endif
+				Call CalcExtAmt(lineqty,lineum,linecost,lineextamt,LbsUnit,LbsFact,currfact) 
+				totrcvdamt = totrcvdamt+ lineextamt
+			endif
+			lineqty = recv_qty ! with free goods
+			tmp3=0
+			if lineqty<>0
+				tmp3 = calcextwgt(lineqty,pol.LbsUnit,pol.LbsFactor) 
+			endif
+			totrcvdwgt=totrcvdwgt+tmp3
+			tmp3=0
+			if lineqty<>0
+				tmp3 = calcextcube(lineqty,pol.cbfunit,pol.cbffactor)
+				totrcvdcube=totrcvdcube+tmp3
+			endif
+		endif
+		! order totals ! 
+		lineum = pol.CostUM                                                 
+		linecost = pol.netcost                                              
+		lineextamt = 0                                                      
+		LbsUnit = pol.LbsUnit                                               
+		LbsFact = pol.LbsFactor
+		If POH_STATUS=7
+			let lineqty=pol.QtyRcvdToDate
+		else
+			let lineqty=pol.QtyShip 
+		endif
+		if lineqty<>0 and linecost<>0 
+			let currfact=0
+				if multcurr<>0 and pol.currid<>0 and pol.currfact<>0
+					let currfact=pol.currfact
+				endif
+			Call CalcExtAmt(lineqty,lineum,linecost,lineextamt,LbsUnit,LbsFact,currfact) 
+			totordamt = totordamt+ lineextamt
+		endif
+		If POH_STATUS=7
+			let lineqty=pol.QtyRcvdToDate+POL.Totfreeqtyrcvd
+		else
+			let lineqty=pol.QtyShip+pol.FreeGoods-Totfreeqtyrcvd 
+		endif
+		let amount=0
+		let cnvta=lineqty
+		if cnvta<>0
+			CNVTU[0] = 0;CNVTU[1] = prod.UMPurchDefault;CNVTU[2] = 1         
+			Amount = ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PRod.)
+			TotOrdQty=TotOrdQty+amount
+		endif
+		tmp3 = calcextwgt(lineqty,pol.LbsUnit,pol.LbsFactor) 
+		totordwgt=totordwgt+tmp3
+		tmp3 = calcextcube(lineqty,pol.cbfunit,pol.cbffactor)
+		totordcube=totordcube+tmp3
+	endif
+Loop
+if POH_STATUS=7 or POH_STATUS=14 ! close po or debit memo
+	let specs[5]=totordamt
+	let specs[6]=totordwgt
+	let specs[7]=totordcube
+	let specs[8]=totordqty
+else
+	if source=371 or source=381
+		let specs[5]=totrcvdamt
+		let specs[6]=totrcvdwgt
+		let specs[7]=totrcvdcube
+		let specs[8]=totrcvdqty
+	else
+		if source<>370 ! not inquiry
+			let specs[5]=totordamt
+			let specs[6]=totordwgt
+			let specs[7]=totordcube
+			let specs[8]=totordqty
+		endif
+	endif
+endif
+outend: ! early leave
+else
+	include "src/callsuberr.inc"
+end try
+end ! calcpototals
+! ------------------------------------------------------------------
+
+Sub CalcExtAmt(lineqty,lineum,linecost,lineextamt,lbsunit,lbsfact,currfact)
+
+! bring extended amount to costing unit of measure factors
+! cost should be in base 
+ Try
+	 Dim 1%,CNVTU[2],FLAG,e
+	dim 3%,tmpqty,tmpcost
+	DIM 3%,CNVTA
+	lineextamt=0
+	if lineqty=0 exit sub ! no qty extension will be zero
+	if linecost=0 exit sub ! no cost exension will be zero
+	If lineum=-2 ! lot costing 
+		let lineextamt=linecost
+		exit sub
+	endif
+	if lineum>=0                                                   
+		LET CNVTA=lineqty
+		let CNVTU[0]=0 ! currently in base
+		let CNVTU[1]=lineum ! unit of measure
+		let CNVTU[2]=5 
+		Amount = ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PRod.)
+		let tmpqty=amount
+                                                
+	                                                                   
+		LET CNVTA=linecost
+		CNVTU[0]=0
+		CNVTU[1]=lineum
+		CNVTU[2]=2 
+		Amount = ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PRod.)                                                                   
+		LET tmpcost=AMOUNT  
+		if p61$[136,136]="Y" and currfact<>0 ! going for base to costing um
+			let cnvcu[0]=1
+			let cnvca[0]=amount
+			let cnvca[1]=currfact
+			call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$
+			let tmpcost=cnvca[0]
+		endif
+		LET lineextamt=FNR(tmpqty*tmpcost)
+		exit sub
+	endif
+	
+	IF lineum=-1 or lineum=-3! cwt 
+		let tmpqty=lineqty
+		LET CNVTA=linecost
+		CNVTU[0]=0
+		CNVTU[1]=lineum
+		CNVTU[2]=2 
+		Amount = ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PRod.)                                                                  
+		LET tmpcost=AMOUNT  
+		if p61$[136,136]="Y" and currfact<>0 ! going for base to costing um
+			let cnvcu[0]=1
+			let cnvca[0]=amount
+			let cnvca[1]=currfact
+			call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$
+			let tmpcost=cnvca[0]
+		endif
+		if lineum=-1 ! cwt
+			LET lineextamt=FNR(tmpcost*(lbsunit*tmpqty/lbsfact)/100)
+			exit sub
+		endif
+		if lineum=-3 ! per lb
+			LET lineextamt=FNR(tmpcost*(lbsunit*tmpqty/lbsfact))
+			exit sub
+		endif
+	endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! CalcExtAmt
+!
+
+!--------------------------------------------------------------------
+ Function CalcExtWgt(lineqty,lbsunit ,lbsfact)
+ ! send over the qty to calc, lbs per unit, lbs per factor
+  Try
+	
+	Dim 3%,extwgt
+
+	extwgt=0
+	if lbsfact<>0
+		let extwgt=fnr(lbsunit*lineqty/lbsfact)
+	endif
+ 
+  else
+    include "src/callsuberr.inc"
+  end try
+end Function ExtWgt ! CalcExtWgt 
+ !--------------------------------------------------------------------
+
+ !--------------------------------------------------------------------
+ Function CalcExtCube(lineqty,cubeunit ,cubefact)
+ ! send over the qty to calc, cube per unit, cube per factor
+  Try
+	
+	Dim 3%,extcube
+
+	extcube=0
+	if cubefact<>0
+		let extcube=fnr(cubeunit*lineqty/Cubefact)
+	endif
+ 
+  else
+    include "src/callsuberr.inc"
+  end try
+end Function ExtCube ! CalcExtCube
+!--------------------------------------------------------------------

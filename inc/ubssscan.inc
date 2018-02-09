@@ -1,0 +1,30 @@
+Def Struct SScanInfo
+  Member slsno$[4]
+  Member slsname$[30]
+  Member Cust$[6]
+  Member Custname$[20]
+  Member Product$[12]
+  Member Description1$[30]
+  Member Description2$[30]
+  Member CommCode$[4]
+  Member Commodity$[16]
+  Member type$[15]
+  Member refnum$[20]
+  Member orddate$[20]
+  Member qty$[20]
+  Member qunit$[4]
+  Member price$[20]
+  Member punit$[4]
+  Member cost$[20]
+  Member cunit$[4]
+  Member extprice$[30]
+  Member extcost$[30]
+  Member gpp$[30]
+End Def
+
+Def Struct SScanVars   
+  Member CommCode$[4]      
+  Member Cust$[6]      
+  Member Product$[12]  
+  Member strSearch$[30]
+End Def                

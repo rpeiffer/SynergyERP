@@ -1,0 +1,389 @@
+! -- fifoinq.DL4 
+! display fifo lots & transactions (791) run from prodm.dl4 ("FIFO" tab)
+!
+! loadsave -w -n 100,10 -o prog/dxport/fifoinq.dl4 src/fifoinq.src
+! 1.0 10/26/2007
+! 05/06/2008 - revised prod and prodwhse
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+Include "src/inc/fileprod.inc"
+Include "src/inc/fileprodwhse.inc"
+Include "src/inc/filefifolot.inc"
+Include "src/inc/filefifotrans.inc"
+
+!* declare functions, subs
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+
+External Lib "ubsprconv.dl4"
+Declare External Function XAmount, Xunit$
+!
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "stockinq.dl4"
+Declare External Function GetUMFactor,XUM$
+
+Declare Intrinsic Sub Env,FormatDate,JuliantoDate,DatetoJulian
+
+Declare Sub OpenFiles
+
+! start the program
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+	! dim program variables
+	Dim 1%,tmp1,row,dir,ReturnStatus,pwdir,fldir,ftdir
+	dim 2%,flrow,ftrow
+	dim 1%,CTLCHan,ProdChan,FLChan,FTChan,UMChan,PWChan
+	Dim 1%,PFU1[20],X,Warehouse,Whse
+	dim 2%,tmp2,Cnvtu[2],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 2%,Q0[1],D9[5],PFU2[6],tmpcnt,fltmpcnt,fttmpcnt
+	Dim 3%,amount,COST_LEV[3],COMM_LEV,COLLSEC,HIDECOST,ProdRec
+	dim 3%,tmp3,ProdRec,FLRec,FTRec,PWRec,OnHand,OnOrder,OnPO
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Prod$[12],TDesc$[15]
+	dim Message$[200],WebStr$[600],SessionID$[200]
+	Dim P9$[50],P60$[50],P61$[256],mode$[3],pwmode$[3],flmode$[3],ftmode$[3]
+	Dim QMASK$[30],PMASK$[30],EMASK$[30],DEC$[6]
+	dim FLKey$[64],FTKey$[64],ProdKey$[64],PWKey$[64]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	dim List$[maxcnt,600] ! for .net
+	dim FList$[maxcnt,600] ! for .net fifolot
+	dim TList$[maxcnt,600] ! for .net fifotrans
+
+	dim Prod. as prod
+	dim PWhs. as prodwhse
+	dim FFL. as fifolot
+	dim FFT. as fifotrans
+
+	call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+	!
+	! open files
+	Call OpenFiles()
+	!
+	! Start Prog.
+	Mat Read #CTLCHan,19,50;P9$; 
+	Mat Read #CTLCHan,60,50;P60$; 
+	Mat Read #CTLChan,61,0;P61$;
+	Mat Read #CTLChan,115;D9;  
+	Mat Read #CTLChan,115,40;Q0;
+
+	Let Dec$="#",Dec$;Qmask$="---,---,--#"                                         
+	If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask      
+	If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask        
+	Let Emask$="-$$$,$$$,$$$,$$$.##"  !ext. price mask
+	DEF FNF(H)=INT(ABS(H)*10^Q0[1]+.5)*10^-Q0[1]*SGN(H)   
+
+	! use 3 separate list$ variables
+	! List$=Prod&Warehouse data, FList$=fifolot data, TList$=fifotrans data
+	tmpcnt=maxcnt;fltmpcnt=maxcnt;fttmpcnt=maxcnt
+	clear List$[]
+	Clear FList$[]
+	Clear TList$[]
+	row=0;flrow=0;ftrow=0
+	ReturnStatus = 1
+	Message$="OK"
+	Warehouse=0;Whse=0 ! default to ALL whses on file
+	options$=UCase$(options$) ! program from
+	If Options$="PRODWH" ! from whse scrn - see if whse used
+	  Call DXGet("warehouse",tmp$)
+	  Warehouse=tmp$
+	  If Warehouse<1 or Warehouse>D9[5] let Warehouse=0
+	Endif
+
+	! get product record
+	Call DXGet("prodid",prod$) \ prod$=UCase$(prod$)
+	prod$ = prod$+Blank$
+	Prod$[13]="" ! cut to length
+	Mode$="="
+	Dir=1
+	ProdRec=filegetprod(e$,ProdChan,mode$,dir,Prod$,Prod.)
+	If ProdRec<0
+	  Clear Prod.
+	  ReturnStatus=0
+	  Message$="Product not found"
+	Endif
+	ProdKey$=Prod$
+	If ProdRec>0
+		! Set up SQL variables into PFU1[] & PFU2[]
+		PFU2[0]=Prod.UM2Fact
+		PFU2[1]=Prod.UM3Fact
+		PFU2[2]=Prod.UM4Fact
+		PFU2[3]=Prod.UM5Fact
+		PFU2[4]=Prod.UM6Fact
+		PFU2[5]=Prod.UM7Fact
+		PFU2[6]=Prod.UM8Fact
+		PFU1[0]=Prod.BaseUM
+		PFU1[1]=Prod.UM2;PFU1[2]=Prod.UM3;PFU1[3]=Prod.UM4;PFU1[4]=Prod.UM5
+		PFU1[5]=Prod.UM6;PFU1[6]=Prod.UM7;PFU1[7]=Prod.UM8;PFU1[8]=Prod.UMStkDefault
+
+		! Section 1   Default UM for display
+		List$[0]=bsdel$,"Default UM",fdel$
+		WebStr$="ProdID",fdel$,"UM",fdel$,"UMDesc",fdel$,"UMFactor",fdel$
+		List$[1]=WebStr$
+		WebStr$=Prod$+fdel$ ! prod
+		WebStr$=WebStr$+XUM$(PFU1[8],UMChan,fdel$)+fdel$ ! um & desc
+		WebStr$=WebStr$+Str$(GETUMFactor(Pfu1[8],pfu1[],pfu2[]))+fdel$ ! factor
+		List$[2]=WebStr$
+		List$[3]=esdel$ ! end of section
+
+		! Section 2   DropList of UM's
+		List$[4]=bsdel$+"UM DropList"+fdel$
+		List$[5]="UM"+fdel$+"Description"+fdel$+"UM Factor"+fdel$
+		tmp2=PFU1[0]
+		WebStr$=XUM$(tmp2,UMChan,fdel$)+fdel$+"1"+fdel$ ! "returns code & descr.
+		List$[6]=WebStr$
+		row=7
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		For X=0 to 6 ! send the um's set up for prod
+		  tmp2=PFU1[X+1]
+		  If tmp2
+			WebStr$=XUM$(tmp2,UMChan,fdel$)+fdel$+Str$(Pfu2[X])+fdel$ ! um, desc & factor
+			List$[row]=WebStr$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		  Endif
+		Next X
+
+		List$[row]=esdel$ ! end of section
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+		! section 3 - totals for header of all whses (prod file)
+		List$[row]=bsdel$,"WarehouseTotals",fdel$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		WebStr$="OnHand",fdel$,"OnSlsOrder",fdel$,"Available",fdel$
+		WebStr$=WebStr$,"QtyOnPO",fdel$
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		! set up on vars
+		OnHand=Prod.QtyOnHand;OnOrder=Prod.QtyOnOrd;OnPO=Prod.QtyOnPO
+		If Warehouse ! need warehouse
+			PWkey$=" ",PWKey$
+			PWKey$[1,12]=ProdKey$
+			PWKey$[13]=Warehouse Using "##"
+			pwmode$="="
+			pwdir=1
+			PWRec=filegetprodwhse(e$,PWChan,pwmode$,pwdir,pwkey$,PWHS.)
+			If PWRec<0 Clear PWHS. ! not found - zero it
+		    OnHand=PWHS.QtyOnHand;OnOrder=PWHS.QtyOnOrd
+		    OnPO=PWHS.QtyOnPO
+		Endif
+		Webstr$=Str$(OnHand),fdel$,Str$(OnOrder),fdel$
+		WebStr$=WebStr$,Str$(OnHand-OnOrder),fdel$
+		WebStr$=WebStr$,Str$(OnPO),fdel$
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		List$[row]=esdel$ ! end of section
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+		! section 4 - warehouse list of every whse in prodwhse file for the product
+		WebStr$=bsdel$,"WarehouseList",fdel$
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		WebStr$="WHID",fdel$,"WhseName",fdel$,"OnHand",fdel$
+		WebStr$=WebStr$,"OnSlsOrder",fdel$,"Available",fdel$
+		WebStr$=WebStr$,"QtyOnPO",fdel$
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		PWkey$=" ",PWKey$
+		PWKey$[1,12]=ProdKey$
+		pwmode$=">"
+		pwdir=1
+		PWKey$[13]=""
+		Let Whse=Warehouse
+		If Warehouse ! sent a whse - get it only
+		  Let PWKey$[13]=Whse-1 Using "##" ! start 1 before (mode 3)
+		Endif
+		Do
+		  PWRec=filegetprodwhse(e$,PWChan,pwmode$,pwdir,pwkey$,PWHS.)
+		  If PWRec<0 or PWKey$[1,12]<>ProdKey$[1,12] Exit Do
+		  tmp1=PWKey$[13,14] \ if tmp1<=0 or tmp1>D9[5] Let PWRec=0 ! whse # out of range
+		  If PWRec>0 ! valid whse
+		   If Whse And tmp1<>Whse Exit Do 
+		   WebStr$=Str$(tmp1),fdel$,"Whse ",Str$(tmp1),fdel$ ! ID & name
+		   WebStr$=WebStr$,Str$(PWHS.QtyOnHand),fdel$ ! on hand
+		   WebStr$=WebStr$,Str$(PWHS.QtyOnOrd),fdel$ ! on order
+		   tmp3=PWHS.QtyOnHand-PWHS.QtyOnOrd
+		   WebStr$=WebStr$,Str$(tmp3),fdel$ ! available
+		   WebStr$=WebStr$,Str$(PWHS.QtyOnPO),fdel$ ! on PO
+		   List$[row]=WebStr$
+		   row=row+1
+		   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+		  ! section 5 - fiflot list of any lot for prod/whse
+		  If flrow=0 ! first fifolot found - send header section
+			WebStr$=bsdel$,"WarehouseDetails",fdel$
+			FList$[flrow]=WebStr$
+			flrow=flrow+1
+			if flrow>fltmpcnt let fltmpcnt=expandarray(e$,FList$[])
+			WebStr$="Trans#",fdel$,"Date",fdel$
+			WebStr$=WebStr$,"WHID",fdel$,"Origin",fdel$
+			WebStr$=WebStr$,"Cost",fdel$,"Received",fdel$
+			WebStr$=WebStr$,"Used",fdel$,"Open",fdel$
+			FList$[flrow]=WebStr$
+			flrow=flrow+1
+			if flrow>fltmpcnt let fltmpcnt=expandarray(e$,FList$[])
+		  Endif ! first time in
+		  FLKey$=" ",FLKey$
+		  FLKey$=Prodkey$+PWKey$[13,14] ! prod & wse
+		  FLKEY$[15]="zzz" ! start at end
+		  FLMode$="<" ! newest to oldest
+		  FLDir=1 ! only 1 (prod/whse/date)
+		  
+		  Do
+		    FLRec=filegetfifolot(e$,FLChan,FLMode$,FLDir,FLKey$,FFL.)
+			If FLRec<0 OR FLKey$[1,14]<>PWKey$[1,14] Exit DO
+			WebStr$=Str$(FFL.TransactionNumber),fdel$ ! trans # (key to fifotrans)
+			tmp$=JDate$(FFL.OriginDate)
+			If FFL.OriginDate<=0 Let tmp$=""
+			WebStr$=WebStr$,tmp$,fdel$ ! date recvd
+			WebStr$=WebStr$,Str$(FFL.WarehouseNumber),fdel$ ! whse
+			tmp1=FFL.OriginType
+			If tmp1>0 And tmp1<40
+			  READ #CTLChan,108,((tmp1-1)*15);TDesc$;
+			Else
+			  TDesc$=""
+			Endif
+			WebStr$=WebStr$,RTrim$(TDesc$),fdel$ ! trans type
+			!tmp1$=FNF(FFL.CostReceivedAt) using pmask$
+			let tmp1$=str$(FFL.CostReceivedAt)
+			WebStr$=WebStr$,LTRIM$(tmp1$),fdel$ ! cost
+			WebStr$=WebStr$,Str$(FFL.OrigQtyRecd),fdel$ ! recv'd
+			WebStr$=WebStr$,Str$(FFL.QtyUsed),fdel$ ! used
+			tmp3=FFL.OrigQtyRecd-FFL.QtyUsed
+			WebStr$=WebStr$,Str$(tmp3),fdel$
+			FList$[flrow]=WebStr$ ! add to fifolot list
+		    flrow=flrow+1
+		    if flrow>fltmpcnt let fltmpcnt=expandarray(e$,FList$[])
+
+			! section 6 - the fifotrans data for the fifolot sent in prev section
+			If ftrow=0 ! first fifotrans found - send header section
+				TList$[ftrow]=bsdel$,"TRANSDATA",fdel$
+				ftrow=ftrow+1
+				if ftrow>fttmpcnt let fttmpcnt=expandarray(e$,TList$[])
+				WebStr$="Trans#",fdel$,"Date",fdel$,"WHID",fdel$,"Source",fdel$
+				WebStr$=WebStr$,"Comment",fdel$,"Received",fdel$
+				WebStr$=WebStr$,"Used",fdel$,"Open",fdel$
+				TList$[ftrow]=WebStr$
+				ftrow=ftrow+1
+				if ftrow>fttmpcnt let fttmpcnt=expandarray(e$,TList$[])
+			Endif ! first fifotrans
+			! Now start the trans list
+			FTKey$=" ",FLKey$
+			FTKey$=FFL.TransactionNumber Using "######"
+			FTMode$=">" ! first to last
+			FTDir=1 ! only 1
+			FTKey$[7]=""
+			FTBal=0
+			Do
+				FTRec=filegetfifotrans(e$,FTChan,ftmode$,ftdir,FTKey$,FFT.)
+				If FTRec<0  Exit Do
+				tmp3=FTKey$[1,6] \ if tmp3<>FFL.TransactionNumber Exit Do
+				WebStr$=Str$(FFT.FifolotTrans),fdel$ ! send fifolot trans # (to tie to fifolot)
+				tmp3=FFT.TransactionDate
+				if tmp3<>0 ! it's julian date
+					tmp$=JDate$(tmp3) ! julian date to mm/dd/yyyy
+				else
+					tmp$="      "
+				endif
+				WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! trans date
+				WebStr$=WebStr$,Str$(FFT.Warehouse),fdel$ ! warehouse
+				WebStr$=WebStr$,RTrim$(FFT.Source$),fdel$ ! source
+				WebStr$=WebStr$,RTrim$(FFT.Comment$),fdel$ ! notes
+				tmp3=FFT.Quantity
+				IF tmp3>=0 ! added
+				  WebStr$=WebStr$,Str$(tmp3),fdel$ ! recvd
+				  WebStr$=WebStr$,"0",fdel$ ! used
+				Else ! used
+				  WebStr$=WebStr$,"0",fdel$ ! recv'd
+				  WebStr$=WebStr$,Str$(tmp3),fdel$ ! used
+				Endif
+				FTBal=FTBal+tmp3
+				WebStr$=WebStr$,Str$(FTBal),fdel$ ! open
+				TList$[ftrow]=WebStr$ ! add to fifotrans list
+				ftrow=ftrow+1
+				if ftrow>fttmpcnt let fttmpcnt=expandarray(e$,TList$[])
+			Loop !  next fifotrans
+		   Loop ! next fifolot
+		  Endif ! valid whse found
+		Loop ! next whse
+
+		! DONE - all warehouses sent
+		If ftrow=0 ! first fifotrans (none found for product - send section header)
+				TList$[ftrow]=bsdel$,"TRANSDATA",fdel$
+				ftrow=ftrow+1
+				if ftrow>fttmpcnt let fttmpcnt=expandarray(e$,TList$[])
+				WebStr$="Trans#",fdel$,"Date",fdel$,"Whs",fdel$,"Source",fdel$
+				WebStr$=WebStr$,"Comment",fdel$,"Received",fdel$
+				WebStr$=WebStr$,"Used",fdel$,"Open",fdel$
+				TList$[ftrow]=WebStr$
+				ftrow=ftrow+1
+				if ftrow>fttmpcnt let fttmpcnt=expandarray(e$,TList$[])
+		Endif ! first fifotrans
+		TList$[ftrow]=esdel$ ! end of fifotrans
+
+		If flrow=0 ! first fifolot (none found for product - send section header)
+			WebStr$=bsdel$,"WarehouseDetails",fdel$
+			FList$[flrow]=WebStr$
+			flrow=flrow+1
+			if flrow>fltmpcnt let fltmpcnt=expandarray(e$,FList$[])
+			WebStr$="Trans#",fdel$,"Date",fdel$
+			WebStr$=WebStr$,"Whs",fdel$,"Origin",fdel$
+			WebStr$=WebStr$,"Cost",fdel$,"Received",fdel$
+			WebStr$=WebStr$,"Used",fdel$,"Open",fdel$
+			FList$[flrow]=WebStr$
+			flrow=flrow+1
+			if flrow>fltmpcnt let fltmpcnt=expandarray(e$,FList$[])
+		Endif ! first time in
+		FList$[flrow]=esdel$ ! end of fifolot
+
+		List$[row]=esdel$ ! end of trans section - whse
+
+	Endif ! valid prod
+	! finish off the data send
+  	call AddToStr(e$,rstr$,List$[]) ! "add the list from subs to string - prod & whse first
+  	call AddToStr(e$,rstr$,FList$[]) ! "add the list from subs to string - fifolots 2nd
+	call AddToStr(e$,rstr$,TList$[]) ! "add the list from subs to string - fifotrans 3rd
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+	Call SetOutput(e$,rstr$)
+else
+ include "src/callmainerrnet.inc"
+end try
+end ! end of program
+
+!---------------------------------------------------------------------------------------------------
+Sub OpenFiles()
+! Open any files required here
+Try
+   CtlChan=OpenFile(-9999,intCo) \ if CTLChan = -1 Error 42 ! Control file
+   ProdChan=OpenFile(-1792,intCo) \ if ProdChan = -1 Error 42 ! Product
+   PWChan=OpenFile(-1744,intCo) \ if PWChan = -1 Error 42 ! prodwhse
+   UMChan=OpenFile(-1728,intCo) \ if UMChan = -1 Error 42 ! U/M
+   FLChan=OpenFile(-3008,intCo) \ If FLChan = -1 Error 42 ! fifo lot
+   FTChan=OpenFile(-3024,intCo) \ If FTChan = -1 Error 42 ! fifo trans
+   !
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!---------------------------------------------------------------------------------------------------

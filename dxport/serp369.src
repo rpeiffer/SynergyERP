@@ -1,0 +1,1993 @@
+!! --- serp369.dl4
+! description Inventory Simulation
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp369.dl4 src/serp369.src
+!
+! 1.0 mm/dd/yyyy change??
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+Include "src/inc/fileccodes.inc" ! u/m file
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+Include "src/inc/sql_prodwhse.inc" ! prodwhse file
+Include "src/inc/filewhinfoz.inc" ! wh info file (rec 0 fix)
+include "src/inc/filea80vm.inc" ! vendor
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$,OpenMySQLMirror
+Declare External Function ChkAltItem$,formatdate2$,getuidrec
+Declare External Sub UserCntrl,getportdefault,GetCostLevels
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,UMDList
+Declare External Function getpravail,getumrec,ChkPrdUM
+
+External Lib "libprodwh.lib"
+Declare External Function getWhAvail
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+! intrinsic subs/functions 
+
+Declare Intrinsic sub programdump,env,Logic,FindF
+Declare Intrinsic Sub DateToJulian,JulianToDate
+Declare Intrinsic Function findchannel
+
+! internal subs/functions
+Declare Sub OpenFiles,SndLists,SndPWData
+Declare Sub Get_PWSales,QtyTrfBO,SndPWUsage
+Declare Sub SndPrcBreak,SBMTUSAGE,HISTPWS
+Declare Sub SubmtPW,recalcall
+Declare Function POQRnd,vendrvprd
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+OPTION GOSUB NESTING 12  ! Default is 8
+try
+ Option String Redim is legal ! in case subs dim/use same names
+ ! define file structs
+ Dim umc. as ccodes ! u/m file
+ Dim PR. as prod ! product file
+ Dim PW. as prodwhse ! prodwhse file
+ Dim sql_prodwhse. as sql_prodwhse ! prodwhse file
+ Dim CPW. as prodwhse ! copy of prodwhse
+ Dim WHI. as whinfo ! wh info file
+ Dim vend. as a80vm ! vendor
+ ! dim program variables
+ dim action$[30],options$[30],userid$[10],blank$[200],Action1$[30],Action2$[30],3%
+ dim Prod$[12],pum$[4],msg$[100]
+ Dim mode$[3],udadesc$[14],XDate$[10],SearKey$[60]
+ dim Message$[200],WebStr$[1000],P9$[50],field$[1,30],P60$[50],p61$[256]
+ Dim 1%,ARMonth,UA5[10],MTHDAYS
+ Dim 1%,Cnvtu[2],3%,CNVTA,Amount
+ Dim 2%,BDAYS[24],currdate,Q0[1],FndUID,oldMinDaysMths
+ dim 2%,currdate,maxcnt \ maxcnt=100 ! init max records in arrays for list
+ Dim 3%,UIDREC[1],cost_lev[3]
+ Dim 1%,X1[9],2%,X2[9],3%,X3[9],R[99]
+ Dim QMASK$[20],PMASK$[20],EMASK$[20],DEC$[5]
+ Dim UA2$[50],TUID$[10],X$[60]
+ dim 1%,keyno,valact1,vers,2%,ReturnStatus
+ dim List$[maxcnt,1000] ! for .net
+ dim SList$[maxcnt,1000] ! for .net selector(drop down) list
+ dim DList$[maxcnt,1000] ! for a third .net data list
+ !
+  Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[1200],tmp$[1200],passinfoStr$[1,12]
+  dim tmp1$[200],tmp2$[100],tmp3$[100],Prodkey$[64],QMask$[20],PUnit$[4]
+  dim 1%,tmpch,Months_exist,ch[99]
+  Dim 2%,CustSec[1],fixpo
+  Dim 3%,AVE_MARGIN,COST_GOODS_SOLD,SALES_DOLLARS,CARRY_COST,ROI,ADJUST_MARGIN
+  Dim 3%,AVG_INVENT_VAL,AVG_INVENT_VALTOT,QBO,QTYTR,DSP_QTYTR,DQBO
+  Dim 3%,DW3[24],DWHMISC2[7],T1[20],passinfo[99],oldMin
+  Dim custom_customer$[30],pruda$[60]
+ Blank$=" ",Blank$
+ sqlChan = -1
+ 
+  ! call dxopen() ! done in pomenu (for standalone)
+ !
+ 
+ !
+ Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+ Call GetCostLevels(e$,cost_lev[],IntCo,Userid$) ! get cost security 
+ ! open files
+ action$=UCase$(action$) ! USED BY POMENU
+ action$=RTrim$(Action$) ! "trim spaces from end
+ action1$=UCase$(action1$)
+ action1$=RTrim$(Action1$) ! "trim spaces from end
+ action2$=UCase$(action2$)
+ action2$=RTrim$(Action2$) ! "trim spaces from end
+ call OpenFiles() ! open any/all here and NOW
+
+ Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+ Def FNI(X) = Sgn(X) * (Int(Abs(X) + .5))
+ Mat read #CTLC,19,50;P9$;
+ Mat read #CTLC,60,50;P60$;
+ Mat read #CTLC,61,0;P61$;
+ mat read #CTLC,115,60;custom_customer$;
+ Custom_customer$=UCase$(Trim$(custom_customer$))
+ READ #ctlc,0,120;ARMONTH;      
+  MAT  READ #CTLC,11,0;BDAYS;    
+  LET MTHDAYS=BDAYS[ARMONTH]  
+  IF MTHDAYS<=0 LET MTHDAYS=21
+  Mat Read #ctlc,3,184;FIXPO; \ If FIXPO <= 0 Let FIXPO = 1
+  Mat read #ctlc,115,40;q0;
+  if q0[1]<2 let q0[1]=2
+  if q0[1]>5 let q0[1]=4
+  Dec$="#",Dec$
+  Let Qmask$="--------#.##"
+  If Q0[1] Let Pmask$="------------.",Dec$[1,Q0[1]]     !price mask        
+  Let Emask$="-$$$$$$$$$$$$.##"  !ext. price mask
+  tmp$=tim(8) using "&&"
+  tmp$=tmp$+tim(9) using "&&"
+  tmp$=tmp$+tim(10) using "&&" ! yymmdd
+  currdate=tmp$
+  DEF FNN(H)=INT(ABS(H)*10^Q0[1]+.5)*10^-Q0[1]*SGN(H)
+  ! Call DXSave(0,"tmp/iss369.txt!") ! \ stop ! data as received
+ ! always get Product Code!
+ if action1$="DLISTS" goto StrtProgrm ! NO PROD ON LISTS/FLAGS!
+ call dxget("prodid",tmp$)
+ tmp1$=chkaltitem$(e$,intco,tmp$)
+ tmp1$=RTrim$(tmp1$)
+ If tmp1$<>"" ! found an altitem
+    Prod$=UCase$(tmp1$)+Blank$ ! use this instead of add'l calls
+ Else ! not found
+    Prod$=UCase$(tmp$)+Blank$ ! use what we got
+ Endif
+ If Len(Prod$)>12 let Prod$[13]=""
+ Prod$=ucase$(Prod$),Blank$
+  ProdKey$=Prod$
+  if prod$=blank$[1,12]
+	returnstatus=0
+	Message$="Blank Product Code not allowed!"
+	goto MPDone
+  Endif
+  ProdRec=filegetprod(e$,PRC,"=",1,ProdKey$,PR.) ! product mode=2 dir=1
+  if ProdRec<0
+	returnstatus=0
+	Message$="Product ID not found!"
+	goto MPDone
+  Endif
+  ! Call DXSave(0,"tmp/iss369.txt!") ! \ stop ! data as received
+  !call programdump("tmp/iss369u!","") ! dump vars
+ StrtProgrm: ! 
+ Returnstatus=0
+  Message$="ACTION1 NOT FOUND"
+ Select Case action1$
+	Case "WHLIST" ! send list of whses for product			doc=PSS.GetWHList.doc
+	  returnstatus=1
+	  Message$="OK"
+	  Field$[0]="Whse" ! warehouse 
+	  SearKey$=Prod$
+	  !
+	  call filedroplistprodwhse(e$,list$[],maxcnt,PWC,"WHDropList",Field$[],1,SearKey$)
+	  call AddToStr(e$,rstr$,List$[])
+	  ! end of whlist
+	Case "DLISTS" ! send flags/lists						doc=PSS.GetLists.doc
+	  Returnstatus=1
+	  Message$="OK"
+	  Clear List$[]
+	  call sndlists()
+	  call AddToStr(e$,rstr$,List$[])
+	  ! end of DLISTS
+	Case "PWDATA" ! send whse data							doc=PSS.GetPWData.doc
+	  returnstatus=1
+	  Message$="OK"
+	  Clear List$[]
+	  call dxget("WHSE",tmp$)
+	  Whse=tmp$
+	  if whse<1 or whse>99
+		returnstatus=0
+		message$="Invalid Warehouse number"
+		goto MPDone
+	  Endif
+	  SearKey$=prod$,Whse Using "##"
+	  PWRec=filegetprodwhse(e$,PWC,"=",1,searKey$,pw.)
+	  if PWRec<=0
+		returnstatus=0
+		Message$="Warehouse Record not found"
+		goto MPDone
+	  Endif
+	  !! Product UM List of Quantity
+	  Clear List$[]
+	  call UMDList(e$,"QTY",PRC,ProdRec,List$[],IntCo,Pr.)
+	  List$[0]=bsdel$,"QTYUMLIST",fdel$
+	  call AddToStr(e$,rstr$,List$[])
+	  !! PROD COST UM LIST
+	  clear List$[]
+	  call UMDList(e$,"COST",PRC,ProdRec,List$[],IntCo,Pr.)
+	  List$[0]=bsdel$,"COSTUMLIST",fdel$
+	  call AddToStr(e$,rstr$,List$[])
+	  clear List$[]
+	  Call SndPWData()
+	  call AddToStr(e$,rstr$,List$[])
+	  ! end of PWDATA
+	Case "GETUSAGE" ! get usages							doc=PSS.GetUsage.doc
+	  returnstatus=1
+	  Message$="OK"
+	  Clear List$[]
+	  call dxget("WHSE",tmp$)
+	  Whse=tmp$
+	  if whse<1 or whse>99
+		returnstatus=0
+		message$="Invalid Warehouse number"
+		goto MPDone
+	  Endif
+	  SearKey$=prod$,Whse Using "##"
+	  PWRec=filegetprodwhse(e$,PWC,"=",1,searKey$,pw.)
+	  if PWRec<=0
+		returnstatus=0
+		Message$="Warehouse Record not found"
+		goto MPDone
+	  Endif
+	  Call SndPWUsage()
+	  call AddToStr(e$,rstr$,List$[])
+	  ! end of GETUSAGE
+	Case "PRCBRK" ! web sends a list of qty/price			doc=PSS.GetPriceBrkInfo.doc
+	  returnstatus=1
+	  Message$="OK"
+	  Clear List$[]
+	  call dxget("WHSE",tmp$)
+	  Whse=tmp$
+	  if whse<1 or whse>99
+		returnstatus=0
+		message$="Invalid Warehouse number"
+		goto MPDone
+	  Endif
+	  SearKey$=prod$,Whse Using "##"
+	  PWRec=filegetprodwhse(e$,PWC,"=",1,searKey$,pw.)
+	  if PWRec<=0
+		returnstatus=0
+		Message$="Warehouse Record not found"
+		goto MPDone
+	  Endif
+	  Call SndPrcBreak()
+	  call AddToStr(e$,rstr$,List$[])
+	  ! end of PRCBRK
+	Case "USAGESAVE" ! adjusted usage						doc=PSS.SubmitUsageAdj.doc
+	  returnstatus=1
+	  Message$="OK"
+	  Close #PWC ! close readonly
+	  PWC=OpenFile(1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	  Clear List$[]
+	  call dxget("WHSE",tmp$)
+	  Whse=tmp$
+	  if whse<1 or whse>99
+		returnstatus=0
+		message$="Invalid Warehouse number"
+		goto MPDone
+	  Endif
+	  SearKey$=prod$,Whse Using "##"
+	  PWRec=filegetprodwhse(e$,PWC,"=",1,searKey$,pw.)
+	  if PWRec<=0
+		returnstatus=0
+		Message$="Warehouse Record not found"
+		goto MPDone
+	  Endif
+	  ! Call DXSave(0,"tmp/iss369.txt!") ! \ stop ! data as received
+	  Call SBMTUSAGE()
+	  ! end of UsageSave
+	Case "GETHISTORY" ! pwsales inq							doc=PSS.GetHistory.doc
+	  returnstatus=1
+	  Message$="OK"
+	  Clear List$[]
+	  call dxget("WHSE",tmp$)
+	  Whse=tmp$
+	  if whse<1 or whse>99
+		returnstatus=0
+		message$="Invalid Warehouse number"
+		goto MPDone
+	  Endif
+	  SearKey$=prod$,Whse Using "##"
+	  PWRec=filegetprodwhse(e$,PWC,"=",1,searKey$,pw.)
+	  if PWRec<=0
+		returnstatus=0
+		Message$="Warehouse Record not found"
+		goto MPDone
+	  Endif
+	  call HISTPWS()
+	  call AddToStr(e$,rstr$,List$[]) ! this year
+	  call AddToStr(e$,rstr$,SList$[]) ! last year
+	  ! end of GETHISTORY
+	Case "PWSAVE" ! save saveable fields					doc=PSS.SubmitPWData.doc
+	  returnstatus=1
+	  Message$="OK"
+	  Close #PWC ! close readonly
+	  PWC=OpenFile(1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	  Clear List$[]
+	  call dxget("WHSE",tmp$)
+	  Whse=tmp$
+	  if whse<1 or whse>99
+		returnstatus=0
+		message$="Invalid Warehouse number"
+		goto MPDone
+	  Endif
+	  SearKey$=prod$,Whse Using "##"
+	  PWRec=filegetprodwhse(e$,PWC,"=",1,searKey$,pw.)
+	  if PWRec<=0
+		returnstatus=0
+		Message$="Warehouse Record not found"
+		goto MPDone
+	  Endif
+	  
+	  Call SubmtPW()
+	  ! call programdump("tmp/iss369u2!","") ! dump vars
+	  ! end of PWSAVE
+	Case "RECALCORDQTY" ! same as sstk? do we need?			doc=PSS.GetActualOpLp.doc
+	  returnstatus=1
+	  Message$="OK"
+	  Clear List$[]
+	  call dxget("WHSE",tmp$)
+	  Whse=tmp$
+	  if whse<1 or whse>99
+		returnstatus=0
+		message$="Invalid Warehouse number"
+		goto MPDone
+	  Endif
+	  SearKey$=prod$,Whse Using "##"
+	  PWRec=filegetprodwhse(e$,PWC,"=",1,searKey$,pw.)
+	  if PWRec<=0
+		returnstatus=0
+		Message$="Warehouse Record not found"
+		goto MPDone
+	  Endif
+	  ! can do all right here (L_5930 then L_4380)
+	  Pw.SafetyStkQty = 0
+	  If pw.SafetyStk Let Pw.SafetyStkQty = FNR(pw.UsgRate * pw.AvgLeadTime * (pw.SafetyStk / 100))
+	  If Pw.SafetyStkQty If Pw.SafetyStkQty < 1 Let Pw.SafetyStkQty = 1
+	  ! L_4380
+	  pw.OrdPt = (pw.UsgRate * pw.AvgLeadTime) + ((pw.UsgRate * pw.AvgLeadTime) * pw.SafetyStk / 100)
+	  pw.LinePt = pw.OrdPt + (pw.UsgRate * pw.RvwPer)
+	  Call SndPWData() ! resend it all
+	  call AddToStr(e$,rstr$,List$[])
+	  ! end of RECALCORDQTY
+	Case "RECALCSSTK" ! recalc sstkqty & ord/linept?
+	  returnstatus=1 ! or is it all part of SIMULCALC? I say yes
+	  Message$="OK"
+	  Clear List$[]
+	  call dxget("WHSE",tmp$)
+	  Whse=tmp$
+	  if whse<1 or whse>99
+		returnstatus=0
+		message$="Invalid Warehouse number"
+		goto MPDone
+	  Endif
+	  SearKey$=prod$,Whse Using "##"
+	  PWRec=filegetprodwhse(e$,PWC,"=",1,searKey$,pw.)
+	  if PWRec<=0
+		returnstatus=0
+		Message$="Warehouse Record not found"
+		goto MPDone
+	  Endif
+	  ! can do all right here (L_5930 then L_4380)
+	  Pw.SafetyStkQty = 0
+	  If pw.SafetyStk Let Pw.SafetyStkQty = FNR(pw.UsgRate * pw.AvgLeadTime * (pw.SafetyStk / 100))
+	  If Pw.SafetyStkQty If Pw.SafetyStkQty < 1 Let Pw.SafetyStkQty = 1
+	  ! L_4380
+	  pw.OrdPt = (pw.UsgRate * pw.AvgLeadTime) + ((pw.UsgRate * pw.AvgLeadTime) * pw.SafetyStk / 100)
+	  pw.LinePt = pw.OrdPt + (pw.UsgRate * pw.RvwPer)
+	  Call SndPWData() ! resend it all
+	  call AddToStr(e$,rstr$,List$[])
+	  ! end of Recalcsstk
+	Case "SIMULCALC" ! recalc all from entries				doc=PSS.GetSimulatedPWData.doc
+	  returnstatus=1
+	  Message$="OK"
+	  Clear List$[]
+	  call dxget("WHSE",tmp$)
+	  Whse=tmp$
+	  if whse<1 or whse>99
+		returnstatus=0
+		message$="Invalid Warehouse number"
+		goto MPDone
+	  Endif
+	  SearKey$=prod$,Whse Using "##"
+	  PWRec=filegetprodwhse(e$,PWC,"=",1,searKey$,pw.)
+	  if PWRec<=0
+		returnstatus=0
+		Message$="Warehouse Record not found"
+		goto MPDone
+	  Endif
+	  call sndpwdata() ! get data as sent for compare!
+	  clear List$[]
+	  call recalcall() ! get & recalc ALL fields
+	  if returnstatus=0 goto MPDone ! something's wrong
+	  Call SndPWData() ! resend it all
+	  call AddToStr(e$,rstr$,List$[])
+	  ! call programdump("tmp/iss369u1!","") ! dump vars
+	  ! end of SIMULCALC
+	
+ End Select
+	!
+   MPDone: ! finish off Main program
+    ! call programdump("tmp/iss369u3!","") ! dump vars
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+!
+	Call SetOutput(e$,rstr$)
+! end of main
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of serp369 program
+!
+! ---------------------------------------------------------------------
+Sub OpenFiles()
+
+  Try
+    !
+	PRC=OpenFile(-1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(-1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	WHI=OpenFile(-2768,IntCo) \ if whi = -1 Error 42 ! wh info file (rec 0 fix)
+	VMC=OpenFile(-2400,IntCo) \ if VMC=-1 Error 42 ! vendor
+	CCC=OpenFile(-1728,IntCo) \ if ccc=-1 Error 42 ! um codes
+	sqlChan = OpenMySQLMirror(e$)
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!----------------------------------------------------------------------------
+Sub SndLists()
+! send flags & droplists
+  Try
+	Dim K14$[50],Mth$[4]
+	K14$ = "JAN FEB MAR APR MAY JUNEJULYAUG SEPTOCT NOV DEC "
+	X2 = (ARMONTH - 1) * 4
+	MTH$ = K14$[X2 + 1,X2 + 4]
+	Clear List$[]
+	List$[0]=bsdel$,"SYSTEM",fdel$
+	Webstr$="MONTH",fdel$,"BDAYS",fdel$
+	webstr$=Webstr$,"POSEC",fdel$,"AVGSEC",fdel$
+	List$[1]=webstr$
+	Webstr$=MTH$,fdel$,Str$(MTHDAYS),fdel$ ! Month & " business days"
+	Webstr$=webstr$,Str$(COST_LEV[2]),fdel$,Str$(COST_LEV[0]),fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	! droplist reord types
+	Clear List$[]
+	List$[0]=bsdel$,"REORDTYPE",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	List$[2]="1",fdel$,"Economic Order Qty",fdel$
+	List$[3]="2",fdel$,"Inventory Class 1",fdel$
+	List$[4]="3",fdel$,"Seasonal",fdel$
+	List$[5]="4",fdel$,"Start Up",fdel$
+	List$[6]="5",fdel$,"Arbitrary",fdel$
+	List$[7]="6",fdel$,"Min / Max",fdel$
+	List$[8]=esdel$
+	!call AddToStr(e$,rstr$,List$[])
+	
+	!! last one no addtostr!
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndLists
+!----------------------------------------------------------------------------
+Sub SndPWData()
+! send data for screen
+  Try
+	dim calc$[60]
+	CALC$ = "EOQ       INV CLASS SEASONAL  START UP  ARBITRARY MIN / MAX "
+	call dxget("UM",tmp$)
+	if rtrim$(tmp$)<>""
+		R = getumrec(e$,ccc,tmp$,IntCo,PR.)           
+		If R > 0 Let tmp$ = Str$(R)
+	Endif ! could be null/blank
+	umrec=tmp$
+	if umrec<=0 let umrec=pr.UMPurchDefault
+	R=ChkPrdUM(e$,umrec,IntCo,Pr.)
+	if r=0 ! not found
+	  returnstatus=0
+	  message$="UM not defined"
+	  Goto SndPWDone
+	Endif
+	DPUNIT=umrec
+	! have prod & whse - now get/send
+	If Not(pw.SafetyStkQty) If pw.SafetyStk Let pw.SafetyStkQty = FNR((pw.UsgRate * pw.AvgLeadTime) * (pw.SafetyStk / 100))
+	If pw.SafetyStkQty If pw.SafetyStkQty < 1 Let pw.SafetyStkQty = 1
+	If Not(pw.KCost) Let pw.KCost = .35
+	If Not(pr.CostPO) Let pr.CostPO = pr.CostAvg
+	If Not(pr.CostPO) Let pr.CostPO = pr.CostLoad
+	If P9$[32,32] <> "Y" Let pw.CostAvg = pr.CostAvg;pw.CostLastPo = pr.CostPO
+	If Not(pw.CostAvg) If pr.CostAvg Let pw.CostAvg = pr.CostAvg
+	If Not(pw.CostLastPo) If pr.CostPO Let pw.CostLastPo = pr.CostPO
+	if Not(pw.Vend) and pr.PrimVend>0 let pw.Vend=pr.PrimVend
+	ORIGVEND = pw.Vend
+	call Get_PWSales() ! misc 
+	If pw.InvtTurns let AVG_MARGIN = pw.RtnOnInvest / pw.InvtTurns  Else AVG_MARGIN=0
+	ROI = FNR(pw.RtnOnInvest * 100)
+	ADJUST_MARGIN = FNR(pw.AdjMarg * 100)
+	GROSS_MARGIN = FNR(pw.GrossMarg * 100)
+	! L_6800 on 369
+	If P9$[32,32] = "Y"
+	  If pw.CostLastPo Let COST = pw.CostLastPo Else Let COST = pw.CostAvg
+	End If 
+	If P9$[32,32] <> "Y"
+	  If pr.CostPO Let COST = pr.CostPO Else Let COST = pr.CostAvg
+	End If 
+	! L_5000 on 369
+	If Not(pw.AvgLeadTime) Let pw.AvgLeadTime = pr.LeadTime
+	! If Not(pw.CommPct) Let pw.CommPct = pr.PrcMult ! ??? on mx369a?
+	If Not(pw.CostAvg) Let pw.CostAvg = pr.CostAvg
+	If Not(pw.CostLastPo) Let pw.CostLastPo = pr.CostPO
+	! L_4480 on 369
+	if not(ManRP) ! no manual entry
+		X3=vendrvprd(pw.vend,Whse)
+		if x3 if x3>0 let pw.RvwPer=x3
+	Endif
+	! L_5320 on 369
+	Call QtyTrfBO() ! qty on trans/bo L_11000/L_5220 on 369
+	! L_10000 on 369
+	If pw.DNReordFlg = 2
+	  pw.EOQOrdQty = - (pw.QtyOnHand + pw.QtyOnPO - pw.QtyOnOrd - QBO + QTYTR)
+	  X3=PW.EOQOrdQty ! Gosub L_10530
+	  pw.EOQOrdQty=POQRnd(x3)
+	  If pw.EOQOrdQty < 0 Let pw.EOQOrdQty = 0
+	Else
+		If pw.SeasonalFlag Let pw.CalcSrc = 3
+		If Not(pw.CalcSrc) Let pw.CalcSrc = 1
+		If pw.CalcSrc = 1 or pw.CalcSrc=3 ! Gosub L_10100 ! EOQ CALC==========
+			pw.EOQOrdQty = 0
+			If pw.UsgRate > 0 If (pw.KCost * COST) <> 0 
+				Let pw.EOQOrdQty = FNR(Sqr((24 * FIXPO * pw.UsgRate) / (pw.KCost * COST)))
+				pw.EoqNoRnding = pw.EOQOrdQty
+			Endif
+			If pw.EOQOrdQty > (pw.UsgRate * 12) Let pw.EOQOrdQty = pw.UsgRate * 12;EX_CODE = 1
+			If pw.EOQOrdQty < (pw.UsgRate * .25) Let pw.EOQOrdQty = pw.UsgRate * .25;EX_CODE = 2
+			If pw.EOQOrdQty < (pw.RvwPer * pw.UsgRate)
+			  pw.EOQOrdQty = (pw.RvwPer * pw.UsgRate) \ EX_CODE = 4
+			End If 
+			If (pr.ShelfLifeMos) <> 0 And (pw.EOQOrdQty > (pr.ShelfLifeMos * pw.UsgRate))
+			  pw.EOQOrdQty = (pr.ShelfLifeMos * pw.UsgRate) \ EX_CODE = 5
+			End If 
+			If pw.InvtClass1 > 0 And pw.InvtClass1 <= 3
+			  If ((pw.QtyOnHand - pw.QtyOnOrd - QBO) + (pw.QtyOnPO + QTYTR)) < pw.OrdPt
+				pw.EOQOrdQty = pw.EOQOrdQty + pw.OrdPt - ((pw.QtyOnHand - pw.QtyOnOrd - QBO) + (pw.QtyOnPO + QTYTR))
+				If (pw.LinePt - pw.OrdPt) > 0 Let pw.EOQOrdQty = pw.EOQOrdQty + ((pw.LinePt - pw.OrdPt) / 2)
+				EX_CODE = 7
+			  End If 
+			End If 
+		Endif
+		If pw.CalcSrc = 2 ! Gosub L_10320 ! using INV CLASS (#2)
+			pw.EOQOrdQty = pw.UsgRate * pw.InvtClass1
+			If pw.InvtClass1 = 13 Let pw.EOQOrdQty = 0 !\ Goto L_10350
+		Endif
+		If pw.CalcSrc = 3 ! Gosub L_10360 ! using SEASONAL (#3)
+			! does same as L_10100 ! per 369 (first line is Goto L_10100)
+		Endif
+		! if calcsrc=4 or 5 ! IT IS USER MAINTAINED
+		If pw.CalcSrc = 6 ! Gosub L_10460 ! using MIN/MAX (#6)
+			pw.EOQOrdQty = pw.MaxStkLvl - (pw.QtyOnHand + pw.QtyOnPO - pw.QtyOnOrd - QBO + QTYTR)
+			If pw.MinStkLvl < (pw.QtyOnHand + pw.QtyOnPO - pw.QtyOnOrd - QBO) + QTYTR Let pw.EOQOrdQty = 0 ! \ Goto L_10510
+			If pw.EOQOrdQty < 0 Let pw.EOQOrdQty = 0 ! L_10510
+		Endif
+		X3=PW.EOQOrdQty ! Gosub L_10530
+	    pw.EOQOrdQty=POQRnd(x3)
+		if pw.EOQOrdQty<0 let pw.EOQOrdQty=0
+	End If ! of DNR or normal
+	! do converts L_8150
+	If Not(DPUNIT) Let DPUNIT = PR.UMPurchDefault
+	CNVTU[0] = 0;CNVTU[1] = DPUNIT;CNVTU[2] = 1
+	For X = 0 To 16
+	  If P9$[20,20] = "F" If X >= 15 Let CNVTU[1] = -1
+	  rem if custom_customer$ = "JACKSON" LET CNVTU[1] = DPUNIT 
+	  rem per Mike Platt task 52027 all disable for all fine paper 
+	  LET CNVTU[1] = DPUNIT 
+	   REM JACKSON DOES NOT WANT TO SEE IT IN CWT
+	  If X < 13 Let CNVTU[2] = 1 Else Let CNVTU[2] = 2
+	  If x=0 let CNVTA=pw.QtyOnHand
+	  ! CNVTA = W3[X]
+	  If x=1 let CNVTA=pw.QtyOnPO
+	  If x=2 let CNVTA=pw.QtyOnOrd
+	  If x=3 let CNVTA=pw.MinStkLvl
+	  If x=4 let CNVTA=pw.MaxStkLvl
+	  If x=5 let CNVTA=pw.LinePt
+	  If x=6 let CNVTA=pw.OrdPt
+	  If x=7 let CNVTA=pw.SafetyStkQty
+	  If x=8 let CNVTA=pw.Demand
+	  If x=9 let CNVTA=pw.UsgRate
+	  If x=10 let CNVTA=pw.EoqNoRnding
+	  If x=11 let CNVTA=pw.EOQOrdQty
+	  If x=12 let CNVTA=pw.LastPhysQty
+	  If x=13 let CNVTA=pw.KCost
+	  If x=14 let CNVTA=pw.CostLoad2
+	  If x=15 let CNVTA=pw.CostAvg
+	  If x=16 let CNVTA=pw.CostLastPo
+	  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	  DW3[X] = AMOUNT
+	Next X
+	CNVTA = pw.AvgInvtQty;CNVTU[0] = 0;CNVTU[1] = DPUNIT;CNVTU[2] = 5
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	DWHMISC2[5] = AMOUNT
+	If DPUNIT > 0 Mat Read #ccc,DPUNIT,10;PUNIT$;
+	If DPUNIT = -1 Let PUNIT$ = " CWT"
+	If DPUNIT = -3 Let PUNIT$ = "LB  "
+	DMNDDAY = FNR(DW3[9] / MTHDAYS)
+	! L_5680
+	For I = 0 To 9 \ T1[I] = 0 \ Next I
+	If MANTURNS Let T1[0] = MANTURNS
+	If AVGINV Let T1[1] = AVGINV
+	If Not(AVGINV) Let T1[1] = DWHMISC2[5]
+	If Not(MANTURNS) Let T1[0] = pw.InvtTurns ! WHMISC2[2]
+	If T1[0] Let T1[2] = FNR(12 / T1[0])
+	! ok - 369 starts display - so we start load
+	List$[0]=bsdel$,"MAINDATA",fdel$
+	Webstr$="ID",fdel$,"WHSE",fdel$,"DESC1",fdel$,"DESC2",fdel$,"VENDITEM",fdel$
+	webstr$=webstr$,"UM",fdel$,"LASTPOCOST",fdel$,"CSTUM",fdel$,"AVGCOST",fdel$
+	webstr$=webstr$,"VENDOR",fdel$,"VENDORNAME",fdel$,"LDTMMTHS",fdel$
+	Webstr$=webstr$,"LDTMDAYS",fdel$,"TURNS",fdel$
+	webstr$=webstr$,"AVGINVTY",fdel$,"SFTYSTK",fdel$,"SSTKPCT",fdel$
+	webstr$=webstr$,"ORDPT",fdel$,"LINEPT",fdel$,"EOQTY",fdel$,"DEMAND",fdel$
+	webstr$=webstr$,"DMNDDAY",fdel$,"REVIEWPER",fdel$,"CARRYCOST",fdel$
+	webstr$=webstr$,"FIXEDPOCOST",fdel$,"AVAILABLE",fdel$,"ONHAND",fdel$
+	webstr$=webstr$,"ONORDER",fdel$,"ONPO",fdel$,"ONTRANSFER",fdel$
+	webstr$=webstr$,"ONBO",fdel$,"SEASONAL",fdel$,"INVTCLASS",fdel$
+	webstr$=webstr$,"DATELASTPHYS",fdel$,"DATELASTOOSTK",fdel$
+	webstr$=webstr$,"TMSOOSTK",fdel$,"ROI",fdel$,"ADJMARGIN",fdel$
+	webstr$=webstr$,"CALCTYPE",fdel$,"CTDESC",fdel$,"MINSTK",fdel$
+	webstr$=webstr$,"MAXSTK",fdel$,"MNSTKMTH",fdel$,"MNSTKDAY",fdel$
+	webstr$=webstr$,"MXSTKMTH",fdel$,"MXSTKDAY",fdel$,"ADDLMIN",fdel$
+	webstr$=webstr$,"DATELASTRCPT",fdel$,"DNRMESSG",fdel$
+	webstr$=webstr$,"MTHSEXIST",fdel$,"GRSMARG",fdel$,"AVGINTVAL",fdel$
+	List$[1]=webstr$
+	Webstr$=Prod$,fdel$,Str$(Whse),fdel$,RTrim$(pr.Desc1$),fdel$
+	webstr$=webstr$,RTrim$(pr.Desc2$),fdel$,RTrim$(pw.VendPN$),fdel$
+	webstr$=webstr$,PUnit$,fdel$
+	tmp$=DW3[16] using PMask$ \ if cost_lev[2]=0 let tmp$=""
+	webstr$=webstr$,LTrim$(tmp$),fdel$ ! last po cost
+	pum$=punit$ 
+	rem removed per Mike Platt task 52027
+	rem if P9$[20,20]="F" 
+	rem if custom_customer$ <>"JACKSON"
+	rem let pum$="CWT"
+	rem ENDIF
+	rem ENDIF
+	webstr$=webstr$,pum$,fdel$ ! cost um
+	tmp$=DW3[15] using PMask$ \ if cost_lev[0]=0 let tmp$=""
+	webstr$=webstr$,LTrim$(tmp$),fdel$ ! avg cost
+	Searkey$=pw.vend using "######"
+	VRR=filegeta80vm(e$,VMC,"=",1,SearKey$,vend.)
+	if VRR<0 clear vend.
+	webstr$=webstr$,Searkey$,fdel$,RTrim$(vend.name$),fdel$
+	webstr$=webstr$,LTrim$(pw.AvgLeadTime using QMask$),fdel$
+	tmp3=fnr(pw.AvgLeadTime*MthDays)
+	webstr$=webstr$,LTrim$(tmp3 using QMask$),fdel$ ! lead time in days
+	webstr$=webstr$,LTrim$(T1[0] using QMask$),fdel$ ! turns
+	webstr$=webstr$,LTrim$(T1[1] using QMask$),fdel$ ! avg inv
+	webstr$=webstr$,LTrim$(DW3[7] using QMask$),fdel$ ! sstk
+	webstr$=webstr$,Ltrim$(pw.SafetyStk using QMask$),fdel$ ! sstk %
+	webstr$=webstr$,LTrim$(DW3[6] using QMask$),fdel$ ! ordpt
+	webstr$=webstr$,LTrim$(DW3[5] using QMask$),fdel$ ! linept
+	webstr$=webstr$,LTrim$(DW3[11] using QMask$),fdel$ ! EOQ
+	webstr$=webstr$,LTrim$(DW3[9] using QMask$),fdel$ ! demand
+	webstr$=webstr$,LTrim$(DMNDDAY using QMask$),fdel$ ! demand/day
+	webstr$=webstr$,LTrim$(pw.RvwPer using QMask$),fdel$ ! rev per
+	Webstr$=webstr$,LTrim$(pw.KCost using PMask$),fdel$ ! carry cost% 
+	webstr$=webstr$,LTrim$(FIXPO using PMask$),fdel$ ! fixed cost
+	AVAIL = DW3[0] - DW3[2]
+	If P9$[28,28] = "Y" Let AVAIL = AVAIL + DW3[1]
+	webstr$=webstr$,LTrim$(AVAIL using QMask$),fdel$ ! avail
+	webstr$=webstr$,LTrim$(DW3[0] using QMask$),fdel$ ! on hand
+	webstr$=webstr$,LTrim$(DW3[2] using QMask$),fdel$ ! on ord
+	webstr$=webstr$,LTrim$(DW3[1] using QMask$),fdel$ ! on po
+	webstr$=webstr$,LTrim$(DSP_TRQTY using QMask$),fdel$ ! on trans
+	webstr$=webstr$,LTrim$(DQBO using QMask$),fdel$ ! on bo
+	tmp$="N" \ if pw.SeasonalFlag=1 let tmp$="Y"
+	webstr$=webstr$,tmp$,fdel$ ! seasonal
+	webstr$=webstr$,Str$(pw.InvtClass1),fdel$ ! inventory class
+	tmp$="" \ if pw.LastPhysDate let tmp$=PDate$(pw.LastPhysDate)
+	webstr$=webstr$,tmp$,fdel$ ! last phys
+	tmp$="" \ if pw.DateOutStk let tmp$=PDate$(pw.DateOutStk)
+	webstr$=webstr$,tmp$,fdel$ ! last out of stock
+	webstr$=webstr$,Str$(pw.YtdOutOfStk),fdel$ ! times out of stk
+	webstr$=webstr$,Ltrim$(ROI Using QMask$),"%",fdel$
+	webstr$=webstr$,LTrim$(ADJUST_MARGIN Using QMask$),"%",fdel$
+	x1=pw.CalcSrc \ if x1<1 let x1=1
+	if pw.SeasonalFlag let x1=3
+	tmp$=CALC$[x1 * 10 - 9,x1 * 10]
+	Webstr$=webstr$,Str$(X1),fdel$,tmp$,fdel$ ! calc type/desc
+	webstr$=webstr$,LTrim$(DW3[3] using QMask$),fdel$ ! min
+	webstr$=webstr$,LTrim$(DW3[4] using QMask$),fdel$ ! max
+	If pw.MinDaysMths>=1 ! months
+		webstr$=webstr$,LTrim$(pw.MinDaysMths Using QMask$),fdel$ ! min mth
+		webstr$=webstr$,fdel$ ! min day
+	Else ! days
+		X2=ABS(pw.MinDaysMths)
+		if x2>0 let x2=Int((MTHDAYS * X2) + .5)
+		webstr$=webstr$,fdel$ ! min mth
+		webstr$=webstr$,LTrim$(X2 using QMask$),fdel$ ! min day
+	Endif
+	If pw.MaxDaysMths>=1 ! months
+		webstr$=webstr$,LTrim$(pw.MaxDaysMths Using QMask$),fdel$ ! max mth
+		webstr$=webstr$,fdel$ ! max day
+	Else ! days
+		X2=ABS(pw.MaxDaysMths)
+		if x2>0 let x2=Int((MTHDAYS * X2) + .5)
+		webstr$=webstr$,fdel$ ! max mth
+		webstr$=webstr$,LTrim$(X2 using QMask$),fdel$ ! max day
+	Endif
+	If pw.LeadTimeUsedMin ! WHFUT[2]
+	  x3=MTHDAYS * pw.LeadTimeUsedMin ! WHFUT[2]
+	  Webstr$=webstr$," + ",LTrim$(X3 using QMask$)," days alt",fdel$
+	Else ! none
+		webstr$=webstr$,fdel$ ! none
+	End If 
+	tmp$="" \ if pw.LastRecptDate let tmp$=PDate$(pw.LastRecptDate)
+	webstr$=webstr$,tmp$,fdel$ ! last receipt
+	tmp$="" \ if pw.DNReordFlg=1 let tmp$="DO NOT REORDER"
+	if pw.DNReordFlg=2 let tmp$="REORDER IF THERE IS A SALES ORDER"
+	webstr$=webstr$,tmp$,fdel$ ! DNR Message
+	webstr$=webstr$,Str$(MONTHS_EXIST),fdel$
+	webstr$=webstr$,LTrim$(GROSS_MARGIN using QMask$),"%",fdel$ !
+	webstr$=webstr$,LTrim$(pw.AvgInvtVal using QMask$),fdel$ ! avg inv val
+	List$[2]=webstr$
+	List$[3]=esdel$
+   SndPWDone: ! finished caller does addtostr
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndPWData
+!----------------------------------------------------------------------------
+Sub GET_PWSALES()
+! Rem accumulate some stuff
+ Try
+	dim K4$[60]
+	Dim 1%,Loop0
+	dim 3%,PWS[12,2],PWSL[12,2]
+	Dim 3%,PWOH[12],PWOHL[12],PWAVG[12],PWAVGL[12]
+	COST_GOODS_SOLD = 0
+	SALES_DOLLARS = 0
+	AVG_INVENT_VAL = 0
+	MONTHS_EXIST = 0
+	Chan=OpenFile(-9963,IntCo) \ if Chan=-1 error 42
+	K4$ = " ",K4$ \ K4$[1,12] = prod$
+	K4$[13,14] = WHse Using "##"
+	Search #chan,2,1;K4$,R33,E ! \ If E > 1 Gosub ERR_SEARCH
+	If Not(E)
+	  Mat Read #Chan,R33,14;PWS
+	  Mat Read #Chan,R33,248;PWSL
+	  Mat Read #Chan,R33,482;PWOH;
+	  Mat Read #Chan,R33,560;PWOHL;
+	  Mat Read #Chan,R33,638;PWAVG;
+	  Mat Read #Chan,R33,716;PWAVGL;
+	  Read #Chan,R33,1158;MONTHS_EXIST;
+	  For Loop0 = 1 To 12
+		If Loop0 = ARMONTH
+		  COST_GOODS_SOLD = COST_GOODS_SOLD + (PWSL[Loop0,0] * PWAVGL[Loop0])
+		  SALES_DOLLARS = SALES_DOLLARS + PWSL[Loop0,1]
+		  AVG_INVENT_VAL = AVG_INVENT_VAL + (PWOHL[Loop0] * PWAVGL[Loop0])
+		Else 
+		  COST_GOODS_SOLD = COST_GOODS_SOLD + (PWS[Loop0,0] * PWAVG[Loop0])
+		  SALES_DOLLARS = SALES_DOLLARS + PWS[Loop0,1]
+		  AVG_INVENT_VAL = AVG_INVENT_VAL + (PWOH[Loop0] * PWAVG[Loop0])
+		End If 
+	  Next Loop0
+	End If 
+	AVG_INVENT_VALTOT = AVG_INVENT_VAL
+	If Not(MONTHS_EXIST) Let MONTHS_EXIST = 1
+	AVG_INVENT_VAL = AVG_INVENT_VAL / MONTHS_EXIST
+	Try Close #Chan  Else Rem
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndPWData
+!----------------------------------------------------------------------------
+Sub QtyTrfBO()
+! get qty on transfer
+  Try
+    Dim K11$[60],k12$[60],K14$[60]
+	Dim J$[60],K8$[60]
+	Dim 1%,OL1[3],TRL1[10],TR1[13],ROL3[3],H4[2],OWHT[1]
+	Dim 2%,OL2[3],H5[16],OLL2[1],ROL2[1],ROL4[3]
+	Dim 3%,OL3[5],TRL3[21],P3[4],ROL7[12]
+	If Not(DPUNIT) Let DPUNIT = Pr.UMPurchDefault
+	! #12=OrdLot-2320, #11=OrdH-1840
+	OHC=openfile(-1840,IntCo) \ if ohc=-1 error 42
+	OLC=openfile(-2320,IntCo) \ if olc=-1 error 42
+	QTYTR = 0
+	goto L_11170 ! use order lines! instead of sordlot
+	L_11000: Rem on transfer
+	K12$ = " ",K12$ \ QTYTR = 0
+	K12$[1,12] = Prod$
+	L_11030: Search #OLC,3,1;K12$,R[12],E \ If E<>0 Goto L_11170
+	!If E Gosub ERR_SEARCH
+	If K12$[1,12] <> Prod$ Goto L_11170
+	Mat Read #OLC,R[12],36;OL1;
+	If OL1[2] <> WHse Goto L_11030
+	If OL1[1] <> 2 Goto L_11030
+	Mat Read #OLC,R[12],60;OL3; \ If Not(OL3[4]) Goto L_11030
+	Mat Read #OLC,R[12],44;OL2;
+	K11$ = " ",K11$ \ K11$[1,6] = OL2[2] Using "######"
+	K11$[7,12] = OL2[0] Using "######"
+	Search #OHC,2,2;K11$,R[11],E \ If E Goto L_11030
+	Mat Read #OHC,R[11],104;H5; \ If H5[7] <> 16 Goto L_11030
+	QTYTR = QTYTR + OL3[4]
+	Goto L_11030
+	L_11170: Rem done with sordlot - do order lines
+	Close #OLC ! swith oto order lines ,#OHC
+	OLC=openfile(-1888,IntCo) \ if olc=-1 error 42
+	K12$=" ",k12$
+	K12$=ProdRec Using "######"
+	nxtot16line: ! 
+	Search #OLc,3,2;k12$,R[12],E \ if e goto OLOT16Done
+	X2=k12$[1,6] \ if x2<>prodrec goto OLOT16Done
+	Mat read #OLC,R[12],0;ROL2;
+	Mat read #OLC,R[12],8;ROL3;
+	mat read #OLC,R[12],16;ROL4;
+	mat read #OLC,R[12],168;ROL7;
+	!if ROL3[0]=1 goto nxtot16line
+	!if ROL3[1]=0 goto nxtot16line ! no stk update
+	for x=1 to 7 ! same as 397/218
+		K11$=" ",K11$
+		k11$[1,2]=x using "##"
+		k11$[3]=ROL2[1] using "######"
+		Search #OHC,2,1;K11$,R[11],E
+		If not(e)
+			mat read #OHC,R[11],78;H4;
+			Mat Read #OHC,R[11],104;H5;
+			mat read #OHC,R[11],486;OWHT;
+			If H5[7] <> 16 Goto nxtot16line
+			If ROL4[3]<1 Or ROL4[3]>99 Let ROL4[3]=H4[2]
+			If ROL4[3]<>WHSE and H5[11] <> WHse Goto nxtot16line ! only transfer in
+			if (OWHT[0]=1 and whse=H5[11]) ! was or OWHT[0]=0 ! not auth or auth & = to
+				x1=-1 \ if whse=H5[11] let x1=1
+				QTYTR = QTYTR + (X1*(ROL7[2]-ROL7[0])) ! like 218/397
+			Endif
+			ST=9
+		Endif
+	Next x
+	goto nxtot16line
+	
+	OLOT16Done: !nxtot16line
+	close #OLC,#OHC
+	!goto L_11330 ! only use order lines (no also transh/l)
+	thc=openfile(-848,IntCo) \ if thc=-1 error 42
+	tlc=openfile(-1360,IntCo) \ if tlc=-1 error 42
+	K14$ = " ",K14$ \ K14$[1,12] = Prod$
+	L_11200: Search #tlc,3,2;K14$,R[14],E \ If E <>0 Goto L_11330
+	!If E Gosub ERR_SEARCH
+	If K14$[1,12] <> Prod$ Goto L_11330
+	Mat Read #tlc,R[14],0;TRL1;
+	If TRL1[0] = 2 Goto L_11200
+	If TRL1[7] <> 0 Goto L_11200
+	Mat Read #tlc,R[14],22;TRL3;
+	Mat Read #thc,TRL3[1],0;TR1;
+	If COMP <> TR1[4] Goto L_11200
+	If W1 <> TR1[5] Goto L_11200
+	If TR1[1] <> 2 Goto L_11200
+	QTYTR = QTYTR + TRL3[3]
+	Goto L_11200
+	L_11330: CNVTU[0] = 0;CNVTU[1] = DPUNIT;CNVTU[2] = 1
+	CNVTA = QTYTR 
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	DSP_TRQTY = AMOUNT
+	!Return
+	Close #tlc,#thc
+	L_5220: Rem "=================================== calc qty back-ordered
+	!#8=sprodlot
+	SLC=openfile(-2528,Intco) \ if slc=-1 error 42
+	QBO = 0;DQBO = 0
+	K8$ = " ",K8$;K8$[1,12] = prod$;K8$[13,14] = whse Using "##"
+	J$ = K8$
+	L_5250: Search #SLC,3,4;K8$,R[8],E ! \ If E > 2 Gosub ERR_SEARCH
+	If E Goto L_5310
+	If J$[1,14] <> K8$[1,14] Goto L_5310
+	Mat Read #SLC,R[8],82;P3;
+	QBO = QBO + P3[4]
+	Goto L_5250
+	L_5310: !
+	CNVTU[0] = 0;CNVTU[1] = DPUNIT;CNVTU[2] = 1
+	CNVTA = QBO
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	DQBO = AMOUNT
+	Close #SLC
+	!Return 
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! QtyTrfBO
+!----------------------------------------------------------------------------
+Function POQRnd(X3)
+! round x3 up to full unit & return ! x3=w3[11] on 369 (EOQQty)
+  Try
+	Dim 1%,PFU1[20]
+	Dim 3%,PFU2[6],Factor
+	Mat read #PRC,ProdRec,512;PFU1;
+	Mat Read #PRC,ProdRec,554;PFU2;
+	For UNT = 1 To 7
+	  If PFU1[UNT] = PFU1[10] Goto L_10580
+	Next UNT
+	FACTOR = 1 \ Goto L_10600
+	L_10580: If PFU1[UNT] = -1 Or PFU1[UNT] = -3 Let FACTOR = 1 \ Goto L_10600
+	FACTOR = PFU2[UNT - 1] \ If Not(FACTOR) Let FACTOR = 1
+	L_10600: If Fra(X3 / FACTOR) >= .5
+	  X3 = Int(1 + (X3 / FACTOR)) * FACTOR
+	End If 
+	If Fra(X3 / FACTOR) < .5
+	  X3 = ((Int(X3 / FACTOR)) * FACTOR)
+	End If
+	tmp3=X3
+  else
+    include "src/callsuberr.inc"
+  end try
+end function tmp3 ! POQRnd
+! 
+!--------------------------------------------------------------------
+Sub SndPWUsage()
+! send up the usages MX369B
+  Try
+	Dim 1%,BOYMONTH,FMONTH[30],W1[2]
+	Dim 2%,D8,CYEAR,W2[9]
+	Dim 3%,T1[9],A3,W5[25],W9[25],LV,Z5[25],Z9[25]
+	Dim M1$[40],ZH3$[25],WH3$[24],Z$[10]
+	R5=PWRec
+	call dxget("UM",tmp$)
+	if rtrim$(tmp$)<>""
+		R = getumrec(e$,ccc,tmp$,IntCo,PR.)           
+		If R > 0 Let tmp$ = Str$(R)
+	Endif ! send null/blank??
+	umrec=tmp$
+	if umrec<=0 let umrec=pr.UMPurchDefault
+	R=ChkPrdUM(e$,umrec,IntCo,Pr.)
+	if r=0 ! not found
+	  returnstatus=0
+	  message$="UM not defined"
+	  Goto SndPWUDone
+	Endif
+	DPUNIT=umrec
+	READ #CTLC,51,74;BOYMONTH;
+	READ #CTLC,0,120;ARMONTH;
+	LET M1$="JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC"
+	READ #CTLC,3,172;D8; \ LET Z$=D8 USING "######";CYEAR=Z$[1,2]
+	IF CYEAR<68 LET CYEAR=CYEAR+2000 ELSE  LET CYEAR=CYEAR+1900
+	FOR X=0 TO 25 \ LET FMONTH[X]=X \ NEXT X
+	LET X7=BOYMONTH;X8=0;X9=0
+	FOR I=1 TO 12
+	  IF NOT(X9) LET FMONTH[I]=X7 ELSE  LET FMONTH[I]=0-X7
+	  IF NOT(X8) LET FMONTH[I+13]=X7+13 ELSE  LET FMONTH[I+13]=X7
+	  IF X7=ARMONTH LET X8=1;X9=1
+	  LET X7=X7+1 \ IF X7=13 LET X7=1
+	NEXT I 
+	REM "============ read whse record and continue                  
+	MAT  READ #PWC,R5,32;W1;
+	MAT  READ #PWC,R5,228;W5;
+	MAT  READ #PWC,R5,540;W9;
+	MAT  READ #PWC,R5,756;WH3$;
+	REM MOVE INTO TEMP VARS (fmonth[x] holds pointer to month# actual
+	LET ZH3$=" ",ZH3$
+	FOR X=0 TO 25
+	  LET Z5[X]=0;Z9[X]=0
+	  IF FMONTH[X]>=0 ! if <0 it's future SO NO SEND
+		LET Z5[X]=W5[FMONTH[X]];Z9[X]=W9[FMONTH[X]]
+		IF X=0 OR X=13 GOTO L_1840:
+		LET X1=FMONTH[X] \ IF X1<1 OR X1>25 GOTO L_1840:
+		IF X1>12 LET X1=X1-1
+		LET ZH3$[X,X]=WH3$[X1,X1]
+	L_1840: ENDIF
+	Next X
+	! L_1900 / L_8500
+	MODE=1
+	IF NOT(DPUNIT) LET DPUNIT=pr.UMPurchDefault ! PFU1[10]
+	LET CNVTU[0]=0;CNVTU[1]=DPUNIT;CNVTU[2]=1
+	IF MODE=2 LET CNVTU[0]=DPUNIT;CNVTU[1]=0
+	FOR X=0 TO 25
+	  IF MODE=1
+		LET CNVTA=Z5[X]
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET Z5[X]=AMOUNT
+	  Endif
+	  LET CNVTA=Z9[X]
+	  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	  LET Z9[X]=AMOUNT
+	NEXT X
+	IF DPUNIT>0 MAT  READ #ccc,DPUNIT,10;PUNIT$;
+	IF DPUNIT=-1 LET PUNIT$="CWT"
+	IF DPUNIT=-3 LET PUNIT$="LB  "
+	!L_5000: REM "========== display data 
+	Clear List$[]
+	List$[0]=bsdel$,"PRODWHSEINFO",fdel$
+	Webstr$="ID",fdel$,"WHSE",fdel$,"DESC1",fdel$,"DESC2",fdel$,"UM",fdel$
+	List$[1]=webstr$
+	List$[2]=Prod$,fdel$,Str$(WHSE),fdel$,RTrim$(pr.desc1$),fdel$,RTrim$(pr.Desc2$),fdel$,PUnit$,fdel$
+	List$[3]=esdel$
+	call Addtostr(e$,rstr$,List$[]) ! send as 2 sections
+	Clear list$[]
+	List$[0]=bsdel$,"PRODWHSEUSAGE",fdel$
+	webstr$="UMTH",fdel$,"MONTH",fdel$,"YEAR",fdel$,"USAGE",fdel$,"ADJUSTED",fdel$,"REASON",fdel$
+	List$[1]=webstr$
+	row=2
+	tmpcnt=maxcnt
+	FOR PMONTH=1 TO 12 ! first this year
+	  LET PMNTH=FMONTH[pMONTH];PMNTH1=FMONTH[pMONTH+13];NOMTH=0;NOMTH1=0
+	  IF PMNTH1<0 LET PMNTH1=ABS(PMNTH1);NOMTH1=1                     
+	  IF PMNTH<0 LET PMNTH=ABS(PMNTH);NOMTH=1                         
+	  webstr$=Str$(FMONTH[pMONTH]),fdel$ ! id for submit
+	  Webstr$=webstr$,M1$[(PMNTH-1)*3+1,(PMNTH-1)*3+3],fdel$
+	  !tmp1=CYEAR
+	  !if boymonth<>1 if pmnth>Armonth let tmp1=cyear ! -1 (STILL SAME YEAR?)
+	  !if boymonth<>1 if pmnth<=armonth if pmnth<boymonth let tmp1=cyear+1 ! (NEXT YEAR?)
+	  !If BOYMONTH <> 1 If pmnth > ARMONTH Let tmp1 = CYEAR - 1 ! (STILL SAME Y
+	  !If BOYMONTH <> 1 And nomth Let tmp1 = CYEAR ! this year new bucket
+	  !if BOYMONTH <> 1 AND pmnth<=armonth let tmp1=CYEAR+1
+	  !Webstr$=webstr$,Str$(tmp1),fdel$ !! need year?
+	  tmp$="CURRENT" !\ if boymonth<>1 let tmp$="CFYEAR"
+	  Webstr$=webstr$,tmp$,fdel$
+	  webstr$=webstr$,LTrim$(Z5[PMONTH] USING "--------.##"),fdel$
+	  tmp$=""
+	  !IF Z9[PMONTH] IF Z9[PMONTH]<>Z5[PMONTH] tmp$=LTrim$(Z9[PMONTH]  USING "--------.##")
+	  tmp$=LTrim$(Z9[PMONTH]  USING "--------.##")
+	  Webstr$=webstr$,tmp$,fdel$
+	  webstr$=webstr$,ZH3$[PMONTH,PMONTH],fdel$
+	  List$[row]=webstr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	NEXT PMONTH
+	FOR PMONTH=1 TO 12 ! then last year
+	  LET PMNTH=FMONTH[pMONTH];PMNTH1=FMONTH[pMONTH+13];NOMTH=0;NOMTH1=0
+	  IF PMNTH1<0 LET PMNTH1=ABS(PMNTH1);NOMTH1=1                     
+	  IF PMNTH<0 LET PMNTH=ABS(PMNTH);NOMTH=1                         
+	  webstr$=Str$(FMONTH[pMONTH+13]),fdel$ ! id for submit
+	  webstr$=webstr$,M1$[(PMNTH-1)*3+1,(PMNTH-1)*3+3],fdel$
+	  !tmp1=CYEAR-1
+	  !if boymonth<>1 if pmnth>Armonth let tmp1=cyear-1 ! -2 (still same
+	  !if boymonth<>1 if pmnth<=armonth if pmnth<boymonth let tmp1=cyear ! -1 (this year?)
+	  
+	  !tmp1 = CYEAR - 1                                                       
+	  !If BOYMONTH <> 1 If pmnth1 > 12 Let tmp1 = CYEAR - 2 ! (still same     
+	  !If BOYMONTH <> 1 If pmnth <= ARMONTH Let tmp1 = CYEAR - 1 ! (this year?
+	  !Webstr$=webstr$,Str$(tmp1),fdel$ !! need year?
+	  tmp$="PREVIOUS" ! \ if boymonth<>1 let tmp$="LFYEAR"
+	  Webstr$=webstr$,tmp$,fdel$
+	  webstr$=webstr$,LTrim$(Z5[PMONTH+13] USING "--------.##"),fdel$
+	  tmp$=""
+	  ! IF Z9[PMONTH+13] IF Z9[PMONTH+13]<>Z5[PMONTH+13] tmp$=LTrim$(Z9[PMONTH+13] USING "--------.##")
+	  tmp$=LTrim$(Z9[PMONTH+13] USING "--------.##")
+	  Webstr$=webstr$,tmp$,fdel$
+	  webstr$=webstr$,ZH3$[PMONTH+13,PMONTH+13],fdel$
+	  List$[row]=webstr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	NEXT PMONTH
+	List$[row]=esdel$
+	SndPWUDone: ! finished - caller to addtostr
+	! call programdump("tmp/iss369u!","") ! dump vars
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndPWUsage
+!----------------------------------------------------------------------------
+Sub SndPrcBreak()
+! submit qty/price/um's and send back details "pricebreak" call on PM
+  Try
+	Dim 1%,PFU1[20],PO_QTY_UOM[10],INCOMING_COST_UOM[10]
+	Dim 3%,PFU2[6],PO_QTY[10],INCOMING_COST[10]
+	Dim DFLTUNIT$[4]
+	FOR LOOP0=1 TO 12
+	  LET ANNUAL_WORK_DAYS=ANNUAL_WORK_DAYS+BDAYS[LOOP0]
+	NEXT LOOP0
+	if pw.UsgRate<=0
+		returnstatus=0
+		Message$="There is no demand for this product"
+		goto PBDone
+	Endif
+	Mat read #PRC,ProdRec,512;PFU1;
+	Mat Read #PRC,ProdRec,554;PFU2;
+	IF NOT(BDAYS[ARMONTH]) LET BDAYS[ARMONTH]=20
+	LET DEMAND_DAY=(pw.UsgRate/BDAYS[ARMONTH])
+	LET FACTOR=1
+	IF PFU1[0]<>PFU1[10]
+	  FOR LOOP0=1 TO 7
+		IF PFU1[LOOP0]=PFU1[10]
+		  LET FACTOR=PFU2[LOOP0-1]
+		ENDIF
+	  NEXT LOOP0
+	ENDIF
+	LET DISPLAY_DEMAND_DAY=DEMAND_DAY/FACTOR
+	LET CNVTA=pr.CostPO
+	if p9$[32,32]="Y" and pw.CostLastPo>0 let CNVTA=pw.CostLastPo
+	CNVTU[0]=0;CNVTU[1]=PFU1[10];CNVTU[2]=2 
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	LET PROD_PO_COST=CNVTA
+	LET REC_CCODE=PFU1[10] 
+	PUM$=XUNIT$(rec_ccode,ccc)
+	LET ADJUST_MARGIN=PW.AdjMarg*100
+	LET DFLTUNIT$=PUM$
+	! send product info now
+	Clear List$[]
+	List$[0]=bsdel$,"PRODWHINFO",fdel$
+	Webstr$="ID",fdel$,"WHSE",fdel$,"DESC1",fdel$,"DESC2",FDEL$
+	webstr$=webstr$,"DEMANDDAY",fdel$,"UM",fdel$
+	webstr$=webstr$,"POCOST",fdel$,"ADJMARGIN",fdel$
+	List$[1]=webstr$
+	Webstr$=Prod$,fdel$,Str$(WHSE),fdel$
+	webstr$=webstr$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.Desc2$),fdel$
+	Webstr$=webstr$,LTrim$(DISPLAY_DEMAND_DAY using PMask$),fdel$
+	webstr$=webstr$,PUM$,fdel$
+	webstr$=webstr$,LTrim$(PROD_PO_COST using PMask$),fdel$
+	webstr$=webstr$,LTrim$(ADJUST_MARGIN using QMask$),"%",fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	call addtostr(e$,rstr$,List$[])
+	! now get lines
+	For X=1 to 6
+		call dxget("QTY"+Str$(x),tmp$)
+		X3=tmp$
+		if X3<=0 goto NoQty ! no qty - bypass
+		PO_QTY[x]=x3
+		call dxget("QTYUM"+Str$(x),tmp$)
+		if Trim$(tmp$)="" let tmp$=PUM$
+		R = getumrec(e$,ccc,tmp$,IntCo,PR.)           
+		If R > 0 Let tmp$ = Str$(R)
+		umrec=tmp$
+		if umrec<=0 let umrec=pr.UMPurchDefault
+		R=ChkPrdUM(e$,umrec,IntCo,Pr.)
+		if r=0 let umrec=pr.UMPurchDefault ! not found
+		PO_QTY_UOM[x]=UMRec
+		call dxget("POCOST"+Str$(X),tmp$)
+		INCOMING_COST[x]=tmp$
+		If INCOMING_COST[x]<=0
+			let PO_QTY[x]=0 \ goto NOQty ! zero=bypass
+			let INCOMING_COST[x]=PROD_PO_COST ! or zero=default!
+		Endif
+		call dxget("COSTUM"+Str$(X),tmp$)
+		if Trim$(tmp$)="" let tmp$=PUM$
+		R = getumrec(e$,ccc,tmp$,IntCo,PR.)           
+		If R > 0 Let tmp$ = Str$(R)
+		umrec=tmp$
+		if umrec<=0 let umrec=pr.UMPurchDefault
+		R=ChkPrdUM(e$,umrec,IntCo,Pr.)
+		if r=0 let umrec=pr.UMPurchDefault ! not found
+		INCOMING_COST_UOM[x]=UMREc
+	  NOQTY: ! no qty
+	Next X
+	! do calcs & send
+	Clear List$[]
+	List$[0]=bsdel$,"PRCBRKDATA",fdel$
+	webstr$="QTY",FDEL$,"QTYUM",FDEL$,"POCOST",FDEL$,"COSTUM",fdel$
+	webstr$=webstr$,"DAYSUPP",fdel$,"CARRYCOST",fdel$,"TRUECOST",fdel$
+	webstr$=webstr$,"EXTCOST",fdel$,"EXTCARRY",fdel$,"EXTTRUE",fdel$
+	webstr$=webstr$,"QTYUMID",fdel$,"COSTUMID",fdel$
+	List$[1]=webstr$
+	row=2;tmpcnt=maxcnt
+	For X=1 to 6
+		LineNumber=X
+		LET CNVTA=PO_QTY[LINENUMBER] 
+	    If CNVTA<=0 goto NOCQty
+		LET CNVTU[0]=PO_QTY_UOM[LINENUMBER]
+		LET CNVTU[1]=0
+		LET CNVTU[2]=1
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET PO_QTY=AMOUNT
+		LET CNVTA=INCOMING_COST[LINENUMBER]
+		If CNVTA<=0 goto NOCQty
+		LET CNVTU[0]=INCOMING_COST_UOM[LINENUMBER]
+		LET CNVTU[1]=0
+		LET CNVTU[2]=2
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET INCOMING_COST=AMOUNT
+		LET DAY_SUPP=0
+		LET DISPLAY_DAY_SUPP=0
+		IF DEMAND_DAY
+		  LET DAY_SUPP=PO_QTY/DEMAND_DAY
+		  LET DISPLAY_DAY_SUPP=FNR(DAY_SUPP)
+		ENDIF
+		LET ANNUAL_DEMAND=DEMAND_DAY*ANNUAL_WORK_DAYS
+		LET NUM_PURCH_YEAR=ANNUAL_DEMAND/PO_QTY
+		LET ANNUAL_REORDER_COST=NUM_PURCH_YEAR*FIXPO
+		LET ANNUAL_REORDER_COST_UNIT=0
+		IF ANNUAL_DEMAND
+		  LET ANNUAL_REORDER_COST_UNIT=ANNUAL_REORDER_COST/ANNUAL_DEMAND
+		ENDIF
+		LET EXT_INCOMING_COST=PO_QTY*INCOMING_COST
+		LET AVE_VALUE_INVT=EXT_INCOMING_COST/2
+		LET MONTHS_USAGE=0
+		LET MONTHS_USAGE=ANNUAL_DEMAND/12
+		IF MONTHS_USAGE
+		  LET MONTHS_SUPPLY=PO_QTY/MONTHS_USAGE
+		ENDIF
+		LET HOLD_COST_PCT=((pw.KCost/12)*MONTHS_SUPPLY)
+		LET NET_HOLDING_COST=AVE_VALUE_INVT*HOLD_COST_PCT
+		LET EXT_CARRY_COST=EXT_INCOMING_COST+NET_HOLDING_COST
+		LET CARRY_COST=FNN(EXT_CARRY_COST/PO_QTY)
+		LET TRUE_COST=FNN(CARRY_COST+ANNUAL_REORDER_COST_UNIT)
+		LET EXT_TRUE_COST=FNR(TRUE_COST*PO_QTY)
+		LET EXT_CARRY_COST=FNR(CARRY_COST*PO_QTY)
+		LET EXT_INCOMING_COST=FNR(EXT_INCOMING_COST)
+		LET CNVTA=CARRY_COST
+		LET CNVTU[0]=0;CNVTU[1]=INCOMING_COST_UOM[LINENUMBER];CNVTU[2]=2
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET CARRY_COST=Amount
+		LET CNVTA=TRUE_COST
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET TRUE_COST=Amount
+		Webstr$=LTrim$(PO_Qty[LINENUMBER] Using QMask$),fdel$
+		x1=PO_QTY_UOM[LINENUMBER]
+		tmp$=XUNIT$(x1,ccc)
+		webstr$=webstr$,tmp$,fdel$
+		webstr$=webstr$,LTrim$(INCOMING_COST[LINENUMBER] using PMask$),fdel$
+		x1=INCOMING_COST_UOM[LINENUMBER]
+		tmp$=XUnit$(x1,ccc)
+		webstr$=webstr$,tmp$,fdel$
+		Webstr$=webstr$,LTrim$(DISPLAY_DAY_SUPP USING "------#"),fdel$
+		Webstr$=webstr$,LTrim$(CARRY_COST using PMask$),fdel$
+		Webstr$=webstr$,LTrim$(TRUE_COST using PMask$),fdel$
+		Webstr$=webstr$,LTrim$(EXT_INCOMING_COST using QMask$),fdel$
+		Webstr$=webstr$,LTrim$(EXT_CARRY_COST using QMask$),fdel$
+		Webstr$=webstr$,LTrim$(EXT_TRUE_COST using QMask$),fdel$
+		webstr$=webstr$,Str$(PO_QTY_UOM[LINENUMBER]),fdel$
+		webstr$=webstr$,Str$(INCOMING_COST_UOM[LINENUMBER]),fdel$
+		List$[row]=webstr$
+		row=row+1
+	    if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	NOCQTY: ! no qty for calc - bypass
+	Next X
+	List$[row]=esdel$
+	PBDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndPrcBreak
+!----------------------------------------------------------------------------
+Sub SBMTUSAGE()
+! sending adjusted usage back
+  Try
+	Dim 3%,T1[9],A3,W5[25],W9[25],LV,Z5[25],Z9[25]
+	Dim M1$[40],ZH3$[25],WH3$[24],Z$[10]
+	
+	! we will get back from web ONLY THOSE THAT CHANGED
+	! as a list of UID's 1 thru max 24
+	R5=PWRec
+	MAT  READ #PWC,R5,540;W9
+	MAT  READ #PWC,R5,756;WH3$
+	call dxget("UM",tmp$)
+	if rtrim$(tmp$)<>""
+		R = getumrec(e$,ccc,tmp$,IntCo,PR.)           
+		If R > 0 Let tmp$ = Str$(R)
+	Endif ! could be null/blank?
+	umrec=tmp$
+	if umrec<=0 let umrec=pr.UMPurchDefault
+	R=ChkPrdUM(e$,umrec,IntCo,Pr.)
+	if r=0 ! not found
+	  returnstatus=0
+	  message$="UM not defined"
+	  Goto SWUDone
+	Endif
+	DPUNIT=umrec
+	if DPUNIT<=0 let DPUNIT=pr.UMPurchDefault
+	For X=1 to 24
+		call dxget("UMTH"+Str$(X),tmp$)
+		if Trim$(tmp$)="" goto UADone
+		X2=tmp$
+		if x2<1 or x2>25 or Fra(X2) goto UADone ! outta range - ignore
+		PMNTH=X2
+		call dxget("ADJUSTED"+Str$(X),tmp$)
+		x3=tmp$
+		if x3<0 let x3=0 ! neg usage allow?
+		Z9[pmnth]=x3
+		call dxget("REASON"+Str$(X),tmp$)
+		ZH3$[pmnth,pmnth]=tmp$+Blank$
+		LET CNVTU[0]=DPUNIT;CNVTU[1]=0;CNVTU[2]=1
+		Cnvta=Z9[pmnth]
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		W9[pmnth]=Amount
+		X1=PMNTH
+		IF X1>=13 LET X1=X1-1 ! NO 13 
+		wh3$[X1,X1]=zh3$[pmnth,pmnth]
+	UADone: ! done with this one
+	Next X
+	! all done
+	R5=PWRec
+	MAT WRITE #PWC,R5,540;W9;
+	MAT WRITE #PWC,R5,756;WH3$;
+	SWUDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SBMTUSAGE
+!----------------------------------------------------------------------------
+Sub HISTPWS()
+! send another Inquiry Screen
+  Try
+	dim K4$[60],m1$[40]
+	Dim 1%,Loop0
+	DIM 2%,SRVLVL[12,1],LSRVLVL[12,1]
+	dim 3%,PWS[12,2],PWSL[12,2],W5[25]
+	DIM 3%,PWFRCST[12],PWFRCSTL[12]
+	Dim 3%,PWOH[12],PWOHL[12],PWAVG[12],PWAVGL[12]
+	Chan=OpenFile(-9963,IntCo) \ if Chan=-1 error 42
+	LET M1$="JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC"
+	call dxget("UM",tmp$)
+	if rtrim$(tmp$)<>""
+		R = getumrec(e$,ccc,tmp$,IntCo,PR.)           
+		If R > 0 Let tmp$ = Str$(R)
+	Endif ! could be null/blank?
+	umrec=tmp$
+	if umrec<=0 let umrec=pr.UMPurchDefault
+	R=ChkPrdUM(e$,umrec,IntCo,Pr.)
+	if r=0 ! not found
+	  returnstatus=0
+	  message$="UM not defined"
+	  Goto PWHDone
+	Endif
+	DPUNIT=umrec
+	if DPUNIT<=0 let DPUNIT=pr.UMPurchDefault
+	PUM$=XUnit$(DPUNIT,ccc)
+	clear List$[]
+	Clear SList$[]
+	List$[0]=bsdel$,"PRODINFO",fdel$
+	webstr$="ID",fdel$,"WHSE",fdel$,"DESC1",fdel$,"DESC2",fdel$,"UM",fdel$
+	List$[1]=webstr$
+	webstr$=Prod$,fdel$,Str$(Whse),fdel$
+	webstr$=webstr$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.Desc2$),fdel$,PUM$,fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	Call addtostr(e$,rstr$,List$[]) ! add header
+	Clear List$[]
+	List$[0]=bsdel$,"TYINFO",fdel$
+	webstr$="MTH",fdel$,"ONHAND",fdel$,"AVGCOST",fdel$
+	webstr$=webstr$,"ESTUSAGE",fdel$,"ACTUSAGE",fdel$
+	webstr$=webstr$,"LNSORD",fdel$,"LNSSHIP",fdel$,"SRVLVL",fdel$
+	SList$[0]=bsdel$,"LYINFO",fdel$
+	List$[1]=webstr$ ! same format for both
+	SList$[1]=webstr$ ! last year same as this year
+	row=2;tmpcnt=maxcnt
+	row2=2;tmpcnt2=maxcnt
+	R5=PWRec
+	MAT  READ #PWC,R5,228;W5;
+	LET CNVTU[0]=0;CNVTU[1]=DPUNIT;CNVTU[2]=1
+	FOR X=0 TO 25
+	  LET CNVTA=W5[X]
+	  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	  LET W5[X]=AMOUNT
+	NEXT X
+	K4$ = " ",K4$ \ K4$[1,12] = prod$
+	K4$[13,14] = WHse Using "##"
+	Search #chan,2,1;K4$,R33,E ! \ If E > 1 Gosub ERR_SEARCH
+	If Not(E)
+	  Mat Read #Chan,R33,14;PWS
+	  Mat Read #Chan,R33,248;PWSL
+	  Mat Read #Chan,R33,482;PWOH;
+	  Mat Read #Chan,R33,560;PWOHL;
+	  Mat Read #Chan,R33,638;PWAVG;
+	  Mat Read #Chan,R33,716;PWAVGL;
+	  MAT  READ #Chan,R33,794;PWFRCST;
+	  MAT  READ #Chan,R33,872;PWFRCSTL;
+	  MAT  READ #Chan,R33,950;SRVLVL;
+	  MAT  READ #Chan,R33,1054;LSRVLVL;
+	  LET CNVTU[0]=0;CNVTU[1]=DPUNIT;CNVTU[2]=1
+	  AvgCost=Pr.CostAvg
+	  if p9$[32,32]="Y" and pw.CostAvg>0 let AvgCost=pw.CostAvg
+		FOR X=1 TO 12                                                    
+		  IF X=ARMONTH                                                   
+			LET PWOH[X]=pw.QtyOnHand ! W3[0]                                            
+			LET PWAVG[X]=AVGCOST                                         
+		  ENDIF                                                          
+		  LET CNVTU[0]=0;CNVTU[1]=DPUNIT;CNVTU[2]=1                        
+		  LET CNVTA=PWOH[X]
+		  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  LET PWOH[X]=AMOUNT        
+		  LET CNVTA=PWOHL[X]
+		  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  LET PWOHL[X]=AMOUNT      
+		  LET CNVTA=PWFRCST[X]
+		  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  LET PWFRCST[X]=AMOUNT  
+		  LET CNVTA=PWFRCSTL[X]
+		  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  LET PWFRCSTL[X]=AMOUNT
+		  LET CNVTU[0]=0;CNVTU[1]=DPUNIT;CNVTU[2]=2                        
+		  LET CNVTA=PWAVG[X]
+		  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  LET PWAVG[X]=AMOUNT      
+		  LET CNVTA=PWAVGL[X]
+		  Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  LET PWAVGL[X]=AMOUNT    
+		NEXT X
+		! ok - now display (2 sections - ThisYear & LastYear
+		Thisyear=1 ! uses flag
+		FOR DMONTH=1 TO 12
+		 WebStr$=M1$[(DMONTH-1)*3+1,(DMONTH-1)*3+3],fdel$
+		 IF DMONTH>ARMONTH ! not there yet all 0
+		   Webstr$=Webstr$,"0",fdel$
+		   Webstr$=Webstr$,"0",fdel$
+		   Webstr$=Webstr$,"0",fdel$
+		   Webstr$=Webstr$,"0",fdel$
+		   Webstr$=Webstr$,"0",fdel$
+		   Webstr$=Webstr$,"0",fdel$
+		   Webstr$=Webstr$,"0",fdel$
+		 ENDIF
+		 IF DMONTH<=ARMONTH
+		   Webstr$=Webstr$,LTrim$(PWOH[DMONTH] USING "--------#.##"),fdel$
+		   IF COST_LEV[0] 
+			Webstr$=Webstr$,LTrim$(PWAVG[DMONTH] USING "--------.##"),fdel$
+		   Else ! no avg cost sec
+		    Webstr$=Webstr$,"0",fdel$
+		   Endif
+		   Webstr$=Webstr$,LTrim$(PWFRCST[DMONTH] USING "------#.##"),fdel$
+		   Webstr$=Webstr$,LTrim$(W5[DMONTH] USING "------#.##"),fdel$
+		   Webstr$=Webstr$,LTrim$(SRVLVL[DMONTH,1] USING "----#"),fdel$
+		   Webstr$=webstr$,LTrim$(SRVLVL[DMONTH,0] USING "----#"),fdel$
+		   IF SRVLVL[DMONTH,1]
+		    If SRVLVL[DMONTH,0]
+				Webstr$=Webstr$,LTrim$(((SRVLVL[DMONTH,0]/SRVLVL[DMONTH,1])*100) USING "---#.##%"),fdel$
+		    Else ! none
+				Webstr$=Webstr$,"0",fdel$
+			Endif
+		   Else	! none
+				Webstr$=Webstr$,"0",fdel$
+		   Endif
+		   !IF NOT(SRVLVL[DMONTH,0]) Webstr$=Webstr$,USING "---#.##%";@66,DMONTH+7;0;
+		 ENDIF
+		 List$[row]=webstr$
+		 row=row+1
+	     if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		NEXT DMONTH
+		thisyear=0;lastyear=1
+		FOR DMONTH=1 TO 12
+		 WebStr$=M1$[(DMONTH-1)*3+1,(DMONTH-1)*3+3],fdel$
+		 IF DMONTH<=ARMONTH ! uses last year
+		   Webstr$=Webstr$,LTrim$(PWOHL[DMONTH] USING "--------#.##"),fdel$
+		   IF COST_LEV[0] 
+			Webstr$=Webstr$,LTrim$(PWAVGL[DMONTH] USING "--------.##"),fdel$
+		   Else ! no avg cost sec
+		    Webstr$=Webstr$,"0",fdel$
+		   Endif
+		   Webstr$=Webstr$,LTrim$(PWFRCSTL[DMONTH] USING "------#.##"),fdel$
+		   Webstr$=Webstr$,LTrim$(W5[DMONTH+13] USING "------#.##"),fdel$
+		   Webstr$=Webstr$,LTrim$(LSRVLVL[DMONTH,1] USING "----#"),fdel$
+		   Webstr$=webstr$,LTrim$(LSRVLVL[DMONTH,0] USING "----#"),fdel$
+		   IF LSRVLVL[DMONTH,1]
+		    If LSRVLVL[DMONTH,0]
+				Webstr$=Webstr$,LTrim$(((LSRVLVL[DMONTH,0]/LSRVLVL[DMONTH,1])*100) USING "---#.##%"),fdel$
+		    Else ! none
+				Webstr$=Webstr$,"0",fdel$
+			Endif
+		   Else	! none
+				Webstr$=Webstr$,"0",fdel$
+		   Endif
+		   !IF NOT(LSRVLVL[DMONTH,0]) Webstr$=Webstr$,USING "---#.##%";@66,DMONTH+7;0;
+		 ENDIF
+		 IF DMONTH>ARMONTH ! is still in this year
+		   Webstr$=Webstr$,LTrim$(PWOH[DMONTH] USING "--------#.##"),fdel$
+		   IF COST_LEV[0] 
+			Webstr$=Webstr$,LTrim$(PWAVG[DMONTH] USING "--------.##"),fdel$
+		   Else ! no avg cost sec
+		    Webstr$=Webstr$,"0",fdel$
+		   Endif
+		   Webstr$=Webstr$,LTrim$(PWFRCST[DMONTH] USING "------#.##"),fdel$
+		   Webstr$=Webstr$,LTrim$(W5[DMONTH] USING "------#.##"),fdel$
+		   Webstr$=Webstr$,LTrim$(SRVLVL[DMONTH,1] USING "----#"),fdel$
+		   Webstr$=webstr$,LTrim$(SRVLVL[DMONTH,0] USING "----#"),fdel$
+		   IF SRVLVL[DMONTH,1]
+		    If SRVLVL[DMONTH,0]
+				Webstr$=Webstr$,LTrim$(((SRVLVL[DMONTH,0]/SRVLVL[DMONTH,1])*100) USING "---#.##%"),fdel$
+		    Else ! none
+				Webstr$=Webstr$,"0",fdel$
+			Endif
+		   Else	! none
+				Webstr$=Webstr$,"0",fdel$
+		   Endif
+		   !IF NOT(SRVLVL[DMONTH,0]) Webstr$=Webstr$,USING "---#.##%";@66,DMONTH+7;0;
+		 ENDIF
+		 SList$[row2]=webstr$
+		 row2=row2+1
+	     if row2>tmpcnt2 let tmpcnt2=expandarray(e$,SList$[])
+		NEXT DMONTH
+	Endif
+	List$[row]=esdel$
+	SList$[row2]=esdel$
+	PWHDone: ! finished
+	Try Close #Chan Else Rem
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! HISTPWS
+!----------------------------------------------------------------------------
+Sub SubmtPW()
+! save back fields that can be updated (per 369a)
+  Try
+	Dim 3%,UVAR[20] ! temp load
+	oldMin = pw.MinStkLvl
+	oldMinDaysMths = pw.MinDaysMths
+	! per 369a - w3 flds 3 4 11 13, w7[12], W2, WH7[2]&[3],Vendor(w2[3])
+	if pw.Spare$="" let pw.Spare$=blank$
+	write record #PWC,PWRec,0;pw.; ! avoid SE due to null key uses pw.spare$ on dir2
+	call dxget("UM",tmp$)
+	if rtrim$(tmp$)<>""
+		R = getumrec(e$,ccc,tmp$,IntCo,PR.)           
+		If R > 0 Let tmp$ = Str$(R)
+	Endif ! could be null/blank?
+	umrec=tmp$
+	if umrec<=0 let umrec=pr.UMPurchDefault
+	R=ChkPrdUM(e$,umrec,IntCo,Pr.)
+	if r=0 ! not found
+	  returnstatus=0
+	  message$="UM not defined"
+	  Goto PWSDone
+	Endif
+	DPUNIT=umrec
+	if DPUNIT<=0 let DPUNIT=pr.UMPurchDefault
+	Call dxget("MINSTK",tmp$) ! w3[3]
+	UVAR[1]=tmp$
+	call dxget("MAXSTK",tmp$) ! w3[4]
+	UVar[2]=tmp$
+	call dxget("EOQTY",tmp$) ! w3[11]
+	UVar[3]=tmp$
+	call dxget("CARRYCOST",tmp$)	! w3[13] %
+	UVar[4]=tmp$
+	call dxget("CALCTYPE",tmp$) ! w7[12]
+	UVar[5]=tmp$
+	call dxget("LDTMMTHS",tmp$) ! w2[0]
+	UVar[6]=tmp$
+	call dxget("REVIEWPER",tmp$) ! w2[1]
+	UVar[7]=tmp$
+	call dxget("VENDOR",tmp$)	! w2[3]
+	UVar[8]=tmp$
+	call dxget("SSTKPCT",tmp$) ! % w2[5]
+	UVar[9]=tmp$
+	call dxget("SFTYSTK",tmp$) ! w3[7] ! if no %
+	UVar[10]=tmp$
+	call dxget("MNSTKMTH",tmp$) ! wh7[2]
+	UVar[11]=tmp$
+	call dxget("MNSTKDAY",tmp$) ! wh7[2]
+	UVar[12]=tmp$
+	call dxget("MXSTKMTH",tmp$) ! wh7[3]
+	UVar[13]=tmp$
+	call dxget("MXSTKDAY",tmp$) ! wh7[3]
+	UVar[14]=tmp$
+	! ok- checks/converts
+	for x=1 to 14
+		if uvar[x]<0 
+			returnstatus=0
+			message$="Negatives are not allowed"
+			goto PWSDone
+		Endif
+	Next x
+	cnvtu[0]=DPUNIT;cnvtu[1]=0;cnvtu[2]=1
+	cnvta=uvar[1]
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	UVar[1]=amount ! in base MIN
+	cnvta=UVar[2]
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	UVar[2]=amount ! MAX
+	cnvta=UVar[3]
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	UVar[3]=amount ! EOQ
+	cnvta=uvar[10]
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	Uvar[10]=amount ! sfty stock
+	cnvtu[0]=DPUNIT;cnvtu[1]=0;cnvtu[2]=2
+	!cnvta=uvar[4]
+	!Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	!Uvar[4]=amount ! KCost %
+	if uvar[14] ! has max days
+		pw.MaxDaysMths=FNR(UVar[14] / MTHDAYS)
+	Else ! no days - months
+		pw.MaxDaysMths=UVar[13]
+	Endif
+	pw.MaxStkLvl=UVar[2]
+	if uvar[12] ! has min days
+		pw.MinDaysMths=FNR(uvar[12]/MTHDAYS)
+	Else ! no days - months
+		pw.MinDaysMths=uvar[11]
+	Endif
+	pw.MinStkLvl=uvar[1]
+	pw.EOQOrdQty=uvar[3]
+	pw.KCost=UVar[4]
+	pw.CalcSrc=Uvar[5]
+	pw.AvgLeadTime=uvar[6]
+	pw.RvwPer=uvar[7]
+	pw.Vend=uvar[8]
+	pw.SafetyStk=uvar[9]
+	if pw.SafetyStk
+		pw.SafetyStkQty=0
+	Else
+		pw.SafetyStkQty=uvar[10]
+	Endif
+	mode$="c"
+	R=PWRec
+	tmp3=fileupdateprodwhse(e$,PWC,mode$,r,pw.)
+	If tmp3<0
+		returnstatus=0
+		Message$="Error "+Str$(tmp3)+" on warehouse update"
+	else
+		if p61$[111,111]="Y" and (pw.MinStkLvl <> oldMin or pw.MinDaysMths <> oldMinDaysMths )! CPI
+			clear ch[]
+			clear passinfo[]
+			ch[1] = CTLC
+			ch[2] = PRC
+			ch[3] = PWC
+			ch[4] = VMC
+			passinfo[0]=55
+			passinfo[1]=ProdRec
+			passinfo[2]=PWRec
+			passinfo[3]=oldMin
+			passinfoStr$[1]=pw.ProdCode$
+			passinfo[4]=pw.Whse
+			passinfo[5]=oldMinDaysMths
+			call "libalertproc.lib",passinfo[],ch[],msg$,0,passinfoStr$[]
+		end if
+		if sqlChan>=0
+			call prodwhse_DL4SQLConvert(e$,"FROMDL4",pw.,sql_prodwhse.)
+			e = prodwhse_SQLUpdate(e$,sqlChan,sql_prodwhse.)
+		end if
+	Endif
+	PWSDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SubmtPW
+!----------------------------------------------------------------------------
+Sub recalcall()
+! get & recalculate ALL fields
+  Try
+	Dim 1%,VCHG[20] ! changed it
+	Dim 3%,UVAR[30] ! temp load
+	
+	call dxget("UM",tmp$)
+	if rtrim$(tmp$)<>""
+		R = getumrec(e$,ccc,tmp$,IntCo,PR.)           
+		If R > 0 Let tmp$ = Str$(R)
+	Endif ! could be null/blank?
+	umrec=tmp$
+	if umrec<=0 let umrec=pr.UMPurchDefault
+	R=ChkPrdUM(e$,umrec,IntCo,Pr.)
+	if r=0 ! not found
+	  returnstatus=0
+	  message$="UM not defined"
+	  Goto PWRCDone
+	Endif
+	DPUNIT=umrec
+	if DPUNIT<=0 let DPUNIT=pr.UMPurchDefault
+	tmp3 = 0
+	  If pw.SafetyStk Let tmp3 = FNR(pw.UsgRate * pw.AvgLeadTime * (pw.SafetyStk / 100))
+	  If tmp3 If tmp3< 1 Let tmp3 = 1
+	  X3[1]=tmp3
+	  ! L_4380
+	  X3[2] = (pw.UsgRate * pw.AvgLeadTime) + ((pw.UsgRate * pw.AvgLeadTime) * pw.SafetyStk / 100)
+	  X3[3] = X3[2] + (pw.UsgRate * pw.RvwPer)
+	Call dxget("MINSTK",tmp$) ! w3[3]
+	UVAR[1]=tmp$
+	call dxget("MAXSTK",tmp$) ! w3[4]
+	UVar[2]=tmp$
+	call dxget("EOQTY",tmp$) ! w3[11]
+	UVar[3]=tmp$
+	call dxget("CARRYCOST",tmp$)	! w3[13]
+	UVar[4]=tmp$
+	call dxget("CALCTYPE",tmp$) ! w7[12]
+	UVar[5]=tmp$
+	call dxget("LDTMMTHS",tmp$) ! w2[0]
+	UVar[6]=tmp$
+	call dxget("REVIEWPER",tmp$) ! w2[1]
+	UVar[7]=tmp$
+	call dxget("VENDOR",tmp$)	! w2[3]
+	UVar[8]=tmp$
+	call dxget("SSTKPCT",tmp$) ! % w2[5]
+	UVar[9]=tmp$
+	call dxget("SFTYSTK",tmp$) ! w3[7] ! if no %
+	UVar[10]=tmp$
+	call dxget("MNSTKMTH",tmp$) ! wh7[2]
+	UVar[11]=tmp$
+	call dxget("MNSTKDAY",tmp$) ! wh7[2]
+	UVar[12]=tmp$
+	call dxget("MXSTKMTH",tmp$) ! wh7[3]
+	UVar[13]=tmp$
+	call dxget("MXSTKDAY",tmp$) ! wh7[3]
+	UVar[14]=tmp$
+	call dxget("DEMAND",tmp$) ! MONTH
+	UVar[15]=tmp$
+	call dxget("AVGINVTY",tmp$)
+	UVar[16]=tmp$
+	call dxget("TURNS",tmp$)
+	UVar[17]=tmp$
+	call dxget("ORDPT",tmp$)
+	UVar[18]=tmp$
+	call dxget("LINEPT",tmp$)
+	UVar[19]=tmp$
+	call dxget("CSTUM",tmp$)
+	R = getumrec(e$,ccc,tmp$,IntCo,PR.)           
+	If R > 0 Let tmp$ = Str$(R)
+	umrec=tmp$
+	if umrec=0 let umrec=pr.UMPurchDefault
+	R=ChkPrdUM(e$,umrec,IntCo,Pr.)
+	if r=0 ! not found
+	  returnstatus=0
+	  message$="UM not defined"
+	  Goto PWRCDone
+	Endif
+	CPUNIT=UMREC
+	call dxget("LASTPOCOST",tmp$)
+	UVar[20]=tmp$
+	call dxget("FIXEDPOCOST",tmp$)
+	UVar[21]=tmp$
+	!Call DXSave(0,"tmp/iss369.txt!")
+	! ok- checks/converts
+	for x=1 to 21
+		if uvar[x]<0 
+			returnstatus=0
+			message$="Negatives are not allowed"
+			goto PWRCDONE
+		Endif
+	Next x
+	cnvtu[0]=DPUNIT;cnvtu[1]=0;cnvtu[2]=1
+	! first - actual op/lp/sstk
+	Read Record #PWC,PWRec,0;cpw.; ! copy of whse
+	cnvta=x3[1]
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	X3[1]=amount ! in base SSTKQTY
+	cnvta=X3[2]
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	X3[2]=amount ! in base OrdPt
+	cnvta=X3[3]
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	X3[3]=amount ! in base LinePt
+	cnvta=uvar[1]
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	UVar[1]=amount ! in base MIN
+	cnvta=UVar[2]
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	UVar[2]=amount ! MAX
+	cnvta=UVar[3]
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	UVar[3]=amount ! EOQ
+	cnvta=uvar[10]
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	Uvar[10]=amount ! sfty stock
+	Cnvta=UVar[15];URATE=UVar[15] ! need for min/max
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	UVar[15]=amount ! demand/month(usagerate)
+	if URate=DW3[9] let UVar[15]=cpw.UsgRate ! not changed - use original
+	AVGINV=UVar[16]
+	cnvta=UVar[16]
+	cnvtu[0]=DPUNIT;cnvtu[1]=0;cnvtu[2]=5
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	if dpunit=pr.BaseUM let Amount=UVar[16] ! is base & always rounds it! use entered!
+	UVar[16]=Amount ! average Inventory
+	x$=t1[1] using QMask$ ! cut a 2 dec!
+	x2=x$
+	if fnr(x2)=FNR(AVGINV) let UVar[16]=cpw.AvgInvtQty ! not changed use orig
+	cnvta=UVar[18];MANORPT=UVar[18]
+	cnvtu[0]=DPUNIT;cnvtu[1]=0;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	UVar[18]=Amount ! Order Point
+	if manorpt=DW3[6] let UVar[18]=cpw.OrdPt ! not changed use orig
+	cnvta=UVar[19];ManLPT=UVar[19]
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	UVar[19]=amount ! Line Point
+	if MANLPT=DW3[5] let UVar[19]=cpw.LinePt ! not changed use orig
+	cnvtu[0]=CPUNIT;cnvtu[1]=0;cnvtu[2]=2 ! cost items =====
+	cnvta=UVar[20]
+	if cnvta<>DW3[16]
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		UVar[20]=amount ! PO COST
+	Else
+		UVar[20]=cpw.CostLastPo ! not changed use orig
+	Endif
+	if uvar[14] ! has max days
+		pw.MaxDaysMths=FNR(UVar[14] / MTHDAYS)
+	Else ! no days - months
+		pw.MaxDaysMths=UVar[13]
+	Endif
+	If pw.MaxDaysMths ! recalc
+		let UVar[2]=FNR(URate*pw.MaxDaysMths)
+		cnvtu[0]=DPUNIT;cnvtu[1]=0;cnvtu[2]=1
+		cnvta=UVar[2]
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		UVar[2]=amount ! MAX
+	Endif
+	pw.MaxStkLvl=UVar[2]
+	if uvar[12] ! has min days
+		pw.MinDaysMths=FNR(uvar[12] / MTHDAYS)
+	Else ! no days - months
+		pw.MinDaysMths=uvar[11]
+	Endif
+	if pw.MinDaysMths ! recalc
+		let UVar[1]=FNR(URate*pw.MinDaysMths)
+		cnvtu[0]=DPUNIT;cnvtu[1]=0;cnvtu[2]=1
+		cnvta=uvar[1]
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		UVar[1]=amount ! in base MIN
+	Endif
+	pw.MinStkLvl=uvar[1]
+	pw.EOQOrdQty=uvar[3]
+	pw.KCost=UVar[4]
+	pw.CalcSrc=Uvar[5]
+	if cpw.AvgLeadTime<>UVAR[6] let pw.AvgLeadTime=uvar[6]
+	if uvar[8] if uvar[8]<>pw.vend
+		pw.Vend=uvar[8]
+		X3=vendrvprd(pw.vend,Whse)
+		if x3 if x3>0 let pw.RvwPer=x3 Else let pw.RvwPer=uvar[7]
+	Else ! no vend ! or same
+		if uvar[7]<>pw.RvwPer let MANRP=1
+		pw.RvwPer=uvar[7] ! use what's sent
+	Endif
+	
+	pw.SafetyStk=uvar[9]
+	if pw.SafetyStk
+		pw.SafetyStkQty=0
+	Else
+		pw.SafetyStkQty=uvar[10]
+	Endif
+	let pw.UsgRate=UVar[15]
+	let pw.AvgInvtQty=UVar[16]
+	Manturns=UVar[17]
+	if t1[0]<>UVar[17] let pw.InvtTurns=UVar[17] ! as is
+	let pw.LinePt=UVar[19]
+	let pw.OrdPt=UVar[18]
+	let pw.CostLastPo=UVar[20]
+	iF uvAR[21]>0 LET FIXPO=UVar[21] ! as is
+	! I don't know if we need all that calc stuff in 369 when a single field is changed
+	! We do need the recalc stuff!
+	!cnvta=cpw.AvgInvtQty
+	!cnvtu[0]=0;cnvtu[1]=DPUNIT;cnvtu[2]=5 ! no qty round
+	!Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	UVar[0]=UVar[16] ! Amount ! average Inventory ! converted
+	!if dpunit=pr.BaseUM let UVar[0]=FNI(cpw.AvgInvtQty) ! as entered! (always rounds base!)
+	! in order to prevent cascade change - flag ones actually changed!
+	if pw.UsgRate and cpw.UsgRate<>pw.UsgRate ! demand
+		let VChg[1]=1;VChg[0]=1
+	Endif
+	If pw.InvtTurns and pw.InvtTurns<>cpw.InvtTurns ! turns changed
+		let VChg[2]=1;VChg[0]=1
+	Endif
+	if pw.AvgLeadTime and cpw.AvgLeadTime<>pw.AvgLeadTime ! lead time
+		VChg[3]=1;VChg[0]=1
+	Endif
+	If pw.AvgInvtQty and cpw.AvgInvtQty<>pw.AvgInvtQty ! avg inv
+		VChg[4]=1;VChg[0]=1
+	Endif
+	if pw.SafetyStk and cpw.SafetyStk<>pw.SafetyStk ! safetystk
+		VChg[5]=1;VChg[0]=1
+	Endif
+	if pw.RvwPer and FNR(cpw.RvwPer)<>FNR(pw.RvwPer) ! rev per
+		VChg[6]=1;VChg[0]=1
+	Endif
+	if pw.OrdPt and cpw.OrdPt<>pw.OrdPt ! order point
+		VChg[7]=1
+		if vchg[2] or vchg[4] let vchg[7]=0 ! ignore
+	Endif
+	If pw.LinePt and cpw.LinePt<>pw.LinePt ! line point
+		VChg[8]=1
+		if vchg[2] or vchg[4] let vchg[8]=0 ! ignore
+	Endif
+	if pw.CalcSrc<>cpw.CalcSrc ! changed calc type
+		VChg[9]=1;VChg[0]=1
+	Endif
+	if pw.MinStkLvl and cpw.MinStkLvl<>pw.MinStkLvl ! min chg
+		VChg[0]=1 ! ;vchg[7]=0;vchg[8]=0
+	Endif
+	if pw.MaxStkLvl and cpw.MaxStkLvl<>pw.MaxStkLvl ! max chg
+		VChg[0]=1 ! ;vchg[7]=0;vchg[8]=0
+	Endif
+	! now go orderly thru and make changes
+	if vchg[2] or vchg[4] ! need usgchanged (first) (turns or avg inv)
+		if vchg[4] ! avg changes usage
+			cnvtu[0]=0;cnvtu[1]=DPUNIT;cnvtu[2]=1
+			Cnvta=cpw.AvgInvtQty ! orig avg?
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			DAVGINV=amount \ if DAVGINV=0 let DAVGINV=1
+			Cnvta=pw.UsgRate ! curr usg?
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			if amount=0 let amount=1
+			tmp3=(Amount / DAVGINV) ! orig ratio (orig display usage/Display Avginvt
+			if tmp3=0 let tmp3=1
+			pw.AvgInvtQty=UVar[16] ! in case changed
+			UVar[15] = (pw.AvgInvtQty / tmp3) ! new usage?
+			cnvtu[0]=DPUNIT;cnvtu[1]=0;cnvtu[2]=1
+			Cnvta=UVar[15]
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			pw.UsgRate=amount
+		Else
+			pw.UsgRate=FNR(pw.Invtturns*pw.AvgInvtQty)
+		Endif
+		if pw.Invtturns let pw.EoqNoRnding=FNR((pw.UsgRate / pw.Invtturns) * 2) Else let pw.EoqNoRnding=0
+		pw.EOQOrdQty = pw.EoqNoRnding
+	Endif
+	If vchg[5] or VChg[1] or VChg[3] ! safety stock
+		pw.SafetyStkQty = 0
+		If pw.SafetyStk Let pw.SafetyStkQty = FNR(pw.UsgRate * pw.AvgLeadTime * (pw.SafetyStk / 100))
+		If pw.SafetyStkQty If pw.SafetyStkQty < 1 Let pw.SafetyStkQty = 1
+	Endif
+	If VChg[0] ! needs Ord/Line Pt changed
+		pw.OrdPt = (pw.UsgRate * pw.AvgLeadTime) + ((pw.UsgRate * pw.AvgLeadTime) * pw.SafetyStk / 100)
+		pw.LinePt = pw.OrdPt + (pw.UsgRate * pw.RvwPer)
+	Endif
+	If pw.ordPt=X3[2] let VChg[7]=0 ! is actual now - no demand recalc
+	if pw.LinePt=X3[3] let VChg[8]=0 ! is actual now - no demand recalc
+	if VChg[7] ! order point
+		cnvtu[0]=0;cnvtu[1]=DPUNIT;cnvtu[2]=1
+		Cnvta=pw.OrdPt ! orig ordpt?
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		DORDPT=amount
+		Cnvta=pw.UsgRate ! curr usg?
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		if amount=0 let amount=1
+		tmp3=(DORDPT / aMOUNT) ! orig ratio (orig display opt/Display usage
+		if tmp3=0 let tmp3=1
+		pw.ordpt=uvar[18] ! in case changed
+		UVar[15] = (MANORPT / tmp3) ! new usage?
+		cnvtu[0]=DPUNIT;cnvtu[1]=0;cnvtu[2]=1
+		Cnvta=UVar[15]
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		pw.UsgRate=amount
+		!pw.OrdPt = (pw.UsgRate * pw.AvgLeadTime) + ((pw.UsgRate * pw.AvgLeadTime) * pw.SafetyStk / 100)
+		pw.LinePt = pw.OrdPt + (pw.UsgRate * pw.RvwPer)
+	Endif
+	If VChg[8] ! line point
+		cnvtu[0]=0;cnvtu[1]=DPUNIT;cnvtu[2]=1
+		Cnvta=pw.LinePt
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		DLNPT=amount
+		Cnvta=pw.UsgRate ! curr usg?
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		if amount=0 let amount=1
+		tmp3=(DLNPT / amount) ! orig ratio
+		if tmp3=0 let tmp3=1
+		pw.linept=UVar[19] ! in case changed
+		UVar[15] = (MANLPT / tmp3) ! new usage?
+		cnvtu[0]=DPUNIT;cnvtu[1]=0;cnvtu[2]=1
+		Cnvta=UVar[15]
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		pw.UsgRate=amount
+		pw.OrdPt = (pw.UsgRate * pw.AvgLeadTime) + ((pw.UsgRate * pw.AvgLeadTime) * pw.SafetyStk / 100)
+		!pw.LinePt = pw.OrdPt + (pw.UsgRate * pw.RvwPer)
+	Endif
+	if pw.InvtTurns let AVG_MARGIN = pw.RtnOnInvest / pw.InvtTurns  Else let AVG_MARGIN =0
+	ROI = FNR(pw.RtnOnInvest * 100)
+	PWRCDONE: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! recalcall
+!----------------------------------------------------------------------------
+Function vendrvprd(vend,whse)
+! based on vend & whse - get rev per
+  Try
+	Dim K10$[50],K11$[50]
+	Dim 3%,M1[17],VW3[11]
+	tmp3=0;revper=0 ! none
+	VTC=OpenFile(-1120,IntCo) \ if vtc=-1 goto VRPDone
+	VWC=OpenFile(-9961,intCo) \ if vwc=-1 let P61$[63,63]="N"
+	K10$=" ",K10$
+	K10$=Vend Using "######"
+	Search #VTC,2,1;K10$,R[10],E
+	if Not(E)
+		Mat read #VTC,R[10],206;M1;
+	Else
+		Goto VRPDone ! no can do
+	Endif
+	if P61$[63,63]="Y" ! uses vendwhse
+		K11$=" ",K11$
+		K11$=K10$,Whse Using "##"
+		Search #VWC,2,1;K11$,R[11],E
+		if not(e)
+			mat read #vwc,R[11],442;VW3; ! replace vend w/whse
+		Endif
+		x1=0 ! see if anything there
+		for x=0 to 7
+			if vw3[x]>0 let x1=1
+		Next X
+		if x1 ! ok - has data
+			for x=0 to 7 \ let m1[x]=vw3[x] \ Next X
+		Endif
+	Endif
+	For X = 8 To 11
+	  If M1[X] > REVPER Let REVPER = M1[X]
+	Next X
+	tmp3 = REVPER
+	VRPDone: ! finished
+	If VTC Try Close #VTC Else Rem
+	IF VWC Try Close #VWC Else Rem
+  else
+    include "src/callsuberr.inc"
+  end try
+end function tmp3 ! vendrvprd
+! 
+!--------------------------------------------------------------------

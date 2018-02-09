@@ -1,0 +1,136 @@
+! loadsave -w -n 100,10 -o prog/util/cpi_expired.dl4 src/cpi_expired.src
+
+include "src/utilcopyright.inc"
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "ubsprconv.dl4"
+declare external function Xunit$
+
+
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/filecpidet.inc" ! CPI detail information
+Include "src/inc/filespecprice.inc" ! Special Price Lines
+
+
+Declare Sub OpenAllFiles, ProcessContracts, PrintContractHeader, PrintContractLine
+Declare Function YYMMDDToPrint$
+
+! MAIN
+
+try
+	dim prod. as prod
+	dim cpid. as cpidet
+	dim spr. as specprice
+	dim tmp$[300],e$[300],K_CPID$[100],K_SPR$[100],K_PROD$[100]
+	dim 1%,cnvtu[2]
+	Dim 3%,CNVTA,Amount
+
+	! set to 1 to fix
+	doFix = 0 ! clear cancel date if we still have outstanding amount
+	
+	call OpenAllFiles()
+	call PrintContractHeader()
+	call ProcessContracts()
+else ! MAIN try
+	include "src/utilcallmainerr.inc"
+end try
+end
+
+! SUBS
+
+sub OpenAllFiles()
+try
+	let IntCo = 1
+	CH_CTRL=OpenFile(-9999,IntCo) \ if CH_CTRL=-1 Error 42
+	CH_PROD=OpenFile(-1792,IntCo) \ if CH_PROD=-1 Error 42 ! product file
+	if doFix
+		CH_SPR=OpenFile(1936,IntCo) \ If CH_SPR=-1 Error 42 ! Contract Lines
+	else
+		CH_SPR=OpenFile(-1936,IntCo) \ If CH_SPR=-1 Error 42 ! Contract Lines
+	end if
+	CH_CPID=OpenFile(9928,IntCo) \ if CH_CPID=-1 Error 42 ! cpi detail
+	CH_CC=OpenFile(-1728,IntCo) \ if ch_cc=-1 Error 42 ! u/m codes
+else
+	include "src/utilcallsuberr.inc"
+end try
+end sub
+
+sub ProcessContracts()
+try
+	K_CPID$ = " ",K_CPID$
+	do
+		R_CPID=filegetcpidet(e$,CH_CPID,">",1,K_CPID$,cpid.)
+		If R_CPID<=0 Exit do
+		if not(cpid.ResStock) goto SkipContract ! not a reserve stock
+		K_SPR$ = K_CPID$
+		R_SPR=filegetspecprice(e$,CH_SPR,"=",1,K_SPR$,spr.)
+		if R_SPR<= 0 goto SkipContract:
+		if not(spr.CancelDate) goto SkipContract
+		! got one - convert qty sold to contract qty
+		k_prod$ = " ",k_prod$ \ k_prod$[1,12] = cpid.ProductID$
+		R_PROD = filegetprod(e$,CH_PROD,"=",1,K_prod$,prod.)
+		if R_prod <= 0 goto SkipContract ! shouldn't happen
+		! convert sold to date amount to contract units
+		let cnvtu[0]=0;cnvtu[1]=spr.UMQty;cnvtu[2]=1;cnvta=spr.QtySinceStart !convertqty
+		spr.QtySinceStart=ConvProdAmount(e$,CNVTU[],CNVTA,CH_CTRL,flag,prod.)
+		! convert Qty Allocated to contract units
+		let cnvtu[0]=0;cnvtu[1]=spr.UMQty;cnvtu[2]=1;cnvta=cpid.QuantityAllocated !convertqty
+		cpid.QuantityAllocated=ConvProdAmount(e$,CNVTU[],CNVTA,CH_CTRL,flag,prod.)
+		outstandingQty = cpid.ResStock - spr.QtySinceStart - cpid.QuantityAllocated
+		if outstandingQty > 0
+			call PrintContractLine()
+			if doFix ! shouldn't be cancelled if we have stock
+				R_SPR=filegetspecprice(e$,CH_SPR,"=",1,K_SPR$,spr.,1)
+				if R_SPR<= 0 goto SkipContract:
+				spr.CancelDate = 0
+				write record #CH_SPR,R_SPR,0;spr.;
+			end if
+		end if
+		SkipContract: !
+	loop
+else
+	include "src/utilcallsuberr.inc"
+end try
+end sub
+
+sub PrintContractHeader()
+try
+	print "CONT#"; tab 6; "Product ID"; Tab 19;
+	print "Start Dt"; tab 28; "End Date";
+	print tab 37; "Last Sld"; tab 46; "UOM";
+	print tab 51; "Res Stock"; tab 62;
+	print "Qty Sold"; tab 73;
+	print "Qty Alloc"
+else
+	include "src/utilcallsuberr.inc"
+end try
+end sub
+
+sub PrintContractLine()
+try
+	print cpid.ContractNumber; tab 6; cpid.ProductID$; Tab 19;
+	print YYMMDDToPrint$(spr.StartDate); tab 28; YYMMDDToPrint$(spr.CancelDate);
+	print tab 37; YYMMDDToPrint$(spr.LastBuyDate); tab 46; Xunit$(spr.UMQty, CH_CC);
+	print tab 51; cpid.ResStock using "#######.##"; tab 62;
+	print spr.QtySinceStart using "#######.##"; tab 73;
+	print cpid.QuantityAllocated using "#######.##"
+else
+	include "src/utilcallsuberr.inc"
+end try
+end sub
+
+Function YYMMDDToPrint$(dateVal)
+try
+	dim retval$[8]
+	retval$ = "    none"
+	if not(dateVal) exit function retval$
+	tmp$ = dateVal using "&&&&&&"
+	retval$ = tmp$[3,4]+"/"+tmp$[5,6]+"/"+tmp$[1,2]
+else
+	include "src/utilcallsuberr.inc"
+end try
+end Function retval$

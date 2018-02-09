@@ -1,0 +1,779 @@
+! >>> Program 380
+!
+! description   Process Direct PO Listing
+!
+! loadsave -w -n 100,10 -o prog/dxport/380.dl4 src/380.src
+!
+! 1.0 mm/dd/yyyy change??
+!
+include "src/copyright.inc" ! dx
+Rem PO380 -  " Direct Sales Order/Purchase Order Reconciliation";
+Rem  rem cct112237  Central Lewmar
+Rem "This program will make receivings on open direct purchase orders";
+! "that have been created from a sales order and the sales order has";
+! "invoiced.";
+! we now start with the 3/spofleh file instead of the invhkey file
+
+!  find all Order type 2 in history that have a po associated
+!  with the line and copy the ship qty to the receive qty
+!  then allow pronto accept of the po, and write flag to invoice
+!  so that it won't get pulled again
+! *** No pronto accept needs to run 373 & 374 to update ***
+!  Create a new program that searches invoice history based on accept date
+!  for lines linked to a direct po, and that are status 1-4. Update the
+!  quantities on the purchase order for each linked line , make the po
+!  receiving quantity the same as the ship quantity on the invoice update
+!  the status to 5.
+!  write a flag to the invoice line to show that the line was proccessed
+!  print a report showing what po's were updated and what po's could not
+!  be updated. The program will not update any po beyond status 4.
+!  the po's will then be accepted with the next batch of receiving for the
+!  warehouse.
+
+!  Do the receiving of the purchase order for each linked line, make the po
+!  receiving quantity on the po,the same as the ship qty on the sales
+!  order.
+
+! ALMOST RIGHT  - cct138560
+! need to handle situation where there are partial shipments off of the same
+! order in sales order.  They should accumulate back to the po line
+
+! this program can't be run once before the 227 and again after without doing
+! a po accept before the second 380 run.  The invl lines get marked by this
+! program, so if it gets run once before a 227 it can mark the po with one
+! number, but when run after a 227, it it finds a new invoice in history it
+! will use that invoices qty values.
+! 380 should be run after 227, then the po's accepted, then it can be run again
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: NOV 15, 2006  10:27:08
+Rem /w2/papermaster/r2005//usr/acct/mary/work/r2005/po/po380.src (univ2) [mary] {55456}
+Rem  Copyright (c) 2006 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Function getmsg$,expandarray
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,FormatDate2$,getuidinfo$,JDate$
+Declare Intrinsic Sub DateToJulian,InpBuf,Logic,String,Time,programdump
+! Option Default Dialect IRIS1
+If Err 0 Gosub ERR_TRAP
+
+Dim 3%,POHR
+! If Spc(13) = 11 Print @80,24;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTIN.hsf\177\";
+Rem {begin dim.rtn.input}
+Dim J$[70],J0$[18],J1$[70],J2$[20],J3$[40],J4$[60],J5$[80],J7$[80],J9$[70]
+Dim X$[100],1%,J0,J2,J3,J4,J5,J7[2],J8,X1[9]
+Dim 2%,J9[9],X2[9],4%,J1
+Rem {end dim.rtn.input}
+Rem {begin src/inc/dim.invh.i}
+Dim 1%,H3[1],H4[2],LOCKPORT,OWHT[1],PICKBY[1]
+Dim 2%,H0[12],H5[16],ST3[24],SLSM[9],H6[8]
+Dim 2%,HFAX[1],HSTI[1],H2[0],OWHT1[1]
+Dim 3%,TOT_SELL,SCOM[4],SMER[4],SCST[4],TOTGL,OREF[5]
+Dim V0$[12],H0$[20],H1$[6],HMAT$[2],P0$[20]
+Rem {end dim.invh.i}
+Rem {begin src/inc/dim.invl.i}
+Dim 1%,L3[3],PL[1],UN[2],S2[1],EUN[2],OWHS,LPRINTED,CTWT[1]
+Dim 2%,L2[1],L4[3],L6[5],L9[1],LCO[1],LTAX2,LP_DATE,LP_TIME
+Dim 3%,L5[3],L7[12],S3[17],OLM[6],UNF[6],CST[0],LTAX1,INVNO,QPB,ROL0
+Dim L6$[60],L1$[20],MT$[2],S3$[33]
+Rem {end dim.invl.i}
+Rem {begin src/inc/dim.pohead.i}
+Dim 2%,POH0[5],POH3[4],POH[4],POH6[1]
+Dim 1%,POH4[3],POH1[9],POH5[10]
+Dim 3%,POH7,POH8[9],POH9[12]
+Dim POH$[82],POH1$[116],ST$[14],POH2$[40]
+Rem {end dim.pohead.i}
+Rem {begin src/inc/dim.poline.i}
+Dim 1%,POL1[5],POL0[4],POMISC[2]
+Dim 2%,POL2[2]
+Dim 3%,POL3[6],POL[5],POL4[23],POL5[9],POL6[9]
+Dim POL1$[120]
+Rem {end dim.poline.i}
+Rem {begin src/inc/dim.prod.i}
+Dim A$[156],HZ$[90],PR_A2$[30],C1$[32],PSN$[20],U3$[60]
+Dim PRFLG$[10],PRMKUPTYP$[4],PIC$[50],PRIML$[12]
+Dim 1%,LLC,PFTB[3],PFU1[20],LM[1],UPCT,PR_PO[1]
+Dim 1%,PRBASE,PRPARC2[3],PRD1[4],AGEDAY
+Dim 2%,A2,A3[2],B[24],PR_C4[10],PFCO[3],PLC[3],PSN[1],U2,U4[1]
+Dim 2%,STK[2],FDT[1],PRMKUP[3],PRD0[2]
+Dim 3%,A1[7],A[33],PF_LOAD2,PFU2[6],PLV[1],PRPARC[3],U3,PFN[1]
+Dim 3%,LBSORD,FUT[1],PRREDI[1],PRD2[3]
+Rem {end dim.prod.i}
+Dim INVHKEY$[50],INVHHKEY$[50],INVLKEY$[50],POHEADKEY$[50],POLINEKEY$[50]
+Dim SORTKEY$[60],P60$[50],CNAME$[30],TIMER$[23],LINES$[79]
+Dim SCRATCH$[80],WORK$[80],F$[16],COID$[1],POFLAG$[1],YES$[1]
+Dim BLANKS$[100],KEYROH$[30],KEYROL$[30],SORTKEY1$[60]
+Dim KEYVEND$[30],VENDNAME$[30],3%,REC_VEND
+Dim 1%,CH_CNTRL,CH_INVH,CH_INVHHKEY,CH_INVL,CH_POHEAD,CH_POLINE,V9[2]
+Dim 1%,NSD1[7],CH_PROD,CH_NSTK,NONSTCK,CNVTU[2],CH_ROH,CH_ROL
+Dim 2%,INVDATE,JDATE[2]
+Dim 3%,ERRFLAG[1]
+Dim 3%,COID,REC_INVH,REC_INVHHKEY,REC_INVL,REC_POHEAD,REC_POLINE,REC_SORT
+Dim 3%,POHR,ACCUM_SHIP,NSD3[9],DSP_POL4[23],DSP_POL2[2],REC_ROH,REC_ROL
+Dim 3%,DOL_RECV,LBS_RECV,CB_RECV,T9,AMOUNT,CNVTA
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+dim tmp$[800],tmp1$[800],tmp2$[800],Message$[600],msg$[100],rstr$[2000],webstr$[2000]
+dim action$[30],options$[30],userid$[8],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+! call dxopen() ! for standalone run
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) / 100)
+COID = IntCo ! Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64)
+COID$ = Str$(COID) !  Using "#"
+MAXCHOICE = 1
+BLANKS$ = " ",BLANKS$
+LINES$ = "-",LINES$
+If Err 0 Let SCRN = Spc(8)
+SCRN = 0 \ V9[0] = Chf(0)
+If Err 0 Gosub ERR_TRAP
+If SCRN If SCRN <> 49 Goto ERR_TRAP
+V9[0] = 50 \ If SCRN Let V9[0] = 20
+V9[1] = 99
+V9[2] = 0
+YES$ = "Y"
+TIMER$ = "" \ Call Time(TIMER$)
+CH_CNTRL = 1 !let work$ = coid using "cntrl/cntrl#" \ open #ch_cntrl,work$
+CH_INVH = 2 \ Read #CH_CNTRL,88,1136;F$; \ Ropen #CH_INVH,F$
+CH_INVHHKEY = 3 \ F$ = "4/sordflehhkey" + COID$ \ Ropen #CH_INVHHKEY,F$
+CH_INVL = 4 \ Read #CH_CNTRL,88,1184;F$; \ Open #CH_INVL,F$
+CH_POHEAD = 5 \ Read #CH_CNTRL,88,2416;F$; \ Open #CH_POHEAD,F$
+CH_POLINE = 6 \ Read #CH_CNTRL,88,2432;F$; \ Open #CH_POLINE,F$
+CH_PROD = 7 \ Read #CH_CNTRL,88,1792;F$; \ Open #CH_PROD,F$
+CH_NSTK = 8 \ Read #CH_CNTRL,88,2448;F$; \ Open #CH_NSTK,F$
+CH_SORT = 9 \ Gosub BUILD_SORT
+CH_ROH = 10 \ Read #CH_CNTRL,88,1840;F$; \ Ropen #CH_ROH,F$
+CH_ROL = 11 \ Read #CH_CNTRL,88,1888;F$; \ Ropen #CH_ROL,F$
+CH_VEND = 12 \ Read #CH_CNTRL,88,2400;F$; \ Ropen #CH_VEND,F$
+Read #CH_CNTRL,0,182;INVDATE;
+X$ = INVDATE Using "&&&&&&" \ Call DateToJulian(1,X$,X$,E) \ If E Gosub ERR_SEARCH
+JDATE[0] = X$
+Mat Read #1,60,50;P60$;
+Read #CH_CNTRL,3;CNAME$;
+P60$[45,45] = "N" ! DO NOT ALLOW PRONTO !!!
+if Scrn ! to xml - not on this report!
+	e$="Can not print to browser"
+	goto Err_Msg
+Endif
+! call dxsave(0,"tmp/380sv.txt!")
+!Gosub PRINT_SCREEN
+PRINT_SCREEN: Rem
+!Print 'CS';@0,0;"PO380";
+!Print @10,0;" Direct Sales Order/Purchase Order Reconciliation";
+!Print @5,2;"This program will make receivings on open direct purchase orders";
+!Print @5,3;"that have been created from a sales order and the sales order has";
+!Print @5,4;"invoiced.";
+!If P60$[45,45] = "Y"
+!  Print @0,15;" 1> Accept Purchase Orders immediately? (Y/N) ";
+!Else 
+!  Print @5,7;"After this update is performed, please run 373 Receipts to Stock ";
+!  Print @5,8;"Journal and 374 Receipts to Stock Accept";
+!End If 
+!Return 
+!Gosub EDT_PRONTO
+EDT_PRONTO: Rem
+!If P60$[45,45] <> "Y" Return 
+!J5$ = ""
+!J0$ = "6 00064815"
+!J1 = PRONTO
+!Gosub ISINPUT
+!PRONTO = J1
+!Return 
+
+ASK_PROMPT: Rem prompt to proceed
+!call programdump("tmp/380log1!","")
+!Print @0,23;'CL';"Enter ";
+!If P60$[45,45] = "Y"
+!  Print "#:Field to edit   ";
+!End If 
+!Print " U: update   E: exit ";
+!Input Len (16384 + 1);""SCRATCH$
+!If SCRATCH$ = "" Goto ASK_PROMPT
+!Call String(1,SCRATCH$)
+!If SCRATCH$ = "U" Goto GET_STARTED
+!If SCRATCH$ = "E" Goto OUTEND
+!CHOICE = SCRATCH$ \ If CHOICE < 0 Or CHOICE > MAXCHOICE Goto ASK_PROMPT
+!On CHOICE Gosub EDT_PRONTO
+!Goto ASK_PROMPT
+If Scrn = 0 !if pdf or print, new method, after edits,setouput,dxclose
+  Call setoutput(e$,rstr$,2) !2 flag puts 0 status section in w/print in process msg, puts </page> in
+  try call dxclose() else rem
+Endif
+
+GET_STARTED: Rem
+!Print @0,23;'CL';"Processing...Please Wait...";
+POSTAT = 1
+POHEADKEY$[1,2] = POSTAT Using "##"
+LOOP_POHEAD: Search #CH_POHEAD,3,1;POHEADKEY$,REC_POHEAD,E
+If E Or POHEADKEY$[1,2] > " 4" Goto PRINT_REPORT
+Gosub READ_POHEAD
+DOLR_RECV = 0;PDS_RECV = 0;CUBE_RECV = 0;PCS_RECV = 0
+X$ = POH0[3] Using "&&&&&&" \ Call DateToJulian(1,X$,X$,E)
+If E
+  JDATE[1] = 0
+Else 
+  JDATE[1] = X$
+End If 
+If POH4[0] <> 1 Goto LOOP_POHEAD
+POLINEKEY$ = POHEADKEY$[3,8]
+LOOP_POLINE: Search #CH_POLINE,3,1;POLINEKEY$,REC_POLINE,E
+If E = 2 Goto POHEADDONE
+If E Gosub ERR_SEARCH
+If POLINEKEY$[1,6] <> POHEADKEY$[3,8] Goto POHEADDONE
+Gosub READ_POLINE
+If POL1[0] = 3 Goto LOOP_POLINE
+If Not(POL4[10]) Goto LOOP_POLINE
+ACCUM_SHIP = 0
+POLINE_FOUND = 0
+INVHHKEY$ = POL4[10] Using "######"
+ERRFLAG[0] = 0;ERRFLAG[1] = 0
+LOOP_INVH: Search #CH_INVHHKEY,3,3;INVHHKEY$,REC_INVH,E
+If E > 2 Gosub ERR_SEARCH
+Mat H0 = Zer
+OREF[1] = 0
+WORK = INVHHKEY$[1,6]
+If E Or WORK <> POL4[10] ! write to failure log
+  If POLINE_FOUND = 0 !  not previously found and processed
+    SORTKEY$ = " ",SORTKEY$
+    SORTKEY$[1,2] = "I "
+    SORTKEY$[3,12] = POLINEKEY$," "
+    SORTKEY$[13,18] = POL4[10] Using "######"
+    SORTKEY$[19,28] = OREF[1] Using "##########"
+    KEYROH$ = " ",KEYROH$;KEYROH$[3,8] = POL4[10] Using "######"
+    For X = 1 To 7
+      KEYROH$[1,2] = X Using "##"
+      Search #CH_ROH,2,1;KEYROH$,REC_ROH,E \ If E > 1 Gosub ERR_SEARCH
+      If Not(E)
+        Mat Read #CH_ROH,REC_ROH,104;H5;
+        If H5[7] <> 2 ! not a direct
+          SORTKEY$[29,60] = POL4[10] Using "Ord###### Not Dirt.Not Accepted"
+        Else 
+          SORTKEY$[29,60] = POL4[10] Using "Order###### Inv Not Accepted"
+        End If 
+        Goto ADDSORTKEY
+      End If 
+    Next X
+    For X = 20 To 24
+      KEYROH$[1,2] = X Using "##"
+      Search #CH_ROH,2,1;KEYROH$,REC_ROH,E \ If E > 1 Gosub ERR_SEARCH
+      If Not(E)
+        SORTKEY$[29,58] = POL4[10] Using "Order ###### Has Been Deleted"
+        Goto ADDSORTKEY
+      End If 
+    Next X
+    For X = 90 To 92
+      KEYROH$[1,2] = X Using "##"
+      Search #CH_ROH,2,1;KEYROH$,REC_ROH,E \ If E > 1 Gosub ERR_SEARCH
+      If Not(E)
+        SORTKEY$[29,60] = POL4[10] Using "Order###### Inv Not Accepted"
+        Goto ADDSORTKEY
+      End If 
+    Next X
+    If ERRFLAG[0] = 1
+      If ERRFLAG[1]
+        SORTKEY$[19,28] = ERRFLAG[1] Using "##########"
+      End If 
+      SORTKEY$[29,60] = POL4[10] Using "Order###### Not Direct"
+      Goto ADDSORTKEY
+    End If 
+    SORTKEY$[29,44] = "Not in history "
+ADDSORTKEY: Search #CH_SORT,4,1;SORTKEY$,REC_POHEAD,E \ If E>1 Gosub ERR_SEARCH
+  End If 
+  Goto LOOP_POLINE
+End If 
+Gosub READ_INVH
+If H5[7] <> 2
+  ERRFLAG[0] = 1;ERRFLAG[1] = INVHHKEY$[7,16]
+  Goto LOOP_INVH
+End If 
+X$ = H0[9] Using "&&&&&&" \ Call DateToJulian(1,X$,X$,E)
+If E
+  JDATE[2] = 0
+Else 
+  JDATE[2] = X$
+End If 
+If Abs(JDATE[1] - JDATE[2]) > 365 And JDATE[1] And JDATE[2]
+  Goto LOOP_INVH
+End If 
+INVLKEY$[1,10] = INVHHKEY$[7,16]
+INVLKEY$[11,13] = POL4[11] Using "###"
+DO_INVL: Search #CH_INVL,2,1;INVLKEY$,REC_INVL,E
+SORTKEY$ = " ",SORTKEY$
+If E Or INVLKEY$[1,10] <> INVHHKEY$[7,16]
+  SORTKEY$[34,50] = " not found",BLANKS$
+  Goto LINE_ERROR
+End If 
+Gosub READ_INVL
+If Not(L7[4]) Goto LOOP_INVH
+POLINE_FOUND = 1
+Read #CH_INVL,REC_INVL,403;POFLAG$;
+If POL1$[81,92] <> L1$[1,12]
+  SORTKEY$[34,60] = " different products"
+  Goto LINE_ERROR
+End If 
+If POL4[1] ! no free goods
+  SORTKEY$[34,60] = " cannot process free goods",BLANKS$
+  Goto LINE_ERROR
+End If 
+If L4[2] = 0
+  SORTKEY$[34,60] = " not assigned to po",BLANKS$
+  Goto LINE_ERROR
+End If 
+If POFLAG$ = "Y"
+  KEYROL$ = " ",KEYROL$;KEYROL$[1,6] = POL4[10] Using "######"
+  KEYROL$[7,9] = POL4[11] Using "###"
+  Search #CH_ROL,2,1;KEYROL$,REC_ROL,E \ If E > 1 Gosub ERR_SEARCH
+  If Not(E)
+    SORTKEY$[34,60] = " part ship. order line open",BLANKS$
+  Else 
+    SORTKEY$[34,60] = " used. ord line not found",BLANKS$
+  End If 
+End If 
+If POFLAG$ <> "Y" Gosub ADJUST_PO \ Goto LOOP_INVH
+LINE_ERROR: Rem    
+SORTKEY$[1,2] = "I "
+SORTKEY$[3,12] = POLINEKEY$," "
+SORTKEY$[13,18] = POL4[10] Using "######"
+SORTKEY$[19,28] = OREF[1] Using "##########"
+SORTKEY$[29,33] = POL4[11] Using "L ###"
+Search #CH_SORT,4,1;SORTKEY$,REC_POHEAD,E \ If E>1 Gosub ERR_SEARCH
+Goto LOOP_INVH
+POHEADDONE: Rem "Done - change totals?
+If POLINE_FOUND ! "found one?
+  Gosub READ_POHEAD
+  If DOLR_RECV Let POH8[0] = DOLR_RECV
+  If PDS_RECV Let POH8[1] = PDS_RECV
+  If CUBE_RECV Let POH9[9] = CUBE_RECV
+  If PCS_RECV Let POH9[10] = PCS_RECV
+  If PO1[5] = 0 Let POH8[2] = PO3[6]
+  If PO1[5] = 1
+    POH8[2] = FNR(POH8[1] * PO3[6])
+  End If 
+  If PO1[5] = 2
+    POH8[2] = FNR((POH8[1] / 100) * PO3[6])
+  End If 
+  If PO1[5] = 3
+    POH8[2] = FNR(PO3[9] * PO3[6])
+  End If 
+  If PO1[5] = 4
+    POH8[2] = FNR(PO3[10] * PO3[6])
+  End If 
+  Gosub WRITE_POHEAD
+End If 
+Goto LOOP_POHEAD
+ADJUST_PO: Rem write the new info
+Write #CH_INVL,REC_INVL,403;YES$;
+If OLDPO <> POH0[2] ! do only once per po
+  POH0[0] = 5
+  POH[4] = 4
+  WORK$ = POH0[2] Using " 5######"
+  Search #CH_POHEAD,5,1;POHEADKEY$,REC_POHEAD,E \ If E Gosub ERR_SEARCH
+  Search #CH_POHEAD,4,1;WORK$,REC_POHEAD,E \ If E Gosub ERR_SEARCH
+  Gosub WRITE_POHEAD
+End If 
+OLDPO = POH0[2]
+POL1[0] = 2
+ACCUM_SHIP = ACCUM_SHIP + L7[4]
+POL3[4] = ACCUM_SHIP
+POL4[5] = L7[4]
+Gosub EXT_POCOST
+Gosub WRITE_POLINE
+SORTKEY$ = " ",SORTKEY$
+SORTKEY$[1,2] = "A "
+SORTKEY$[3,12] = POLINEKEY$," "
+SORTKEY$[13] = POL4[10] Using "######"
+SORTKEY$[19] = OREF[1] Using "##########"
+Search #CH_SORT,4,1;SORTKEY$,REC_POHEAD,E \ If E>1 Gosub ERR_SEARCH !Stop 
+Return 
+L_4550: Rem CALL CONV
+Gosub CONVERT
+X3 = AMOUNT
+Return 
+EXT_POCOST: Rem "move in PO Cost from Inv G/L Cost
+Call Logic(1,2 ^ 0,POL1[3],X0)
+NONSTK = X0
+If Not(NONSTK)
+  REC_PROD = POL3[1]
+  Gosub READ_PROD
+Else ! "it is a nonstock
+  Mat Read #CH_NSTK,POL3[1],96;NSD1;
+  Mat Read #CH_NSTK,POL3[1],132;NSD3;
+  A[5] = NSD3[7] \ A[6] = NSD3[6] \ B[23] = NSD3[2] \ A1[3] = NSD3[8]
+  For X = 0 To 20 \ PFU1[X] = 0 \ Next X
+  For X = 0 To 6 \ PFU2[X] = 0 \ Next X
+  PFU1[0] = NSD1[2];PFU1[1] = NSD1[3];PFU2[0] = NSD3[3]
+End If 
+POL2[0] = L7[7]
+If Not(POL2[0]) Let POL2[0] = L5[1]
+POL1[5] = UN[2]
+CNVTU[0] = 0;CNVTU[1] = POL1[5];CNVTU[2] = 2
+CNVTA = POL2[0] \ Gosub CONVERT \ DSP_POL2[0] = AMOUNT
+DSP_POL4[0] = AMOUNT
+Gosub EXTEND_COST
+DOLR_RECV = DOLR_RECV + DOL_RECV
+PDS_RECV = PDS_RECV + LBS_RECV
+CUBE_RECV = CUBE_RECV + CB_RECV
+PCS_RECV = PCS_RECV + RECV_QTY
+Return 
+EXTEND_COST: Rem --------------------------------------------------
+If POH0[0] = 7 Let SQTY = POL3[2];LINE_QTY = POL3[2] + POL4[1];RECV_QTY = POL3[3]
+If POH0[0] <> 7 Let SQTY = POL4[5];LINE_QTY = POL4[5] + POL4[1] - POL4[17];RECV_QTY = POL3[4]
+If POH0[0] = 7 Let RECV_QTY1 = POL3[3] - POL4[17] Else Let RECV_QTY1 = POL3[4] - POL4[16]
+If POL3[4] <> 0 And POL1[5] = -1 Let LINE_QTY = POL3[4]
+If POL3[4] <> 0 And POL1[5] = -3 Let LINE_QTY = POL3[4]
+If (POL1[5] = -1 Or POL1[5] = -3) And A[6] <> POL4[12] ! using cwt and someone altered the weight
+  SCR = A[6]
+  A[6] = POL4[12]
+  CNVTU[0] = -1;CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = DSP_POL2[0]
+  Gosub CONVERT
+  A[6] = SCR
+Else 
+  AMOUNT = POL2[0]
+End If 
+T9 = FNR(RECV_QTY1 * AMOUNT)
+POL4[6] = T9
+If POL1[5] = -2 !   lot
+  POL4[6] = POL2[0] - (POL2[0] * (POL4[2] / 100)) - POL4[3]
+  POL4[7] = POL2[0] - (POL2[0] * (POL4[2] / 100)) - POL4[3]
+End If 
+Gosub EXTEND_NET_COST
+If POL1[5] = -2
+  DOL_RECV = POL4[0]
+Else 
+  DOL_RECV = FNR((RECV_QTY1) * POL4[0])
+End If 
+POL3[5] = 0 \ If POL4[13] Let POL3[5] = POL4[12] * (LINE_QTY) / POL4[13]
+LBS_RECV = 0 \ If POL4[13] Let LBS_RECV = POL4[12] * (RECV_QTY) / POL4[13]
+POL3[6] = 0 \ If POL4[15] Let POL3[6] = POL4[14] * (LINE_QTY) / POL4[15]
+CB_RECV = 0 \ If POL4[15] Let CB_RECV = POL4[14] * (RECV_QTY) / POL4[15]
+Return 
+EXTEND_NET_COST: Rem ----------------------------------------------------
+If (POL1[5] = -1 Or POL1[5] = -3) And A[6] <> POL4[12] ! using cwt
+  A[5] = POL4[13];A[6] = POL4[12]
+End If 
+POL4[0] = POL2[0] - (POL2[0] * (POL4[2] / 100)) - POL4[3]
+If POL4[0] < 0 Let POL4[0] = 0
+CNVTU[2] = 2;CNVTU[1] = POL1[5]
+CNVTA = POL4[0];CNVTU[0] = 0
+Gosub L_4550 \ DSP_POL4[0] = X3
+CNVTU[2] = 2;CNVTU[0] = POL1[5]
+CNVTA = DSP_POL4[0];CNVTU[1] = 0
+Gosub L_4550 \ POL4[0] = X3
+If (POL1[5] = -1 Or POL1[5] = -3) And A[6] <> POL4[12] ! using cwt and someone altered the weight
+  SCR = A[6]
+  A[6] = POL4[12]
+  CNVTU[0] = -1;CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = DSP_POL4[0]
+  Gosub CONVERT
+  A[6] = SCR
+Else 
+  AMOUNT = POL4[0]
+End If 
+POL4[7] = FNR(RECV_QTY1 * AMOUNT)
+If POL1[5] = -2 Let POL4[7] = POL2[0] - (POL2[0] * (POL4[2] / 100)) - POL4[3]
+Return 
+PRINT_REPORT: Rem
+! If SCRN Print 'CS';
+SORTKEY$ = " ",SORTKEY$
+LOOP_REPORT: Search #CH_SORT,3,1;SORTKEY$,REC_POHEAD,E
+If E
+  !If V9[2] And SCRN Input @0,23;"PRESS <CR> TO CONTINUE "J$ \ Print 'CS';
+  Goto DO_PRONTO_ACCEPT ! which just goes to DONE
+End If 
+If Not(BADFLAG) And SORTKEY$[1,1] > "A" Let V9[1] = 99;BADFLAG = 1
+If V9[1] > V9[0] Gosub PRINT_HEADING
+Print #0; Tab 10;SORTKEY$[3,8];
+Print #0; Tab 17;SORTKEY$[9,11];
+Print #0; Tab 25;SORTKEY$[13,18];
+Print #0; Tab 33;SORTKEY$[19,28];
+If Not(BADFLAG)
+  Gosub READ_POHEAD
+  Print #0; Using "######"; Tab 45;POH3[3];
+  KEYVEND$ = " ",KEYVEND$
+  KEYVEND$[1,6] = POH3[3] Using "######"
+  Search #CH_VEND,2,1;KEYVEND$,REC_VEND,E
+  If E
+    VENDNAME$ = " ",VENDNAME$;VENDNAME$[1,19] = "Vendor Not On File "
+  Else 
+    Mat Read #CH_VEND,REC_VEND,0;VENDNAME$;
+  End If 
+  Print #0; Tab 53;VENDNAME$;
+  Print #0; Tab 84;SORTKEY$[29,60];
+Else 
+  Print #0; Tab 45;SORTKEY$[29];
+End If 
+Print #0;""
+V9[1] = V9[1] + 1
+Goto LOOP_REPORT
+DO_PRONTO_ACCEPT: Rem
+PRONTO = 0
+If Not(PRONTO) Goto DONE
+Goto DONE
+!SORTKEY$ = "A "
+!LOOP_PRONTO: Search #CH_SORT,3,1;SORTKEY$,REC_POHEAD,E
+!If E Goto DONE
+!If SORTKEY$[1,1] <> "A" Goto DONE
+!POHR = REC_POHEAD
+!If OLDPOHR <> POHR Swap 2,"po374swap"
+!OLDPOHR = POHR
+!Goto LOOP_PRONTO
+PRINT_HEADING: Rem "==================================== headings
+If V9[1] < V9[0] Return 
+!If V9[2] If SCRN Input @0,23;"PRESS <CR> TO CONTINUE "J$ \ Print 'CS';
+If V9[2] If Not(SCRN) Print #0;"\14\";
+V9[2] = V9[2] + 1 \ V9[1] = 6
+If Not(SCRN) Print #0;"\12\";
+Print #0;TIMER$;
+Print #0; Tab (46 - Len(CNAME$) / 2);CNAME$;
+Print #0; Using "PAGE ####"; Tab 70;V9[2]
+Print #0;" - 380 - ";
+Print #0; Tab 20;"DIRECT PURCHASE/SALES ORDER RECONCILIATION"
+Print #0;""
+If Not(BADFLAG) Print #0; Tab 25;"**** SUCCESSFULLY UPDATED ****"
+If BADFLAG Print #0; Tab 25;"**** ERROR LIST ****"
+Print #0; Tab 10;"   PO"; Tab 17;"Line"; Tab 25;"Order #"; Tab 33;"Invoice #";
+If Not(BADFLAG)
+  Print #0; Tab 45;"Vendor#"; Tab 53;"Vendor Name";
+End If 
+Print #0;" "
+Print #0;LINES$
+Return 
+READ_INVH: Rem
+Rem {begin src/inc/read.invh.i}
+Mat Read #CH_INVH,REC_INVH,0;H0
+Mat Read #CH_INVH,REC_INVH,52;H3
+Mat Read #CH_INVH,REC_INVH,56;TOT_SELL
+Mat Read #CH_INVH,REC_INVH,64;LOCKPORT
+Mat Read #CH_INVH,REC_INVH,66;V0$
+Mat Read #CH_INVH,REC_INVH,78;H4
+Mat Read #CH_INVH,REC_INVH,84;H0$
+Mat Read #CH_INVH,REC_INVH,104;H5
+Mat Read #CH_INVH,REC_INVH,172;ST3
+Mat Read #CH_INVH,REC_INVH,272;H1$
+Mat Read #CH_INVH,REC_INVH,278;SLSM
+Mat Read #CH_INVH,REC_INVH,318;SCOM
+Mat Read #CH_INVH,REC_INVH,348;SMER
+Mat Read #CH_INVH,REC_INVH,378;SCST
+Mat Read #CH_INVH,REC_INVH,408;H6
+Mat Read #CH_INVH,REC_INVH,444;HMAT$
+Mat Read #CH_INVH,REC_INVH,446;P0$
+Mat Read #CH_INVH,REC_INVH,466;HFAX
+Mat Read #CH_INVH,REC_INVH,474;HSTI
+Mat Read #CH_INVH,REC_INVH,482;H2
+Mat Read #CH_INVH,REC_INVH,486;OWHT
+Mat Read #CH_INVH,REC_INVH,490;OWHT1
+Mat Read #CH_INVH,REC_INVH,498;TOTGL
+Mat Read #CH_INVH,REC_INVH,504;PICKBY
+Mat Read #CH_INVH,REC_INVH,512;OREF
+Rem {end read.invh.i}
+Return 
+WRITE_POHEAD: Rem
+Rem {begin src/inc/write.pohead.i}
+Mat Write #CH_POHEAD,REC_POHEAD,0;POH0
+Mat Write #CH_POHEAD,REC_POHEAD,24;POH$
+Mat Write #CH_POHEAD,REC_POHEAD,106;POH1$
+Mat Write #CH_POHEAD,REC_POHEAD,222;POH3
+Mat Write #CH_POHEAD,REC_POHEAD,242;POH4
+Mat Write #CH_POHEAD,REC_POHEAD,250;POH8
+Mat Write #CH_POHEAD,REC_POHEAD,310;POH
+Mat Write #CH_POHEAD,REC_POHEAD,330;POH1
+Mat Write #CH_POHEAD,REC_POHEAD,350;POH9
+Mat Write #CH_POHEAD,REC_POHEAD,428;ST$;
+Mat Write #CH_POHEAD,REC_POHEAD,442;POH2$;
+Mat Write #CH_POHEAD,REC_POHEAD,482;POH5;
+Mat Write #CH_POHEAD,REC_POHEAD,504;POH6;
+Mat Write #CH_POHEAD,REC_POHEAD,528;POH7;
+Rem {end write.pohead.i}
+Return 
+READ_INVL: Rem
+Rem {begin src/inc/read.invl.i}
+Mat Read #CH_INVL,REC_INVL,0;L2
+Mat Read #CH_INVL,REC_INVL,8;L3
+Mat Read #CH_INVL,REC_INVL,16;L4
+Mat Read #CH_INVL,REC_INVL,32;L5
+Mat Read #CH_INVL,REC_INVL,56;L6
+Mat Read #CH_INVL,REC_INVL,80;L6$
+Mat Read #CH_INVL,REC_INVL,140;L1$
+Mat Read #CH_INVL,REC_INVL,160;L9
+Mat Read #CH_INVL,REC_INVL,168;L7
+Mat Read #CH_INVL,REC_INVL,246;PL
+Mat Read #CH_INVL,REC_INVL,250;UN
+Mat Read #CH_INVL,REC_INVL,256;S2
+Mat Read #CH_INVL,REC_INVL,260;S3
+Mat Read #CH_INVL,REC_INVL,368;MT$
+Mat Read #CH_INVL,REC_INVL,370;S3$
+Mat Read #CH_INVL,REC_INVL,404;OLM
+Mat Read #CH_INVL,REC_INVL,446;EUN
+Mat Read #CH_INVL,REC_INVL,452;UNF
+Mat Read #CH_INVL,REC_INVL,494;LCO
+Mat Read #CH_INVL,REC_INVL,502;CST
+Mat Read #CH_INVL,REC_INVL,508;LTAX1
+Mat Read #CH_INVL,REC_INVL,514;CTWT
+Mat Read #CH_INVL,REC_INVL,518;INVNO
+Mat Read #CH_INVL,REC_INVL,538;LTAX2
+Mat Read #CH_INVL,REC_INVL,542;QPB
+Read #CH_INVL,REC_INVL,548;LPRINTED
+Read #CH_INVL,REC_INVL,550;OWHS
+Read #CH_INVL,REC_INVL,552;LP_DATE
+Read #CH_INVL,REC_INVL,556;LP_TIME
+Read #CH_INVL,REC_INVL,564;ROL0
+Rem {end read.invl.i}
+Return 
+WRITE_POLINE: Rem
+Rem {begin src/inc/write.poline.i}
+Mat Write #CH_POLINE,REC_POLINE,0;POL1
+Mat Write #CH_POLINE,REC_POLINE,12;POL2
+Mat Write #CH_POLINE,REC_POLINE,24;POL3
+Mat Write #CH_POLINE,REC_POLINE,66;POL1$
+Mat Write #CH_POLINE,REC_POLINE,186;POL
+Mat Write #CH_POLINE,REC_POLINE,222;POL0
+Mat Write #CH_POLINE,REC_POLINE,232;POL4
+Mat Write #CH_POLINE,REC_POLINE,376;POMISC
+Mat Write #CH_POLINE,REC_POLINE,382;POL5
+Mat Write #CH_POLINE,REC_POLINE,442;POL6;
+Rem {end write.poline.i}
+Return 
+READ_POHEAD: Rem
+Rem {begin src/inc/read.pohead.i}
+Mat Read #CH_POHEAD,REC_POHEAD,0;POH0;
+Mat Read #CH_POHEAD,REC_POHEAD,24;POH$;
+Mat Read #CH_POHEAD,REC_POHEAD,106;POH1$;
+Mat Read #CH_POHEAD,REC_POHEAD,222;POH3;
+Mat Read #CH_POHEAD,REC_POHEAD,242;POH4;
+Mat Read #CH_POHEAD,REC_POHEAD,250;POH8;
+Mat Read #CH_POHEAD,REC_POHEAD,310;POH;
+Mat Read #CH_POHEAD,REC_POHEAD,330;POH1;
+Mat Read #CH_POHEAD,REC_POHEAD,350;POH9;
+Mat Read #CH_POHEAD,REC_POHEAD,428;ST$;
+Mat Read #CH_POHEAD,REC_POHEAD,442;POH2$;
+Mat Read #CH_POHEAD,REC_POHEAD,482;POH5;
+Mat Read #CH_POHEAD,REC_POHEAD,504;POH6;
+Mat Read #CH_POHEAD,REC_POHEAD,528;POH7;
+Rem {end read.pohead.i}
+Return 
+READ_POLINE: Rem
+Rem {begin src/inc/read.poline.i}
+Mat Read #CH_POLINE,REC_POLINE,0;POL1;
+Mat Read #CH_POLINE,REC_POLINE,12;POL2;
+Mat Read #CH_POLINE,REC_POLINE,24;POL3;
+Mat Read #CH_POLINE,REC_POLINE,66;POL1$;
+Mat Read #CH_POLINE,REC_POLINE,186;POL;
+Mat Read #CH_POLINE,REC_POLINE,222;POL0;
+Mat Read #CH_POLINE,REC_POLINE,232;POL4;
+Mat Read #CH_POLINE,REC_POLINE,376;POMISC;
+Mat Read #CH_POLINE,REC_POLINE,382;POL5;
+Mat Read #CH_POLINE,REC_POLINE,442;POL6;
+Rem {end read.poline.i}
+Return 
+READ_PROD: Rem
+Rem {begin src/inc/read.prod.i}
+Mat Read #CH_PROD,REC_PROD,0;A$
+Mat Read #CH_PROD,REC_PROD,156;B
+Mat Read #CH_PROD,REC_PROD,256;A
+Mat Read #CH_PROD,REC_PROD,460;A1
+Mat Read #CH_PROD,REC_PROD,508;A2
+Mat Read #CH_PROD,REC_PROD,512;PFU1
+Mat Read #CH_PROD,REC_PROD,554;PFU2
+Mat Read #CH_PROD,REC_PROD,596;PRPARC
+Mat Read #CH_PROD,REC_PROD,620;LM
+Mat Read #CH_PROD,REC_PROD,624;PR_PO
+Mat Read #CH_PROD,REC_PROD,628;AGEDAY
+Read #CH_PROD,REC_PROD,630;LLC
+Mat Read #CH_PROD,REC_PROD,632;PSN$
+Mat Read #CH_PROD,REC_PROD,652;PSN
+Mat Read #CH_PROD,REC_PROD,660;U2
+Mat Read #CH_PROD,REC_PROD,664;LBSORD
+Mat Read #CH_PROD,REC_PROD,670;U4
+Read #CH_PROD,REC_PROD,678;U3
+Mat Read #CH_PROD,REC_PROD,684;U3$
+Mat Read #CH_PROD,REC_PROD,744;HZ$
+Mat Read #CH_PROD,REC_PROD,834;A3
+Mat Read #CH_PROD,REC_PROD,846;PFTB
+Read #CH_PROD,REC_PROD,854;UPCT
+Mat Read #CH_PROD,REC_PROD,856;C1$
+Mat Read #CH_PROD,REC_PROD,894;PR_C4
+Read #CH_PROD,REC_PROD,938;PF_LOAD2
+Mat Read #CH_PROD,REC_PROD,944;PR_A2$
+Mat Read #CH_PROD,REC_PROD,974;PFCO
+Mat Read #CH_PROD,REC_PROD,990;PLV
+Mat Read #CH_PROD,REC_PROD,1002;PLC
+Mat Read #CH_PROD,REC_PROD,1018;PFN
+Mat Read #CH_PROD,REC_PROD,1030;STK
+Mat Read #CH_PROD,REC_PROD,1048;FDT
+Mat Read #CH_PROD,REC_PROD,1056;PRFLG$
+Mat Read #CH_PROD,REC_PROD,1066;PRBASE
+Mat Read #CH_PROD,REC_PROD,1068;PRMKUP
+Mat Read #CH_PROD,REC_PROD,1084;PRMKUPTYP$
+Mat Read #CH_PROD,REC_PROD,1088;FUT
+Mat Read #CH_PROD,REC_PROD,1100;PRPARC2
+Mat Read #CH_PROD,REC_PROD,1108;PRREDI
+Mat Read #CH_PROD,REC_PROD,1120;PIC$
+Mat Read #CH_PROD,REC_PROD,1270;PRD0
+Mat Read #CH_PROD,REC_PROD,1282;PRIML$
+Mat Read #CH_PROD,REC_PROD,1294;PRD1
+Mat Read #CH_PROD,REC_PROD,1304;PRD2
+Rem {end read.prod.i}
+Unlock #CH_PROD
+Return 
+BUILD_SORT: Rem
+Try Close #9 Else REM	! blockid has #9 open already
+F$ = Spc(6) Using "6/SORTWORK&&&&!"
+WORK$ = "[1:1] ",F$
+Build #CH_SORT,WORK$
+REC_SORT = 40 \ Search #CH_SORT,0,1;F$,REC_SORT,E \ If E Gosub ERR_SEARCH
+REC_SORT = 1 \ Search #CH_SORT,0,0;F$,REC_SORT,E \ If E Gosub ERR_SEARCH
+REC_SORT = 0 \ Search #CH_SORT,1,0;F$,REC_SORT,E \ If E Gosub ERR_SEARCH
+Return 
+
+ISINPUT: Return ! Call "input",J1,J$,J0$,J1$,J4$,J5$ \ Return 
+Rem {begin rtn.convert.s}
+CONVERT: Rem "UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)   ! 20040 REM
+If CNVTU[2] = 3 Or CNVTU[2] = 4 Goto CVTSTARTA
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto CVTDONE
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto CVTDONE
+If CNVTU[2] = 0 Goto CVTSTARTA
+If Not(CNVTA) Let AMOUNT = 0 \ Goto CVTDONE
+CVTSTARTA: Rem ALL UB 5+!!  IF SPC 4>1280 GOTO cvtstartb: ! "unibasic 5+
+
+CVTSTARTB: Rem "====== unibasic 5+ logic
+!Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+Call "MXPRCONV5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,e$,rstr$
+If CNVTU[2] = 0 Goto CVTDONE
+If FLAG Let E = FLAG \ Gosub ERR_SEARCH
+AMOUNT = CNVTA
+CVTDONE: Return 
+Rem {end rtn.convert.s}
+OUTEND: Rem
+DONE: Rem
+Try Close #CH_Sort  Else Rem
+F$ = Spc(6) Using "6/SORTWORK&&&&"
+Try Kill F$  Else REM
+!Chain "mx000"
+If scrn ! dx xml
+  Call addtostr(e$,rstr$,esdel$) !end section
+  Call setoutput(e$,rstr$,1) !1 flag puts 0 status section in, puts </page> in
+End If 
+!
+try Call dxclose() else rem
+End
+ERR_SEARCH: Rem                                            
+ENUM = E;ELINE = Spc(16);CTERR = 0                         
+If E = 5 Let CTERR = Err(8)                                
+e$ = "RETURN STATUS",(E + (CTERR * .001))                  
+e$ = e$,"/ STATEMENT",ELINE," IN PROGRAM " + Msc$(4)       
+Call programdump("tmp/380se!","")                        
+Goto ERR_MSG ! Error 10000                                 
+Return ! End
+
+ERR_MSG: ! send message                                    
+ReturnStatus = 1 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)    
+Message$ = e$                                              
+Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)     
+Call AddToStr(e$,rstr$,WebStr$)                            
+Call SetOutPut(e$,rstr$)                                   
+End                             
+
+Rem {begin rtn.error.s}
+ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+!
+include "src/callmainerrnet.inc"
+End

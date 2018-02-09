@@ -1,0 +1,2772 @@
+! serpspr.dl4
+!
+! Special Price  (PM program 128)
+! Enter/edit Lines
+!
+! 1.0 08/04/2008
+! 05/24/2011 - add multiple price levels/breaks/types
+! 02/28/2012 - add cost group type
+!
+! loadsave -w -n 100,10 -o prog/dxport/serpspr.dl4 src/serpspr.src
+!
+! THE WEB USES LINE TYPE 4 for ALL PRODUCTS
+! PM SPLINE TYPES= 1:Product, 2:Commodity, 3:Size ONLY, 5:Cost Group
+! So - check & convert needed to make type 4 = type 1 w/"#  " prod code
+!
+include "src/copyright.inc"
+! internal files needed
+! Include "src/inc/filea80vm.inc" ! Vendor
+Include "src/inc/fileccodes.inc" ! u/m file
+Include "src/inc/filecommhead.inc" ! commodity
+Include "src/inc/filecust.inc" ! customer
+Include "src/inc/filesslsmz.inc" ! Salesman ! uses array
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+Include "src/inc/filewhinfoz.inc" ! wh info file (rec 0 fix)
+Include "src/inc/filespecprice.inc" ! Special Price Lines (ONLY DIR USED!)
+Include "src/inc/filecostgrp.inc" ! cost group file
+
+Include "src/inc/filebrktbl.inc" ! break table (if p60$[12,12]="Y")
+! Include "src/inc/filevendtag.inc" ! vendor tag
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+Declare External Function ChkAltItem$,formatdate2$
+Declare External Sub UserCntrl,LogAccess
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,UMDList
+Declare External Function getpravail,getumrec,ChkPrdUM
+
+External Lib "libcustlist.lib"
+Declare External Sub CustList
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "librebates.lib"
+Declare External Sub rebates
+
+! External Lib "ubsvendlist.dl4"
+! Declare External Sub VendList
+
+!External Lib "libcnttabs.lib"
+!Declare External Sub RCOPN,RCCLS,CNCTR,COCTR
+
+! internal subs/functions 
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian,JulianToDate
+
+Declare Sub Updatelog,OpenFiles,GetCust,GetProd,GetSPRCost
+Declare Sub GetCommd,GetRProd,UpdtLine,SendLBox,CopySPPR,GetCostGroup
+Declare Sub SLSPEnt,SlsmUpdtLines,CPList,GetPRCLvls,UpdtPRLvl
+Declare Sub LP_UPDT
+Declare Function chkDateFrmt$
+
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200],X$[20]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],RKey$[60],Cust$[6]
+	Dim sfld$[5],bcdata$[5],TUID$[10],UCA2$[50],UTYPE$[10]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2],UCA5[10]
+	Dim 2%,Q0[1],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim 1%,X1[9],Chans[20]
+	Dim 2%,CustNo,x2[9],sysdate
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR,SHR,SDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/sp.log" ! fields for DEBUG
+	Dim custom_customer$[30]
+
+	! Dim Vend. as a80vm ! Vendor
+	Dim umc. as ccodes ! u/m file
+	Dim comd. as commhead ! commodity
+	Dim cgrp. as costgrp ! cost group
+	Dim cust. as cust ! customer
+	Dim PR. as prod ! product file
+	Dim PW. as prodwhse ! prodwhse file
+	Dim WHI. as whinfo ! wh info file
+	Dim SD. as specprice ! special price file (ONLY USES DIR 1)
+
+	call dxopen()
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$)
+	call LogAccess(e$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serpspr"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	GAct=0 ! action not found
+	if debugdetail
+		dmsg$="SERPSPR ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$
+		Call updatelog(debug)
+	Endif
+	Call OpenFiles() ! open any/all files
+
+	MAT  READ #CTLC,3,172;SysDate;
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	Mat Read #ctlc,115,60;CUSTOM_CUSTOMER$;
+	CUSTOM_CUSTOMER$=Trim$(UCASE$(CUSTOM_CUSTOMER$))
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	TUID$=UserID$+Blank$
+	If Len(TUID$)>10 let TUID$[11]=""
+	Call UserCntrl(TUID$,UCA2$,UCA5[],status,intCo)
+	Let COST_LEV[0]=UCA5[0]
+	Let COST_LEV[1]=UCA5[1]
+	Let COST_LEV[2]=UCA5[2]
+	Let COST_LEV[3]=UCA5[3]
+	Let COMM_LEV=UCA5[4]
+	OnlyInquiry=0 \ if UCA2$[48,48]="I" let OnlyInquiry=1
+	!call dxsave(0,"tmp/sprcsv.txt!")
+	select case action$
+		case "OINQFLAG" ! needs flag now					doc=Sprc-GetOInqFlag.doc
+			returnstatus=1
+			message$="OK"
+			Clear List$[]
+			List$[0]=bsdel$,"OINQFLAG",fdel$
+			List$[1]="ID",fdel$,"FLAG",fdel$
+			tmp$="N" \ if onlyinquiry let tmp$="Y"
+			List$[2]="ONLYINQ",fdel$,tmp$,fdel$
+			List$[3]=esdel$
+			call AddToStr(e$,rstr$,List$[])
+			!
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			if debugdetail
+				dmsg$="Only Inquiry flag sent "+Message$ \ Call updatelog(debug)
+			Endif
+			GAct=1 ! okay
+			! end of OINQFLAG
+		case "DROPLIST" !   send droplists  ! all droplists happen
+		!
+		If Action1$="UMDROPLIST" !            doc= Sprc-umdroplist.doc
+			Call DXGet("PRODID",prod$) \ prod$=UCase$(prod$)
+			Prod$=Prod$+Blank$ \ If Len(Prod$)>12 let Prod$[13]=""
+			ProdKey$=Prod$
+			! If Prodkey$[1,6]<>"COMMD "
+				PrR=filegetprod(e$,PRC,"=",1,ProdKey$,PR.) ! product mode=2 dir=1
+				If PRR>0
+					let NonStk=0
+				Else ! is a commodity, size or # ALLPROD?
+					PRR=0;nonstk=1
+				Endif
+			if debugdetail
+				dmsg$="UMDROPLIST PROD= "+prodkey$ \ Call updatelog(debug)
+			Endif
+			!
+			! initialize status
+		  If PrR<0 ! Product record not found
+			 clear PR.
+			 ReturnStatus=0
+			 Message$="Error, Product not found"
+		  else ! continue with list
+			E$="" ! clear message
+			tmp$=" " ! is passed
+			If Not(NonStk)
+				Call UMDList(e$,tmp$,PRC,PRR,List$[],IntCo,Pr.) ! in libprod.lib
+			Else ! nonstk - send Default List
+				Clear List$[]
+				Call DXGET("UTYPE",tmp$) ! get type of um list (QTY,PRICE,COST)
+				Tmp$=RTRIM$(tmp$)
+				Let UType$=UCASE$(tmp$)
+				List$[0]=bsdel$,"UMLIST",fdel$
+				List$[1]="ID",fdel$,"UM",fdel$,"FACTOR",FDEL$,"Default",fdel$
+				If UType$="PRICE" let LIST$[2]="0",fdel$,"PRICING U/M",fdel$,"",fdel$,"",fdel$ 
+				If UType$="COST" Let List$[2]="0",fdel$,"COSTING  U/M",fdel$,"",fdel$,"",fdel$
+				If Utype$="QTY" let List$[2]="0",fdel$,"SELLING U/M",fdel$,"",fdel$,"",fdel$
+				List$[3]=esdel$ ! end of section
+			Endif
+			Let ReturnStatus=1
+			Message$="OK"
+			If E$<>""
+			  Let ReturnStatus=0
+			  Message$=E$
+			Endif
+		  Endif ! valid prod
+		  if debugdetail
+				dmsg$="UMDROPLIST sent "+message$ \ Call updatelog(debug)
+		  Endif
+		Endif ! action1=umdroplist
+		!
+		If Action1$="WHSELIST" ! zero=none?  doc=Sprc-whsedroplist.doc
+			Let ReturnStatus=1
+			Message$="OK";e$=""
+			Clear List$[]
+			clear field$[]
+			tmpcnt=maxcnt
+			tmp$=Action1$ ! section header
+			Call filedroplistwhinfoz(e$,list$[],tmpcnt,WHI,tmp$,Field$[],"0") ! "0"=none
+			if e$<>"" Let Message$=e$;ReturnStatus=0
+			if debugdetail
+				dmsg$="WHSELIST Sent "+Message$ \ Call updatelog(debug)
+			Endif
+		Endif ! whselist
+				
+		If Action1$="OPTLIST" ! option list for line fields    doc=sprc-getlineopts.doc
+			!
+			Let ReturnStatus=1
+			Message$="OK"
+			Call SendLBox()
+			if debugdetail
+				dmsg$="OPTBOXLIST sent "+message$ \ Call updatelog(debug)
+			Endif
+			!
+		Endif ! of send option boxes
+		If Action1$="COMMDLIST" ! commodity list   doc=Sprc-CommodityList.doc
+			Let ReturnStatus=1
+			Message$="OK";e$=""
+			Call DXGet("STEXT",tmp$) ! start at
+			ProdKey$=UCase$(tmp$)
+			Clear List$[]
+			tmpcnt=maxcnt
+			Clear Field$[]
+			Call filedroplistcommhead(e$,list$[],tmpcnt,CMC,"COMMODITYLIST",field$[],1,ProdKey$)
+			if debugdetail
+				dmsg$="COMMODITY LIST sent "+message$ \ Call updatelog(debug)
+			Endif
+		Endif ! of commodity list
+		If Action1$="SIZELIST" ! u/m list   doc=Sprc-SizeUMDropList.doc
+			Let ReturnStatus=1
+			Message$="OK"
+			Clear List$[]
+			tmpcnt=maxcnt
+			Call filedroplistccodes(e$,list$[],tmpcnt,CCC,"SIZELIST")
+			!if e$<>"" 
+			!   ReturnStatus=0
+			!   Message$=E$
+			!Endif
+			if debugdetail
+				dmsg$="SIZE UM LIST sent "+message$ \ Call updatelog(debug)
+			Endif 
+		Endif
+		If Action1$="BRKTBLLIST" ! break table   doc=Sprc-BrkTblDropList.doc
+			Let ReturnStatus=1
+			Message$="OK"
+			Clear List$[]
+			tmpcnt=maxcnt
+			Call filedroplistbrktbl(e$,list$[],tmpcnt,BTC,"BREAKTABLELIST")
+			if e$<>"" 
+			   ReturnStatus=0
+			   Message$=E$
+			Endif
+			if debugdetail
+				dmsg$="BRK TBL LIST sent "+message$ \ Call updatelog(debug)
+			Endif 
+		Endif
+		If Action1$="CSTGRPLIST" ! cost group list   doc=Spc-CostGroupList.doc
+			Let ReturnStatus=1
+			Message$="OK";e$=""
+			Call DXGet("STEXT",tmp$) ! start at
+			ProdKey$=UCase$(tmp$)
+			Clear List$[]
+			tmpcnt=maxcnt
+			Clear Field$[]
+			Call filedroplistcostgrp(e$,list$[],tmpcnt,CGC,"CSTGRPLIST",field$[],1,ProdKey$)
+			if debugdetail
+				dmsg$="COST GROUP LIST sent "+message$ \ Call updatelog(debug)
+			Endif
+		Endif ! of cost group list
+
+		! end of droplists
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		!
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		GAct=1 ! okay
+		!
+	case "PRODSEARCH" ! product scan    doc = Sprc-prodscan.doc
+		!
+		Let ReturnStatus=1
+		Message$="OK"
+		X2=0 ! normal scan
+		Call ProdList(e$,IntCo,List$[],maxcnt,ctlc,prc,pwc,x2,debugdetail,dblog$,UserId$)
+		If E$<>""
+		  Let ReturnStatus=0
+		  Message$=E$
+		Endif
+		call AddToStr(e$,rstr$,List$[])
+		!
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		if debugdetail
+			dmsg$="Product Search sent "+Message$ \ Call updatelog(debug)
+		Endif
+		GAct=1 ! okay
+		! end of prodsearch
+
+	case "CUSTSEARCH" ! customer Scan  doc=Sprc-CustScan.doc
+		!
+		Let ReturnStatus=1
+		Message$="OK"
+		
+		Call CustList(e$,IntCo,List$[],maxcnt,ctlc,cuc,debugdetail,dblog$,UserId$)
+		If E$<>""
+		  Let ReturnStatus=0
+		  Message$=E$
+		Endif
+		call AddToStr(e$,rstr$,List$[])
+		!
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		if debugdetail
+			dmsg$="Customer Search sent "+Message$ \ Call updatelog(debug)
+		Endif
+		GAct=1 ! okay
+		! end of custsearch
+
+	case "GETCUST" ! customer name    doc=sprc-getcustomer.doc
+		! get cust name
+		
+		Call DXGet("CUSTID",tmp$)
+		X2=tmp$
+		Cust$=X2 Using "######"
+		Call GetCust()
+		If CUR<0 and X2=999999
+			let cust.name$="PROMOTION"+Blank$
+		Endif
+		Clear List$[]
+		List$[0]=bsdel$,"CUSTNAME",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$
+		List$[2]=Cust$,fdel$,RTrim$(Cust.Name$),fdel$
+		List$[3]=esdel$
+		ReturnStatus=1
+		Message$="OK"
+		call AddToStr(e$,rstr$,List$[])
+		!
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		if debugdetail
+			dmsg$="Customer Lookup sent "+Message$ \ Call updatelog(debug)
+		Endif
+		GAct=1 ! okay
+		! end of GetCust
+
+	case "GETSPLINE" ! get a PRICE line #   doc=sprc-getsprline.doc
+		! based on cUSt/product
+		call GetRProd()
+		GAct=1 ! okay
+		! end of
+	case "UPDTLINE" ! update the line   doc=sprc-submitsprline.doc
+		! send in all data
+		If OnlyInquiry
+			returnstatus=0
+			message$="Inquiry only - no update"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto SPRDone
+		Endif
+		call UpdtLine()
+		GAct=1 ! okay
+		! end of
+	case "COPYPRICE" ! copy from a contr into this one   doc=Sprc-CopyPRICE.doc
+		! both must exist already
+		If OnlyInquiry
+			returnstatus=0
+			message$="Inquiry only - no update"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto SPRDone
+		Endif
+		Call CopySPPr()
+		GAct=1 ! okay
+		! end of CopySPPr
+	case "SLSPCOPY" ! SLSM update entry/check   doc=Sprc-SlsprsnEntry.doc
+		! only type 1 & 2 for range
+		If OnlyInquiry
+			returnstatus=0
+			message$="Inquiry only - no update"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto SPRDone
+		Endif
+		Call SlspEnt()
+		GAct=1 ! okay
+		! end of SLSPCOPY
+	case "SLSPUPDT" ! range update of lines     doc=Sprc-SlspRangeUpdate.doc
+		! type 1 or 2 only
+		If OnlyInquiry
+			returnstatus=0
+			message$="Inquiry only - no update"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto SPRDone
+		Endif
+		Call SlsmUpdtLines()
+		GAct=1 ! okay
+		! end of rangeupdate
+	case "GETCPLIST" ! list records for Customer
+		! list existing entries for customer
+		ReturnStatus=1
+		Message$="OK"
+		Call DXGET("CUSTID",tmp$)
+		X2=tmp$
+		Cust$=X2 Using "######"
+		Call GetCust()
+		If CUR<0 
+			If X2=999999
+				let cust.name$="PROMOTION"+Blank$
+			Else
+				ReturnStatus=0
+				Message$="CUSTOMER NOT FOUND"
+				goto CPLDone
+			Endif
+		Endif
+		Call CPList() ! Adds to rstr
+		CPLDone: ! finished
+		!
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		if debugdetail
+			dmsg$="Get existing Lines complete "+message$ \ Call updatelog(debug)
+		Endif
+		GACT=1 ! okay
+		! end of cplist
+	case "RELOPEN" ! tab for Related Open Contracts   doc=Rbt-RelContrOpen.doc
+		! send data - 
+		!call RCOPN(e$,IntCo,List$[],maxcnt,chans[],UserId$)
+		! writes to rstr - 
+		GACT=1 ! okay
+		! end of RELOpen
+	case "RELEXPD" ! tab for Related Contracts Expired  doc=Rbt-RelContrExprd.doc
+		! send data - 
+		!call RCCLS(e$,IntCo,List$[],maxcnt,chans[],UserId$)
+		! writes to rstr - 
+		GACT=1 ! okay
+		! end of RELExpd
+	case "NONCONTR" ! Customers not on any contract   doc=Rbt-CustNotContr.doc
+		! sends data to rstr$
+		!Call CNCTR(e$,IntCo,List$[],maxcnt,chans[],UserId$)
+		GACT=1 ! okay
+		! end of NONCONTR
+	case "ONOCONTR" ! custs on other contracts    doc=Rbt-CustOtherContr.doc
+		! sends data to rstr$
+		!Call COCTR(e$,IntCo,List$[],maxcnt,chans[],UserId$)
+		GACT=1 ! okay
+		! end of ONOCONTR
+	! next case
+	End Select
+  If GAct=0 ! did not have a good (re)action
+	if debugdetail
+		dmsg$="ACTION NOT FOUND" \ Call updatelog(debug)
+	Endif
+	ReturnStatus=0
+	Message$="ACTION NOT FOUND"
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+  Endif
+  SPRDOne: ! finished
+  if debugdetail
+		dmsg$="End of Program serpspr" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	! VNC=OpenFile(-2400,IntCo) \ If VNC=-1 Error 42 ! Vendor
+	CCC=OpenFile(-1728,IntCo) \ IF CCC=-1 Error 42 ! u/m file
+	CMC=OpenFile(-2288,IntCo) \ if CMC=-1 Error 42 ! commodity
+	CUC=OpenFile(-1808,IntCo) \ If CUC=-1 Error 42 ! customer
+	PRC=OpenFile(-1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(-1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	RHC=OpenFile(-304,IntCo) \ If RHC=-1 Error 42 ! Rebate Contract Header 
+	RDC=OpenFile(-320,IntCo) \ If RDC=-1 Error 42 ! Rebate Lines
+	SDC=OpenFile(1936,IntCo) \ If SDC=-1 Error 42 ! Contract Lines
+	SMC=OpenFile(-1824,IntCo) \ if SMC=-1 Error 42 ! Salesman file
+	WHI = OpenFile(-2768,IntCo) \ if whi = -1 Error 42 ! wh info file (rec 0 fix)
+	BTC=OpenFile(-1952,IntCo) \ if btc=-1 Error 42 ! break table
+	VTC=OpenFile(1120,IntCo) \ if vtc=-1 Error 42 ! vendtag
+	CGC=OpenFile(9916,IntCo) \ if CGC=-1 Error 42 ! Cost Group
+	LPC=OpenFile(1376,IntCo) \ if LPC=-1 Error 42 ! last price
+	Chans[0]=CTLC;Chans[1]=CCC;Chans[2]=CMC;Chans[3]=CUC
+	Chans[4]=PRC;Chans[5]=PWC;Chans[6]=PTC;Chans[13]=RHC
+	Chans[7]=SHC;Chans[8]=SDC;Chans[14]=RDC;Chans[9]=VNC
+ 	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+Userid$+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+
+Sub GetCust()
+! get Customer data - 
+! PASS IN CUST$
+  Try
+	Dim Ckey$[60]
+	Dim 2%,PRTYPE
+	Dim 3%,CUR
+	ckey$=" ",cKey$
+	cKey$=Cust$
+	
+		CUR=filegetcust(e$,CUC,"=",1,CKey$,cust.)
+		If CUR<0
+			clear cust.
+			cust.Name$="CUSTOMER NOT FOUND"+Blank$
+		Endif
+
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetCust
+! 
+!--------------------------------------------------------------------
+Sub GetProd()
+! get Prod data - 
+! PASS IN Prod$ already checked for type=2 or "#  " (commod or allprod)
+  Try
+	tmp$=Prod$
+	tmp1$=ChkAltItem$(e$,intCo,tmp$)
+	If rtrim$(tmp1$)<>"" let Prod$=rtrim$(tmp1$)+blank$ ! key was found
+	ProdKey$=Prod$
+	PRR=filegetprod(e$,PRC,"=",1,ProdKey$,pr.)
+	If PRR<0
+		clear pr.
+		pr.Desc1$="PRODUCT NOT FOUND"
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Getprod
+! 
+!--------------------------------------------------------------------
+Sub GetCommd()
+! get/check Commodity data - 
+! PASS IN Prod$ 
+  Try
+	ProdKey$=Prod$
+	CMR=filegetcommhead(e$,CMC,"=",1,ProdKey$,comd.)
+	If CMR<0
+		clear comd.
+		comd.CodeDescription$="COMMOD NOT FOUND"
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Getcommd
+! 
+!--------------------------------------------------------------------
+Sub GetCostGroup()
+! get/check Cost Group data - 
+! PASS IN Prod$ 
+  Try
+	ProdKey$=Prod$
+	CGR=filegetcostgrp(e$,CGC,"=",1,ProdKey$,cgrp.)
+	If CGR<0
+		clear cgrp.
+		cgrp.CGrpDesc$="COST GROUP NOT FOUND"
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetCostGroup
+! 
+!--------------------------------------------------------------------
+Sub GetRProd()
+! based on cust,type,prod
+! send back info - new or existing
+  Try
+	Dim LKey$[60],CMKey$[60],Prdf$[12]
+	Dim RBUM$[4],SCUm$[4],CGKey$[12]
+	Dim 1%,Type
+	Dim 3%
+	
+	ReturnStatus=1
+	Message$="OK"
+	Clear List$[]
+	tmpcnt=maxcnt
+	Call DXGet("CUSTID",tmp$)
+	CustNo=tmp$
+	If CustNo<=0 Or CustNo>999999
+		Message$="INVALID CUSTOMER NUMBER"
+		ReturnStatus=0
+		Goto GRLDone
+	Endif
+	Cust$=CustNo Using "######"
+	Call GetCust()
+	If Cur<0 and CustNo=999999 Let cust.Name$="PROMOTION"+Blank$
+	Call DXGet("RTYPE",tmp$)
+	X2=tmp$
+	if x2=1 or x2=2 or x2=3 or x2=4 or x2=5
+		! only types 1=prod,2=commod,3=size, 4=ALL, 5=CostGroup
+		type=x2
+	Else
+		ReturnStatus=0
+		Message$="TYPE NOT VALID"
+		goto GRLDone
+	Endif
+	Call DXGet("PRODID",tmp$)
+	let prod$=UCase$(RTrim$(tmp$))+Blank$
+	if prod$[1,1]="*" let type=2
+	If prod$[1,1]="&" let type=3
+	If prod$[1,3]="#  " let type=4
+	if prod$[1,1]="-" let type=5
+	If type=4 ! all prod (web option)
+		Prod$="#"+Blank$
+		Type=1 ! switch to PM type
+	Endif
+	if debugdetail
+		dmsg$="Get Line "+Str$(CustNo)+" T="+Str$(Type)+" "+prod$ \ Call updatelog(debug)
+	Endif
+  
+	! okay to go
+	List$[0]=bsdel$,"SPLINE",fdel$
+	WebStr$="PRODID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+	WebStr$=WebStr$,"STDATE",fdel$,"ENDDATE",fdel$
+	WebStr$=WebStr$,"UMPRC",fdel$,"UMCOST",fdel$
+	WebStr$=WebStr$,"SPTYPE",fdel$,"BASETYPE",fdel$
+	WebStr$=WebStr$,"SPRUDA",fdel$,"SPRUDANO",fdel$
+	WebStr$=WebStr$,"WHSE",fdel$,"COSTTYPE",fdel$
+	WebStr$=WebStr$,"COSTBASE",fdel$,"SPRFACT",fdel$
+	WebStr$=WebStr$,"COSTFACT",fdel$,"MINQTY",fdel$
+	WebStr$=WebStr$,"QTYLIM",fdel$,"UMQTY",fdel$
+	WebStr$=WebStr$,"BRKTYPE",fdel$,"BRKTBL",fdel$ ! not if p60$[12,12]="N"
+	WebStr$=WebStr$,"COMMPCT",fdel$,"LASTBUY",fdel$
+	WebStr$=WebStr$,"QTYSOLD",fdel$,"SLSDOLS",FDEL$
+	WebStr$=WebStr$,"EXIST",fdel$,"PRDPTYPE",fdel$
+	WebStr$=WebStr$,"PRICE",fdel$,"COST",fdel$
+	webstr$=webstr$,"MINTYPE",fdel$ ! added min type level 1
+	! ADD DESC OF TYPES?
+	! WebStr$=WebStr$,"RTDESC",fdel$,"CTDESC",fdel$,"CBDESC",fdel$
+	List$[1]=WebStr$
+	row=2
+	LKey$=" ",LKey$
+	LKey$[1,6]=CustNo Using "######"
+	Prdf$=Prod$+Blank$
+	if type=2 and prod$[1,1]<>"*" ! commod
+		Prdf$="*"+Prod$+Blank$
+	Endif
+	if type=2 and prod$[1,1]="*"
+		Prod$=Prdf$[2]
+	Endif
+	If type=3 and prod$[1,1]<>"&" 
+	    let Prdf$="&"+Prod$+Blank$
+	Endif
+	if type=3 and prod$[1,1]="&"
+		let prod$=Prdf$[2]
+	Endif
+	If type=3 ! get UM REC # for SIZE
+		tmp$=Prod$
+		Search #CCC,2,1;tmp$,R,E
+		If not(e)
+			Prdf$[6,9]=R Using "####" ! add rec #
+		Endif
+	Endif
+	if type=5 and prod$[1,1]<>"-" ! commod
+		Prdf$="-"+Prod$+Blank$
+	Endif
+	if type=5 and prod$[1,1]="-"
+		Prod$=Prdf$[2]
+	Endif
+	If type=1 ! product (including #?)
+		Prdf$=Prod$
+	Endif
+	if rtrim$(prod$)="" ! HAVE TO HAVE IT!!
+		returnstatus=0
+		if type=1 let message$="NO Product"
+		if type=2 let message$="NO Commodity"
+		if type=3 let Message$="NO Size"
+		if type=5 let Message$="NO Cost Group"
+		message$=message$+" ID was sent"
+		goto GRLDone
+	Endif
+	LKey$[7,18]=Prdf$
+	LKey$[19]="" ! CUT TO LENGTH
+	SDR=filegetspecprice(e$,SDC,"=",1,LKey$,SD.)
+	If SDR<=0 
+		If OnlyInquiry
+			returnstatus=0
+			message$="Inquiry only - Record not found"
+			goto GRLDone
+		Else
+			Clear sd.
+		Endif
+	Endif ! not found
+	NonStk=0
+	If type=1 ! prod desc
+		If Prod$[1,3]<>"#  " ! a normal product
+			tmp$=Prod$
+			tmp1$=ChkAltItem$(e$,intCo,tmp$)
+			!If tmp1$<>"" let Prod$=tmp$ ! key was found
+			 If RTrim$(tmp1$) <> "" Let Prod$ = RTrim$(tmp1$) + Blank$
+			ProdKey$=Prod$
+			PRR=filegetprod(e$,PRC,"=",1,ProdKey$,pr.)
+			If PRR<=0
+				clear pr.
+				Pr.Desc1$="PRODUCT NOT FOUND"
+				returnstatus=0
+			Endif
+		Else ! it's all
+			clear pr.
+			Pr.Desc1$="ALL PRODUCTS"
+			NonStk=1
+		Endif
+	Endif
+	If type=2 ! commodity
+		Clear pr.
+		NonStk=1
+		CMKey$=Prod$[1,4]
+		CMR=filegetcommhead(e$,CMC,"=",1,CMKey$,comd.)
+		If CMR<=0 
+			Clear comd.
+			pr.Desc1$="COMMODITY NOT FOUND"
+			returnstatus=0
+		Else ! found - load pr.
+			pr.Desc1$=comd.CodeDescription$
+			pr.Desc2$=comd.Remarks$
+		Endif
+	Endif
+	If Type=3 ! size (um)
+			Clear pr.
+			x3=key1$[12] ! s/b umrec
+			Read record #CCC,X3,0;umc.;
+			pr.desc1$=umc.Description$
+	Endif
+	If type=5 ! cost group
+		Clear pr.
+		NonStk=1
+		CGKey$=Prod$[1,12]
+		CGR=filegetcostgrp(e$,CGC,"=",1,CGKey$,cgrp.)
+		If CGR<=0 
+			Clear cgrp.
+			pr.Desc1$="COST GROUP NOT FOUND"
+			returnstatus=0
+		Else ! found - load pr.
+			pr.Desc1$=cgrp.CGrpDesc$
+			pr.Desc2$="Cost Group"
+		Endif
+	Endif
+	! existing list boxes (web hardcode?)
+	! PRICE TYPES: 1=%DISC(-=%MARKUP), 8=$DISC(-=MARKUP), 3=Flat
+	! SLSM COST: 1=%MARKUP(-=DISC), 2=$MARKUP(-=DISC), 3=FLAT, 3=STD
+	! COST BASE: 1=BASE, 2=LOAD, 3=LAST, 4=REBATE, 5=LOAD2(REDI)
+	! 
+	! load detail string
+	! Default if new
+	If SDR<=0
+		If NonStk
+			let sd.umprice=0
+			let sd.umcost=0
+		Else
+			let sd.umprice=pr.UMPriceDefault
+			let sd.umcost=pr.UMCostDefault
+		Endif
+		let sd.StartDate=Sysdate
+		sd.CancelDate=0 !
+	Endif
+	if returnstatus=0
+		message$=pr.desc1$
+		goto GRLDone
+	Endif
+	WebStr$=RTrim$(Prod$),fdel$
+	WebStr$=WebStr$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.Desc2$),FDEL$
+	tmp$="0"
+	If sd.StartDate let tmp$=PDate$(sd.StartDate)
+	tmp1$="NONE"
+	if sd.CancelDate let tmp1$=PDate$(sd.CancelDate)
+	WebStr$=WebStr$,tmp$,fdel$,tmp1$,fdel$ ! start/end dates
+	RBUM$=""
+	if Not(NonStk) and sd.umprice let RBUM$=XUnit$(sd.UMPrice,ccc)
+	if nonstk
+		
+		Tmp$="PRCE"
+		RBUM$=Tmp$
+	Endif
+	SCUm$=""
+	if Not(NonStk) and sd.UMCost let SCUm$=XUnit$(sd.UMCost,ccc)
+	if nonstk
+		pr.PriceType=0 ! AS 128 does it
+		tmp$="COST"
+		SCUM$=Tmp$
+	Endif
+	WebStr$=WebStr$,rbum$,fdel$,scum$,fdel$  ! um prc, cost
+	WebStr$=WebStr$,Str$(sd.PrcType),fdel$,Str$(sd.BaseType),fdel$
+	WebStr$=WebStr$,RTrim$(sd.Uda2$),fdel$,Str$(sd.Uda1),fdel$
+	WebStr$=WebStr$,Str$(sd.Whse),fdel$,Str$(sd.SCostType),fdel$
+	X3=sd.SPFact
+	if Not(NonStk) and sd.PrcType=3 ! flat
+		cnvtu[0]=0;cnvtu[1]=sd.UMPrice;cnvtu[2]=2
+		Cnvta=X3
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		X3=Amount
+	Endif
+	WebStr$=WebStr$,Str$(sd.SCostBase),fdel$,LTrim$(x3 Using PMask$),fdel$
+	x3=sd.SCFact
+	if Not(NonStk) and sd.SCostType=3 ! flat
+		cnvtu[0]=0;cnvtu[1]=sd.UMCost;cnvtu[2]=2
+		Cnvta=X3
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		X3=Amount
+	Endif
+	WebStr$=WebStr$,Ltrim$(X3 Using PMask$),fdel$ ! sslcost fact
+	X3=sd.MinQtyForSp
+	IF sD.UMQTY=0 and not(NonStk) let sd.umqty=PR.UMSellDefault
+	!if Not(NonStk) and sd.umqty
+	!	cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1
+	!	Cnvta=x3
+	!	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	!	X3=Amount
+	!Endif
+	tmp$="" \ if Not(NonStk) and sd.UMQty let tmp$=XUnit$(sd.UMQty,ccc)
+	WebStr$=WebStr$,LTrim$(X3 Using QMask$),fdel$ ! Min qty 
+	X3=sd.QtyLimit
+	IF sD.UMQTY=0 and not(NonStk) let sd.umqty=PR.UMSellDefault
+	!if Not(NonStk) and sd.umqty
+	!	cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1
+	!	Cnvta=x3
+	!	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	!	X3=Amount
+	!Endif
+	tmp$="" \ if Not(NonStk) and sd.UMQty let tmp$=XUnit$(sd.UMQty,ccc)
+	WebStr$=WebStr$,LTrim$(X3 Using QMask$),fdel$,tmp$,fdel$ ! limit & U/M
+	WebStr$=WebStr$,Str$(sd.BrkType),fdel$,Str$(sd.BrkTable),fdel$ ! brk & tbl
+	WebStr$=WebStr$,Str$(sd.CommPct),fdel$ ! comm prct
+	tmp$="NONE"
+	If sd.LastBuyDate let tmp$=PDate$(sd.LastBuyDate)
+	WebStr$=WebStr$,tmp$,fdel$  ! Last buy
+	cnvtu[0]=0;cnvtu[1]=sd.UMQty;cnvtu[2]=1
+	Cnvta=sd.QtySinceStart
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	
+	tmp$="" \ if Not(NonStk) and sd.UMQty let tmp$=XUnit$(sd.UMQty,ccc)
+	if NonStk Let Amount=sd.QtySinceStart;TMP$=""
+	WebStr$=WebStr$,LTrim$(Amount using QMask$),"/",tmp$,fdel$
+	WebStr$=WebStr$,LTrim$(sd.SalesSinceStart Using QMask$),FDEL$
+	tmp$="Y"
+	If SDR<=0 Let tmp$="N"
+	WebStr$=WebStr$,tmp$,fdel$ ! line exists Y/N
+	WebStr$=WebStr$,Str$(pr.PriceType),fdel$ ! price type 1=matrix, 2=bracket (0=nonstk)
+	If Not(NonStk) ! can go get price & cost
+		Price=0;Cost=0
+		Call GetSPRCost() ! will also check cost_lev & return 0 if applicable
+		If Price
+			WebStr$=WebStr$,LTrim$(Price Using PMask$),"/",RBUM$,fdel$
+		Else
+			WebStr$=WebStr$," ",fdel$ ! none or security says no
+		Endif
+		If Cost
+			WebStr$=WebStr$,LTrim$(Cost Using PMask$),"/",SCUM$,fdel$
+		Else
+			WebStr$=WebStr$," ",fdel$ ! none or security says no
+		Endif
+	Else ! No Price/Cost
+		WebStr$=WebStr$," ",fdel$," ",Fdel$
+	Endif
+	IF SD.MINTYPE<>2 LET SD.MINTYPE=1
+	Webstr$=webstr$,Str$(sd.MinType),fdel$ ! 1=qty,2=lbs
+	List$[row]=WebStr$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$ ! end of section
+	Call AddToStr(e$,rstr$,List$[])
+	! now send other 9 prices in new call
+	call GetPrcLvls()
+	! 
+	GRLDone: ! finished
+	! call programdump("/tmp/sprlog3!","")
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Get "+Str$(CustNo)+" Line complete "+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetRProd
+! 
+!--------------------------------------------------------------------
+Sub UpdtLine()
+! receive back data - update file
+! 
+  Try
+	Dim LKey$[60],CMKey$[60],Prdf$[12]
+	Dim RBUM$[4],SCUm$[4],CGKey$[12]
+	Dim 1%,Type,edtype
+	Dim 3%
+	
+	Dim OSDL. as specprice
+	Call DXGet("EDTYPE",tmp$) ! type of update
+	tmp$=UCase$(tmp$)
+	Tmp$=RTrim$(tmp$) ! uppercase and trimmed
+	Edtype=0 ! default=Edit
+	If tmp$="A" let edtype=1
+	If tmp$="D" let edtype=2
+	ReturnStatus=1
+	Message$="OK"
+	Clear List$[]
+	tmpcnt=maxcnt
+	Call DXGet("CUSTID",tmp$)
+	CustNo=tmp$
+	If CustNo<=0 Or CustNo>999999
+		Message$="INVALID CUSTOMER NUMBER"
+		ReturnStatus=0
+		Goto URLDone
+	Endif
+	Cust$=CustNO Using "######"
+	Call GetCust()
+	If CUR<0 and CustN0<>999999
+		Message$="INVALID CUSTOMER NUMBER"
+		ReturnStatus=0
+		Goto URLDone
+	Endif
+	Call DXGet("RTYPE",tmp$)
+	X2=tmp$
+	if x2=1 or x2=2 or x2=3 or x2=4 or x2=5 
+		! only types 1=prod,2=commod, 3=size(4=ALL on web), 5=costgroup
+		type=x2
+	Else
+		ReturnStatus=0
+		Message$="TYPE NOT VALID"
+		goto URLDone
+	Endif
+	Call DXGet("PRODID",tmp$)
+	let prod$=UCase$(RTrim$(tmp$))+Blank$
+	if prod$[1,1]="*" let type=2
+	if prod$[1,1]="&" let type=3
+	if prod$[1,1]="#" let type=4
+	if prod$[1,1]="-" let type=5
+	If type=4 ! all prods type
+		Let Prod$="#"+Blank$ ! switch to PM Code
+		Let Type=1 ! switch to PM type
+	Endif
+	if debugdetail
+		If edtype=0 dmsg$="Edit"
+		if edtype=1 dmsg$="Add"
+		if edtype=2 dmsg$="Delete"
+		dmsg$=dmsg$+" Line "+Str$(CustNo)+" T="+Str$(Type)+" "+prod$ \ Call updatelog(debug)
+	Endif
+
+	LKey$=" ",LKey$
+	LKey$[1,6]=CustNo Using "######"
+	Prdf$=Prod$
+	if type=2 and Prod$[1,1]<>"*" ! commod
+		Prdf$="*"+Prod$+Blank$
+	Endif
+	if type=2 and prod$[1,1]="*"
+		Prod$=Prod$[2]+Blank$
+	Endif
+	If type=3 If prod$[1,1]<>"&" 
+		let Prdf$="&"+Prod$+Blank$! size - key = "&UUUURRRR" (um text, R=um rec#)
+	Endif
+	If type=3 ! check / add the um Rec #
+		If prod$[1,1]="&"
+			Prod$=Prod$[2]+Blank$
+		Endif
+	    tmp$=Prod$[1,4] ! size um text
+		Search #CCC,2,1;tmp$,R,E
+		if not(e)
+			Prod$[5]=R Using "####" ! ="UUUURRRR"
+			Prdf$="&"+Prod$+Blank$
+		Endif ! needs Rec # or ccodes
+	Endif
+	if type=5 and Prod$[1,1]<>"-" ! costgroup
+		Prdf$="-"+Prod$+Blank$
+	Endif
+	if type=5 and prod$[1,1]="-"
+		Prod$=Prod$[2]+Blank$
+	Endif
+	If type=1 ! product (including #?)
+		Prdf$=Prod$
+	Endif
+	if rtrim$(prod$)="" ! HAVE TO HAVE IT!!
+		returnstatus=0
+		if type=1 let message$="NO Product"
+		if type=2 let message$="NO Commodity"
+		if type=3 let Message$="NO Size"
+		if type=5 let Message$="NO Cost Group"
+		message$=message$+" ID was sent"
+		goto URLDone
+	Endif
+	LKey$[7,18]=Prdf$
+	LKey$[19]="" ! CUT TO LENGTH
+	SDR=filegetspecprice(e$,SDC,"=",1,LKey$,SD.)
+	If SDR<=0 Clear sd.
+	If SDR>0 Read Record #SDC,SDR,0;Osdl.; ! for change record
+	if edtype=1 and sdr>0 let edtype=0 ! found existing - chg to edit
+	NonStk=0
+	If type>=2 or Prod$[1,3]="#  " let NonStk=1
+	If edtype=2 ! want a delete
+	  If sdr<0 goto URLDone ! no rec on delete
+	  E=0
+	  Search #SDC,5,1;LKey$,R,E
+	 ! no delete function available from file
+	  If E
+		Let e$="SEARCH ERROR "+Str$(E)+" DELETE SPR LINE - SERPSPR"
+		Error 11000
+	  Endif
+	 
+	  Let E=3;R=SDR
+	  Search #SDC,1,0;LKey$,R,E
+	  If E
+		Let e$="SEARCH ERROR "+Str$(E)+" DELETE SPR LINE - SERPSPR"
+		Error 11000
+	  Endif
+	  Goto URLDone
+	Endif ! of delete
+		
+	Clear pr.
+	NonStk=0
+	If type=1 ! prod desc
+		If Prod$[1,3]<>"#  " ! a normal product
+			tmp$=Prod$
+			tmp1$=ChkAltItem$(e$,intCo,tmp$)
+			!If tmp1$<>"" let Prod$=tmp$ ! key was found
+			 If RTrim$(tmp1$) <> "" Let Prod$ = RTrim$(tmp1$) + Blank$
+			ProdKey$=Prod$
+			PRR=filegetprod(e$,PRC,"=",1,ProdKey$,pr.)
+			If PRR<=0
+				clear pr.
+				Pr.Desc1$="PRODUCT NOT FOUND"
+				returnstatus=0
+			Endif
+		Else ! it's all
+			clear pr.
+			Pr.Desc1$="ALL PRODUCTS"
+			NonStk=1
+		Endif
+	Endif
+	If type=2 ! commodity
+		Clear pr.
+		NonStk=1
+		CMKey$=Prod$[1,4]
+		CMR=filegetcommhead(e$,CMC,"=",1,CMKey$,comd.)
+		If CMR<=0 
+			Clear comd.
+			pr.Desc1$="COMMODITY NOT FOUND"
+			returnstatus=0
+		Else ! found - load pr.
+			pr.Desc1$=comd.CodeDescription$
+			pr.Desc2$=comd.Remarks$
+		Endif
+	Endif
+	If Type=3 ! size (um)
+			Clear pr.
+			x3=Prod$[5] ! key1$[12] ! s/b umrec
+			Read record #CCC,X3,0;umc.;
+			pr.desc1$=umc.Description$
+	Endif
+	If type=5 ! cost group
+		Clear pr.
+		NonStk=1
+		CGKey$=Prod$[1,12]
+		CGR=filegetcostgrp(e$,CGC,"=",1,CGKey$,cgrp.)
+		If CGR<=0 
+			Clear cgrp.
+			pr.Desc1$="COST GROUP NOT FOUND"
+			returnstatus=0
+		Else ! found - load pr.
+			pr.Desc1$=cgrp.CGrpDesc$
+			pr.Desc2$="Cost Group"
+		Endif
+	Endif
+	if returnstatus=0
+		message$=pr.desc1$
+		goto URLDone
+	Endif
+	! okay to go
+	sd.SpecLnType=Type
+	sd.CustNum=CustNo
+	sd.RecCopy=0 ! no longer copied?
+	sd.ProdCode$=prod$
+	! do all gets
+	Call DXGet("STDATE",tmp$)
+	tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy or mm/dd/yy to yyyymmdd
+	sd.StartDate=tmp1$[3,8] ! just want yymmdd
+	if tmp$="" or tmp$="NONE" let sd.StartDate=0
+	tmp$=" ",tmp$
+	Call DXGet("ENDDATE",tmp$)
+	tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy or mm/dd/yy to yyyymmdd
+	sd.CancelDate=tmp1$[3,8] ! just want yymmdd
+	if tmp$[1,4]="NONE" or tmp$="" let sd.CancelDate=0
+	iF sd.CancelDate ! needs range check!!!
+		X$=sd.StartDate using "&&&&&&"
+		Call DateToJulian(1,X$,X$,E)
+		If e let x$=" ",x$
+		Jdate[0]=x$[1,5]
+		x$=sd.CancelDate using "&&&&&&"
+		Call DateToJulian(1,X$,X$,E)
+		if e let x$=" ",x$
+		Jdate[1]=x$[1,5]
+		if jdate[1]<Jdate[0] ! end before starts
+			message$="Date Range is invalid"
+			returnstatus=0
+			Goto URLDone
+		Endif
+	Endif
+	Call DXGet("UMPRC",tmp$)
+	If Not(NonStk) let R=getumrec(e$,CCC,tmp$,IntCo,PR.)
+	If NonStk ! how 128 does it
+		R=0 ! ALWAYS DEFAULTS to PRICING
+	Else
+		if r=0 
+			returnstatus=0
+			message$="Price UM Not found"
+			goto URLDone
+		Endif
+	Endif
+	sd.UMPrice=r
+	Call DXGet("UMCOST",tmp$)
+	If Not(NonStk) let R=getumrec(e$,CCC,tmp$,IntCo,PR.)
+	If NonStk ! how 128 does it
+		R=0 ! ALWAYS DEFAULTS to COSTING
+	Else
+		if r=0 
+			returnstatus=0
+			message$="Cost UM Not found"
+			goto URLDone
+		Endif
+	Endif
+	sd.UMCost=r
+	Call DXGet("PRCTYPE",tmp$)
+	sd.PrcType=tmp$ ! s/b a number
+	if sd.PrcType<1 or sd.PrcType>8
+		returnstatus=0
+		message$="Price Type invalid"
+		goto URLDone
+	Endif
+	Call DXGet("BASETYPE",tmp$)
+	sd.BaseType=tmp$ ! s/b a number
+	x1=1 \ if sd.PrcType=3 or sd.PrcType=7 let x1=0
+	if sd.BaseType<X1 or sd.BaseType>15 ! 15=netpo
+		returnstatus=0
+		message$="Base Type Invalid"
+		goto URLDone
+	Endif
+	X1=sd.prctype
+	if x1=4 or x1=5 or x1=6 ! brakt/jumps into base type field!
+		x3=sd.BaseType;badfact=0
+		if x1=4	and (x3<1 or x3>10) let badfact=1
+		if x1=5 and (x3<1 or x3>9) let badfact=1
+		if x1=6 and (x3<1 or x3>9) let badfact=1
+		if badfact
+			returnstatus=0
+			message$="Invalid Bracket or Jump"
+			goto URLDone
+		Endif
+	Endif
+	Call DXGet("SPRUDA",tmp$)
+	sd.Uda2$=tmp$+Blank$
+	Call DXGet("SPRUDANO",tmp$)
+	sd.Uda1=tmp$
+	Call DXGet("WHSE",tmp$)
+	sd.Whse=tmp$
+	if sd.whse<0 or sd.whse>99
+		returnstatus=0
+		message$="Invalid Warehouse"
+		goto URLDone
+	Endif
+	Call DXGet("COSTTYPE",tmp$)
+	sd.SCostType=tmp$ ! s/b a number
+	if sd.SCostType<1 or sd.SCostType>5
+		returnstatus=0
+		message$="Invalid Cost Type"
+		goto URLDone
+	Endif
+	Call DXGet("COSTBASE",tmp$)
+	sd.SCostBase=tmp$ ! s/b a number
+	x1=0 \ if sd.scosttype=1 or sd.scosttype=2 let x1=1
+	if sd.SCostBase<X1 or sd.SCostBase>6 ! 6=netpo
+		returnstatus=0
+		message$="Invalid Cost Base"
+		goto URLDone
+	Endif
+	Call DXGet("PRCFACT",tmp$)
+	X3=tmp$
+	if not(nonstk) and sd.PrcType=3 ! flat
+		cnvtu[0]=sd.UMPrice;cnvtu[1]=0;cnvtu[2]=6 ! to base no round
+		Cnvta=X3
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		X3=Amount
+	Endif
+	! we have to add a check of data entered
+	let x1=sd.PrcType;badfact=0
+	if x1=1 or x1=6 or x1=4 or x1=5 ! %
+		if x3<-99.99 or x3>99.99 let badfact=1
+	Endif
+	if x1=2 ! gtm
+		if x3<1 or x3>99.99 let badfact=1
+	Endif
+	if x1=3 and x3<=0 let badfact=1 ! $
+	!if x1=4	and (x3<1 or x3>10) let badfact=1
+	!if x1=5 and (x3<1 or x3>9) let badfact=1
+	!if x1=6 and (x3<1 or x3>9) let badfact=1
+	! if x1=8 ! $ disc/mark
+	if badfact
+		returnstatus=0
+		message$="Invalid Factor Entered"
+		goto URLDone
+	Endif
+	sd.SPFact=x3
+	Call DXGet("COSTFACT",tmp$)
+	X3=tmp$
+	if not(nonstk) and sd.SCostType=3 ! flat
+		cnvtu[0]=sd.UMCost;cnvtu[1]=0;cnvtu[2]=6 ! to base no round
+		Cnvta=X3
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		X3=Amount
+	Endif
+	x1=sd.SCostType;badfact=0
+	if x1=1 and (x3<-99 or x3>99.99) let badfact=1
+	IF X1=10 AND x3<0 let badfact=1 ! special (comes from special price?)
+	if x1=3 and x3<=0 let badfact=1 ! flat
+	!if x1=2 ! $ disc/mark
+	if badfact
+		returnstatus=0
+		message$="Invalid Cost Factor Entered"
+		goto URLDone
+	Endif
+	sd.SCFact=x3
+	call DXGet("QTYUM",tmp$)
+	If Not(NonStk) let R=getumrec(e$,CCC,tmp$,IntCo,PR.)
+	If NonStk ! how 128 does it
+		R=0 ! ALWAYS DEFAULTS to COSTING
+	Else
+		if r=0 
+			returnstatus=0
+			message$="Quantity UM Not found"
+			goto URLDone
+		Endif
+	Endif
+	sd.UMQty=r
+	call DXGet("MINQTY",tmp$)
+	X3=tmp$
+	if x3<0
+		returnstatus=0
+		message$="Minimum Quantity Invalid"
+		goto URLDone
+	Endif
+	!if not(nonstk) 
+	!	cnvtu[0]=sd.UMQty;cnvtu[1]=0;cnvtu[2]=1
+	!	Cnvta=X3
+	!	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	!	X3=Amount
+	!Endif
+	sd.MinQtyForSp=X3
+	Call DXGet("QTYLIM",tmp$)
+	X3=tmp$
+	if x3<0 
+		Returnstatus=0
+		message$="Quantity Limit Invalid"
+		goto URLDone
+	Endif
+	!if not(nonstk) 
+	!	cnvtu[0]=sd.UMQty;cnvtu[1]=0;cnvtu[2]=1
+	!	Cnvta=X3
+	!	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	!	X3=Amount
+	!Endif
+	sd.QtyLimit=X3
+	Call DXGet("COMMPCT",tmp$)
+	sd.CommPct=tmp$
+	IF SD.COMMPCT<0 OR SD.COMMPCT>=100
+		RETURNSTATUS=0
+		MESSAGE$="Invalid Comm percent"
+		goto URLDone
+	Endif
+	Call DXGet("BRKTYPE",tmp$)
+	sd.BrkType=tmp$
+	if sd.brktype<0 or sd.brktype>4
+		returnstatus=0
+		message$="Invalid Break Type"
+		goto URLDone
+	Endif
+	Call DXGet("BRKTBL",tmp$)
+	sd.BrkTable=tmp$
+	call dxget("MINTYPE",tmp$) ! added for 2428
+	sd.MinType=tmp$ \ IF SD.MINTYPE<>2 LET SD.MINTYPE=1
+	if sd.MinType<1 or sd.MinType>2 
+		returnstatus=0
+		message$="Minimum Type is 1:qty, 2:lbs"
+		goto URLDone
+	Endif
+	if sd.SCostType=0 let sd.SCostType=4
+	! blank out unused strings!
+	sd.sOpen$=Blank$
+	sd.sOpen$[100]=""
+	! data gotten
+	! conditiions checked
+	if sd.PrcType=3 let sd.BaseType=0 ! flat no base type
+	if sd.PrcType=7 let sd.BaseType=0 and sd.SPFact=0 ! free no basetype or factor
+	if sd.SCostType=4 or sd.SCostType=5 let sd.SCFact=0 ! std or free no factor
+	if sd.SCostType=3 or sd.SCostType=4 or sd.SCostType=5 let sd.SCostBase=0 ! flat,stc,free no basetype
+	Call UpdtPRLvl()
+	if returnstatus=0 goto URLDone ! problem in level entry
+	If SDR<=0 ! new
+		SDR=0;E=2
+		Search #SDC,1,0;LKey$,R,E
+		SDR=R
+		If SDR<=0
+			Let e$="SEARCH ERROR "+Str$(Abs(E))+" INSERT SPR LINE - SERPSPR"
+			Error 11000
+		Endif ! >0 = record added
+		Search #SDC,4,1;LKey$,R,E
+		If E
+			Let e$="SEARCH ERROR "+Str$(Abs(E))+" INSERT SPR LINE - SERPSPR"
+			Error 11000
+		Endif
+	
+		Write record #SDC,SDR,0;sd.;
+	Else ! update/change
+		Write record #SDC,SDR,0;sd.; ! write new data
+	Endif
+	call LP_UPDT(SDR) ! chk/add last price
+	! call programdump("/tmp/sprlog1!","")
+	URLDone: ! finished
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Update "+Str$(CustNo)+" Line complete "+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! UpdtLine()
+! 
+!--------------------------------------------------------------------
+Sub SendLBox()
+! send the line list boxes
+ Try
+	Dim RUD$[28]
+	Mat read #ctlc,67,168;RUD$; ! uda labels
+	Clear List$[]
+	List$[0]=bsdel$,"SPTYPELIST",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	row=2
+	List$[row]="1",fdel$,"1: % DISCOUNT/MARKUP",fdel$
+	row=row+1
+	List$[row]="2",fdel$,"2: GROSS MARGIN",fdel$
+	row=row+1
+	List$[row]="3",fdel$,"3: FLAT PRICE",fdel$
+	row=row+1
+	List$[row]="4",fdel$,"4: FIXED BRACKET",fdel$ ! only if prodptyp=2 or nonstk
+	row=row+1
+	List$[row]="5",fdel$,"5: BRACKET JUMP",fdel$ ! only if prodptyp=2 or nonstk
+	row=row+1
+	List$[row]="6",fdel$,"6: BRK LEVEL JUMP",fdel$ ! only if prodptyp<>2 or nonstk and p60$[12,12]<>"Y"
+	row=row+1
+	List$[row]="7",fdel$,"7: FREE GOODS",fdel$
+	row=row+1
+	List$[row]="8",fdel$,"8: $ DISCOUNT/MARKUP",fdel$
+	row=row+1
+	List$[row]=esdel$ ! end of section
+	row=row+1
+	if row+17>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=bsdel$,"BASECOSTLIST",fdel$
+	row=row+1
+	List$[row]="ID",fdel$,"DESC",fdel$
+	row=row+1
+	List$[row]="1",fdel$,"1: BASE COST",fdel$
+	row=row+1
+	List$[row]="2",fdel$,"2: LOADED COST",fdel$
+	row=row+1
+	List$[row]="3",fdel$,"3: LAST COST",fdel$
+	row=row+1
+	List$[row]="4",fdel$,"4: LIST PRICE 1",FDEL$
+	row=row+1
+	List$[row]="5",fdel$,"5: LIST PRICE 2",FDEL$
+	row=row+1
+	List$[row]="6",fdel$,"6: LIST PRICE 3",FDEL$
+	row=row+1
+	List$[row]="7",fdel$,"7: LIST PRICE 4",FDEL$
+	row=row+1
+	List$[row]="8",fdel$,"8: LIST PRICE 5",FDEL$
+	row=row+1
+	List$[row]="9",fdel$,"9: LIST PRICE 6",FDEL$
+	row=row+1
+	List$[row]="10",fdel$,"10: SPECIAL COST",FDEL$
+	row=row+1
+	List$[row]="11",fdel$,"11: SALESMAN COST",FDEL$
+	row=row+1
+	List$[row]="12",fdel$,"12: CALCULATED PRICE",FDEL$
+	row=row+1
+	List$[row]="13",fdel$,"13: REDI COST",FDEL$
+	row=row+1
+	List$[row]="14",fdel$,"14: REBATE COST",FDEL$
+	row=row+1
+	List$[row]="15",fdel$,"15: NET PO COST",fdel$
+	row=row+1
+	List$[row]=esdel$ ! end of section
+	row=row+1
+	if row+8>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=bsdel$,"SLSMCOSTLIST",fdel$
+	row=row+1
+	List$[row]="ID",fdel$,"DESC",fdel$
+	row=row+1
+	List$[row]="1",fdel$,"1: % MARKUP/DISCOUNT",fdel$
+	row=row+1
+	List$[row]="2",fdel$,"2: $ MARKUP/DISCOUNT",fdel$
+	row=row+1
+	List$[row]="3",fdel$,"3: FLAT COST",fdel$
+	row=row+1
+	List$[row]="4",fdel$,"4: USE STANDARD",FDEL$
+	row=row+1
+	List$[row]="5",fdel$,"5: FREE GOODS",FDEL$
+	row=row+1
+	List$[row]=esdel$ ! end of section
+	row=row+1
+	if row+8>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=bsdel$,"COSTBASELIST",fdel$
+	row=row+1
+	List$[row]="ID",fdel$,"DESC",fdel$
+	row=row+1
+	List$[row]="1",fdel$,"1: BASE COST",fdel$
+	row=row+1
+	List$[row]="2",fdel$,"2: LOAD COST",fdel$
+	row=row+1
+	List$[row]="3",fdel$,"3: LAST COST",fdel$
+	row=row+1
+	List$[row]="4",fdel$,"4: REBATE COST",fdel$
+	row=row+1
+	List$[row]="5",fdel$,"5: REDI COST",fdel$
+	row=row+1
+	List$[row]="6",fdel$,"6: NET PO COST",fdel$
+	row=row+1
+	List$[row]=esdel$ ! end of section
+	row=row+1
+	if row+7>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=bsdel$,"BRKTYPELIST",fdel$
+	row=row+1
+	List$[row]="ID",fdel$,"DESC",fdel$
+	row=row+1
+	List$[row]="1",fdel$,"1: ACCUM/NO BRK",fdel$
+	row=row+1
+	List$[row]="2",fdel$,"2: ACCUM & BRK",fdel$
+	row=row+1
+	List$[row]="3",fdel$,"3: NO ACCUM/NO BRK",fdel$
+	row=row+1
+	List$[row]="4",fdel$,"4: NO ACCUM / BRK",fdel$
+	row=row+1
+	List$[row]=esdel$ ! end of section
+	row=row+1
+	if row+12>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=bsdel$,"SYSTEM",fdel$
+	row=row+1
+	List$[row]="ID",fdel$,"DESC",fdel$
+	row=row+1
+	List$[row]="WHSEFLAG",fdel$,P9$[32,32],fdel$
+	row=row+1
+	tmp$=RTrim$(RUD$[1,14])
+	If tmp$="" let tmp$="S PRICE UDA1"
+	List$[row]="UDA1LBL",fdel$,tmp$,fdel$
+	row=row+1
+	tmp$=RTrim$(RUD$[15,28])
+	If tmp$="" let tmp$="S PRICE UDA2"
+	List$[row]="UDA2LBL",fdel$,tmp$,fdel$
+	row=row+1
+	List$[row]="AMALGFLAG",fdel$,P60$[12,12],fdel$
+	row=row+1
+	List$[row]="LOADSEC",fdel$,Str$(cost_lev[1]),fdel$
+	row=row+1
+	List$[row]="LASTSEC",fdel$,Str$(cost_lev[2]),fdel$
+	row=row+1
+	List$[row]="BASESEC",fdel$,Str$(cost_lev[3]),fdel$
+	row=row+1
+	List$[row]="COMMSEC",fdel$,Str$(comm_lev),fdel$
+	row=row+1
+	tmp$="N" \ if onlyinquiry let tmp$="Y"
+	list$[row]="ONLYINQ",fdel$,tmp$,fdel$
+	row=row+1
+	List$[row]=esdel$ ! end of section
+	row=row+1 \ if row+5>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=bsdel$,"MINTYPES",fdel$
+	row=row+1
+	List$[row]="ID",fdel$,"DESC",fdel$
+	row=row+1
+	List$[row]="1",fdel$,"1: Qty Min",fdel$
+	row=row+1
+	List$[row]="2",fdel$,"2: Lbs Min",fdel$
+	row=row+1
+	list$[row]=esdel$ ! end of section
+	row=row+1
+	! Call AddToStr(e$,rstr$,List$[]) ! add lists to string (NOT IF ACTION1 USED!)
+	
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SendLBox
+! 
+!--------------------------------------------------------------------
+Sub CopySPPr()
+! pass 2 custs & Overwrite flag
+! will copy lines from one into other
+  Try
+	Dim Flnkey$[64],lnkey$[64],FRKey$[64]
+	Dim CRef$[10],CKey1$[64],CKey2$[64]
+	Dim RKey2$[64],RKey3$[64]
+	Dim 1%,CUCopy,addel
+	Dim 2%,FCustNo,TcustNo
+	Dim 3%,CSHR,XSDR,FSDR
+
+
+	Dim CSD. as specprice ! copy of specprice
+
+	ReturnStatus=1
+	Message$="OK"
+	if debugdetail
+		dmsg$="Copy Price Start " \ Call updatelog(debug)
+	Endif
+	Call DXGet("CUSTID",tmp$)
+	FCustNo=tmp$
+	If FCustNo<=0 Or FCustNo>999999
+		Message$="INVALID CUSTOMER NUMBER"
+		ReturnStatus=0
+		Goto CCDone
+	Endif
+	RKey$=" ",RKey$
+	RKey$=FCustNo Using "######"
+	Call DXGet("FRCUSTID",tmp$)
+	TCustNo=tmp$
+	If TCustNo<=0 Or TCustNo>999999
+		Message$="INVALID FROM CUSTOMER NUMBER"
+		ReturnStatus=0
+		Goto CCDone
+	Endif
+	FRKey$=" ",FRKey$
+	FRKey$=FCustNo Using "######"
+	
+	Call DXGet("OVRWRT",tmp$)
+	OWCopy=0 ! no
+	If tmp$="1" let OWCopy=1 ! yes
+	! okay - copy lines from
+	FLNKey$=" ",FLNKey$
+	FLNKey$=FCustNo Using "######"
+	NumLines=0
+	Do
+		FSDR=filegetspecprice(e$,SDC,">",1,FLNKey$,SD.)
+		If FSDR<=0 Exit Do
+		if FLNKey$[1,1] = "C" exit do   ! hit contract range
+		X2=FLNKey$[1,6] \ if x2<>FCustNo Exit Do
+		! see if exists on to record or not
+		LNKey$=FLNKey$
+		LNKey$[1,6]=TCustNo Using "######"
+		XSDR=filegetspecprice(e$,SDC,"=",1,LNKey$,CSD.)
+		If XSDR<0 And XSDR<>-1 ! something happened
+			Let e$="SEARCH ERROR "+Str$(XSDR)+" CHK EXIST SPR LINES - SERPSPR"
+			Error 11000
+		Endif
+		sd.RecCopy=1 ! copied/updated 
+		If (XSDR>0 and OWCOPY=1) OR xsdr<0 ! ovrwrite exist or new
+		! on any copy(add/exist) sets/clears fields
+		  sd.CustNum=TCustNo ! to cust#
+		  sd.StartDate=SysDate ! as 128 does
+		  ! sd.CancelDate=0 ! keep same
+		! LET RB1[3]=0;RB3[4]=0;RB3[5]=0;RB3[6]=0 ! on all
+		  sd.LastBuyDate=0;sd.QtySinceStart=0
+		  sd.RebateSinceStart=0;sd.SalesSinceStart=0
+		  if xsdr>0 ! found - update fields
+			E=0
+			Write Record #SDC,XSDR,0;sd.; ! write new
+			NumLines=NumLines+1
+			If E ! something happened
+				Let e$="SEARCH ERROR "+Str$(E)+" COPY EXIST SPR LINES - SERPSPR"
+				Error 11000
+			Endif
+		  Else ! brand new record - should only if XSDR=-1 (not found)
+			E=2;r=0
+			Search #SDC,1,0;LNKey$,R,E
+			If E<>0 ! something happened
+				Let e$="SEARCH ERROR "+Str$(E)+" COPY NEW SPR LINES - SERPSPR"
+				Error 11000
+			Endif
+			XSDR=R
+			Search #SDC,4,1;LNKey$,R,E
+			If E<>0 ! something happened
+				Let e$="SEARCH ERROR "+Str$(E)+" COPY NEW SPR LINES - SERPSPR"
+				Error 11000
+			Endif
+			
+			Write Record #SDC,XSDR,0;sd.; ! write new
+			NumLines=NumLines+1
+		  Endif ! add/update
+		  ! Call LP_UPDT(XSDR) !?? no prodrec, etc
+		Endif ! add/overwrite
+	Loop
+	
+	! call programdump("/tmp/sprlog4!","")
+	CCDone: ! finished
+	Clear List$[]
+	List$[0]=bsdel$,"UPDATED",fdel$
+	List$[1]="MESSAGE",fdel$
+	List$[2]=Str$(NumLines)," Records Updated",fdel$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Copy PRICE From "+Str$(FCustNo)+" TO "+Str$(TCustNo)+" "
+		if OWCopy let dmsg$=dmsg$+"OVERWRITE EXISTING  "
+		dmsg$=dmsg$+Str$(NumLines)+" RECORDS "
+		dmsg$=dmsg$+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! CopySPPr
+! 
+!--------------------------------------------------------------------
+Function chkDateFrmt$(DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY
+! if not make it MM/DD/YYYY
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE" or len(din$)<6
+	  Let DOut$=UCase$(DIn$)+Blank$
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function DOut$ ! chkDateFrmt$
+! 
+!--------------------------------------------------------------------
+Sub GetSPRCOST()
+! get the price & cost for the line
+ Try
+	Dim CKey$[60]
+	Dim 2%,SysDate
+	Dim 3%,Rebate_args[10,4],Basec,SBase
+	Dim 3%,UnitPRICE,Price
+
+	MAT  READ #CTLC,3,172;SysDate;
+	If NonStk Exit Sub
+	If sd.PrcType=3 Exit sub ! not for flat
+	If sd.BaseType=12 Or sd.BaseType=14 Exit Sub ! not on calc or rebate
+	If P9$[32,32]="Y" and sd.whse
+		CKey$=" ",CKey$
+		CKey$=Prod$+sd.whse Using "##"
+		PWR=filegetprodwhse(e$,PWC,"=",1,CKey$,PW.)
+		If PWR<0 
+			Clear PW.
+			sd.whse=0
+		Endif
+	Else
+		Clear pw.
+	Endif
+	If P9$[32,32]="Y" and sd.whse
+		IF sd.BaseType=1 LET BASEC=pw.CostBase   
+		IF sd.BaseType=2 LET BASEC=pw.CostLoad
+		IF sd.BaseType=3 LET BASEC=pw.CostLastPo
+		IF sd.BaseType=4 LET BASEC=pw.Price1
+		IF sd.BaseType=5 LET BASEC=pw.Price2
+		IF sd.BaseType=6 LET BASEC=pw.Price3
+		IF sd.BaseType=7 LET BASEC=pw.Price4
+		IF sd.BaseType=8 LET BASEC=pw.Price5
+		IF sd.BaseType=9 LET BASEC=pw.Price6
+		IF sd.BaseType=13 LET BASEC=pw.CostLoad2
+		if sd.basetype=15 let basec=pw.CostNetPO
+	ELSE                           
+		IF sd.BaseType=1 LET BASEC=pr.CostBase
+		IF sd.BaseType=2 LET BASEC=pr.CostLoad
+		IF sd.BaseType=3 LET BASEC=pr.CostPO
+		IF sd.BaseType=4 LET BASEC=pr.ListPrice1
+		IF sd.BaseType=5 LET BASEC=pr.ListPrice2
+		IF sd.BaseType=6 LET BASEC=pr.ListPrice3
+		IF sd.BaseType=7 LET BASEC=pr.ListPrice4
+		IF sd.BaseType=8 LET BASEC=pr.ListPrice5
+		IF sd.BaseType=9 LET BASEC=pr.ListPrice6
+		IF sd.BaseType=13 LET BASEC=pr.CostLoad2
+		if sd.basetype=15 let basec=pr.CostNetPO
+	ENDIF
+	IF sd.BaseType=10 OR sd.BaseType=11 ! sp cost & salesrep cost
+		! GOSUB GET_CUSTCODE:  ! GET FIRST CUST ON CONTR
+		Cust$=CustNo Using "######"
+		Call GetCust() ! get cust data
+		! GOSUB SP_CHKREBATE: ! set / call rebates
+		Clear Rebate_Args[]
+		LET REBATE_ARGS[1,0]=PRC ! CH_PROD                                   
+		LET REBATE_ARGS[2,0]=PWC ! CH_PRWH                                   
+		LET REBATE_ARGS[3,0]=VTC ! CH_VENDTAG                                
+		LET REBATE_ARGS[4,0]=RHC ! CH_RCONTRACTH                             
+		LET REBATE_ARGS[5,0]=RDC ! CH_REBATEDTL                              
+		LET REBATE_ARGS[1,1]=PRR ! P2                                        
+		LET REBATE_ARGS[2,1]=PWR ! REC_PRWH                                  
+		LET REBATE_ARGS[1,2]=sd.whse ! SPWH                                      
+		LET REBATE_ARGS[2,2]=CUSTNo
+		LET REBATE_ARGS[3,2]=0                                         
+		LET REBATE_ARGS[4,2]=SysDATE                                      
+		LET REBATE_ARGS[5,2]=cust.PriceType ! CUST_C1[7]                                
+		!CALL "rebates",REBATE_ARGS[],pr.ProdCode$,STATUS ! 
+		Call rebates(e$,REBATE_ARGS[],pr.ProdCode$,status,debug,dblog$)
+		! call "rebates",rebate_args[],Prod$,Flag
+		IF NOT(STATUS) !"indicates call was successful in finding rebate
+		  LET RBCOST=REBATE_ARGS[1,3]                                  
+		ELSE                                                           
+		  LET RBCOST=0                                                 
+		ENDIF                                                          
+		! GOSUB GET_SPCOST:                              
+		LET SPSLCOST=0;BASEC=0;AMOUNT=0                                        
+		IF sd.SCostBase=1 LET BASEC=pr.CostBase
+		IF sd.SCostBase=2 LET BASEC=pr.CostLoad
+		IF sd.SCostBase=3 LET BASEC=pr.CostPO
+		IF sd.SCostBase=4 LET BASEC=RBCOST
+		IF sd.SCostBase=5 LET BASEC=pr.CostLoad2
+		if sd.scostbase=6 let basec=pr.CostNetPO
+		IF sd.SCostType=1 AND BASEC                                                 
+			LET SPSLCOST=(BASEC*((100+sd.SCFact)/100))                             
+		ENDIF                                                                 
+		IF sd.SCostType=2                                                          
+			LET AMOUNT=0                                                        
+			IF BASEC
+				LET CNVTU[0]=0;CNVTU[1]=sd.UMCost;CNVTU[2]=2;CNVTA=BASEC            
+				Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.) ! GOSUB L_20000:                                                    
+			ENDIF                                                               
+			IF AMOUNT                                                           
+				LET CNVTU[0]=sd.UMCost;CNVTU[1]=0;CNVTU[2]=6;CNVTA=(AMOUNT+sd.SCFact)
+				Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.) ! GOSUB L_20000:                                                    
+			ENDIF                                                               
+		ENDIF
+		IF sd.SCostType=3 AND sd.SCFact                                       
+			LET SPSLCOST=sd.SCFact
+			IF NOT(NonStk)                                                 
+				LET CNVTU[0]=sd.UMCost;CNVTU[1]=0;CNVTU[2]=6;CNVTA=SPSLCOST 
+				Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.) ! GOSUB L_20000:                                             
+				LET SPSLCOST=AMOUNT                                        
+			ENDIF                                                        
+		ENDIF                                                          
+		IF AMOUNT LET SPSLCOST=AMOUNT                                  
+		LET BASE=SPSLCOST                              
+	ENDIF  ! of basetype 10 or 11   
+	! okay now do sp calcs
+	IF sd.PrcType=1                                                 
+		LET UNITPRICE=(BASEC*((100+sd.SPFact)/100))                 
+	ENDIF                                                      
+	IF sd.PrcType=8                                                 
+		LET UNITPRICE=BASEC                                       
+	ENDIF                                                      
+	IF sd.PrcType=2 
+	  if sd.SPFact<>100
+		LET UNITPRICE=(BASEC/((100-sd.SPFact)/100))
+	  Else
+		unitprice=0
+	  Endif
+	ENDIF                                                      
+	LET CNVTU[0]=0;CNVTU[1]=sd.UMPrice;CNVTU[2]=2;CNVTA=UNITPRICE
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	LET UNITPRICE=AMOUNT                      
+	IF sd.PrcType=8                                                 
+		LET UNITPRICE=UNITPRICE+sd.SPFact
+	ENDIF                                                      
+	LET CNVTU[0]=0;CNVTU[1]=sd.UMCost;CNVTU[2]=2;CNVTA=BASEC
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	LET BASEC=AMOUNT                                            
+	Price=UnitPrice
+	Cost=BaseC
+	! finished - check cost security
+	IF sd.BaseType=1 and cost_lev[3]=0 LET Price=0
+	IF sd.BaseType=2 and cost_lev[1]=0 LET Price=0
+	IF sd.BaseType=3 and cost_lev[2]=0 LET Price=0
+	if sd.basetype=10 and cost_lev[2]=0 Let Price=0
+	if sd.basetype=11 and cost_lev[1]=0 let price=0
+	IF sd.BaseType=13 and cost_lev[1]=0 LET Price=0
+	if sd.basetype=14 and cost_lev[2]=0 let price=0
+	IF sd.BaseType=15 and cost_lev[2]=0 LET Price=0
+	if sd.SCostType=1 and cost_lev[3]=0 let cost=0
+	if sd.SCostType=2 and cost_lev[1]=0 let cost=0
+	if sd.SCostType=3 and cost_lev[2]=0 let cost=0
+	if sd.SCostType=4 and cost_lev[2]=0 let cost=0
+	if sd.SCostType=5 and cost_lev[1]=0 let cost=0
+	if sd.SCostType=6 and cost_lev[2]=0 let cost=0
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetSPRCost
+! 
+!--------------------------------------------------------------------
+Sub SlspEnt()
+! Salesmand update Entry check for from/to
+! check entry is on file
+ Try
+	dim 2%,slsm
+	dim 3%,SMR
+	Dim Slm. as sslsm
+	ReturnStatus=1
+	Message$="OK"
+	Call DXGet("SLSID",tmp$)
+	let slsm=tmp$
+	If slsm<1 and slsm>999
+		ReturnStatus=0
+		Message$="INVALID SLSM ID"
+		Goto RUEDone
+	Endif
+	tmp$=Slsm Using "###"
+	SMR=filegetsslsmz(e$,SMC,"=",1,tmp$,slm.)
+	if SMR<0
+		ReturnStatus=0
+		Message$="INVALID SLSM ID"
+		Goto RUEDone
+	Endif
+	! okay load string
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"SLSPERSON",fdel$
+	List$[1]="ID",fdel$,"NAME",fdel$
+	row=2
+	List$[2]=Str$(slsm),fdel$,RTrim$(slm.Name$),fdel$
+	
+	row=3
+	List$[row]=esdel$ ! end of section
+	Call AddToStr(e$,rstr$,List$[])
+	! 
+	RUEDone: ! finished
+	
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Check Slsm "
+		dmsg$=dmsg$+tmp$+" FOR COPY COMPLETE "
+		dmsg$=dmsg$+message$ \ Call updatelog(debug)
+	Endif
+
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SlspEnt
+! 
+!--------------------------------------------------------------------
+Sub SlsmUpdtLines()
+! based on range - add or update lines
+! optionally the original line (if not in range)
+! as line not updated yet - send all data
+  Try
+	Dim LKey$[60],CMKey$[60],Prdf$[12],CGKey$[12]
+	Dim SProd$[12],EProd$[12],OProd$[12]
+	Dim RBUM$[4],SCUm$[4],mode$[2]
+	Dim 1%,Type,edtype
+	Dim 3%
+	Dim CCust. as cust
+	ReturnStatus=1
+	Message$="OK"
+	Clear List$[]
+	tmpcnt=maxcnt
+	edtype=1 ! start as add
+	Call DXGet("CUSTID",tmp$)
+	CustNo=tmp$
+	If CustNo<=0 Or CustNo>999999
+		Message$="INVALID CUSTOMER NUMBER"
+		ReturnStatus=0
+		Goto RULDone
+	Endif
+	Cust$=CustNo Using "######"
+	Call GetCust()
+	If CUR<0 and CustNo<>999999
+		Message$="INVALID CUSTOMER NUMBER"
+		ReturnStatus=0
+		Goto RULDone
+	Endif
+	Call DXGet("SLSID",tmp$)
+	let slsm=tmp$
+	If slsm<1 and slsm>999
+		ReturnStatus=0
+		Message$="INVALID SLSM ID"
+		Goto RULDone
+	Endif
+	RKey$=" ",RKey$
+	Call DXGet("OVRWRT",tmp$)
+	OWCopy=0 ! no
+	If tmp$="1" let OWCopy=1 ! yes
+	Call DXGet("RTYPE",tmp$)
+	X2=tmp$
+	if x2=1 or x2=2 or x2=3 or x2=4 ! only types 1=prod,2=commod, 3=size(4=ALL on web)
+		type=x2
+	Else
+		ReturnStatus=0
+		Message$="TYPE NOT VALID"
+		goto RULDone
+	Endif
+	
+	Call DXGet("PRODID",tmp$)
+	Let Prod$=UCase$(tmp$)+Blank$
+	If type=2 let OProd$[5]=""
+	If type=1 and OProd$[1,3]="#  " let type=4
+	If prod$[1,1]="*" let type=2
+	if prod$[1,1]="&" let type=3
+	if prod$[1,3]="#  " let type=4
+	If prod$[1,1]="-" let type=5
+	
+	StrtUpdate: ! start
+	edtype=1
+	if debugdetail
+		
+		if edtype=1 dmsg$="Add"
+		
+		dmsg$=dmsg$+" PRICE Line "+Str$(CustNo)+" T="+Str$(Type)+" "+prod$ \ Call updatelog(debug)
+	Endif
+
+	LKey$=" ",LKey$
+	LKey$[1,6]=CustNo Using "######"
+	Prdf$=Prod$
+	if type=2 and Prod$[1,1]<>"*" ! commod
+		Prdf$="*"+Prod$+Blank$
+	Endif
+	if type=2 and prod$[1,1]="*"
+		Prod$=Prod$[2]+Blank$
+	Endif
+	If type=3 If prod$[1,1]<>"&" 
+		let Prdf$="&"+Prod$+Blank$! size - key = "&UUUURRRR" (um text, R=um rec#)
+	Endif
+	If type=3 ! check / add the um Rec #
+		If prod$[1,1]="&"
+			Prod$=Prod$[2]+Blank$
+		Endif
+	    tmp$=Prod$[1,4] ! size um text
+		Search #CCC,2,1;tmp$,R,E
+		if not(e)
+			Prod$[5]=R Using "####" ! ="UUUURRRR"
+			Prdf$="&"+Prod$+Blank$
+		Endif ! needs Rec # or ccodes
+	Endif
+	if type=5 and Prod$[1,1]<>"-" ! costgroup
+		Prdf$="-"+Prod$+Blank$
+	Endif
+	if type=5 and prod$[1,1]="-"
+		Prod$=Prod$[2]+Blank$
+	Endif
+	If type=1 or type=4 ! product (including #?)
+		Prdf$=Prod$+Blank$
+	Endif
+	if rtrim$(prod$)="" ! GOTTA HAVE IT!
+		returnstatus=0
+		if type=1 let message$="NO Product"
+		if type=2 let message$="NO Commodity"
+		if type=3 let Message$="NO Size"
+		if type=5 let message$="NO Cost Group"
+		message$=message$+" ID was sent"
+		goto RULDone
+	Endif
+	CMKey$=" ",CKEy$
+	CMKey$=Slsm Using "###"
+	NumLines=0
+	NxtRGKey: ! loop cust file for slsm (dir 5=SSSCCCCCC)
+	CCUR=filegetcust(e$,CUC,">",5,CMKey$,CCust.)
+	If CCUR<0 goto RGLDone
+	x2=cmkey$[1,3] \ if x2<>Slsm Goto RGLDone
+	LKey$=" ",LKey$
+	Lkey$=CMKey$[4,9] ! customer
+	LKey$[7,18]=Prdf$ ! as setup above
+	LKey$[19]="" ! CUT TO LENGTH
+	SDR=filegetspecprice(e$,SDC,"=",1,LKey$,SD.)
+	If SDR<=0 Clear sd.
+	! 
+	if sdr>0 and not(owCopy) Goto NxtRGKey ! found existing - no overwrite
+	NonStk=0
+	If type>=2 or Prod$[1,3]="#  " let NonStk=1
+			
+	Clear pr.
+	if not(nonStk)
+		ProdKey$=Prod$
+		ProdKey$[13]=""
+		PRR=filegetprod(e$,PRC,"=",1,ProdKey$,pr.)
+		If PRR<=0 Clear pr.
+	Endif
+	! okay to go
+	sd.SpecLnType=Type
+	sd.CustNum=CCust.CustomerCode ! to cust #
+	sd.RecCopy=1 ! copied/updated from another line
+	sd.ProdCode$=prod$
+	! do all gets
+	Call DXGet("STDATE",tmp$)
+	tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy or mm/dd/yy to yyyymmdd
+	sd.StartDate=tmp1$[3,8] ! just want yymmdd
+	if tmp$="" or tmp$="NONE" let sd.startdate=0
+	tmp$=" ",tmp$
+	Call DXGet("ENDDATE",tmp$)
+	tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy or mm/dd/yy to yyyymmdd
+	sd.CancelDate=tmp1$[3,8] ! just want yymmdd
+	if tmp$[1,4]="NONE" or tmp$="" let sd.CancelDate=0
+	iF sd.CancelDate ! needs range check!!!
+		X$=sd.StartDate using "&&&&&&"
+		Call DateToJulian(1,X$,X$,E)
+		If e let x$=" ",x$
+		Jdate[0]=x$[1,5]
+		x$=sd.CancelDate using "&&&&&&"
+		Call DateToJulian(1,X$,X$,E)
+		if e let x$=" ",x$
+		Jdate[1]=x$[1,5]
+		if jdate[1]<Jdate[0] ! end before starts
+			message$="Date Range is invalid"
+			returnstatus=0
+			Goto RULDone
+		Endif
+	Endif
+	Call DXGet("UMPRC",tmp$)
+	If Not(NonStk) let R=getumrec(e$,CCC,tmp$,IntCo,PR.)
+	If NonStk ! how 128 does it
+		R=0 ! ALWAYS DEFAULTS to PRICING
+	Else
+		if r=0 
+			returnstatus=0
+			message$="Price UM Not found"
+			goto RuLDone
+		Endif
+	Endif
+	sd.UMPrice=r
+	Call DXGet("UMCOST",tmp$)
+	If Not(NonStk) let R=getumrec(e$,CCC,tmp$,IntCo,PR.)
+	If NonStk ! how 128 does it
+		R=0 ! ALWAYS DEFAULTS to COSTING
+	Else
+		if r=0 
+			returnstatus=0
+			message$="Cost UM Not found"
+			goto RuLDone
+		Endif
+	Endif
+	sd.UMCost=r
+	Call DXGet("PRCTYPE",tmp$)
+	sd.PrcType=tmp$ ! s/b a number
+	if sd.PrcType<1 or sd.PrcType>8
+		returnstatus=0
+		message$="Price Type invalid"
+		goto RULDone
+	Endif
+	Call DXGet("BASETYPE",tmp$)
+	sd.BaseType=tmp$ ! s/b a number
+	X1=1 \ IF sd.PrcType=3 or sd.PrcType=7 let x1=0
+	if sd.BaseType<X1 or sd.BaseType>15 ! 15=netpo
+		returnstatus=0
+		message$="Base Type Invalid"
+		goto RULDone
+	Endif
+	X1=sd.prctype
+	if x1=4 or x1=5 or x1=6 ! brkt/jumps into base type field!
+		x3=sd.BaseType;badfact=0
+		if x1=4	and (x3<1 or x3>10) let badfact=1
+		if x1=5 and (x3<1 or x3>9) let badfact=1
+		if x1=6 and (x3<1 or x3>9) let badfact=1
+		if badfact
+			returnstatus=0
+			message$="Invalid Bracket or Jump"
+			goto RULDone
+		Endif
+	Endif
+	Call DXGet("SPRUDA",tmp$)
+	sd.Uda2$=tmp$+Blank$
+	Call DXGet("SPRUDANO",tmp$)
+	sd.Uda1=tmp$
+	Call DXGet("WHSE",tmp$)
+	sd.Whse=tmp$
+	if sd.whse<0 or sd.whse>99
+		returnstatus=0
+		message$="Invalid Warehouse"
+		goto RULDone
+	Endif
+	Call DXGet("COSTTYPE",tmp$)
+	sd.SCostType=tmp$ ! s/b a number
+	if sd.SCostType<1 or sd.SCostType>5
+		returnstatus=0
+		message$="Invalid Cost Type"
+		goto RULDone
+	Endif
+	Call DXGet("COSTBASE",tmp$)
+	sd.SCostBase=tmp$ ! s/b a number
+	x1=0 \ if sd.scosttype=1 or sd.scosttype=2 let x1=1
+	if sd.SCostBase<X1 or sd.SCostBase>6 ! 6=netpo
+		returnstatus=0
+		message$="Invalid Cost Base"
+		goto RULDone
+	Endif
+	Call DXGet("PRCFACT",tmp$)
+	X3=tmp$
+	if not(nonstk) and sd.PrcType=3 ! flat
+		cnvtu[0]=sd.UMPrice;cnvtu[1]=0;cnvtu[2]=6 ! to base no round
+		Cnvta=X3
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		X3=Amount
+	Endif
+	! we have to add a check of data entered
+	let x1=sd.PrcType;badfact=0
+	if x1=1 or x1=4 or x1=5 or x1=6 ! %
+		if x3<-99.99 or x3>99.99 let badfact=1
+	Endif
+	if x1=2 ! gtm
+		if x3<1 or x3>99.99 let badfact=1
+	Endif
+	if x1=3 and x3<=0 let badfact=1 ! $
+	!if x1=4	and (x3<1 or x3>10) let badfact=1
+	!if x1=5 and (x3<1 or x3>9) let badfact=1
+	!if x1=6 and (x3<1 or x3>9) let badfact=1
+	! if x1=8 ! $ disc/mark
+	if badfact
+		returnstatus=0
+		message$="Invalid Factor Entered"
+		goto RULDone
+	Endif
+	sd.SPFact=x3
+	Call DXGet("COSTFACT",tmp$)
+	X3=tmp$
+	if not(nonstk) and sd.SCostType=3 ! flat
+		cnvtu[0]=sd.UMCost;cnvtu[1]=0;cnvtu[2]=6 ! to base no round
+		Cnvta=X3
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		X3=Amount
+	Endif
+	x1=sd.SCostType;badfact=0
+	if x1=1 and (x3<-99 or x3>99.99) let badfact=1
+	IF X1=10 AND x3<0 let badfact=1 ! special (comes from special price?)
+	if x1=3 and x3<=0 let badfact=1 ! flat
+	!if x1=2 ! $ disc/mark
+	if badfact
+		returnstatus=0
+		message$="Invalid Cost Factor Entered"
+		goto RULDone
+	Endif
+	sd.SCFact=x3
+	call DXGet("QTYUM",tmp$)
+	If Not(NonStk) let R=getumrec(e$,CCC,tmp$,IntCo,PR.)
+	If NonStk ! how 128 does it
+		R=0 ! ALWAYS DEFAULTS to COSTING
+	Else
+		if r=0 
+			returnstatus=0
+			message$="Quantity UM Not found"
+			goto RuLDone
+		Endif
+	Endif
+	sd.UMQty=r
+	call DXGet("MINQTY",tmp$)
+	X3=tmp$
+	if x3<0
+		returnstatus=0
+		message$="Minimum Quantity Invalid"
+		goto RULDone
+	Endif
+	!if not(nonstk) 
+	!	cnvtu[0]=sd.UMQty;cnvtu[1]=0;cnvtu[2]=1
+	!	Cnvta=X3
+	!	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	!	X3=Amount
+	!Endif
+	sd.MinQtyForSp=X3
+	Call DXGet("QTYLIM",tmp$)
+	X3=tmp$
+	if x3<0
+		returnstatus=0
+		message$="Quantity Limit Invalid"
+		goto RULDone
+	Endif
+	!if not(nonstk) 
+	!	cnvtu[0]=sd.UMQty;cnvtu[1]=0;cnvtu[2]=1
+	!	Cnvta=X3
+	!	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	!	X3=Amount
+	!Endif
+	sd.QtyLimit=X3
+	Call DXGet("COMMPCT",tmp$)
+	sd.CommPct=tmp$
+	IF SD.COMMPCT<0 OR SD.COMMPCT>=100
+		RETURNSTATUS=0
+		MESSAGE$="Invalid Comm percent"
+		goto RULDone
+	Endif
+	Call DXGet("BRKTYPE",tmp$)
+	sd.BrkType=tmp$
+	IF sd.brktype<0 or sd.brktype>4
+		returnstatus=0
+		message$="Break Type Invalid"
+		goto RULDone
+	Endif
+	Call DXGet("BRKTBL",tmp$)
+	sd.BrkTable=tmp$
+	if sd.SCostType=0 let sd.SCostType=4
+	call dxget("MINTYPE",tmp$)
+	sd.MinType=tmp$ \ IF SD.MINTYPE<>2 LET SD.MINTYPE=1
+	if sd.MinType<1 or sd.MinType>2
+		returnstatus=0
+		message$="Minimum type is 1:qty, 2:lbs"
+		goto RULDone
+	Endif
+	! blank out unused strings!
+	sd.sOpen$=Blank$
+	sd.sOpen$[100]=""
+	call UpdtPRLvl()
+	if returnstatus=0 goto RULDone ! some issue in levels ocurred
+	! data gotten
+	If SDR<=0 ! new
+		SDR=0;E=2
+		Search #SDC,1,0;LKey$,R,E
+		SDR=R
+		If SDR<=0
+			Let e$="SEARCH ERROR "+Str$(Abs(E))+" INSERT SPR LINE - SERPSPR"
+			Error 11000
+		Endif ! >0 = record added
+		Search #SDC,4,1;LKey$,R,E
+		If E
+			Let e$="SEARCH ERROR "+Str$(Abs(E))+" INSERT SPR LINE - SERPSPR"
+			Error 11000
+		Endif
+		
+		Write record #SDC,SDR,0;sd.;
+	Else ! update/change
+		Write record #SDC,SDR,0;sd.; ! write new data
+	Endif
+	NumLines=NumLines+1
+	! call lp_updt(SDR) !??
+	! call programdump("/tmp/sprlog5!","")
+	Goto NxtRGKey
+	!
+	RGLDone: ! loop thru done - manual update orig line
+	
+	! fall thru if really done
+	RULDone: ! finished 
+	Clear List$[]
+	List$[0]=bsdel$,"UPDATED",fdel$
+	List$[1]="MESSAGE",fdel$
+	List$[2]=Str$(NumLines)+" Records Updated",fdel$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Slsm Update PRICE "+Str$(CustNo)+" Line "+Str$(NumLines)+" complete "+message$ \ Call updatelog(debug)
+	Endif
+
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SlsmUpdtLines
+! 
+!--------------------------------------------------------------------
+Sub CPList()
+! separate call to get lines (in case of redisplay)
+  Try
+	Dim CMKey$[60],CGKey$[12]
+	Dim 3%,CMR,NumLines
+	Clear List$[]
+	Row=0 ! start load @ beginning of list
+	tmpcnt=maxcnt
+	NumLines=0
+	! i guess do lines
+	List$[row]=bsdel$,"PRICELINE",fdel$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="PRODUCT",fdel$,"DESC1",fdel$,"DESC2",fdel$
+	WebStr$=WebStr$,"SPRICE",fdel$,"TYPE",fdel$,"WHSE",fdel$
+	WebStr$=WebStr$,"PLTYPE",fdel$ ! contract line type
+	List$[row]=WebStr$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	key1$=" ",key1$
+	Key1$=Cust$
+	do
+		SDR=filegetspecprice(e$,SDC,">",1,Key1$,SD.)
+		If SDR<0 Exit do
+		if Key1$[1,6]<>Cust$ exit do
+		! do like 87 - a summary only
+		NumLines=NumLines+1
+		type=sd.SpecLnType
+		If type=2 ! commodity
+			CMKey$=sd.ProdCode$[1,4]
+			CMR=filegetcommhead(e$,CMC,"=",1,CMKey$,comd.)
+			clear pr.
+			pr.Desc1$=comd.CodeDescription$
+			pr.Desc2$=comd.Remarks$
+		Endif
+		If Type=3 ! size (um)
+			Clear pr.
+			x3=key1$[12] ! s/b umrec
+			Read record #CCC,X3,0;umc.;
+			pr.desc1$=umc.Description$
+			sd.ProdCode$[5]="" ! DO NOT SEND RECORD #
+		Endif
+		If type=5 ! cost group
+			CGKey$=sd.ProdCode$[1,12]
+			CGR=filegetcostgrp(e$,CGC,"=",1,CGKey$,cgrp.)
+			clear pr.
+			pr.Desc1$=cgrp.CGrpDesc$
+			pr.Desc2$="Cost Group"
+		Endif
+		If Type=1 ! a product type
+			If sd.ProdCode$[1,3]="#  " ! ALL PRODUCTS
+				clear pr.
+				pr.Desc1$="ALL PRODUCTS"
+				type=4 ! using 4 for the web (PM is a type 1)
+			Else
+				Prod$=sd.ProdCode$+Blank$
+				Call GetProd()
+			Endif
+		Endif ! of commod or prod
+		WebStr$=""
+		if type=2 let webStr$="*" ! add the * for commod
+		if type=3 let webstr$="&" ! size
+		if type=5 let webstr$="-" ! cost group
+		WebStr$=WebStr$,RTrim$(sd.ProdCode$),fdel$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.Desc2$),fdel$
+		x3=sd.SPFact
+		iF Type=1 and sd.PrcType=3 ! flat cost
+			Cnvtu[0]=0;Cnvtu[1]=sd.UMPrice;Cnvtu[2]=2
+			Cnvta=X3
+			X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		Endif
+		WebStr$=WebStr$,LTrim$(ABS(x3) Using PMask$),fdel$
+		if type=1 ! prod
+			if sd.PrcType=8 or sd.PrcType=3 ! flat?
+				tmp$=""
+				tmp$=XUNIT$(sd.UMPrice,ccc)
+				WebStr$=WebStr$,"/",RTrim$(tmp$),"  "
+			Endif
+		Else ! nonstk types
+			if sd.PrcType=8 or sd.PrcType=3 ! flat?
+				tmp$=""
+				tmp$="PRCE"
+				WebStr$=WebStr$,"/",RTrim$(tmp$),"  "
+			Endif
+		Endif
+		tmp$=""
+		If sd.PrcType=1 ! percent
+			if sd.SPFact<0 let tmp$="% DISCOUNT" ELSE let tmp$="% MARK UP"
+		Endif
+		if sd.PrcType=8 ! $ amount
+			If sd.SPFact<0 let tmp$="$ DISCOUNT" ELSE let tmp$="$ MARKUP"
+		Endif
+		If sd.PrcType=3 ! flat amount
+			let tmp$="FLAT PRICE"
+		Endif
+		if sd.PrcType=2 ! margin
+			let tmp$="MARGIN"
+		Endif
+		If sd.prctype=7 ! free
+			tmp$="FREE GOODS"
+		Endif
+		if sd.prctype=4 ! bracket
+			IF sd.SPFact=0 tmp$=sd.BaseType USING "BRACKET ## "
+			IF sd.SPFact>0 tmp$=sd.BaseType USING "MARKUP OF BRKT ##"  
+			IF sd.SPFact<0 tmp$=sd.BaseType USING "MARKDOWN  OF BRKT ##"
+		Endif
+		If sd.prctype=5 or sd.prctype=6 ! break/brckt
+			IF sd.SPFact=0 tmp$=sd.BaseType USING "## BRKT JMP"
+			IF sd.SPFact>0 tmp$=sd.BaseType USING "MARKUP ## BRKT JMP"  
+			IF sd.SPFact<0 tmp$=sd.BaseType USING "MARKDOWN ## BRKT JMP"
+		Endif
+		if sd.prctype=6
+			tmp$=tmp$+" OF BREAK TABLE"
+		Else ! give full desc
+			If sd.prctype<>4 and sd.prctype<>5 ! gets no additional
+				if sd.BaseType=1 let tmp$=tmp$+" OF BASE COST"
+				if sd.BaseType=2 let tmp$=tmp$+" OF LOADED COST"
+				if sd.BaseType=3 let tmp$=tmp$+" OF LAST COST"
+				if sd.BaseType=4 let tmp$=tmp$+" OF LIST PRC 1"
+				if sd.BaseType=5 let tmp$=tmp$+" OF LIST PRC 2"
+				if sd.BaseType=6 let tmp$=tmp$+" OF LIST PRC 3"
+				if sd.BaseType=7 let tmp$=tmp$+" OF LIST PRC 4"
+				if sd.BaseType=8 let tmp$=tmp$+" OF LIST PRC 5"
+				if sd.BaseType=9 let tmp$=tmp$+" OF LIST PRC 6"
+				if sd.BaseType=10 let tmp$=tmp$+" OF SP. COST"
+				if sd.BaseType=11 let tmp$=tmp$+" OF SLSM COST"
+				if sd.BaseType=12 let tmp$=tmp$+" OF CALC. PRC"
+				if sd.BaseType=13 let tmp$=tmp$+" OF REDI COST"
+				if sd.BaseType=14 let tmp$=tmp$+" OF REBATE COST"
+				if sd.basetype=15 let tmp$=tmp$+" OF NETPO COST"
+			Endif
+		Endif 
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! end of type
+		WebStr$=WebStr$,Str$(sd.Whse),fdel$
+		WebStr$=WebStr$,STR$(type),fdel$ ! contract line type (1-4)
+		List$[row]=WebStr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Loop
+	List$[row]=esdel$ ! end of section
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! finshed - calling routine to do status & Output
+	if debugdetail
+		dmsg$="Get Customer "+Cust$+" Lines="+Str$(NumLines)+" complete "+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! CPList
+! 
+!--------------------------------------------------------------------
+Sub GetPRCLvls()
+! separate call to get 9 other price levels(breaks)
+  Try
+	! send as a separate section for web
+	Dim 3%
+	
+	ReturnStatus=1
+	Message$="OK"
+	Clear List$[]
+	! tmpcnt=maxcnt ! set on detail send
+	List$[0]=bsdel$,"PRCLEVELS",fdel$
+	Webstr$="LVL",fdel$,"LSPTYPE",FDEL$
+	webstr$=webstr$,"LSPRFACT",fdel$,"LBASETYPE",fdel$
+	webstr$=webstr$,"LMINQTY",fdel$,"LMINTYPE",fdel$
+	List$[1]=webstr$
+	row=2
+	for x=2 to 10
+		if x=2
+			let x3[1]=sd.PrcType2;x3[2]=sd.PrcFact2
+			let x3[3]=sd.BaseType2;x3[4]=sd.MinQty2
+			let x3[5]=sd.MinType2
+		Endif
+		if x=3
+			let x3[1]=sd.PrcType3;x3[2]=sd.PrcFact3
+			let x3[3]=sd.BaseType3;x3[4]=sd.MinQty3
+			let x3[5]=sd.MinType3
+		Endif
+		if x=4
+			let x3[1]=sd.PrcType4;x3[2]=sd.PrcFact4
+			let x3[3]=sd.BaseType4;x3[4]=sd.MinQty4
+			let x3[5]=sd.MinType4
+		Endif
+		if x=5
+			let x3[1]=sd.PrcType5;x3[2]=sd.PrcFact5
+			let x3[3]=sd.BaseType5;x3[4]=sd.MinQty5
+			let x3[5]=sd.MinType5
+		Endif
+		if x=6
+			let x3[1]=sd.PrcType6;x3[2]=sd.PrcFact6
+			let x3[3]=sd.BaseType6;x3[4]=sd.MinQty6
+			let x3[5]=sd.MinType6
+		Endif
+		if x=7
+			let x3[1]=sd.PrcType7;x3[2]=sd.PrcFact7
+			let x3[3]=sd.BaseType7;x3[4]=sd.MinQty7
+			let x3[5]=sd.MinType7
+		Endif
+		if x=8
+			let x3[1]=sd.PrcType8;x3[2]=sd.PrcFact8
+			let x3[3]=sd.BaseType8;x3[4]=sd.MinQty8
+			let x3[5]=sd.MinType8
+		Endif
+		if x=9
+			let x3[1]=sd.PrcType9;x3[2]=sd.PrcFact9
+			let x3[3]=sd.BaseType9;x3[4]=sd.MinQty9
+			let x3[5]=sd.MinType9
+		Endif
+		if x=10
+			let x3[1]=sd.PrcType10;x3[2]=sd.PrcFact10
+			let x3[3]=sd.BaseType10;x3[4]=sd.MinQty10
+			let x3[5]=sd.MinType10
+		Endif
+
+		if x3[1]=0 ! if no price type - all blank!
+			x3[2]=0;x3[3]=0;x3[4]=0;x3[5]=0
+		Endif
+		webstr$=Str$(X),fdel$,Str$(X3[1]),fdel$
+		X3=X3[2] ! sd.SPFact
+		if Not(NonStk) and X3[1]=3 ! flat
+			cnvtu[0]=0;cnvtu[1]=sd.UMPrice;cnvtu[2]=2
+			Cnvta=X3
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			X3=Amount
+		Endif
+		WebStr$=WebStr$,LTrim$(x3 Using PMask$),fdel$
+		webstr$=webstr$,Str$(X3[3]),fdel$ ! base type
+		IF X3[5]<>2 LET X3[5]=1
+		webstr$=webstr$,Str$(X3[4]),fdel$,str$(X3[5]),fdel$ ! min,type
+		List$[row]=webstr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Next X
+	List$[row]=esdel$
+	Call AddToStr(e$,rstr$,List$[])
+	! okay done
+
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetPRCLvls
+! 
+!--------------------------------------------------------------------
+Sub UpdtPRLvl()
+! separate call to update 9 other price levels(breaks)
+! we treat as separate call after normal update!
+! price record may not exist yet so let line update decide
+  Try
+	Dim 3%
+	! do as for/next to save coding!
+	x1[1]=2 ! actual level used - (to condense it if levels are skipped?)
+	For X=2 to 10
+		clear x3[]
+		Call DXGet("LSPTYPE"+Str$(x),tmp$)
+		if rtrim$(tmp$)="" goto NxtLvl ! no type - no level
+		x3=tmp$ ! s/b a number
+		if x3=0 goto NxtLvl ! 0=not used
+		if X3<1 or X3>8
+			returnstatus=0
+			message$="Price Type Level "+Str$(X)+" invalid"
+			goto LURLDone
+		Endif
+		Call DXGet("LBASETYPE"+Str$(X),tmp$)
+		X3[1]=tmp$ ! s/b a number
+		x1=1 \ if X3[0]=3 or x3[0]=7 let x1=0
+		if X3[1]<X1 or x3[1]>15 ! 15=netpo
+			returnstatus=0
+			message$="Base Type Level "+Str$(X)+" Invalid"
+			goto LURLDone
+		Endif
+		X1=X3[0] ! sd.prctype
+		if x1=4 or x1=5 or x1=6 ! brakt/jumps into base type field!
+			x3[9]=X3[1];badfact=0
+			if x1=4	and (x3[9]<1 or x3[9]>10) let badfact=1
+			if x1=5 and (x3[9]<1 or x3[9]>9) let badfact=1
+			if x1=6 and (x3[9]<1 or x3[9]>9) let badfact=1
+			if badfact
+				returnstatus=0
+				message$="Invalid Bracket or Jump - Level "+Str$(X)
+				goto LURLDone
+			Endif
+		Endif
+		Call DXGet("LSPRFACT"+str$(X),tmp$)
+		X3[2]=tmp$
+		if not(nonstk) and X3[0]=3 ! flat
+			cnvtu[0]=sd.UMPrice;cnvtu[1]=0;cnvtu[2]=6 ! to base no round
+			Cnvta=X3[2]
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			X3[2]=Amount
+		Endif
+		! we have to add a check of data entered
+		let x1=X3[0];badfact=0
+		if x1=1 or x1=6 or x1=4 or x1=5 ! %
+			if x3<-99.99 or x3>99.99 let badfact=1
+		Endif
+		if x1=2 ! gtm
+			if x3<1 or x3>99.99 let badfact=1
+		Endif
+		if x1=3 and x3<=0 let badfact=1 ! $
+		!if x1=4	and (x3<1 or x3>10) let badfact=1
+		!if x1=5 and (x3<1 or x3>9) let badfact=1
+		!if x1=6 and (x3<1 or x3>9) let badfact=1
+		! if x1=8 ! $ disc/mark
+		if badfact
+			returnstatus=0
+			message$="Invalid Factor Entered - Level "+Str$(X)
+			goto LURLDone
+		Endif
+		call DXGet("LMINQTY"+Str$(X),tmp$)
+		X3[3]=tmp$
+		if x3[3]<0 or x3[3]>999999
+			returnstatus=0
+			message$="Minimum Quantity Invalid - Level "+Str$(X)
+			goto LURLDone
+		Endif
+		call dxget("LMINTYPE"+Str$(X),tmp$) ! added for 2428
+		X3[4]=tmp$ \ IF X3[4]<>2 LET X3[4]=1
+		if X3[4]<1 or X3[4]>2 
+			returnstatus=0
+			message$="Minimum Type is 1:qty, 2:lbs - Level "+Str$(X)
+			goto LURLDone
+		Endif
+		NxtLvl: ! no entry - next
+		! x1[1]=x ! an alt - to keep same level as entered
+		if x1[1]=2 ! load level 2
+			let sd.PrcType2=x3[0];sd.BaseType2=x3[1]
+			sd.PrcFact2=x3[2]
+			sd.MinQty2=x3[3];sd.MinType2=x3[4]
+		Endif
+		if x1[1]=3 ! load level 3
+			let sd.PrcType3=x3[0];sd.BaseType3=x3[1]
+			sd.PrcFact3=x3[2]
+			sd.MinQty3=x3[3];sd.MinType3=x3[4]
+		Endif
+		if x1[1]=4 ! load level 4
+			let sd.PrcType4=x3[0];sd.BaseType4=x3[1]
+			sd.PrcFact4=x3[2]
+			sd.MinQty4=x3[3];sd.MinType4=x3[4]
+		Endif
+		if x1[1]=5 ! load level 5
+			let sd.PrcType5=x3[0];sd.BaseType5=x3[1]
+			sd.PrcFact5=x3[2]
+			sd.MinQty5=x3[3];sd.MinType5=x3[4]
+		Endif
+		if x1[1]=6 ! load level 6
+			let sd.PrcType6=x3[0];sd.BaseType6=x3[1]
+			sd.PrcFact6=x3[2]
+			sd.MinQty6=x3[3];sd.MinType6=x3[4]
+		Endif
+		if x1[1]=7 ! load level 7
+			let sd.PrcType7=x3[0];sd.BaseType7=x3[1]
+			sd.PrcFact7=x3[2]
+			sd.MinQty7=x3[3];sd.MinType7=x3[4]
+		Endif
+		if x1[1]=8 ! load level 8
+			let sd.PrcType8=x3[0];sd.BaseType8=x3[1]
+			sd.PrcFact8=x3[2]
+			sd.MinQty8=x3[3];sd.MinType8=x3[4]
+		Endif
+		if x1[1]=9 ! load level 9
+			let sd.PrcType9=x3[0];sd.BaseType9=x3[1]
+			sd.PrcFact9=x3[2]
+			sd.MinQty9=x3[3];sd.MinType9=x3[4]
+		Endif
+		if x1[1]=10 ! load level 10
+			let sd.PrcType10=x3[0];sd.BaseType10=x3[1]
+			sd.PrcFact10=x3[2]
+			sd.MinQty10=x3[3];sd.MinType10=x3[4]
+		Endif
+
+		if x<10 let x1[1]=x1[1]+1 ! don't add on last loop!
+		if x1[1]>10 ! wtf?
+			returnstatus=0
+			message$="Too many levels received!"
+			goto LURLDone
+		Endif
+	
+	Next X
+	LURLDone: ! finished - return to normal program
+
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! UpdtPRLvl
+! 
+!--------------------------------------------------------------------
+Sub LP_UPDT(SPR_Rec) 
+	! chk/add last price record
+    ! for web price catalog
+ Try
+	Dim 1%,Chan[9],3%,PRec[5]
+	Dim CKey$[60]
+	if custom_customer$<>"CSS" goto LPUDTDONE ! only central san?
+	if contract or SD.SpecLnType<>1 goto LPUDTDONE ! only 128 for a product
+	if SD.ProdCode$[1,1]="#" goto LPUDTDONE  ! ALL prods can't happen
+	! if SD.StartDate>SysDate goto LPUDTDONE  ! not started yet
+	if SD.CancelDate and SD.CancelDate<SysDate goto LPUDTDONE ! not active
+	IF P9$[32,32]="Y" AND SD.Whse=0 ! NEEDS REC IF WHSEPRICING
+		LET SD.Whse=1
+		CKey$=" ",CKey$
+		CKey$=SD.ProdCode$+sd.whse Using "##"
+		PWR=filegetprodwhse(e$,PWC,"=",1,CKey$,PW.)
+		If PWR<0 
+			goto LPUDTDONE ! got to have a rec!
+		Endif
+	ENDIF
+	if PRR<=0 goto LPUDTDONE ! needs prod rec!!
+	IF SPR_REC<=0 GOTO LPUDTDONE ! another gotta have
+	PRec[0]=PRR ! prod
+	PRec[1]=PWR ! prdwhse
+	PRec[2]=SD.CustNum ! CUST_CODE ! cust #
+	Let rec_lastpr=0 ! not known
+	LineRec=SPR_Rec ! sp line rec
+	Chan[0]=CUC ! cust
+	Chan[1]=SDC ! sprc dtl
+	Chan[2]=LPC ! last prc
+	chan[3]=PRC ! prodchan
+	Chan[4]=PWC ! prwhse
+	Call "build117sp.dl4",PRec[],rec_lastpr,LINEREC,chan[],Intco,e$,rstr$
+	if rec_lastpr ! returned record - something worked
+		! print @0,MSC(34)-3;" LAST PRICE UPDATED";'CL';
+	Endif
+	LPUDTDONE: !finished
+else
+    include "src/callsuberr.inc"
+  end try
+end sub ! LP_UPDT
+! 
+!--------------------------------------------------------------------

@@ -1,0 +1,243 @@
+! pmu_comm_div - initialize add'l field: div and create dir 2
+!
+! loadsave -w -n 100,10 -o prog/util/pmu_comm_div.dl4 src/pmu_comm_div.src
+!
+! PMUPGRADER ROUTINE
+
+external lib "ubsfunc.dl4"
+declare intrinsic sub programdump,datetojulian
+Declare Intrinsic Sub InpBuf,String,Time
+Declare Intrinsic Function findchannel
+! Option Default Dialect IRIS1
+include "src/utilcopyright.inc"
+dim e$[300]
+
+ENTER COID,GROUPID,DBAK$,CH_LOG,COREDUMP,E,...
+! if "fromUpgrade" don't send print statements with
+! control strings as this is being executed via
+! a job not attached to terminal.  Be sure to send
+! all output to ch_log as this will be reviewed and
+! sent back to software repository
+try
+	enter fromUpgrade
+else
+	dim 1%,fromUpgrade
+end try
+try ! main try
+LET E=99
+!
+include "src/dim.pmupgrade.i"
+
+! commission fields
+dim 1%,s4[1],SPLITFLAG,SPLITTYPE
+dim 2%,s1[3],s3[1],CRREF,Division,S80,S81
+dim 3%,s2[1],s6[1],s7[2],cs9[3],COMMSRVCHG,DISCTAKEN,OCS1[3],SPLITPERCENT
+dim smat$[2]
+
+
+DIM tmp$[200],p61$[256]
+DIM k_1$[100],k_2$[100],k_hist$[100]
+dim 2%,h5[16]
+dim 3%,s7[2],hs7[1]
+DIM 3%
+
+try close #1 else rem
+Open #1,"cntrl/cntrl"+Str$(COID)
+Mat Read #1,61,0;p61$;
+
+Let COL=0;Row=23
+
+ropen #2,"3/SSLSMCOMM" + str$(coid)
+search #2,1,2;K_1$,r,e
+if not(e)
+	LOGMSG$ = "Commission files already upgraded - skipping."
+	GOSUB DO_WRITE_LOG:
+	close #2
+	goto do_exit:
+end if
+close #2
+
+
+ropen #2,"4/SORDFLEHH"+str$(coid)
+
+Let FCode$="SSLSMCOMM"
+LET OWRITE$="ye 'comm_div'"
+LET MODE=1 ! "move file as we are rebuilding
+GOSUB DO_BACKUP: ! "ALWAYS BACKUP EXISTING!!!
+OPEN #3,DFILE$
+LET OWRITE$="N"
+GOSUB DO_BUILD:
+open #4,"3/SSLSMCOMM"+str$(coid)
+doingHistory=0
+gosub UpdateCommission
+close #3
+close #4
+
+
+Let FCODE$="SSLSMCOMMH"
+LET OWRITE$="ye 'comm_div'"
+LET MODE=1 ! "move file as we are rebuilding
+GOSUB DO_BACKUP:
+OPEN #3,DFILE$
+LET OWRITE$="N"
+GOSUB DO_BUILD:
+open #4,"4/SSLSMCOMMH"+str$(coid)
+doingHistory=1
+gosub UpdateCommission
+close #3
+close #4
+goto do_exit:
+
+UpdateCommission: !
+	if doingHistory
+		LET LOGMSG$="Initialize division for SSLSMCOMMH records."
+	else
+		LET LOGMSG$="Initialize division for SSLSMCOMM records."
+	end if
+	GOSUB DO_WRITE_LOG:
+	LET CH=3 \ GOSUB GET_ACTIVE_RECS:
+	LET LOGMSG$="Estimated number of records to process: "+STR$(ACTRECS)
+	GOSUB DO_WRITE_LOG:
+	REC = 0
+	k_1$ = " ",k_1$
+	do
+		search #3,3,1;K_1$,r_old,e \ if e>2 error 11000
+		if e exit do
+		LET REC=REC+1
+		IF NOT(FRA(REC/100)) GOSUB DISPLAY_PROGRESS: ! to screen or log
+		GOSUB ReadCommission:
+		Division = 0
+		! if this is a commission record based on history,
+		! try and determine the division this belongs
+		! to
+		if k_1$[14,14] = "1" or k_1$[14,14] = "6"
+			k_hist$ = " ",k_hist$
+			k_hist$[1,2] = "30" \ if k_1$[14] = "6" k_hist$[1,2] = "31"
+			if doingHistory
+				k_hist$[3,12] = hs7[1] using "##########"
+			else
+				k_hist$[3,12] = s7[1] using "##########"
+			end if
+			search #2,2,1;k_hist$,r_hist,e
+			if not(e)
+				mat read #2,r_hist,104;h5;
+				Division = h5[8]
+			end if
+		end if
+		! add new record
+		e=2 \ search #4,1,0;k_1$,r_new,e \ if e error 11000
+		gosub WriteCommission
+		search #4,4,1;k_1$,r_new,e \ if e error 11000
+		k_2$ = " ",k_2$
+		k_2$[1,4] = Division using "####"
+		k_2$[5,18] = k_1$[1,14]
+		search #4,4,2;k_2$,r_new,e \ if e error 11000
+		if e exit do
+	loop
+RETURN
+
+ReadCommission: !
+	mat read #3,r_old,0;s1
+	mat read #3,r_old,16;s2
+	mat read #3,r_old,28;s3
+	mat read #3,r_old,36;s4
+	mat read #3,r_old,40;s6
+	mat read #3,r_old,52;smat$
+	if doingHistory
+		mat read #3,r_old,54;hs7
+		mat read #3,r_old,68;S80
+	else
+		mat read #3,r_old,54;s7
+	end if
+	mat read #3,r_old,72;cs9
+	if doingHistory
+		mat read #3,r_old,96;S81
+	else
+		mat read #3,r_old,96;CRREF
+	end if
+	mat read #3,r_old,100;COMMSRVCHG
+	mat read #3,r_old,106;DISCTAKEN
+	mat read #3,r_old,112;OCS1
+	mat read #3,r_old,136;SPLITFLAG
+	mat read #3,r_old,138;SPLITTYPE
+	if doingHistory
+		mat read #3,r_old,140;SPLITPERCENT
+	end if
+RETURN
+
+WriteCommission: !
+	mat write #4,r_new,0;s1
+	mat write #4,r_new,16;s2
+	mat write #4,r_new,28;s3
+	mat write #4,r_new,36;s4
+	mat write #4,r_new,40;s6
+	mat write #4,r_new,52;smat$
+	if doingHistory
+		mat write #4,r_new,54;hs7
+		mat write #4,r_new,68;S80
+	else
+		mat write #4,r_new,54;s7
+	end if
+	mat write #4,r_new,72;cs9
+	if doingHistory
+		mat write #4,r_new,96;S81
+	else
+		mat write #4,r_new,96;CRREF
+	end if
+	mat write #4,r_new,100;COMMSRVCHG
+	mat write #4,r_new,106;DISCTAKEN
+	mat write #4,r_new,112;OCS1
+	mat write #4,r_new,136;SPLITFLAG
+	mat write #4,r_new,138;SPLITTYPE
+	if doingHistory
+		mat write #4,r_new,140;SPLITPERCENT
+		mat write #4,r_new,146;Division;
+	else
+		mat write #4,r_new,140;Division;
+	end if
+RETURN
+
+DO_EXIT: REM---------------- Exit the upgrade -----------------------------------
+LET E=0
+GOTO OUTEND:
+
+DO_BACKUP: REM"Backup the given file
+CALL "sysfbackup",FCODE$,COID,GROUPID,ORIG$,DBAK$,OWRITE$,MODE,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+IF E GOTO OUTEND:
+RETURN 
+
+DO_BUILD: REM"Build the given file
+CALL "Sysfbuild",FCODE$,COID,GROUPID,PTH$,OWRITE$,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+IF E GOTO OUTEND:
+RETURN 
+
+include "src/rtn.pmupgrade.i"
+
+
+OUTEND: REM"Final exit (be sure to set e=0 if successful before branching here)
+try CLOSE #1 Else Rem
+try Close #2 Else Rem
+try Close #3 Else Rem
+try close #4 Else Rem
+try close #5 Else Rem
+try close #6 Else Rem
+try close #7 Else Rem
+END 
+else ! main try
+	e = spc(8)
+	If Spc(8) <> 10000
+		dim msc4$[100] \ msc4$=msc$(4)
+		if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+		call env(2,"PROGNAME",msc4$)
+		if spc(8) = 11000
+			call utilsearcherr(e$, e, Spc(10))
+		else
+			Call utilsuberr(e$,Spc(8),Spc(10),Msc$(2))
+		end if
+		call programdump()
+	End If
+	Call utilmainerr(e$,Spc(8))
+	If ch_log <> -1
+		Print #ch_log;e$
+	End If
+end try

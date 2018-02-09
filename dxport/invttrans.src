@@ -1,0 +1,538 @@
+! -- INVTTRANS.DL4
+! display inventory transactions (785) run from prodm.dl4 & serp219.dl4
+! ALSO holds subs & routines for Invtrans Updating
+!
+! loadsave -w -n 100,10 -o prog/dxport/invttrans.dl4 src/invttrans.src
+!
+! ERPScheduler Enabled
+!
+
+! 1.0 10/24/2007
+! 2.0 05/06/2008 - revised Product struct
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+! Functions & subs in program
+!	S	MakeTrans		Add a key/data record to invtrans
+!
+!include structure,filehandler libs & default structure dims
+Include "src/inc/fileprod.inc"
+Include "src/inc/fileinvtrans.inc"
+Include "src/inc/filensinvtrans.inc"
+
+!* declare functions, subs
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+
+External Lib "ubsprconv.dl4"
+Declare External Function XAmount, Xunit$
+!
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "stockinq.dl4"
+Declare External Function GetUMFactor,XUM$
+
+Declare Intrinsic Sub Env,FormatDate,JuliantoDate,DatetoJulian,programdump
+Declare Intrinsic function GetStruct$
+Declare Intrinsic Sub SetStruct
+
+Declare Sub OpenFiles
+Declare External Sub MakeTrans
+
+! start the program
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+	! dim program variables
+	Dim 1%,tmp1,dir,ReturnStatus,2%,row
+	dim 1%,CTLCHan,ProdChan,ITChan,UMChan
+	Dim 1%,PFU1[20],X,Whse,Warehouse,trnstype[40]
+	dim 2%,tmp2,Cnvtu[2],maxcnt \ maxcnt=100 ! init max records in arrays for list
+	Dim 2%,Q0[1],D9[5],PFU2[6],sysdate,sjdate
+	Dim 3%,amount,COST_LEV[3],COMM_LEV,COLLSEC,HIDECOST,ProdRec
+	dim 3%,tmp3,ProdRec,ITRec
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Prod$[12],TDesc$[15]
+	dim Message$[200],WebStr$[600],SessionID$[200]
+	Dim P9$[50],P60$[50],P61$[256],mode$[3],stkey$[60]
+	Dim QMASK$[20],PMASK$[20],EMASK$[20],DEC$[9]
+	dim ITKey$[64],ProdKey$[64],TName$[30],k9$[50],R[99]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	dim List$[maxcnt,300] ! for .net 
+
+	dim Prod. as prod
+	dim ITR. as invtrans
+
+	call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+	!call dxsave(0,"tmp/219in.txt!")
+	! open files
+	Call OpenFiles()
+	!
+	! Start Prog.
+	read #CTLChan,3,172;sysdate;
+	Read #CTLCHan,19,50;P9$; 
+	Read #CTLCHan,60,50;P60$; 
+	Read #CTLChan,61,0;P61$;
+	Mat Read #CTLChan,115;D9;  
+	Mat Read #CTLChan,115,40;Q0;
+
+	Let Dec$="#",Dec$;Qmask$="---------#.##"                                         
+	!If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask      
+	If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask        
+	Let Emask$="-$$$,$$$,$$$,$$$.##"  !ext. price mask
+	tmpcnt=maxcnt
+	clear List$[]
+	ReturnStatus = 1
+	Message$="OK";sholot=0
+	tmp$=Sysdate using "&&&&&&"
+	Call DateToJulian(1,tmp$,tmp1$,F)
+	if f let tmp1$=Str$(Tim(6))
+	sjdate=tmp1$ ! use system date
+	! check if single warehouse
+	Warehouse=0 ! default to all
+	maxjdate=0 ! max date (0=all)
+	shoyrs=.5 ! send max yrs of data - per committee 6 months as default
+	tmp$ = GetParameter$("MAXTM")
+	x2=tmp$ ! ;X2=1
+	if x2>0 and x2<=99 let shoyrs=x2
+	let maxjdate=sjdate-(shoyrs*365) ! show # yrs back
+	if maxjdate<0 let maxjdate=0
+	options$=UCase$(options$)
+	If options$="PRODWH" ! from whse inquiry - get warehouse
+		Warehouse = GetParameter$("warehouse")
+		If Warehouse<1 or Warehouse>D9[5] let Warehouse=0
+	Endif
+	maxname=30 ! as wider screen in prod inq
+	if options$="OEMENU" ! from a menu
+		if UCase$(Action$)="INVTRANS" ! from mx785/219
+			let sholot=1;maxname=24
+			Warehouse = GetParameter$("warehouse")
+			If Warehouse<1 or Warehouse>D9[5] let Warehouse=0
+			tmp$ = GetParameter$("trtype")
+			! multiple types possible - comma separated
+			! sent as comma delimited
+			CPOS=1
+			stloop: ! loop it
+			Search tmp$[CPOS],",",EPOS
+			If EPOS
+				x1 = cpos + epos - 2 ! move to before comma
+				tmp1$=tmp$[CPOS,X1]
+				! get the type
+				let x2=tmp1$
+				if x2>0 and x2<36
+					trnstype[x2]=1
+					trnstype[0]=trnstype[0]+1
+				Endif
+				cpos = cpos + epos ! start after comma
+				EPOS=0
+				Goto STLoop ! look for next
+			Else ! no more commas, was there no comma at end?
+				if (cpos>1 and CPOS<=Len(tmp$)) or (cpos=1 and len(tmp$)>0) ! found one comma or none
+					tmp1$=tmp$[CPOS]
+					
+					let x2=tmp1$
+					if x2>0 and x2<36
+						trnstype[x2]=1
+						trnstype[0]=trnstype[0]+1
+					Endif
+				Endif
+			Endif
+			tmp1$=RTrim$(tmp$)
+			if tmp1$="" or tmp1$[1,1]="0" clear trnstype[]
+		Endif
+	Endif
+	Let sholot=1 ! per web - always show transtype / lot
+	! get product record
+	prod$ = GetParameter$("prodid")
+	prod$ = UCase$(prod$)+Blank$
+	Prod$[13]="" ! cut to length
+	Mode$="="
+	Dir=1
+	ProdRec=filegetprod(e$,ProdChan,mode$,dir,Prod$,Prod.)
+	If ProdRec<0
+	  Clear Prod.
+	  ReturnStatus=0
+	  Message$="Product not found"
+	  goto outdone
+	Endif
+	ProdKey$=Prod$;Whse=0
+	If Warehouse let Whse=Warehouse
+	! ADDED 01/2014 - send in chunks of 1000 records
+	MAXRECS=400
+	tmp$ = GetParameter$("CURKEY") ! where we left off
+	let stkey$=Rtrim$(tmp$) ! spaces issue? ! just trim the end
+	IF stkey$<>"" and Len(stkey$)<26 ! spaces after prodcode were dropped
+		x=len(stkey$) ! current length total
+		if x<14 ! cannot be!
+			returnstatus=0
+			message$="Beginning Key is too short!"
+			goto outdone
+		Endif
+		let x1=x-13 ! date,etc is last 14 chars (13,26 in key) and no spaces
+		let tmp$=stkey$[x1] ! just date, etc.
+		let stkey$=Prodkey$+Blank$ ! reset product code
+		let stkey$[13]=tmp$ ! add date, etc
+	endif
+
+	If ProdRec>0
+		! Set up SQL variables into PFU1[] & PFU2[]
+		PFU2[0]=Prod.UM2Fact
+		PFU2[1]=Prod.UM3Fact
+		PFU2[2]=Prod.UM4Fact
+		PFU2[3]=Prod.UM5Fact
+		PFU2[4]=Prod.UM6Fact
+		PFU2[5]=Prod.UM7Fact
+		PFU2[6]=Prod.UM8Fact
+		PFU1[0]=Prod.BaseUM
+		PFU1[1]=Prod.UM2;PFU1[2]=Prod.UM3;PFU1[3]=Prod.UM4;PFU1[4]=Prod.UM5
+		PFU1[5]=Prod.UM6;PFU1[6]=Prod.UM7;PFU1[7]=Prod.UM8;PFU1[8]=Prod.UMStkDefault
+		if stkey$<>"" goto contontrans
+		! Section 1   Default UM for display
+		List$[0]=bsdel$,"Default UM",fdel$
+		WebStr$="ProdID",fdel$,"UM",fdel$,"UMDesc",fdel$,"UMFactor",fdel$
+		List$[1]=WebStr$
+		WebStr$=Prod$+fdel$
+		WebStr$=WebStr$+XUM$(PFU1[8],UMChan,fdel$)+fdel$
+		WebStr$=WebStr$+Str$(GETUMFactor(Pfu1[8],pfu1[],pfu2[]))+fdel$
+		List$[2]=WebStr$
+		List$[3]=esdel$ ! end of section
+
+		! Section 2   DropList of UM's
+		List$[4]=bsdel$+"UM DropList"+fdel$
+		List$[5]="UM"+fdel$+"Description"+fdel$+"UM Factor"+fdel$
+		tmp2=PFU1[0]
+		WebStr$=XUM$(tmp2,UMChan,fdel$)+fdel$+"1"+fdel$ ! "returns code & descr.
+		List$[6]=WebStr$
+		row=7
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		For X=0 to 6 ! send the um's set up for prod
+		  tmp2=PFU1[X+1]
+		  If tmp2
+			WebStr$=XUM$(tmp2,UMChan,fdel$)+fdel$+Str$(Pfu2[X])+fdel$
+			List$[row]=WebStr$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		  Endif
+		Next X
+
+		List$[row]=esdel$ ! end of section
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+		contontrans: ! just send more trans or above also??
+		if stkey$<>"" let row=0 ! just the trans!?
+		! section 3 - the inventory trans data
+		List$[row]=bsdel$,"TRANSDATA",fdel$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		WebStr$="Date",fdel$,"TransDesc",fdel$,"Source",fdel$
+		WebStr$=WebStr$,"Notes",fdel$,"Whse",fdel$
+		WebStr$=WebStr$,"Location",fdel$,"Units",fdel$
+		if sholot let webstr$=webstr$,"LotCode",fdel$,"TRTYPE",fdel$
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		!call AddToStr(e$,rstr$,List$[]) ! TEST for speed
+		! Now start the trans list
+		ITKey$=Prod$+"zzz" ! do mode 6
+		Mode$="<" ! latest to oldest
+		if stkey$<>"" let itkey$=stkey$+"zz" ! where to start (1 BEFORE)
+		Dir=2 ! prod/date
+		Do
+			!ITRec=filegetinvtrans(e$,ITChan,mode$,dir,ITKey$,ITR.)
+			!If ITRec<0 Or ITKey$[1,12]<>ProdKey$ Exit Do
+			Search #ITChan,6,2;ITKey$,ITRec,E
+			if e or itkey$[1,12]<>ProdKey$[1,12] Exit do
+			! there seems to be an issue in file getting zero/null records!
+			try
+				read record #ITChan,itrec,0;itr.; ! see if faster - it seems to be faster with "Search"!
+			Else ! in case "not written"
+				clear itr.
+				goto BYP_Rec
+			End try
+			if itr.AcptDate<=0 or Rtrim$(itr.ProdCode$)="" goto BYP_rec ! bad data - bypass
+			! if row>20 and itr.AcptDate<maxjdate Exit do ! do not keep going
+			!if row>3000 exit do ! more is REALLY SLOW!
+			!if itr.AcptDate<maxjdate Exit do ! do not keep going reached earliest
+			if row>Maxrecs ! reach limit
+				let returnstatus=5
+				message$="CURKEY="+ITKey$+"&"
+				exit do
+			endif
+			WWh=0 ! conditional select variable (whse,type,etc)
+			If Whse and ITR.Whse<>Whse Let WWH=1
+			tmp1=ITR.TrnsType
+			IF TMP1=6 OR TMP1=27 let WWH=1 ! no show
+			if trnstype[0] and trnstype[tmp1]=0 let WWH=1 ! goto BYP_Rec
+			!if itr.trnsdate<maxjdate let WWH=1 ! past oldest wanted
+			If Not(WWH) ! okay
+				tmp$=UCase$(ITR.Comment$)
+				pos0=1;pos1=0;tname$=" ",tname$
+				search tmp$[pos0],"CUST#",pos1
+				if pos1 ! got a customer
+					let cust=tmp$[pos0+pos1+5] ! after text
+					k9$=Cust using "######"
+					Search #custchan,2,1;k9$,r[7],E
+					if not(e)
+						mat read #custchan,r[7],30;tname$;
+					Endif
+				Else ! maybe vendor?
+					search tmp$[pos0],"VEN#",pos1
+					if pos1 ! got a vendor
+						let vend=tmp$[pos0+pos1+3] ! after text - changed from +4 to +3-task36966
+						let k9$=vend using "######"
+						Search #vendchan,2,1;k9$,r[8],e
+						if not(e)
+							mat read #vendchan,r[8],0;tname$;
+						Endif
+					Endif
+				Endif
+				
+				tmp3=ITR.AcptDate
+				if tmp3<>0 ! it's julian date
+					tmp$=JDate$(tmp3) ! julian date to mm/dd/yyyy
+				else
+					tmp$="      "
+				endif
+				WebStr$=RTrim$(tmp$),fdel$ ! trans date
+				tmp1=ITR.TrnsType
+				IF tmp1<=0 Or tmp1>40
+				  Tdesc$=""
+				Else
+					READ #CTLChan,108,((tmp1-1)*15);TDesc$;
+				Endif
+				WebStr$=WebStr$,RTrim$(TDesc$),fdel$ ! trans desc
+				tmp$=ITR.SrcCode$ ! if line>99 and accepted in 227 - line# is attached to invoice# - split it out!
+				fr227=0;x1=ITR.TrnsType ! came from 227 check
+				if x1=8 or x1=9 or x1=10 or x1=12 or x1=16 or x1=20 or x1=21 or x1=26 or x1=28 let fr227=1
+				if fr227 and tmp$[9,9]="-" let fr227=0 ! from 247!
+				if fr227 ! size issues = lines>99 run into inv #
+					if tmp$[10,10]<>" " let tmp$=ITR.SrcCode$[1,9]+" "+ITR.SrcCode$[10,12]
+				endif
+				WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! source
+				WebStr$=WebStr$,RTrim$(ITR.Comment$) ! start comment
+				if RTrim$(Tname$)<>""  ! got's it a name
+					webstr$=Webstr$+" "+RTrim$(TName$[1,maxname])
+				Endif
+				webstr$=webstr$,fdel$ ! notes
+				WebStr$=WebStr$,STR$(ITR.Whse),fdel$ ! warehouse
+				WebStr$=WebStr$,RTrim$(ITR.Loc$),fdel$ ! location
+				tmp3=ITR.Qty
+				IF ITR.TrnsType>=15 LET tmp3=0-tmp3
+				!WebStr$=WebStr$,LTrim$(tmp3 using QMask$),fdel$ ! trans qty
+				Webstr$=WebStr$,Str$(tmp3),fdel$ ! no mask
+				if sholot let webstr$=webstr$,RTrim$(ITR.LotNum$),fdel$,Str$(ITR.TrnsType),fdel$ ! lot code
+				List$[row]=WebStr$
+				row=row+1
+				if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+				!if itr.AcptDate<maxjdate let itkey$[13]=" " ! hit eop
+			Endif ! of condition (warehouse,etc) okay
+			BYP_Rec: ! for bad data bypass
+		Loop
+		List$[row]=esdel$ ! end of trans section
+
+	Endif ! valid prod
+	! finish off the data send
+  	call AddToStr(e$,rstr$,List$[]) ! "add the list from subs to string
+	! call AddToStr(e$,rstr$,esdel$)  ! TEST FOR SPEED
+	outdone: !
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+	Call SetOutput(e$,rstr$)
+else
+ include "src/callmainerrnet.inc"
+end try
+end ! end of program
+
+!---------------------------------------------------------------------------------------------------
+Sub OpenFiles()
+! Open any files required here
+Try
+   CtlChan=OpenFile(-9999,intCo) \ if CTLChan = -1 Error 42 ! Control file
+   ProdChan=OpenFile(-1792,intCo) \ if ProdChan = -1 Error 42 ! Product
+   UMChan=OpenFile(-1728,intCo) \ if UMChan = -1 Error 42 ! U/M
+   ITChan=OpenFile(-2512,intCo) \ If ITChan = -1 Error 42 ! Inventory trans
+   CustChan=OpenFile(-1808,IntCo) \ if custchan=-1 Error 42 ! customer
+   VendChan=OpenFile(-2400,IntCo) \ if vendchan=-1 Error 42 ! vendor
+   !
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+
+!---------------------------------------------------------------------------------------------------
+External Sub MakeTrans(e$,IntCo,ITC,Status,itrIn. as invtrans)
+! This program ONLY takes care of adding a record and finding a unique (non-
+! duplicated) key.  The calling program must still set all variables needed
+! and send over via the "call" with the proper File Structure.
+! The NSInvtrans & Invtrans Files should be exactly the same
+! Variables In
+! e$		Error Message
+! IntCo		Company #
+! ITC		Invtrans Channel #
+! Status	Status of call (0=NG, 1+=Record added)
+! ITR.		File Structure
+try
+	dim 1%,e, ITChan, scr, UCC, insertcount
+	dim 2%,x2,comp
+	dim 2%,startchan,tempchan ! "date/time stamp for record & channel
+	dim 3%,Cdate,Rec_InvTr[1], Rec[99]
+	dim date$[30],date1$[30],f$[16],key1$[30],key2$[30],time$[30]
+	dim tmp$[80],UserId$[10],mode$[2]
+
+	Status=0 ! start off as fail
+	! old structure def was overwritting a the record boundry
+	! as the last element was a string and put the definition
+	! right out to the record size (add a null byte and
+	! poof, you are over the record boundry).
+	!
+	! new structure has last string element trimmed so it
+	! doesn't happen (spare).
+	!
+	! If the structure passed in matches in both number
+	! of elements and in type of those individual elements
+	! it will not generate a parameter mismatch (so we
+	! do not need to recompile form print and it
+	! will successfully pass the structure).  The code
+	! below copies all the passed in member into a
+	! new instance of the structure forcing the last
+	! element to be truncated if it is one of the
+	! old style definitions.  Thus no record boundry
+	! will be exceeded + no need to recompile any
+	! program sending old style records... :)
+	!
+	dim ITR. as invtrans
+	N = 1
+	Do
+		try call SetStruct(GetStruct$(itrIn.,n), ITR., n, 1) else exit do
+		N = N + 1
+	Loop
+
+	If ITC<=0 ! did not passa channel
+	  If ITR.Loc$="NSTOCK" ! it's for nsinvtrans(PO's)
+	    ITChan=OpenFile(9960,IntCo) \ if ITChan=-1 Error 42
+	  Else ! 
+	    ItChan=OpenFile(2512,IntCo) \ if ITChan=-1 Error 42
+	  Endif
+	Else ! passed it
+	  ITChan=ITC
+	Endif
+	! get the Usercntrl Rec #
+	tmp$ = GetParameter$("S_USER.ID") ! get from system variable
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Let Key1$=UserID$+"          " ! space fill it
+	UCC = OpenFile(-9988, intCo) \ if UCC=-1 Error 42
+	Search #UCC,2,1;Key1$,Rec,E
+	If Not(E)
+	  Let SCR=Rec
+	Else
+	  Let SCR=0 ! 
+	Endif
+	Close #UCC
+	! verify date sent
+	let date$=" ",date$;date1$=" ",date1$
+	date$=ITR.TrnsDate using "&&&&&&" ! "transaction date
+	Call DateToJulian(1,Date$,Date1$,E)! "convert to julian
+
+	if e ! "invalid date
+		Let Date1$=Tim(6) Using "#####" ! current date in julian days
+	endif
+
+	let ITR.TrnsDate=date1$ ! "date converted to julian
+	! set up for adding record
+	! the below may not be neccessary as calling programs SHOULD HAVE IT SETUP ALREADY
+	! in po374a - it is set up
+	!LET ITR.RfRcvd=0
+
+	!IF ITR.TrnsType < 0
+	!	ITR.RfRcvd =ITR.Tiebrkr ! i guess passed & reused 
+	!	ITR.TrnsType = abs(ITR.TrnsType)
+     !   IF ITR.RfRcvd=0 LET ITR.RfRcvd=-1
+	!else
+	!	ITR.RfRcvd =0 
+	!endif
+	!if ITR.EntBy < 0
+	!	ITR.ProntoAcpt = 1
+	!	ITR.EntBy = abs(ITR.EntBy)
+	!else
+	!	ITR.ProntoAcpt= 0
+	!endif
+
+	!"after the variable pronto be assigned - assign the lt1[2] to usecntrl rec#
+	if scr=-1 let ITR.EntBy=-1  !"super user 
+	if scr>0 let ITR.EntBy=scr
+
+	insertcount=0  ! initial counter
+
+	GetDateTime: ! get the accept date & time
+	let date$=" ",date$;date1$=" ",date1$;time$=" ",time$
+
+	! "get current date/time
+	Date1$=Tim(6) Using "#####" ! accept date (today)
+	let time$=tim(11) using "&&",tim(12) using "&&",tim(13) using "&&"
+	let ITR.Tiebrkr=0;ITR.AcptDate=date1$;ITR.AcptTime=time$ ! "tiebreaker/date/time
+	
+	! now try for a unique key for record
+	KeyLoop: ! "try for a unique key BEFORE ADDING RECORD!
+
+	let key1$=" ",key1$
+	let key1$=ITR.AcptDate using "&&&&&" ! "date
+	let key1$[6]=ITR.AcptTime using "&&&&&&" ! "time
+	let key1$[12]=ITR.Tiebrkr using "&&&" ! "tiebreaker
+	Search #ITChan,2,1;Key1$,Rec,E
+	If Not(E) ! found it
+	  let ITR.Tiebrkr=ITR.Tiebrkr+1
+	  if ITR.Tiebrkr<1000
+		goto KeyLoop ! "try again
+	  else
+		goto GetDateTime ! get new accept time & TRY AGAIN
+	  Endif
+	Else ! got an unused key - add it
+	  mode$="a";Rec_Invtr=0
+	  If ITR.Loc$="NSTOCK" ! it's for nsinvtrans(PO's)
+		Rec_invtr=fileupdatensinvtrans(e$,ITchan,mode$,rcdno,itr.) ! just in case keys diff
+		If Rec_Invtr<0 ! - Error on add - What Now?
+			if ITR.Tiebrkr<1000 
+				insertcount=insertcount+1 
+				if insertcount <= 3  !! try changing time 3 times
+					goto KeyLoop ! "try again
+				endif
+			endif
+			Let X2=ABS(Rec_Invtr)
+			Let e$="SEARCH ERROR "+Str$(x2)+" CREATE NSINVTRANS - MAKETRANS"
+			! Error 19000+x2 ! Error? - or let Status let 'em
+			call programdump("tmp/nsinvtrse!","") 
+		Endif
+	  Else
+	    Rec_invtr=fileupdateinvtrans(e$,ITchan,mode$,rcdno,itr.)
+		If Rec_Invtr<0 ! - Error on add - What Now?
+			if ITR.Tiebrkr<1000
+				insertcount=insertcount+1 
+				if insertcount <= 3  !! try changing time 3 times
+					goto KeyLoop ! "try again
+				endif
+			endif
+			Let X2=ABS(Rec_Invtr)
+			Let e$="SEARCH ERROR "+Str$(x2)+" CREATE INVTRANS - MAKETRANS"
+			call programdump("tmp/invtrse!","") 
+			! Error 19000+x2 ! Error? - or let Status let 'em
+		Endif
+	  Endif
+	Endif ! all done
+	If ITC<=0 Close #ITChan
+	Let Status=Rec_invtr ! okay as we're done
+	! If Rec_invtr<=0 Let Status=0 ! something failed
+	! call programdump("tmp/invtr"+key1$[1,11]+"!","")
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! maketrans
+!---------------------------------------------------------------------------------------------------

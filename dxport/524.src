@@ -1,0 +1,721 @@
+! 524   Invoice Print (interactive/shopprint) DCS Version
+!
+! loadsave -w -n 100,10 -o prog/dxport/524.dl4 src/524.src
+!
+Declare Intrinsic Sub DateToJulian,FindF,FormatDate,VerifyDate,String,String
+Option Default Dialect IRIS1
+!
+!
+! LA524 A/P CKWRITING 
+!???:04/16/00:Converted to Bedit   (mkbedit 1.2b)
+!
+! If Err 0 Gosub Err_Escape
+!If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTIN.hsf\177\";
+! LAST UPDATE: FLAG FOR MULTIPLE BANKS & AP ACCT DIST DETAIL - V5
+!---------------------------------------------------------------
+
+!
+include "src/copyright.inc"
+Declare Intrinsic Sub FormatDate, VerifyDate, getglobals, setglobals
+Declare Intrinsic Sub FindF,String, programdump
+Declare Intrinsic Function FindChannel 
+External Lib "ubsfunc.dl4"
+Declare External Function GetUidInfo$,GetUIDRec,OpenFile
+
+External Lib "libgeneral.lib"
+! Declare External Sub getsession,AddToStr,SetOutPut,CreateNetStatus
+Declare External Sub CreateNetStatus
+
+include "src/inc/fileedittrack.inc" ! edit tracking
+External Lib "libedittrack.lib"
+Declare External Sub MakeEdittrack
+
+Try
+!
+Dim ETR. as edittrack ! EDITTRACKING
+!
+Dim 1%,c0[6],E,K,S,A5,S8,div,P0[1023],userrec
+dim 1%,multichk
+Dim 2%,A7,B[1],D1,C,F1[2],R[23],U[3],V9[3],X
+Dim 3%,D,R3,tmp3
+Dim divname$[30],keydiv$[10]
+Dim A7$[67],A8$[96],A9$[78],D$[6],F$[10],G$[2],I$[8],K4$[20],P2$[80],A$[30]
+Dim R$[63],R1$[13],V$[20],A5$[30],2%,I1$[8]
+Dim 2%,D3[3],S1,S2,S3,F2,U1,J$[20],x$[50]
+dim keycr$[50],2%,crtype,3%,rec_cr
+Dim 1%,DCSPRTRTYPE,DCSP1[4],DCS
+Dim DCSP1$[10],DCSSCR$[300],DCSX$[20]
+Dim DCSFNAME$[50],DCSLINEIN$[100],DCSPRNTNAME$[100]
+!
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100],msg$[250],pdffilename$[100],mergedir$[200]
+Dim 2%,uport,tmp$[500],prid$[2],scheck$[10],echeck$[10],reprint$[1],bankid$[2],s1[8]
+Dim checkdate$[10],div$[2],sorter$[2],groupid$[2],reprintRange[1]
+
+Dim action$[30],options$[30],userid$[8],b$[200],3%
+Dim action1$[30],action2$[30],action3$[30] ! actions for programs
+Dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1000] ! .net delimiters
+Dim WebStr$[1000],Message$[200],blockid$[10]
+Dim 4%
+!
+b$ = " ",b$
+!
+! Call dxopen()
+!
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+
+try close #1 else rem
+dummy = openfile(9999,intCo) ! reopen with control file with write access
+
+coid=intco  ! comes from getssion
+Call DXGet("u_port",tmp$) \ uport=tmp$ \ if not(uport) let uport=1
+Call DXGet("PRINTER",prid$) \ prid$=ucase$(prid$) \ printerselected=prid$
+
+Call DXGet("BLOCKID",blockid$) \ blockid$=UCase$(blockid$)
+if blockid$="524" or blockid$="524A"
+	Call DXGet("BANKID",bankid$)
+	Call DXGet("DIV",div$)
+	Call DXGet("SORTER",sorter$)
+	Call DXGet("CHECKDATE",checkdate$)  ! passed as MMDDYY
+else if Ucase$(blockid$)="524AA"
+	Call DXGet("U_BANKID",bankid$)
+	Call DXGet("U_DIV",div$)
+	Call DXGet("U_SORTER",sorter$)
+	Call DXGet("U_REPRINT",reprint$) \ reprint=reprint$
+	Call DXSet("U_REPRINT","") ! reset
+	Call DXGet("CHECKDATE0",checkdate$)  ! passed as MMDDYY
+	Call DXGet("CHECKNUM0",scheck$)  ! passed as MMDDYY
+	Call DXGet("U_SREPRINT",tmp$) \ reprintRange[0] = tmp$ !* starting check #
+	Call DXSet("U_SREPRINT","") ! reset
+	Call DXGet("U_EREPRINT",tmp$) \ reprintRange[1] = tmp$ !* ending check #
+	Call DXSet("U_EREPRINT","") ! reset
+end if
+If blockid$="524"
+	Call dxget("MULTICHK",tmp$) ! Allow for multiple check runs
+	if rtrim$(tmp$)="" 
+		let multichk=0 ! no
+	else
+		let multichk=99 ! yes
+	endif
+endif
+if blockid$="524A" ! some adittional info for reprints only
+	Call DXGet("SREPRINT",tmp$) \ reprintRange[0] = tmp$ !* starting check #
+	Call DXGet("EREPRINT",tmp$) \ reprintRange[1] = tmp$ !* ending check #
+end if
+
+!
+! 1. validate bank
+if not(bankid$)
+	returnstatus=0;message$="Invalid Bank#"
+	goto AB_outend
+end if
+Mat Read #1,51,18;c0;
+if not(c0[0])
+	let tmp3=bankid$
+	if tmp3>1 ! flag is not set to multibank and bank is not 1
+		mat read #1,51,18;c0
+		let c0[0]=1
+		mat write #1,51,18;c0;
+	endif
+endif
+
+! 2. validate checkdate  passed as MMDDYY
+tmp$=checkdate$[1,2],"/",checkdate$[3,4],"/",checkdate$[5,6]
+Call VerifyDate(tmp$,checkdate$,e) ! formats to YYMMDD
+if e returnstatus=0;message$="Invalid Check Date" \ goto AB_Outend
+if blockid$="524" or blockid$="524A" Call DXSet("U_CHECKDATE",tmp$) ! MM/DD/YY
+
+if blockid$="524A"
+	Call DXSet("U_REPRINT","1") \ reprint=1
+	Call DXSet("U_SREPRINT",str$(reprintRange[0]))
+	Call DXSet("U_EREPRINT",str$(reprintRange[1]))
+end if
+
+! 3. ?
+
+if blockid$="524AA" 
+	! set flags 
+	READ #1,88,16;f$;
+	try close #15 else rem
+	OPEN #15,f$
+	V$ = " 0" \ Search #15,2,1;V$,R[15],E
+	If E Gosub Err_Search
+	Mat Read #15,R[15],2;R$;
+	if r$[51,51]=" " 
+		let returnstatus=0
+		let message$="Update In Process Elsewhere "
+		goto AB_outend
+	endif
+	userRec = GetUIDRec(e$, intCo, userid$)
+	if userRec = 0
+		returnstatus=0
+		message$="Error getting user ID rec: "+userid$
+		goto AB_outend
+	end if
+	MAT  READ #1,120,0;P0
+	if P0[524]<>0 and P0[524]<>userRec
+		tmp$ = GetUIDInfo$(e$,intCo,p0[524])
+		returnstatus=0
+		message$ = "AP Checks being printed by: "+rtrim$(tmp$[1,10])+"... Try Later"
+		goto AB_outend
+	end if
+	P0[524]=userRec
+	MAT WRITE #1,120,0;P0;
+	R$[51,51] = " " \ Mat Write #15,R[15],2;R$;
+	! printer only sent on 2nd block
+	DCS = 1
+	Gosub GETDCSPRTRTYPE
+	If PRNTSCREEN Or PRNTDISKFILE Let DCS = 0
+	If DCS If Not(DCSPRTRTYPE) and prid$<>"P"
+			! Print @0,0;'CS'
+			! Print @0,10;"The printer is not for DCS Laser Form, please reselect another printer "
+			! Signal 3,50
+			! Goto OutEnd
+			returnstatus=0;message$="Invalid Printer" !\ goto AB_outend
+			MAT  READ #1,120,0;P0
+			P0[524]=0
+			MAT WRITE #1,120,0;P0;
+			GOTO L_9050:
+	End If
+End If  !"blockid$="524" or blockid$="524A" or blockid$="524AA" 
+!
+A7$[1] = "NO" \ A7$[7] = "ONE" \ A7$[14] = "TWO" \ A7$[21] = "THREE"
+A7$[28] = "FOUR" \ A7$[35] = "FIVE" \ A7$[42] = "SIX"
+A7$[49] = "SEVEN" \ A7$[56] = "EIGHT" \ A7$[63] = "NINE"
+A8$[1] = "ELEVEN" \ A8$[11] = "TWELVE" \ A8$[22] = "THIRTEEN"
+A8$[33] = "FOURTEEN" \ A8$[44] = "FIFTEEN" \ A8$[55] = "SIXTEEN"
+A8$[66] = "SEVENTEEN" \ A8$[77] = "EIGHTEEN" \ A8$[88] = "NINETEEN"
+A9$[1] = "TEN" \ A9$[9] = "TWENTY" \ A9$[18] = "THIRTY"
+A9$[27] = "FORTY" \ A9$[36] = "FIFTY" \ A9$[45] = "SIXTY"
+A9$[54] = "SEVENTY" \ A9$[63] = "EIGHTY" \ A9$[72] = "NINETY"
+
+! user group calc
+Mat Read #1,52,0;S1;
+G$[1,1] = S1[1] Using "#"
+G$[2,2] = S1[2] Using "#"
+
+U = Spc(5) \ U[1] = Int(U / 16384)
+U[2] = Int((U - U[1] * 16384) / 64) \ U[3] = U - (U[1] * 16384 + U[2] * 64)
+! G$[1,1] = U[2] Using "#" \ G$[2,2] = U[3] Using "#"
+
+! GET STARTED
+! MAIN 
+READ #1,88,16;f$;
+try close #15 else rem
+OPEN #15,f$
+READ #1,88,48,LOCKTIME;f$
+OPEN #16,f$
+!
+P2$ = "\15\",P2$
+K = 1 \ V9[1] = 1
+Read #1,0,134;D3; !READ IN CURRENT A/P DATE- USED TO CK DATE ENTERED
+I$ = D3 Using "######" !COMP CURR MONTH(YYMM)=D3[1] & NEXT M=D3[2]
+D3[1] = I$[1,4] !CURRENT A/P YYMM
+D3[3] = I$[3,4] !CURR MONTH
+D3[2] = D3[1] + 1 !NEXT MONTH
+If D3[3] >= 12 Let D3[2] = D3[1] + 89 !IF DEC- EFF ADD 1 TO YEAR
+If D3[2] >= 10000 Let D3[2] = 1 !yymm =0001 ROLLOVER @ END OF CENT
+D3[3] = 0 !SET =0 FOR LATER COMPARE- WILL HAVE DATE ENTERED YYMM
+V$ = " 0" \ Search #15,2,1;V$,R[15],E
+If E Gosub Err_Search
+Mat Read #15,R[15],2;R$;
+if blockid$="524" or blockid$="524A"
+	userRec = GetUIDRec(e$, intCo, userid$)
+	if userRec = 0
+		returnstatus=0
+		message$="Error getting user ID rec: "+userid$
+		goto AB_outend:
+	end if
+	MAT  READ #1,120,0;P0;
+	if P0[524]<>0 and P0[524]<>userRec
+		tmp$ = GetUIDInfo$(e$,intCo,p0[524])
+		returnstatus=0
+		message$ = "AP Checks being printed by: "+rtrim$(tmp$[1,10])+"... Try Later"
+		goto AB_outend:
+	end if
+	IF R$[51,51]=" "
+		let message$="Update In Process Elsewhere "
+		goto AB_outend: 
+	endif
+	let chkfound=0
+	If not(multichk) ! verify if checks have not been accepted on register! new stuff
+		V$ = "20" \ Search #15,2,1;V$,R[15],E
+		If E Gosub Err_Search
+		Mat Read #15,R[15];R1$;
+		F$ = R$[56,56],"/A20CR",G$[1,2]
+		ch_apcr=FindChannel()
+		try 
+			rOpen #ch_apcr,f$
+		else
+			let message$="Error with file A20CR"
+			goto AB_outend:
+		end try
+		let keycr$=" ",keycr$
+		do
+			search #ch_apcr,3,1;keycr$,rec_cr,e
+			if e<>0 exit do
+			read #ch_apcr,rec_cr,8;crtype;
+			if crtype<>9 ! not void
+				let chkfound=99
+				exit do
+			endif
+		loop
+		if rtrim$(blockid$)="524"! new check run
+			if chkfound<>0
+				let message$="Checks have already been processed. Please run register. "
+				goto AB_outend:
+			endif
+		endif
+		if rtrim$(blockid$)="524A"! new check run
+			if chkfound=0
+				let message$="There are no existing checks to re-print. "
+				goto AB_outend:
+			endif
+		endif
+		Try
+			Close #ch_apcr
+		else
+			rem
+		end try
+	endif
+endif
+
+! call programdump("tmp/524.2!","")! open the printer
+
+
+!
+! Signal 3,30 \ Goto L_9100
+!
+L_860: ! reset flag
+!	R$[51,51] = " " \ Mat Write #15,R[15],2;R$;
+
+! update the user id for this option
+	P0[524]=userRec
+	!MAT WRITE #1,120,0;P0;
+
+V$ = "20" \ Search #15,2,1;V$,R[15],E
+If E Gosub Err_Search
+Mat Read #15,R[15];R1$;
+F$ = R$[31,31],"/A80VM",G$[1,2] \ Open #2,F$
+F$ = R$[53,53],"/A20OI",G$[1,2] \ Open #3,F$
+F$ = R$[56,56],"/A20CR",G$[1,2] \ Open #5,F$
+F$ = R$[39,39],"/A50DB",G$[1,2] \ Open #6,F$
+F$ = R$[43,43],"/A50CR",G$[1,2] \ Open #7,F$
+Mat Read #1,88,112;F$; \ Open #8,F$ !APCASH
+F$ = R$[40,40],"/A50DD",G$[1,2] \ Open #10,F$
+Mat Read #1,51,18;c0;
+If c0[2] Mat Read #1,88,144;F$; \ ROpen #17,F$ !APDETA 
+Mat Read #1,88,432;F$; \ Open #18,F$ !APDETH
+Mat Read #1,88,1120;F$; \ Open #19,F$
+If c0[6] ! A/P DIVISION
+	F$ = R$[1,1],"/APDIV",G$[1,2] \ Open #20,F$
+End If
+V$ = " ",V$ \ Search #5,3,1;V$,R[5],E \ If Not(E) Goto L_990
+If E <> 2 Gosub Err_Search
+R1$[13,13] = "0" \ Mat Write #15,R[15];R1$;
+L_990: ! GOTO L_5000:! FILE SIZE CHECK NOT NEEDED
+
+L_1000: !  Print 'CS'; Tab 20;"A/P CHECKWRITING";
+! Print @5,2;"1> NEW CHECK RUN";@5,3;"2> RE-PRINT CHECKS";
+! Print @5,4;"3> VOID/DELETE CHECKS";@5,5;"4> MANUAL CHECKS ONLY";
+L_1030: ! Print @5,7;'CL';"SELECT OPTION OR <CR> TO END "; \ Input ""I$
+if not(reprint) let i$="1" else i$="2"
+If I$ = "" Goto L_9050 ! reset flag and exit
+If Len(I$) > 2 Goto L_1070
+S = I$
+If S > 0 If S < 5 Goto L_1080
+L_1070: Gosub L_8900 \ Goto L_1030
+
+L_1080: ! 
+! S=1 - New Check Run
+! S=2 - Reprint
+
+If S = 3 Chain "LA524B"
+If S = 4 Chain "LA524C"
+If S = 1 If R1$[13,13] <> "1" Goto L_1500
+If S = 2 If R1$[13,13] = "1" Goto L_1200
+! If S = 2 Print @0,21;'CL RB';"CHECK HAVE NOT BEEN PRINTED!!!"; \ Goto L_2090
+If S = 2 message$="CHECKS HAVE NOT BEEN PRINTED!!!" \ returnstatus=0 \ Goto L_9050
+
+! Print @10,8;'CL';"*** WARNING!!!  CHECKS HAVE ALREADY BEEN PRINTED ***";
+! Print @0,10;'CL';"RUN CHECK REGISTER TO MAKE SURE CHECKS ARE ALLOCATED TO THE CORRECT ACCOUNTING PERIOD";
+! Print @0,12;'CL';"IF CHECKS HAVE BEEN RUN ON STOCK PAPER, PLEASE USE OPTION '3' TO DELETE/VOID EXISTING CHECKS ";
+! Print @0,14;'CL';"IF CHECKS HAVE BEEN PRINTED FOR THE WRONG BANK PLEASE USE OPTION '3' TO VOID CHECKS ";
+! Print @0,16;"IF REPRINTING EXISTING CHECKS, PLEASE USE OPTION '2' TO REPRINT CHECKS ";
+! Print @0,18;'CL';"PRESS <CR> TO RETURN TO MENU, OR  C: TO CONTINUE WITH NEW CHECK PRINT "; \ Input ""I$
+! If I$ <> "C" Goto L_9050
+! For X = 18 To 9 Step -1
+!   Print @0,X;'CL'
+! Next X
+Goto L_1500
+!
+L_1200: ! ENTER BANK INFO HERE   
+If Not(c0[0]) Let I$ = "1" \ Goto L_1220
+i$=bankid$
+L_1205: ! Print @0,9;'CL';"ENTER BANK NUMBER CHECKS ARE TO BE PRINTED ON ";
+! Input ""I$
+! If I$ = "" Goto OutEnd
+!
+If Len(I$) > 2 Goto L_1235
+!
+L_1220: A5 = I$ \ K4$ = A5 Using "##"
+Search #8,2,1;K4$,R[8],E \ If Not(E) Goto L_1250
+If E > 1 Gosub Err_Search
+
+L_1235: ! Print @0,23;'CL RB';"BANK IS NOT ON FILE!!!"; \ Signal 3,30
+returnstatus=0;message$="BANK IS NOT ON FILE!!!" \ goto L_9050
+Goto L_1205
+!
+L_1250: Mat Read #8,R[8],2;A5$; \ Mat Read #8,R[8],50;A7;
+! Print Using "##  ";@0,9;'CL';" BANK #: ";A5;A5$[1,30];
+!
+! Print @5,11;'CL';"STARTING CHECK # TO BE REPRINTED OR  E: TO END ";
+! Input ""I$
+! If I$ = "E" Goto L_9050
+! if not(scheck$) let scheck$=a7 using "######"
+I$=str$(reprintRange[0]) ! starting check#
+!
+C = I$
+If C > 0 If C <= 999998 Goto L_1330 ! number is ok
+! Gosub L_8900 \ Goto L_1200
+! bad check#
+returnstatus=0;message$="Invalid Starting Check Number!!!" \ goto L_9050
+!
+L_1330: B = C
+V$ = " ",V$ \ V$[1,2] = A5 Using "##" \ V$[3,8] = C Using "######"
+F1 = 0 \ B[1] = 0
+!
+L_1340: Search #5,3,1;V$,R[5],E
+If E = 2 If Not(F1) Goto L_1385
+If E = 2 Goto L_1390
+If E Gosub Err_Search
+X = V$[1,2] \ If X <> A5 If Not(F1) Goto L_1385
+If X <> A5 Let X = V$[3,8] \ Goto L_1370
+X = V$[3,8]
+If Not(F1) If X <> C Goto L_1385
+L_1370: If X = 999999 Goto L_1390
+F1 = 99 \ B[1] = X
+Goto L_1340
+!
+L_1385: returnstatus=0;message$="Invalid Starting Check Number" \ goto L_9050 ! Print @0,23;'RB';"INVALID CHECK #"; \ Gosub L_8920 \ Goto L_1200
+!
+L_1390: C = B[1]
+L_1395: ! Print @5,13;'CL';"ENTER ENDING CHECK #, <CR> FOR LAST,  E: TO END ";
+! Input ""I$
+if reprintRange[1]
+	i$ = str$(reprintRange[1])
+else
+	i$ = ""
+end if
+If I$ = "E" Goto L_9050
+If I$ = "" Let I$ = C Using "######"
+B[1] = I$
+If B[1] > C Let B[1] = C
+If B[1] > 0 And B[1] <= 999998 Goto L_1435 ! its ok
+! Gosub L_8900 \ Goto L_1395
+L_1435: If B[1] >= B[0] Goto L_1500
+! bad range
+! Print @0,23;'RB';"STARTING CHECK# MUST BE LESS THAN ENDING CHECK #";
+! Gosub L_8920 \ Goto L_1200
+returnstatus=0;message$="Invalid Range" \ goto L_9050 
+!
+L_1500: ! ENTER BANK INFO HERE
+If Not(c0[0]) Let I$ = "1" \ Goto L_1520
+L_1505: ! Print @0,9;'CL';"ENTER BANK NUMBER CHECKS ARE TO BE PRINTED ON ";
+! Input ""I$
+i$=bankid$
+If I$ = "" Goto OutEnd
+If Len(I$) > 2 Goto L_1535
+!
+L_1520: A5 = I$ \ K4$ = A5 Using "##"
+Search #8,2,1;K4$,R[8],E \ If Not(E) Goto L_1550
+If E > 1 Gosub Err_Search
+L_1535: ! Print @0,23;'CL RB';"BANK IS NOT ON FILE!!!"; \ Signal 3,30
+! Goto L_1505
+returnstatus=0;message$="BANK IS NOT ON FILE!!!" \ goto L_9050
+!
+! bank id ok
+
+L_1550: Mat Read #8,R[8],2;A5$; \ Mat Read #8,R[8],50;A7;
+if blockid$="524" or blockid$="524A" Call DXSet("U_BANKID",bankid$)
+if blockid$="524" or blockid$="524A" Call DXSet("U_CHECKNUM",A7 using "######")
+! Print Using "##  ";@0,9;'CL';" BANK #: ";A5;A5$[1,30];
+If Not(A7) Goto L_1650
+L_1600: ! Print Using "######";@5,15;'CL';"IS NEXT AVAILABLE CHECK# ";A7;" OK (Y/N)? ";
+! Input ""I$
+! If I$ = "Y" Goto L_1700
+! If I$ = "N" Goto L_1650
+! Gosub L_8900 \ Goto L_1500
+!
+L_1650: ! Print @5,16;'CL';"ENTER NEW STARTING CHECK # ";
+! Input ""I$
+if not(scheck$) let scheck$=a7 using "######"
+i$=scheck$
+C = I$
+If C > 0 If C <= 999998 Goto L_1710	! its ok
+! Gosub L_8900 \ Goto L_1650
+returnstatus=0;message$="Invalid Check Number" \ goto L_9050
+!
+L_1700: C = A7
+L_1710: ! Print @5,17;'CL';"ENTER DATE TO BE PRINTED ON CHECKS (MMDDYY) ";
+! Input ""I$
+i$=checkdate$
+D3[3] = 0
+If Len(I$) = 6
+	D = I$ \ D$ = D Using "&#####"
+	I$ = D$[1,2],"/",D$[3,4],"/",D$[5,6]
+!	Call VerifyDate(I$,I1$,E) \ If Not(E) Goto L_1780
+    Goto L_1780    
+End If
+! Gosub L_8900 \ Goto L_1710
+returnstatus=0;message$="Invalid Check Date" \ goto L_9050
+!
+L_1780: D3[3] = D$[5,6],D$[1,2] !YYMM
+If D3[3] <> D3[1] And D3[3] <> D3[2] Gosub L_3500 ! \ If I$ <> "Y" Goto L_1000 Else Print @0,10;'CE';
+D = D$ \ Write #15,R[15],60;D;
+If S = 2 Goto L_1800
+
+L_1791: ! Print @5,19;'CL';"SORT OPTION:  1: VENDOR CODE OR  2: VENDOR NAME ";
+! Input ""I$ \ If Len(I$) > 2 Goto L_1791
+i$=sorter$
+S8 = I$ ! \ If S8 < 1 Goto L_1791
+! If S8 > 2 Goto L_1791
+if s8<1 or s8>2 returnstatus=0;message$="Invalid Sort" \ goto L_9050
+!
+if blockid$="524" or blockid$="524A" Call DXSet("U_SORTER",sorter$)
+!
+
+div = 0
+If c0[6] ! ap division
+	getdiv: ! enter division
+	! Print @0,23;'CL';"Enter Division to Print, 0: all divisions, E: end ";
+	! Print @5,20;'CL';"DIVISION: ";
+	! Input Len (16384 + 2);""I$
+	i$=div$
+	! Call String(1,I$)
+	! If I$ = "" Goto getdiv
+	! If I$ = "E" Goto L_9050
+	! If Len(I$) > 2 Print 'RB';"INVALID!!" \ Signal 3,20 \ Goto getdiv
+	! If I$ = "O" Print 'RB';"INVALID!!" \ Signal 3,20 \ Goto getdiv
+	If I$ <> "0"
+		!IF VAL(I$)<1 OR VAL(I$)>99 GOTO getdiv:
+		keydiv$ = " ",keydiv$
+		div = I$
+		! If div < 1 Or div > 99 Or Fra(div) <> 0 Print 'RB';"INVALID!!" \ Goto getdiv
+		keydiv$[1,2] = div Using "##"
+		Search #20,2,1;keydiv$,R[20],E \ If E > 1 Gosub Err_Search
+		If E = 1
+			! Print @0,23;'CL RB';"Division Not On File "; \ Signal 3,20
+			! Goto getdiv
+		Else
+			Mat Read #20,R[20],12;divname$;
+			! Print Using "## ";@5,20;'CL';"DIVISION: ";div;divname$;
+		End If
+	Else
+		div = 0
+		! Print Using "## ";@5,20;'CL';"DIVISION: ";div;"All Divisions";
+	End If
+	! Print @0,23;'CL';
+End If
+!
+if blockid$="524" or blockid$="524A" Call DXSet("U_DIV",div$)
+!
+L_1800: For K = 1 To 6
+	If D$[K,K] = " " Let D$[K,K] = "0"
+Next K
+! I$ = D$[5,6],D$[1,2],D$[3,4] \ D1 = I$
+D1 = D$
+
+L_1840: ! Print @0,23;'CL';" A: ACCEPT  R: REJECT  X: EXIT ";
+! Input Len (16384 + 1);""I$
+! Call String(1,I$)
+! If I$ = "A" Goto L_1900
+! If I$ = "X" Goto L_9050
+! If I$ = "R" Goto L_1000
+! Gosub L_8900 \ Goto L_1840
+! Goto L_1900
+!
+L_1900: ! Print @0,23;'CL RB';"VERIFYING CHECK NUMBERS...PLEASE WAIT...";
+If S = 1 Goto L_2100
+K4$ = " ",K4$ \ K4$[1,2] = A5 Using "##" \ K4$[3,8] = B Using "######"
+F1 = 0 \ F1[2] = 0
+!
+L_1930: Search #5,3,1;K4$,R[5],E
+If E = 2 Goto L_2000
+X = K4$[1,2] \ If X <> A5 Goto L_2000
+F1[1] = K4$[3,8]
+If F1[1] > B[1] Goto L_2000
+If F1 If F1[1] <> F1 Let F1[2] = F1[2] + 1
+If S8 > 2 Goto L_1791
+F1 = F1[1]
+Goto L_1930
+!
+L_2000: K4$ = " ",K4$ \ K4$[1,2] = A5 Using "##" \ K4$[3,8] = C Using "######"
+Search #5,3,1;K4$,R[5],E
+If E = 2 Goto L_2040
+X = K4$[1,2] \ If X <> A5 Goto L_2040
+F1 = K4$[3,8]
+L_2040: F1[2] = F1[2] + C + 2
+If Not(F1) Goto L_3000 !NO CHECKS FOUND IN RANGE
+If F1 >= C If F1 <= F1[2] Goto L_2070
+Goto L_3000
+
+L_2070: ! Print Using "######";@0,20;'CE';"CHECKS EXIST IN RANGE OF ";C;" TO ";F1[2];
+! Print @0,21;"CHECK NUMBER NEED TO BE DELETED OR VOIDED TO REPRINT ";
+returnstatus=0;message$="Checks exist in the range "+ Str$(c) +" to "+ str$(f1[s])+". Delete or Void."
+goto L_9050
+
+L_2090: ! Print @0,22;"PRESS <CR> TO RETURN TO MENU "; \ Input ""I$ \ Goto L_9050
+Goto L_9050
+
+L_2100: ! VERFIY CHECKS FOR NEW CHECK RUN
+K4$ = " ",K4$ \ K4$[1,2] = A5 Using "##" \ K4$[3,8] = C Using "######"
+Search #5,3,1;K4$,R[5],E
+If E = 2 Goto L_3000
+X = K4$[1,2] \ If X <> A5 Goto L_3000
+F1[1] = K4$[3,8]
+If F1[1] = 999999 Goto L_3000	! its ok
+!
+! Print Using "######";@0,20;'CE';"CHECKS EXISTS IN FILE GREATER THAN STARTING CHECK NUMBER ";C;
+! Print @0,21;'CL';"CHECK REGISTER NEEDS TO BE RUN OR CHECKS NEED TO BE DELETED TO USE THIS RANGE ";
+! Goto L_2090
+returnstatus=0;message$="CHECKS EXISTS IN FILE GREATER THAN STARTING CHECK NUMBER "+Str$(C)+" RUN REGISTER OR DELETE CHECKS."
+Goto L_9050
+
+L_3000: R1$[13,13] = "1" \ Mat Write #15,R[15];R1$
+Mat Write #15,R[15];R1$ ! CHECK-RUN FLAG
+if action1$="PRINT" and UCase$(blockid$)="524AA"
+	! Chain "LA524A.ODCS.dl4"
+	chain "serpapcheck.odcs.dl4"
+	Chain Write A5,A7$,A8$,A9$,B,C,D,D1,D$,F1,P2$,S,V9,S8,div
+end if
+!
+let tmp$="524aa"
+Call env(2,"NEXTBLOCK",tmp$)                                  
+Call setoutput(e$,rstr$,1) !1 flag puts 0 status section, puts </page>
+
+End 
+
+L_3500: ! MESSAGE OF POSS BAD DATE
+! have .net validdate the date
+!
+! Print @5,11;'CL RB';"THE CHECK DATE ENTERED IS NOT IN EITHER ";
+! Print "THE CURRENT OR NEXT MONTH IN A/P."
+! Print @1,12;'CL';"PLEASE CHECK THE DATE JUST ENTERED FOR ";
+! Print "CORRECTNESS.  IF YOU BELIEVE THE DATE"
+! Print @1,13;'CL RB';"IS IN EITHER OF THE 2 MONTHS, EXIT AND ";
+! Print "CHECK DAYSTART FOR A WRONG DATE ENTERED"
+! Print @1,14;'CL';"THERE.  IF, FOR SOME REASON YOU HAVE ";
+! Print "INTENTIONALLY ENTERED A DATE OUTSIDE"
+! Print @1,15;'CL';"THE NORMAL DATE RANGE, AND THE DATE ";
+! Print "IS CORRECT, YOU MAY PROCEED."
+! Signal 3,3
+L_3550: ! Print @3,19;'CL RB';"AFTER (ALL)THIS WARNING,";
+! Print " DO YOU (REALLY) STILL WANT TO PROCEED(Y/N/E)?:";
+! Input ""I$
+! If I$ <> "Y" If I$ <> "N" If I$ <> "E" Print 'RB';"INVALID!!" \ Signal 3,10 \ Goto L_3550
+! If I$ = "E" Goto L_9050
+Return
+
+! CHECK ON FILE SIZE OF A50CR
+E = 0 \ Search #7,1,0;A$,F2,E
+E = 1 \ Search #7,1,0;A$,U1,E
+S3 = Chf(7) - F2
+S1 = U1
+S2 = S3 - S1
+S4 = S2 * 100 / S3
+If S4 < 90 Goto Outend ! L_1000
+If S4 < 95 Goto L_5090
+! Print @0,21;'CL RB';"****** CHECK RECONCIATION FILE FULL!!! ******";
+! Print @0,22;'CL RB';"CHECK RECONCILIATION MUST BE RUN OR FILE MUST BE EXPANDED ";
+! Print @0,23;'CL RB';"PRESS <CR> TO RETURN TO THE MENU ";
+! Input ""J$ \ Goto L_9050
+returnstatus=0;message$="Check Reconciliation File Full" \ goto L_9050
+!
+L_5090: ! Print @0,21;'CL RB';"*** CHECK RECONCILIATION FILE NEARLY FULL!!! ***";
+! Print Using "#####";@0,22;'CL RB';"HAS ROOM FOR ONLY ";(S1 - 10);" CHECKS";
+L_5100: ! Print @0,23;'CL RB';"PRESS <CR> TO RETURN TO THE MENU OR  C: TO CONTINUE CHECK PRINT ";
+! Input ""J$
+! If J$ = "" Goto L_9050
+! If J$ = "C" Goto L_1000
+! Goto L_5100
+returnstatus=0;message$="Check Reconciliation File Nearly Full" \ goto L_9050
+!
+L_8900: ! ERR ROUTINE  
+! Print @0,23;'CL RB';"INVALID!!!";
+message$="INVALID!!! :="+Spc(9) \ returnstatus=0
+L_8920: !Signal 3,20 \ Print @0,23;'CL'; \ Return
+Return
+
+OutEnd: ! END
+! PRINT #0;"\236\";
+! reset flag
+L_9050: V$ = " 0" \ Search #15,2,1;V$,R[15],E
+If E Gosub Err_Search
+Mat Read #15,R[15],2;R$; \ R$[51,51] = "1" \ Mat Write #15,R[15],2;R$;
+
+AB_outend:  ! abynorml exit
+L_9100: ! Chain "MX000C" !CLOSE
+! Chain "MX000"
+If returnstatus=0  ! error
+	Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	Call AddToStr(e$,rstr$,WebStr$)
+	Call SetOutPut(e$,rstr$)
+else ! sucess
+	Call SetOutPut(e$,rstr$)
+End If
+End
+
+Stop 
+
+GETCHAN: Rem search for open channel (counts down from supplied chnl #    
+For SCR = CHNL To 1 Step -1
+  CHNL = SCR
+  Gosub CHNLFREE
+  If CHNLFREE
+    SCR = 1
+  Else 
+    CHNL = 0
+  End If 
+Next SCR
+Return
+
+CHNLFREE: Rem check to see if a channel is being used   
+If Err 0 Let CHNLFREE = Spc(8)
+CHNLFREE = 0
+E = Chf(CHNL)
+If Err 0 Gosub Err_Escape
+If CHNLFREE And CHNLFREE <> 49 Gosub ERR_TRAP
+END_CHNLFREE: Rem                                       
+Return 
+!-------------------------------------------------------------
+!#include rtn.dcscode.i       
+include "src/rtn.dcscode_r10.i"
+!#include rtn.error.s
+!-------------------------------------------------------------
+Err_Escape: !
+ERR_TRAP: Rem
+If Spc(8) = 123
+  Escdis 
+  Escclr 
+  Return -1
+End If 
+Goto ERR_MAIN
+ERR_SEARCH: Rem
+ENUM = E + 1000;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "
+Goto ERR_MAIN
+ERR_MAIN: Rem
+If Err 0 Rem
+e$ = msg$
+If Spc(8) <> 10000 Call suberr(e$,Spc(8),Spc(10),Msc$(2))
+Call mainerr(e$,Spc(8),buttonlist$[],nextlist$[])
+Stop 
+!
+!
+Else 
+  include "src/callmainerrnet.inc"
+End Try 
+!
+!--------------------------------------------------------------

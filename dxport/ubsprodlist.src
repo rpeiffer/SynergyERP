@@ -1,0 +1,489 @@
+!Program Name: ubsprodlist
+! loadsave -w -n 100,10 -o prog/dxport/ubsprodlist.dl4 src/ubsprodlist.src
+!                                                  
+!Last Updated:                                     
+!zyc 09/28/04 
+!
+
+Declare External sub prodlist
+Declare Sub updatelog,errTrap,parseWords
+
+Include "src/prvars.inc"
+dim p.[1000] as pinfo
+call prodlist(1,35,1,"files/6/dx.log","103.6020","1",p.[],ii,ss,600," ")
+print ii;ss
+!stop
+
+External Sub ProdList(intCo,intSalesMan,debug,dlog$,strSearch$,what$,p.[] as pInfo, ii, ss, iLimit, Key1$,...)
+	Try Enter commcode$,... else dim commcode$[4]
+	Try Enter catcode$,... else dim catcode$[4]
+	Try Enter vendcode$ else dim vendcode$[6]
+Try
+Print Msc$(0)
+Declare Intrinsic Function FindChannel,Trim$
+Declare External Function PDate$,OpenFile,WareHouse,XUnit$,Xamount,ReplaceChar$
+Declare Intrinsic Sub Logic
+External Lib "ubsfunc.dl4","ubsprconv.dl4"
+
+declare Function RegionOK, WordCheck
+
+Include "src/ubswhse.inc"
+Include "src/ubssales.inc"
+Include "src/ubsprod.inc"
+
+
+!DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01)
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)                       
+Def FNN(H) = Int(Abs(H) * 10 ^ Q0[1] + .5) * 10 ^ - Q0[1] * Sgn(H)       
+Def FNT(H) = Int(Abs(H) * 10 ^ Q0[1]) * 10 ^ - Q0[1] * Sgn(H)            
+Def FNV(H) = Int(Abs(H) * 10 ^ Q0[1] + .9999999) * 10 ^ - Q0[1] * Sgn(H) 
+Def FNU(H) = Int(Abs(H) + Sgn(Fra(Abs(H)))) * Sgn(H)                     
+
+
+Dim WHK$[40],PRK$[12],SMK$[20],VNK$[20],CMK$[20],P9$[50],P61$[256],WHSE$[2]
+Dim PIK$[50],SMK$[20]
+Dim PRKey$[40], work$[255]
+
+Dim WH. As WHSE
+Dim SM. As SLSM
+Dim PR. As PROD
+Dim CM. As CommCode
+
+
+Dim 1%,debugDetail,Dir,Mode
+! Variables for Channel#'s
+Dim 2%,WHC,PRC,SMC,VNC,CMC,CTLC,CCC,PIC,CHAN,CTC
+! Variables for Search Record#
+Dim 3%,WHR,PRR,SMR,VNR,CMR,CTLR,PIR,CHANR,CTR
+! Variables for Search Error
+Dim 2%,WHE,PRE,SME,VNE,CME,CTLE,PIE,CHANE,CTE
+
+
+Dim Temp$[100],Vend$[50], UOM$[4]
+Dim SLS$[3],CO$[2],Sales$[35],CatD$[24]
+Dim Msg$[256],pgmName$[20]
+Dim QMASK$[20],PMASK$[20],EMASK$[20],DEC$[5]
+Dim Word$[1,20],Desc$[30],region$[4]
+
+Dim 1%,baseunit,stockunit,sellunit,purchunit,costunit,priceunit  
+Dim 2%, t2
+Dim 2%, Q0[1] 
+Dim 3%, TotAvl, oldrec
+
+
+debugDetail=0
+pgmName$="ubsprodlist"
+msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+ii=0
+
+SLS$=intSalesMan Using "###" ! Passed Salesman
+CO$=Str$(intCo) ! Company
+strSearch$=Trim$(strSearch$)
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+
+region=0
+
+WHC= OpenFile(-1744,intCo)  \ If WHC=-1  Error 42
+PRC= OpenFile(-1792,intCo)  \ If PRC=-1  Error 42
+VNC= OpenFile(-2400,intCo)  \ If VNC=-1  Error 42
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42
+CMC= OpenFile(-2288,intCo)  \ If CMC=-1  Error 42
+CCC= OpenFile(-1728,intCo)  \ If CCC=-1  Error 42
+PIC= OpenFile(-9993,intCo)  \ If PIC=-1  Error 42     !prodwordidx
+SMC= OpenFile(-1824,intCo)  \ If SMC=-1  Error 42     !sslsm
+CTC= OpenFile(-1984,intCo)  \ If CTC=-1  Error 42     !category
+if region REG= OpenFile(-9985,intCo)  \ If REG=-1  Error 42    !region
+
+    Read #CTLC,19,50;P9$;
+Mat Read #CTLC,115,40;Q0; 
+
+If not(Q0[1]) let Q0[1]=2                                                       
+Let Dec$="#",Dec$;Qmask$="---,---,--#"                                          
+If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask      
+If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask        
+Let Emask$="-$$$,$$$,$$$,$$$.##"                         !ext. price mask
+
+
+WHSE$=WareHouse(intSalesMan,intCo) Using "##" !  Need to get whse salesman
+eccos_region = whse$  ! home warehouse
+
+If What$="1" or What$="2" or What$="6" or What$="" ! must search for something for these
+	If Trim$(strSearch$)="" Goto LoopEnd:
+End If
+
+If What$="4" Then
+	Try x=Val(catcode$) else Goto Loopend:  ! verify numeric
+Endif
+If What$="5" Then
+	Try x=Val(vendcode$) else Goto Loopend:  ! verify numeric
+Endif
+
+!product code
+If What$="1" Then
+   Let WHK$=" ",WHK$
+   Let WHK$[1,12]=strSearch$   !begins with
+Endif
+
+!product description
+If What$="2" Then
+   Call parseWords(strSearch$,word$[])  
+   Let PIK$=" ",PIK$
+   Let PIK$=Word$[0]
+Endif
+
+!commodity code
+If What$="3" Then                     
+   Let PRKey$=" ",PRKey$
+   ! Let PRKey$[1,4]=strSearch$
+   Let PRKey$[1,4]=commcode$
+Endif                
+
+!category code
+If What$="4" Then   
+   ! Let WHK$=" ",WHK$;WHK$[1,2]=WHSE$
+   Let WHK$=" ",WHK$;WHK$[1,2]= "  "
+Endif                 
+
+!vendor code
+If What$="5" Then     
+   Let WHK$=" ",WHK$
+   ! Let WHK$[1,2]=WHSE$;WHK$[3,8]=Val(strSearch$) using "######"
+   ! Let WHK$[1,2]=" 1";WHK$[3,8]=Val(strSearch$) using "######"
+   Let WHK$[1,2]=" 1";WHK$[3,8]=Val(vendcode$) using "######"
+Endif       
+
+!vendor item code         
+If What$="6" Then    
+   Let WHK$=" ",WHK$ 
+   Let WHK$[1,2]=WHSE$;WHK$[3,22]=strSearch$
+Endif                
+
+Start: !
+
+LoopTop: Rem=========================================================== 
+If What$="1" then !product code
+   Loop1: Search #WHC,3,1;WHK$,WHR,WHE
+   if WHE=2 goto LoopEnd:
+   t2=len(strSearch$) \ if not(t2) let t2=1
+   If WHK$[1,t2]<>strSearch$[1,t2] goto LoopEnd:
+   if intSalesMan=999 goto WHOK  ! csr
+	if region 
+		if RegionOK(WHK$[13,14]) goto WHOK else goto loop1
+	else
+   		If WHK$[13,14]<>WHSE$ goto loop1:  !    Let WHE=22
+	endif
+   If WHE goto LoopEnd:
+Endif
+
+If What$="2" then !description
+   LoopTop2: !
+   Search #PIC,3,1;PIK$,PIR,PIE
+   If PIE goto LoopEnd:
+   If PIK$[1,len(Word$[0])]<>Word$[0] then goto LoopEnd:
+   Let WHK$=" ",WHK$;WHK$[1,12]=PIK$[21,32]   ! ;WHK$[13,14]=WHSE$
+   Loop2: Search #WHC,3,1;WHK$,WHR,WHE
+   if WHE=2 goto LoopTop2  ! End:
+   If WHK$[1,12]<>PIK$[21,32] goto LoopTop2  ! End
+   if intSalesMan=999 goto WHOK  ! csr
+	if region 
+		if RegionOK(WHK$[13,14]) goto WHOK else goto loop2
+	else
+   		If WHK$[13,14]<>WHSE$ goto loop2:  !    Let WHE=22
+	endif
+   If WHE goto LoopTop2  ! End:
+Endif
+
+If What$="3" Then !commodity 
+   LoopTop3: !
+   Search #PRC,3,3;PRKey$,PRR,PRE                     
+   t2=len(commcode$) \ if not(t2) let t2=1       
+   If PRKey$[1,t2]<>commcode$[1,t2] goto LoopEnd:
+
+   Let WHK$=" ",WHK$;WHK$[1,12]=PRKey$[5,16]   ! ;WHK$[13,14]=WHSE$ 
+   Loop3: Search #WHC,3,1;WHK$,WHR,WHE                               
+   if WHE=2 goto LoopTop3  ! End:
+   If WHK$[1,12]<>PRKey$[5,16]  goto LoopTop3
+   if intSalesMan=999 goto WHOK  ! csr
+	if region 
+		if RegionOK(WHK$[13,14]) goto WHOK else goto loop3
+	else
+   		If WHK$[13,14]<>WHSE$ goto loop3:  !    Let WHE=22
+	endif
+   If WHE goto LoopTop3  ! End:                                       
+Endif 
+
+If What$="4" Then !category 
+   Loop4: Search #WHC,3,3;WHK$,WHR,WHE                                         
+   if WHE=2 goto LoopEnd:
+   if intSalesMan=999 goto WHOK  ! csr
+	if region 
+		if RegionOK(WHK$[1,2]) goto WHOK else goto loop4
+	else
+   		If WHK$[1,2]<>WHSE$ goto loop4:  !    Let WHE=22
+	endif
+   If WHE goto LoopEnd:                                                 
+Endif                 
+
+If What$="5" Then !vendor code   
+   Loop5: Search #WHC,3,3;WHK$,WHR,WHE                                         
+   if WHE=2 goto LoopEnd:
+   Try t2=val(vendcode$) Else t2=0
+   Try vc=val(whk$[3,8]) Else vc=-99 
+   If vc<>t2 goto LoopEnd:
+
+   if intSalesMan=999 goto WHOK  ! csr
+	if region 
+		if RegionOK(WHK$[1,2]) goto WHOK else goto loop5
+	else
+   		If WHK$[1,2]<>WHSE$ goto loop5:  !    Let WHE=22
+	endif
+Endif  
+
+If What$="6" Then !vendor item code 
+   Loop6: Search #WHC,3,4;WHK$,WHR,WHE                 
+   if WHE=2 goto LoopEnd:
+   t2=len(strSearch$) \ if not(t2) let t2=1
+   If WHK$[3,2+t2]<>Trim$(strSearch$) goto LoopEnd:
+
+   if intSalesMan=999 goto WHOK  ! csr
+	if region 
+		if RegionOK(WHK$[1,2]) goto WHOK else goto loop6
+	else
+   		If WHK$[1,2]<>WHSE$ goto loop6:  !    Let WHE=22
+	endif
+Endif                                           
+
+WHOK: ! passed any warehouse tests
+
+If debugDetail                                                      
+   msg$="doing...Search #WHC: WHK$="+WHK$+" WHR="+WHR \ Call updatelog(debug) 
+   If WHE msg$="error...Search error "+WHE  \ Call updatelog(debug) 
+Endif 
+Read Record #WHC,WHR; WH.;
+Let TotAvl=0;TotAvl=WH.W3[0]-WH.W3[2]
+If P9$[28,28]="Y" Let TotAvl=TotAvl+WH.W3[1]
+
+
+!=================Get Product Record
+PRK$=WH.W1$[1,12]
+Temp$=" ",Temp$;Temp$=PRK$
+
+Search #PRC,2,1;PRK$,PRR,PRE
+IF PRK$[1,12]<>Temp$[1,12] Let PRE=22
+If PRE Goto LoopTop: ! No prod on file?  Skip it.
+
+If debugDetail                                                      
+   msg$="doing...Search #PRC: PRK$="+PRK$+" PRR="+PRR \ Call updatelog(debug) 
+   If PRE msg$="error...Search error "+PRE  \ Call updatelog(debug) 
+Endif 
+Read Record #PRC,PRR;PR.;
+
+if prr=oldrec goto looptop else oldrec=prr
+
+!more checks
+If What$="2" and Len(Word$[1])  !description
+   Let gotone=0
+   Let Desc$=PR.A$[9,38];position=0
+   Search Desc$[position+1],Word$[1],position
+   If position then Let gotone=1
+   Let Desc$=PR.A$[63,92];position=0          
+   Search Desc$[position+1],Word$[1],position
+   If position then Let gotone=1
+   !
+   If not(gotone) then goto LoopTop:
+Endif       
+If What$="3" and strsearch$ and not(WordCheck()) goto LoopTop:
+
+If What$="4"  !category
+   If PR.B[11]<>Val(catcode$) then goto LoopTop:
+   if strsearch$ and not(WordCheck()) goto LoopTop:
+Endif
+
+If What$="5"  !VENDOR
+   If PR.B[24]<>Val(vendcode$) then goto LoopTop:
+   If strsearch$ and not(WordCheck()) goto LoopTop:
+Endif
+
+
+!set                  
+baseunit =PR.PFU1[0]
+stockunit=PR.PFU1[8]  
+sellunit =PR.PFU1[9]  
+purchunit=PR.PFU1[10] 
+costunit =PR.PFU1[11] 
+priceunit=PR.PFU1[12] 
+
+
+!totavl                                                               
+Let CNVTA=TOTAVL              !cost/price/qty                         
+Let CNVTU[0]=0                !current unit                           
+Let CNVTU[1]=sellunit        !desired unit                           
+Let CNVTU[2]=1                !mode 1=qty 2=cost/price                
+LET TOTAVL=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+! load cost
+loadcost=PR.B[8]
+IF P9$[32,32]="Y" and WH.W3[17] LET loadcost=WH.W3[17]		! loaded
+Let CNVTA=loadcost              !cost/price/qty                         
+Let CNVTU[0]=0                !current unit                           
+Let CNVTU[1]=sellunit        !desired unit                           
+Let CNVTU[2]=2                !mode 1=qty 2=cost/price                
+LET loadcost=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+!============Get Commodity Code Desc
+CMK$=PR.A$[152,155]
+Search #CMC,2,1;CMK$,CMR,CME
+If CMK$<>PR.A$[152,155] Then Let CME=22
+
+If debugDetail                                                     
+   msg$="doing...Search #CMC: CMK$="+CMK$+" CMR="+CMR \ Call updatelog(debug)
+   If CME msg$="error...Search error "+CME  \ Call updatelog(debug)    
+Endif                                                              
+If CME=0 Then
+   Mat Read #CMC,CMR;CM.;
+Else
+   Clear CM.
+   CM.D$[1,16]=PR.A$[152,155]+"            "
+End If
+
+
+!=================category                                                      
+CatD$=" ",CatD$                                                                 
+
+CTR=PR.B[11]                                                                    
+If CTR Then                                                                     
+   Mat Read #CTC,CTR;CatD$;                                                     
+Else                                                                            
+   CatD$="-NOF-"                                                                
+End If                                                                          
+
+
+!=======================Get Vendor
+VNK$=PR.B[24] Using "######"
+Temp$=" ",Temp$;Temp$=VNK$
+
+Search #VNC,2,1;VNK$,VNR,VNE
+If VNK$[1,6]<>Temp$[1,6] Let VNE=22
+
+If debugDetail                                                     
+   msg$="doing...Search #VNC: VNK$="+VNK$+" VNR="+VNR \ Call updatelog(debug)
+   If VNE msg$="error...Search error "+VNE  \ Call updatelog(debug)    
+Endif                                                              
+If VNE=0 Then
+   Mat Read #VNC,VNR;Vend$[1,30];
+Else
+   Vend$="-NOF-"
+End If
+
+
+!=======================Get SalesMan                                            
+SMK$=SLS$                                                                       
+Temp$=" ",Temp$;Temp$=SMK$                                                      
+
+Search #SMC,2,1;SMK$,SMR,SME                                                    
+If SMK$[1,3] <> Temp$ Let SME=22                                                
+If debugDetail                                                                  
+   msg$="doing...Search #SMC: SMK$="+SMK$+" SMR="+SMR \ Call updatelog(debug)   
+   If SME msg$="error...Search error "+SME  \ Call updatelog(debug)             
+Endif                                                                           
+If SME=0 Then                                                                   
+   Mat Read #SMC,SMR;Sales$[1,30];                                              
+Else                                                                            
+   Sales$="-NOF-"                                                               
+End If                                                                          
+
+
+LoadMe: !===============================================
+
+If ii < iLimit Then
+  p.[ii].slsno$=SLS$
+  p.[ii].slsname$=Sales$
+  p.[ii].Product$=PR.A$[140,151]
+  work$ = PR.A$[9,38] + "     "
+  p.[ii].Description1$ = ReplaceChar$(trim$(work$))
+  ! p.[ii].Description1$=ReplaceChar$(PR.A$[9,38])
+  work$ = trim$(PR.A$[63,92] + "     ")
+  if not(work$) let work$ = " "
+  p.[ii].Description2$ = ReplaceChar$(work$)
+  ! p.[ii].Description2$=ReplaceChar$(PR.A$[63,92])
+  p.[ii].Commodity$=CM.D$[1,16]
+  p.[ii].Category$=CatD$
+  p.[ii].Vendor$=Vend$
+  p.[ii].QtyAvailable$=TotAvl Using QMask$+" "+XUnit$(sellunit,CCC)
+  !  future fields
+!   p.[ii].cost1$=loadcost Using PMask$
+!  p.[ii].costdesc1$=XUnit$(costunit,CCC)
+!  if pr.pfco[0] let p.[ii].costcode$ =" #" else p.[ii].costcode$=" " ! future cost indicator
+	!
+  ii=ii+1
+Else
+  goto LoopEnd:
+End If
+Goto LoopTop:
+
+
+
+LoopEnd: !=======================================================
+Close #WHC,#PRC,#CTLC,#VNC,#CCC,#CMC,#PIC,#SMC,#CTC
+if region Close #REG
+msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+ss=0
+Print Msc$(0)
+Exit Sub
+Else
+  Temp$=""
+  Call errTrap(pgmName$)
+End Try
+
+
+Sub updatelog(debug)                                        
+	If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub   
+
+
+Sub parseWords(strSearch$,word$[]) 
+    If len(strSearch$)<=0 Exit Sub
+	Let strSearch$=Trim$(strSearch$);max=len(strSearch$)
+    If strSearch$[max]<" " Let strSearch$[max]="" 
+
+	For I=0 to 1
+        Let Word$[I]=""
+	Next I
+
+	Let I=0;position=0
+	findWords: !
+    Let temp$=""
+	Let temp$=strSearch$[position+1] to " ":position 
+	If len(temp$) 
+	   Let Word$[I]=temp$;I=I+1
+    Endif
+	If position<>0 and I<>2 then goto findWords:
+End Sub
+
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+
+Function RegionOK(wh$)
+	region$[1,2] = eccos_region using "##"
+	region$[3,4] = wh$
+	Search #REG,2,1;region$,rgr,rge
+	if not(RGE) scr = 1 else scr=0
+	if wh$=whse$ scr=1 ! home whse is always ok
+End Function scr
+
+Function WordCheck()
+	scr = 0;work$=PR.A$[9,38]+" "+PR.A$[63,92]+" "+PR.A$[140,151]
+	kpos=0 \ Search work$, word$[0], kpos \ if kpos scr=1
+	kpos=0 \ Search work$, word$[1], kpos \ if kpos scr=1
+End Function scr
+
+
+ss=0
+!ss=spc(10)
+End Sub

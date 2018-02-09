@@ -1,0 +1,2347 @@
+!    dfadmin.dl4 - main program to maintain/display demo file definitions subsystem files
+!
+!    "dfadmin.bas" 1.0 8/25/2006
+!
+!    All rights reserved.    (C) Copyright 2006 by:
+!    Dynamic Concepts, Inc.   Aliso Viejo, California USA
+!
+!    "@(#) dfadmin.bas 1.0@(#)"
+!
+! loadsave -w -n 100,10 -o dfadmin.dl4 src/dfadmin.src
+!
+!This source code is free to use and duplicate with purchase of dynamicXport
+!license
+!
+! *declare dl4 intrinsic subs & functions
+Declare Intrinsic Function findchannel,trim$,dateusing$,replace$,fmtof
+Declare Intrinsic Sub programdump,dxopen,dxget,dxset,dxclose,dxsave
+Declare Intrinsic Sub StringSearch,env
+!
+!
+External Lib "dfgeneral.lib" !general routines
+Declare External Sub dfsuberr,dfmainerr,ReadSystemFile,openfiles
+Declare External Function getprogrampath$,dfDTconvert$
+!
+Declare Sub fieldslist,keylist
+Include "src/dffiles.bsh"
+!
+!ubs filedefquery
+External Lib "prog/dxport/ubsfunc.dl4"
+Declare External Function OpenFile
+!
+Declare External Function readrecord
+!
+!
+!
+Dim filedefhdr. As filedefhdr,filedeffields. As filedeffields,filedefkey. As filedefkey
+Dim oldfiledefhdr. As filedefhdr,oldfiledeffields. As filedeffields,oldfiledefkey. As filedefkey
+Dim key1. As key1,key2. As key2,key1seq. As key1seq,key1seq2. As key1seq2
+!
+! any external subs included in this program file
+!
+External Function fill$(field$)
+  !--------------------------------------------------------------------
+  ! right fill with spaces
+  field$ = field$,"                    "
+End Function field$ !fill$
+!
+!
+External sub dfintegritycheck(e$,filekey$,...)
+  !--------------------------------------------------------------------
+  ! check key integrity of an indexed contig file
+  ! can be called from external programs or from browser interface
+  ! required parameters
+  !  e$  used to return null or error message
+  !  filekey$ is filename in file definitions to check (case sensitive) 
+  ! optional parameters
+  !  sendto$   if null output goes to screen, else printer, filename or email address
+  !  primarykey  which key to consider primary key for repairs  default is 1
+  !  excludedirs$   comma separated directory #'s to exclude from integrity check  default is null
+  !  keysmatchdata  check that keys match data 0=yes 1=no  default is 0 yes
+  !  keysmatchrcdno check that key's record #s match 0=yes  1=no  default is 0 yes
+  !  repair         repair keys where possible 0=no 1=yes default is 0 no
+  ! 
+ try enter sendto$,... else dim sendto$[1]
+ try enter primarykey,... else let primarykey=1
+ try enter excludedirs$,... else dim excludedirs$[1]
+ try enter keysmatchdata,... else let keysmatchdata=0
+ try enter keysmatchrcdno,... else let keysmatchrcdno=0
+ try enter repair else let repair=0
+ !
+ !
+ try
+  Dim filename$[20],active$[1],version$[10]
+  dim keyopts$[240],fieldopts$[240],4%,value,3%
+  dim keyvalue$[200],rcdkey$[200],otherkey$[200]
+  dim b$[200],tmp$[200],1%,c[20],3%,excludedkeys[100],tmp2$[200]
+  dim from$[100],subj$[100]
+  b$ = " ",b$
+  !
+  Dim keyarray.[100] As filedefkey
+  Dim keyfields.[100] As filedeffields
+  Dim filedeffields. As filedeffields
+  Dim config. As config
+  Dim key1. as key1
+  Dim filedefhdr. as filedefhdr
+  !
+  function getpart$(keypart,rcdno) !internal routine to format field value to index format
+   try
+	for i=0 to maxfieldcnt
+	 if fields$[i] = keyfields.[keypart].varname$
+	 !format values$[i] for key into tmp$ 
+	 tmp$=values$[i] !default, no formatting
+    tmp1=0 \ pos1=0 \ pos2=0
+	KeyOpts$=ucase$(keyarray.[keypart].Opts$)
+	FieldOpts$=ucase$(keyfields.[keypart].Opts$)
+	!first convert field value with fieldopts$ if needed
+	!begin field DTOC
+	xpos=pos(ucase$(FieldOpts$),="DTOC(''")
+    if xpos let ypos=pos(ucase$(FieldOpts$[xpos+6]),="'')")
+    if xpos if ypos !date field conversion option
+     tmp$= dfDTconvert$(e$,values$[i],FieldOpts$[xpos+6,xpos+6+ypos-2],"MMDDYY")
+    end if
+	!end field DTOC
+	!
+	!now convert value with keyopts$ if needed
+    !begin key DTOC
+	xpos=pos(ucase$(KeyOpts$),="DTOC(''")
+    if xpos let ypos=pos(ucase$(KeyOpts$[xpos+6]),="'')")
+    if xpos if ypos !date field conversion option
+     tmp$= dfDTconvert$(e$,tmp$,"MMDDYY",KeyOpts$[xpos+6,xpos+6+ypos-2])
+    end if
+	!end key DTOC
+	!
+	! check for numeric masking
+    call StringSearch(KeyOpts$,1,"NTOC",tmp1) 
+    if tmp1>0 call StringSearch(KeyOpts$,tmp1,"(",pos1)
+    if pos1>0 call StringSearch(KeyOpts$,pos1+1,")",pos2)
+    if pos2>0     
+      call StringSearch(KeyOpts$,pos2,"RECNO",tmp2)
+	  if tmp2>0 
+	   let tmp$=rcdno using KeyOpts$[pos1+1,pos2-1]  ! record # 
+	  else !numeric field value
+	   tmp=values$[i]
+	   let tmp$=tmp using KeyOpts$[pos1+1,pos2-1]
+	  end if
+	endif
+    !
+    tmp11=0 \ pos11=0 \ pos12=0
+    call StringSearch(KeyOpts$,1,"NFTOC",tmp11) 
+    if tmp11>0 call StringSearch(KeyOpts$,tmp11,"(",pos11)
+    if pos11>0 call StringSearch(KeyOpts$,pos11+1,")",pos12)
+	if pos12>0 
+	  let tmp=values$[i]
+      let tmp$=FRA(tmp)*100 using KeyOpts$[pos11+1,pos12-1]
+	endif
+    !
+    ! check if partial field length is used
+    if keyfields.[keypart].Precision > 0 if keyfields.[keypart].Precision<>keyarray.[keypart].Precision let tmp$=values$[i,1,keyarray.[keypart].Precision] 
+
+
+	  exit for !done
+     end if !field match
+	next i
+   else
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+   end try
+  end function tmp$ !getkeypart$
+  !
+  ! need to get filenames from dxsystem.txt
+  !
+  !read system file parameters
+  Call ReadSystemFile(e$,config.)
+  !
+  ! open files
+  !
+  Call openfiles(e$,config.,c[])
+  !
+  if len(filekey$) > 20
+   filename$ = filekey$[1,20]
+   active$ = filekey$[21,21]
+   if len(filekey$) > 21 let version$ = filekey$[22]
+  else
+   filename$ = filekey$,b$
+  end if
+  !
+  !get filedef hdr rcd
+  Try
+        key1.filename$ = filename$
+        key1.active$ = active$
+        key1.version$ = version$
+   Search >= #c[0],1;key1.
+   hdrseq = -2
+   Do
+    Read Record #c[0],hdrseq;filedefhdr.
+    If rtrim$(filedefhdr.filename$) <> rtrim$(filename$) Error 10000
+    If active$<>"" if rtrim$(filedefhdr.active$) = rtrim$(active$) 
+	 If version$="" exit do
+	 If rtrim$(filedefhdr.version$) = rtrim$(version$) exit do
+	else
+	 exit do !active$=""
+	end if
+    hdrseq = -1 !get next
+   Loop
+   version$ = filedefhdr.version$  !for getrecord
+  Else 
+      e$ = "Filename ",RTrim$(filename$)," is not on file!"
+      Error 10000
+  End Try 
+  !
+  !put excludedirs$ into a numeric array flags
+  tmp$=excludedirs$
+  do
+   if tmp$="" exit do
+   xpos=pos(tmp$,=",")
+   if xpos = 0 
+    dirno=tmp$
+   else if xpos > 1
+    dirno=tmp$[1,xpos-1]
+   end if
+   try let excludedkeys[dirno]=1 else rem
+   if xpos if xpos <> len(tmp$) let tmp$=tmp$[xpos+1] else let tmp$=""
+  loop
+  !
+  !read the directory/index definitions and put them into a structure array
+    kcnt = 0
+	kseq = 0
+    kpart = 0
+    seq = -2
+    Try Search >= #c[2],1;filedefhdr.filename$,filedefhdr.version$,kseq,keypart Else Rem
+    Do 
+      Try Read Record #c[2],seq;keyarray.[kcnt] Else Exit Do 
+      If keyarray.[kcnt].filename$ <> RTrim$(filedefhdr.filename$) Exit Do 
+      If keyarray.[kcnt].version$ <> RTrim$(filedefhdr.version$) Exit Do 
+      If keyarray.[kcnt].rcdposition !get field rcd
+        Try 
+          Search = #c[1],1;filedefhdr.filename$,filedefhdr.version$,keyarray.[kcnt].rcdposition
+          Read Record #c[1],-2;keyfields.[kcnt]
+          If keyarray.[kcnt].precision = -1 Let keyarray.[kcnt].precision = keyfields.[kcnt].precision
+        Else 
+          e$ = "ERROR KEY PART LINKED TO FIELD # ",Str$(keyarray.[kcnt].rcdposition)
+		  error 10000
+        End Try 
+      End If
+      !
+	  !
+      kcnt = kcnt + 1
+      seq = -1 !get next
+    Loop
+	kcnt=kcnt - 1   !last item in keyarray,keyfields array
+  !
+  !open the real data file
+  intco=1
+  call dxget("intco",tmp$) \if tmp$<>"" let intco=tmp$
+  datafile=openfile(rtrim$(filename$),intco,"R")
+  if datafile<0 let e$="Could not open data file ",rtrim$(filename$)\error 10000
+  !
+  !open sendto channel if filename or lpt....or  open email driver
+  sendtochan= 0 !main screen  ??does this work in dl4term?, outside dl4term?  maybe=0 and make sure nothing is open on 0
+  if sendto$ <> "" !else to screen
+   sendtochan=findchannel()
+   xpos=pos(sendto$,="@")
+   ypos=pos(sendto$,=".",-1) !search backwards for .
+   if xpos if ypos>xpos  !there is an @ and followed by .   assume its an email address
+    !open email driver
+    Call env(1,"EMAILFROM",from$) 
+	if from$ = "" let from$="system@ubsys.com"
+    subj$ = filename$, " integrity check"
+	Open #sendtochan,"(From=" + from$ + ",subject=" + subj$ + ",AttachAs=Mime)" + sendto$ As "email"
+   else 
+    if sendto$[1,1]="$" !assume its a printer to open
+     try
+      open #sendtochan,sendto$
+     else
+      e$="Can't open ",sendto$ \error 10000
+	 end try
+    else !assume its a textfilename to build
+	 try
+	  build #sendtochan,sendto$ as "text"
+	 else
+	  e$="Can't build ",sendto$ \error 10000
+	 end try
+    end if !printer or textfile
+   end if !email or printer/textfile
+  end if !sendto$
+  !
+  !print the report header information
+  ;#sendtochan;"Data file integrity check"
+  ;#sendtochan;"Filename : ";filename$
+  ;#sendtochan;"Process start time ";tim#(0)
+  ;#sendtochan;"Directories defined : ";
+  lastseq = -1
+  for i=0 to kcnt
+   if keyarray.[i].seq <> lastseq
+    if lastseq<>-1 print #sendtochan;",";
+	lastseq = keyarray.[i].seq
+	print #sendtochan;str$(lastseq);
+   end if
+  next i
+  ;#sendtochan;
+  if excludedirs$<>"" print #sendtochan;"Requested to exclude directories ";excludedirs$
+  if keysmatchdata print #sendtochan;"Requested not to check if keys match data"
+  if keysmatchrcdno print #sendtochan;"Requested not to check if key's record numbers match"
+  if repair
+   print #sendtochan;"Requested to repair file";
+   if primarykey print #sendtochan;", consider Directory";primarykey;" the primary";
+   print #sendtochan;
+  end if
+  ;#sendtochan;
+  !
+  !count fields and maxlen to dim properly
+    maxfieldcnt=0
+	maxlen=20
+    kseq = 0
+    seq = -2
+    Try Search >= #c[1],1;filedefhdr.filename$,filedefhdr.version$,kseq Else Rem
+    Do 
+      Try Read Record #c[1],seq;filedeffields. Else Exit Do 
+      If filedeffields.filename$ <> RTrim$(filedefhdr.filename$) Exit Do 
+      If filedeffields.version$ <> RTrim$(filedefhdr.version$) Exit Do
+	  !
+	  if filedeffields.precision>maxlen let maxlen=filedeffields.precision
+	  maxfieldcnt=maxfieldcnt+1
+	  seq = -1
+    loop
+  dim fields$[maxfieldcnt,20]  
+  dim values$[maxfieldcnt,maxlen]
+  !load fields$
+  fcnt = 0
+  kseq = 0
+  seq = -2
+  Try Search >= #c[1],1;filedefhdr.filename$,filedefhdr.version$,kseq Else Rem
+  Do 
+      Try Read Record #c[1],seq;filedeffields. Else Exit Do 
+      If filedeffields.filename$ <> RTrim$(filedefhdr.filename$) Exit Do 
+      If filedeffields.version$ <> RTrim$(filedefhdr.version$) Exit Do
+	  !
+	  fields$[fcnt] = filedeffields.varname$
+	  fcnt=fcnt+1
+	  seq = -1
+  loop
+  !
+  !loop to search down each directory
+  begkeyno=1
+  endkeyno= keyarray.[kcnt].seq
+  for keyno = begkeyno to endkeyno
+   !see if keyno is defined, some key #'s may be skipped in the definition
+   for mainkeyseq = 0 to kcnt
+    if keyarray.[mainkeyseq].seq = keyno exit for !it is defined
+   next mainkeyseq
+   if mainkeyseq <= kcnt if excludedkeys[keyarray.[mainkeyseq].seq] = 0 !do it, exists and not excluded
+   ;#sendtochan;"Beginning search down directory #";keyno;"  ";tim#(0)
+   keyvalue$=""
+   mode=2
+   do
+	search #datafile,mode,keyno;keyvalue$,recordno,e
+	 if e
+	  search #datafile,3,keyno;keyvalue$,recordno,e
+	 end if
+    if e=2 exit do !end of directory
+	if e print #sendtochan;"Error ";e;" while searching down directory, keyvalue$=";keyvalue$\exit do
+	e=readrecord(e$,filename$,version$,c[1],datafile,recordno,fields$[],values$[])
+	!
+	if e<0 exit do !end of directory
+	totrecs[keyno]=totrecs[keyno]+1
+	!
+	!compare main directory key to record
+	rcdkey$=""
+	for mainkeypart = mainkeyseq to kcnt
+	 if keyarray.[mainkeypart].seq <> keyno exit for !done with main keyparts
+       !concat the key parts from the record's values$[] using fields$[] compared to keyfields.[otherkeypart].varname$
+	   rcdkey$=rcdkey$,getpart$(mainkeypart,recordno)
+	
+	next mainkeypart
+	!
+	if rcdkey$ <> keyvalue$
+	 print #sendtochan;" Key '";keyvalue$;"' does not match record '";rcdkey$;"' record #";recordno;
+	   if repair
+	     !delete the bad key that doesn't match the record
+		 search #datafile,5,keyno;keyvalue$,recordno,e
+		 if e
+		  print #sendtochan;"; could NOT repair by deleting key error";e;
+		 else
+		  print #sendtochan;"; repaired by deleting the incorrect key";
+		 end if
+		 !add the correct key that matches the record, if needed
+		 search #datafile,4,keyno;rcdkey$,recordno,e
+         if e
+		  !already there correctly, thats ok print #sendtochan;"; could NOT repair by adding correct key error";e;
+		 else
+		  print #sendtochan;" and by adding correct key";
+		 end if
+	   end if !repair
+	   print #sendtochan;
+	end if !rcdkey$ mismatch
+	!
+	!try to find other directory keys and verify record # matches main
+    for otherkey = 0 to kcnt
+	 if keyarray.[otherkey].seq <> keyno if keyarray.[otherkey].keypart = 1 if excludedkeys[keyarray.[otherkey].seq] = 0 !its other key, first part, not main key and not on excluded list
+	  otherkey$=""
+	  for otherkeypart = otherkey to kcnt
+	   if keyarray.[otherkeypart].seq <> keyarray.[otherkey].seq exit for !done with this key's keyparts
+       !concat the key parts from the record's values$[] using fields$[] compared to keyfields.[otherkeypart].varname$
+	   otherkey$=otherkey$,getpart$(otherkeypart,recordno)
+	  next otherkeypart
+      !search mode 2 to look for other key
+	  otherkeyno = keyarray.[otherkey].seq
+	  search #datafile,2,otherkeyno;otherkey$,otherrecordno,e
+      if e
+	   print #sendtochan;" Directory";otherkeyno;" Key '";otherkey$;"' not found for Directory";keyno;" Key '";keyvalue$;"' record #";recordno;
+       ! if repair, if otherkey is considered primary delete the key being searched down
+	   ! else add the other key
+	   if repair
+	    if otherkeyno = primarykey  !can't find primary, throw away secondary
+		 search #datafile,5,keyno;keyvalue$,recordno,e
+		 if e
+		  !ok may already have deleted it
+		 else
+		  print #sendtochan;"; repaired by deleting key in directory ";keyno;
+		 end if
+		else !can't find secondary, so add it
+		 search #datafile,4,otherkeyno;otherkey$,otherrecordno,e
+         if e
+		  print #sendtochan;"; could NOT repair by adding key error";e;
+		 else
+		  print #sendtochan;"; repaired by adding key in directory ";otherkeyno;
+		 end if
+		end if !primary/not primary
+	   end if !repair
+	   print #sendtochan;
+	  else
+	   if keysmatchrcdno if otherrecordno <> recordno 
+	    print #sendtochan;" Directory";otherkeyno;" Key '";otherkey$;"' found, but record #";otherrecordno;" doesn't match Directory";keyno;" record #";recordno;
+	    ! if repair if otherkey is considered primary
+		! else delete the key and readd with correct recordno
+		if repair
+	     if otherkeyno = primarykey  !record # doesn't match primary, throw away secondary, won't happen unless primary dir # > secondary dir #
+		  search #datafile,5,keyno;keyvalue$,recordno,e
+		  if e
+		   !ok may already have deleted it
+		  else
+		   print #sendtochan;"; repaired by deleting key in directory ";keyno;
+          end if
+		 else !record # doesn't match secondary, change secondary to right rcd #
+		 search #datafile,5,otherkeyno;otherkey$,otherrecordno,e
+		 if e
+		  print #sendtochan;"; could NOT repair by deleting key error";e;
+		 else
+		  print #sendtochan;"; repaired by deleting the incorrect key";
+		 end if
+		 !add the correct key that matches the record, if needed
+		 search #datafile,4,otherkeyno;otherkey$,recordno,e
+         if e
+		  !already there correctly, thats ok print #sendtochan;"; could NOT repair by adding correct key error";e;
+		 else
+		  print #sendtochan;" and by adding correct key";
+		 end if
+		 print #sendtochan;" in directory ";otherkeyno
+		 end if !primary/not primary
+        end if !repair
+	    print #sendtochan;
+	   end if
+	  end if !e
+	 end if !seq <> keyno
+	next otherkey
+	!
+	mode=3 !next real record
+   loop
+   ;#sendtochan;"Finished search down directory #";keyno;"  ";totrecs[keyno];" keys counted  ";tim#(0)
+   end if !mainkeyseq exists
+  next keyno
+  !all done
+  ;#sendtochan;"Process end time ";tim#(0)
+  try close #sendtochan else rem
+  !
+ Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+	!do not cause a hard error, let calling program look at e$
+	try print #sendtochan;e$ else rem
+	try close #sendtochan else rem
+ End Try 
+End sub !dfintegritycheck
+!
+!
+External function readrecord(e$,filename$,version$,filedeffieldchan,openfilechan,recordno,fields$[],values$[],...)
+  !--------------------------------------------------------------------
+  ! read field defs, read fields from recordno and populate values$[] and prec[] for fields$[]
+  ! can pass 2 optional varnames which will get returned as values of those varnames
+  ! pass optional auditflag  if 1 read fields from old record byte disp (+200) if 2 read fields from new record byte disp (+3300)
+  ! function returns -1 if record cannot be read
+  try enter element1$,... else dim element1$[1]
+  try enter element2$,... else dim element2$[1]
+  try enter auditflag else let auditflag=0
+  try
+	dim tmp$[20],1%,n1,2%,n2,3%,n3,4%,n4,fvalue$[fmtof(values$)],tmpvalue$[fmtof(values$)]
+	dim mask$[20],decmask$[20],lenlist$[ubound(values$[],1),3],includeit$[1]
+	dim hold1$[40],hold2$[40]
+	dim filedeffields. as filedeffields
+	decmask$=".###############"
+	clear values$[]
+	includecnt=0
+	kseq=0
+	lastbyte = -1
+	seq = -2
+	Try Search >= #filedeffieldchan,1;filename$,version$,kseq Else Rem
+	Do 
+		Try Read Record #filedeffieldchan,seq;filedeffields. Else Exit Do 
+		If filedeffields.filename$ <> RTrim$(filename$) Exit Do 
+		If filedeffields.version$ <> RTrim$(version$) Exit Do
+		!
+		position = filedeffields.position
+		If filedeffields.position = -1
+			position = lastbyte + 1 !default
+		End If 
+		lastprecision = filedeffields.precision
+		If filedeffields.precision > 0
+			tmp$ = "S",Str$(filedeffields.precision)
+			!if using separate alpha fields you need to add 1
+			lastbyte = position + filedeffields.precision - 1
+			lenlist$[cnt] = Str$(filedeffields.precision)
+		Else 
+			If position / 2 <> Int(position / 2) Let position = position + 1 !numerics must start on even byte
+			tmp$ = Str$(Int(abs(filedeffields.precision))),"%"
+			lastbyte = position + (Int(filedeffields.precision * -1) * 2) - 1
+			lenlist$[cnt] = "0" !can't determine
+			If Fra(filedeffields.precision)
+				tmp$ = tmp$," ",Str$(Fra(filedeffields.precision) * -10)," dec"
+			End If 
+		End If 
+		if filedeffields.varname$=fields$[includecnt] or filedeffields.varname$=element1$ or filedeffields.varname$=element2$!include this field
+			rposition=position
+			if auditflag=1 let rposition=rposition+200
+			if auditflag=2 let rposition=rposition+3300
+			if tmp$[1,1]="S" !read string
+				try
+					read #openfilechan,recordno,rposition;fvalue$;
+				else
+					exit function -1
+				end try
+				if len(fvalue$)>filedeffields.precision let fvalue$=fvalue$[1,filedeffields.precision]
+			else !read numeric
+				mask$="-------------#"
+				if fra(filedeffields.precision)
+					mask$=mask$,decmask$[1,fra(filedeffields.precision)*-10+1]
+				end if
+				prec=Int(abs(filedeffields.precision))
+				if prec=1
+					try
+						read #openfilechan,recordno,rposition;n1;
+					else
+						exit function -1
+					end try
+					fvalue$=n1 using mask$
+				else if prec=2
+					try
+						read #openfilechan,recordno,rposition;n2;
+					else
+						exit function -1
+					end try
+					fvalue$=n2 using mask$
+				else if prec=3
+					try
+						read #openfilechan,recordno,rposition;n3;
+					else
+						exit function -1
+					end try
+					fvalue$=n3 using mask$
+				else if prec=4
+					try
+						read #openfilechan,recordno,rposition;n4;
+					else
+						exit function -1
+					end try
+					fvalue$=n4 using mask$
+				end if !prec
+			end if !S/N
+			if filedeffields.varname$=fields$[includecnt] 
+				let values$[includecnt]=fvalue$
+				includecnt=includecnt+1
+			end if
+			if filedeffields.varname$=element1$ let hold1$=fvalue$
+			if filedeffields.varname$=element2$ let hold2$=fvalue$
+
+			cnt=cnt+1
+		end if
+		seq=-1
+	loop
+	element1$=hold1$
+	element2$=hold2$
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End function 0 !readrecord   
+!
+!now any internal subs or functions for the program
+!
+Sub integritycheck()
+  !--------------------------------------------------------------------
+  ! file integrity check from browser wrapper routine
+  Try 
+    !
+    checkit=0
+	intco=1
+	call dxget("intco",tmp$) \if tmp$<>"" let intco=tmp$
+	Call dxget("sendto",sendto$)
+	if sendto$="" let e$="You must specify where to send the results to" \checkit=1   !error, must have a send to thru browser
+    call dxget("primarykey",tmp$)
+	primarykey = tmp$
+	if primarykey < 0 or primarykey <> int(primarykey) let e$="Invalid primary key" \checkit=1
+	call dxget("excludedirs",excludedirs$)
+	call dxget("keysmatchdata",tmp$)
+	if tmp$="y" let keysmatchdata = 0 else let keysmatchdata = 1
+	call dxget("keysmatchrcdno",tmp$)
+	if tmp$="y" let keysmatchrcdno = 0 else let keysmatchrcdno = 1
+	call dxget("repair",tmp$)
+	if tmp$="y" let repair = 1 else let repair = 0
+	!ajax back that it is running or not
+    if checkit=0 let e$="Integrity check is in process for ",rtrim$(filename$),". Results will be sent to ",sendto$,"."
+    call dxset("xmlstring",e$+"|")
+	Call dxset("output",mergedir$ + "ajax.html")
+	call dxclose() !to send msg back first
+	if checkit=0 Call dfintegritycheck(e$,filekey$,sendto$,primarykey,excludedirs$,keysmatchdata,keysmatchrcdno,repair)
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !integritycheck
+!
+Sub filedefsearch()
+  !--------------------------------------------------------------------
+  ! filedef search routine
+  Try 
+    !
+    Call dxget("keyvar",keyvar$)
+    Call dxget("keyno",keyno$)
+    If keyno$ = "" Let keyno$ = "1" !input
+    Call dxget("sstatus",active$)
+    Call dxget("keynext",keynext$)
+    Call dxset("keyvar",keyvar$)
+    Call dxset("keyno",keyno$)
+    Call dxset("sstatus",active$)
+    Call dxset("keynext",keynext$)
+    hdrkeyno = keyno$
+    hdrseq = -2
+    If hdrkeyno = 1
+      key1.filename$ = keyvar$
+      If active$ <> "" Let key1.active$ = active$
+      If keynext$ <> ""
+        key1.filename$ = keynext$[1,20]
+        key1.active$ = keynext$[21,21]
+        key1.version$ = keynext$[22]
+      End If 
+    Else If hdrkeyno = 2
+      key2.groupname$ = keyvar$
+      If keynext$ <> ""
+        key2.groupname$ = keynext$[1,20]
+        key2.filename$ = keynext$[21,40]
+        key2.active$ = keynext$[41,41]
+        key2.version$ = keynext$[42]
+      End If 
+    End If 
+    If hdrkeyno = 1
+      Try Search >= #c[0],hdrkeyno;key1. Else Rem
+    Else 
+      Try Search >= #c[0],hdrkeyno;key2. Else Rem
+    End If 
+    Do 
+      Try Read Record #c[0],hdrseq;filedefhdr. Else Exit Do 
+      If keyvar$ <> "" If hdrkeyno = 1 If filedefhdr.filename$[1,Len(keyvar$)] <> keyvar$ Exit Do 
+      If keyvar$ <> "" If hdrkeyno = 2 If filedefhdr.groupname$[1,Len(keyvar$)] <> keyvar$ Exit Do 
+      checkit = 0
+      If active$ <> "" If filedefhdr.active$ <> active$ Let checkit = 1
+      If checkit = 0 !ok to show
+        If cnt > maxcnt Exit Do 
+        filedefhdr.filename$ = filedefhdr.filename$,"                    "
+        filedefhdr.version$ = filedefhdr.version$,"          "
+        groupnamelist$[cnt] = filedefhdr.groupname$
+        filenamelist$[cnt] = filedefhdr.filename$
+        desclist$[cnt] = filedefhdr.desc$
+        If desclist$[cnt] = "" Let desclist$[cnt] = " "
+        versionlist$[cnt] = filedefhdr.version$
+        activelist$[cnt] = filedefhdr.active$
+        cnt = cnt + 1
+      End If 
+      hdrseq = -1 !get next
+    Loop 
+    !
+    If cnt > maxcnt
+      If hdrkeyno = 1 Let tmp$ = filedefhdr.filename$,filedefhdr.active$,filedefhdr.version$
+      If hdrkeyno = 2 Let tmp$ = filedefhdr.groupname$,filedefhdr.filename$,filedefhdr.active$,filedefhdr.version$
+      Call dxset("keynext",tmp$)
+    End If 
+    Call dxset("groupname",groupnamelist$[])
+    Call dxset("filename",filenamelist$[])
+    Call dxset("desc",desclist$[])
+    Call dxset("version",versionlist$[])
+    Call dxset("active",activelist$[])
+    !
+    Call dxset("output",mergedir$ + "dxfiledefpr.html")
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !filedefsearch
+!
+sub dfdroplistfilenames()
+!--------------------------------------------------------------------
+! create drop list of all the filenames from file definitions 
+ try
+ !
+  cnt=0 
+  keyno=1
+  seq=-2
+  Try Search >= #c[0],keyno; Else Rem
+  Do
+  Try Read Record #c[0],seq;filedefhdr. Else Exit Do
+   if ucase$(filedefhdr.active$)="A"
+        filedefhdr.filename$ = filedefhdr.filename$,"                    "
+        filedefhdr.version$ = filedefhdr.version$,"          "
+   filenamelist$[cnt]= filedefhdr.filename$,filedefhdr.active$,filedefhdr.version$
+   desclist$[cnt]=filedefhdr.filename$," ",filedefhdr.desc$
+   if desclist$[cnt]="" let desclist$[cnt]=" "
+   cnt=cnt+1
+   if cnt>ubound(desclist$[],1)
+     dim desclist$[ubound(desclist$[],1)+50,fmtof(desclist$)]
+	 dim filenamelist$[ubound(filenamelist$[],1)+50,fmtof(filenamelist$)]
+   end if
+   end if
+   seq=-1 !get next
+  Loop
+  !
+ if cnt
+  desclist$[cnt]=""
+  call dxset("filedescs",desclist$[])
+  call dxset("filename",filenamelist$[])
+ end if
+ else
+  if spc(8)<>10000
+   call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+   !call programdump("")
+  end if
+  error 10000
+ end try
+end sub !dfdroplistfilenames
+!
+Sub hdradd()
+  !--------------------------------------------------------------------
+  ! add hdr routine,verify id not in use or assign id
+  Try 
+    !
+    Call dxget("keyvar",keyvar$) !filename
+    If keyvar$ = "" !assign an id
+      !keyvar$="99999999"
+      !try search <= #c[0],1;keyvar$ else let keyvar$="0"     
+      !keyvar=keyvar$
+      !keyvar=keyvar+1
+      !if keyvar>0 and keyvar<=99999999 
+      ! keyvar$=keyvar using "&&&&&&&&"
+      !else
+      e$ = "You must provide a Filename to add!" !"Could not generate next ID!"
+      Error 10000
+      !end if
+    Else !verify not in use
+      Try 
+        ! if len(keyvar$)<20 let keyvar$=keyvar$,b$[1,8-len(keyvar$)] !space fill
+        ! Search = #c[0],1;keyvar$
+        ! e$="Filename ",keyvar$," is already on file!"
+        ! error 10000
+      Else 
+      End Try 
+    End If 
+    !
+    Call dxset("newkeyvar",keyvar$)
+    Call dxset("u_filekey","")
+    Call dxset("output",mergedir$ + "dxfiledef.html")
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !hdradd
+!
+Sub hdrchg()
+  !--------------------------------------------------------------------
+  ! change hdr routine, get/display record
+  !
+  Try 
+    Try 
+      Search = #c[0],1;filename$,active$,version$
+    Else 
+      e$ = "Filename ",RTrim$(filename$)," is not on file!"
+      Error 10000
+    End Try 
+    !
+    Read Record #c[0],-2;filedefhdr.
+    !
+    Call dxset("newkeyvar",filedefhdr.filename$)
+    filekey$ = fill$(filedefhdr.filename$),filedefhdr.active$,fill$(filedefhdr.version$)
+    Call dxset("u_filekey",filekey$)
+    tmp$ = dateusing$(Tim#(0),"mm/dd/YYYY HH:NN")
+    Call dxset("today",tmp$)
+    Call dxset("desc",filedefhdr.desc$)
+    Call dxset("version",filedefhdr.version$)
+    Call dxset("group",filedefhdr.groupname$)
+    Call dxset("active",filedefhdr.active$)
+    tmp$ = "Active"
+    If filedefhdr.active$ = "F" Let tmp$ = "Future"
+    If filedefhdr.active$ = "O" Let tmp$ = "Obsolete"
+    Call dxset("activestring",tmp$)
+    Call dxset("addedby",filedefhdr.addedby$)
+    Call dxset("updatedby",filedefhdr.updatedby$)
+    Call dxset("addeddate",filedefhdr.addeddate$)
+    Call dxset("updateddate",filedefhdr.updateddate$)
+	call dxset("userdef1",filedefhdr.userdef1$)
+	call dxset("userdef2",filedefhdr.userdef2$)
+	call dxset("userdef3",filedefhdr.userdef3$)
+	call dxset("userdef4",filedefhdr.userdef4$)
+	call dxset("userdef5",filedefhdr.userdef5$)
+
+    !
+    !get other tables to display
+    Call fieldslist()
+    Call keylist()
+    Call dxset("output",mergedir$ + "dxfiledef.html")
+    If action$ = "print" Call dxset("output",mergedir$ + "dxfiledefview.html")
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !hdrchg
+!
+Sub filedefquery()
+  !--------------------------------------------------------------------
+  ! query a file initial routine, get/display desc and fields,key list
+  !
+  Try 
+    Try 
+      Search = #c[0],1;filename$,active$,version$
+    Else 
+      e$ = "Filename ",RTrim$(filename$)," is not on file!"
+      Error 10000
+    End Try 
+    !
+    Read Record #c[0],-2;filedefhdr.
+    !
+    Call dxset("desc",filedefhdr.desc$)
+   !
+    !get other tables to display
+    Call fieldslist()
+    Call keylist(1)
+    Call dxset("output",mergedir$ + "dxfiledefquery.html")
+    if options$="DXFILEAU" Call dxset("output",mergedir$ + "dxfiledefaudit.html")
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !filedefquery
+!
+Sub dl4query()
+  !--------------------------------------------------------------------
+  ! return dl4 query info for a file
+  !
+  try
+    intco=1
+	call dxget("intco",tmp$) \if tmp$<>"" let intco=tmp$
+	filename$=rtrim$(filename$)
+    datafile=openfile(filename$,intco,"N")  !!!N indicates don't open,return actual filename in filename$
+	if datafile<0 let e$="Could not open ",rtrim$(filename$), " in dfadmin.dl4"\buttonlist$[0]="Back"\nextlist$[0]="1"\error 10000
+
+    tmp$="$$run -X /usr/lib/dl4/tools/query ",filename$
+	pipechan=findchannel()
+	open #pipechan,tmp$
+	string$='FX'
+	do
+	 read #pipechan;tmp$
+	 if tmp$="" exit do
+	 tmp$=replace$(tmp$,"\15\","<BR>")
+	 string$=string$,tmp$
+	loop
+	e$=string$\error 10000
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !dl4query
+!
+Sub auditlogpurge()
+  !--------------------------------------------------------------------
+  ! purge records from audit log file
+  !
+  Try
+   dim to1$[10],keyvalue$[70],k1$[70]
+   intco=1
+   call dxget("intco",tmp$) \if tmp$<>"" let intco=tmp$
+   auditfile = openfile("dfaudit",intco)
+   call dxget("to",to1$)
+   keyvalue$=filename$
+   if lcase$(filename$)="all" let keyvalue$=""
+    call dxset("s_msg","Purging is now in process!")
+    call dxset("output","dxstd/msg.html")
+    call dxclose()
+	do
+    search #auditfile,3,2;keyvalue$,recordno,e
+	checkit=0
+	  if lcase$(filename$)="all"
+	   if keyvalue$[21,26]>to1$[9,10],to1$[1,2],to1$[4,5] let checkit=1\keyvalue$=keyvalue$[1,20],"zzzzzz"
+	  else
+	   if keyvalue$[1,20]<>lcase$(filename$[1,20]) let e=2
+	   if keyvalue$[21,26]>to1$[9,10],to1$[1,2],to1$[4,5] let e=2
+	  end if
+	  if e exit do
+	  if checkit=0 !purge it
+	   k1$=keyvalue$[1,20],keyvalue$[33],keyvalue$[21,32]
+	   search #auditfile,5,1;k1$,recordno,e
+	   search #auditfile,5,2;keyvalue$,recordno,e
+	   e=3
+	   search #auditfile,1,0;keyvalue$,recordno,e
+	  end if !checkit
+   loop
+ Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !auditlogpurge
+!
+Sub filedefquerysearch()
+  !--------------------------------------------------------------------
+  ! query a file search routine, get/display records
+  !
+  Try 
+	Option String ReDIM Is Legal
+	Try 
+		Search = #c[0],1;filename$,active$,version$
+	Else 
+		e$ = "Filename ",RTrim$(filename$)," is not on file!"
+		Error 10000
+	End Try 
+	!
+	Read Record #c[0],-2;filedefhdr.
+	Call dxset("desc",filedefhdr.desc$)
+	call dxget("keyno",keyno$)
+	if keyno$="" let keyno$="2" !audit log, by date default
+	call dxset("keyno",keyno$)
+	tmp$=keyno$ to " " \keyno=tmp$
+	call dxget("keyvar",keyvar$)
+	!determine fields to include
+	includecnt=0
+	cnt=1
+	maxcnt=100
+	maxlen=20
+	dim includefields$[400],fields$[maxcnt,20],fieldsdesc$[maxcnt,60],2%,prec[maxcnt],element1$[40],element2$[40],hold1$[40],hold2$[40]
+	dim endkey$[120],logic$[3],op1$[2],op2$[2],value1$[40],value2$[40]
+	dim add1$[1],mod1$[1],del$[1],from$[10],to1$[10]
+	dim 4%,adate,auserid$[20],aoptionid$[20],atype$[1],akey$[30],areason$[80]
+	call dxget("includefields",includefields$)
+	call dxset("includefields",includefields$)
+	call dxget("element1",tmp$)\element1=tmp$
+	call dxget("element2",tmp$)\element2=tmp$
+
+	kseq = 0
+	seq = -2
+	Try Search >= #c[1],1;filename$,version$,kseq Else Rem
+	Do 
+		Try Read Record #c[1],seq;filedeffields. Else Exit Do 
+		If filedeffields.filename$ <> RTrim$(filename$) Exit Do 
+		If filedeffields.version$ <> RTrim$(version$) Exit Do
+
+		if includefields$[cnt,cnt]="y" 
+			if includecnt>maxcnt
+				maxcnt=maxcnt+50
+				dim fields$[maxcnt,20],fieldsdesc$[maxcnt,60],2%,prec[maxcnt]
+			end if
+			fields$[includecnt]=filedeffields.varname$
+			fieldsdesc$[includecnt]=filedeffields.shortdesc$
+			prec[includecnt]=filedeffields.precision
+			if filedeffields.precision>maxlen let maxlen=filedeffields.precision
+			includecnt=includecnt+1
+		end if
+		if element1=cnt-1 let hold1$=filedeffields.varname$\prec1=filedeffields.precision
+		if element2=cnt-1 let hold2$=filedeffields.varname$\prec2=filedeffields.precision
+		seq = -1
+		cnt=cnt+1
+	loop
+	dim format$[10],searchdesc$[250],customfile$[50],ttfile$[50]
+	dim values$[cnt,maxlen],newvalues$[includecnt,maxlen],keyvalue$[200]
+	rowdim=(includecnt+2)*(maxlen+62)
+	if options$="DXFILEAU" let rowdim=(includecnt+2)*(maxlen+78)*2
+	dim rstr$[rowdim] !each rcd string
+	thedim=rowdim*100
+	if thedim>500000 let thedim=500000
+	if rowdim<5000 let rowdim=5000
+	dim xstr$[thedim] !100 rcds string
+	!open data file
+	intco=1
+	call dxget("intco",tmp$) \if tmp$<>"" let intco=tmp$
+	call dxget("type",type$) !search type  R=a record, L=list
+	if type$="" let type$="R"
+	!
+	if options$="DXFILEAU" 
+		let type$="L"
+		auditfile = openfile("dfaudit",intco)
+	else
+		datafile=openfile(rtrim$(filename$),intco,"R")
+		if datafile<0 let e$="Could not open ",rtrim$(filename$), " in dfadmin.dl4"\buttonlist$[0]="Back"\nextlist$[0]="1"\error 10000
+	end if
+	if type$="R" !single record 
+		!search/read
+		if ucase$(keyno$)="R" !by record no
+			recordno=keyvar$
+		else
+			keyvalue$=keyvar$
+			mode = 2
+			if action$="searchrecordsprev" let mode = 6
+			if action$="searchrecordsnext" let mode = 3
+			search #datafile,mode,keyno;keyvalue$,recordno,e
+			if action$="searchrecords" if e
+				search #datafile,3,keyno;keyvalue$,recordno,e
+			end if
+		end if
+		if e let e$="Could not find record for ",keyvar$\buttonlist$[0]="Back"\nextlist$[0]="1"\error 10000
+		element1$=hold1$
+		element2$=hold2$
+		e=readrecord(e$,filename$,version$,c[1],datafile,recordno,fields$[],values$[])
+		if e<0 let e$="Could not find record for ",keyvar$\buttonlist$[0]="Back"\nextlist$[0]="1"\error 10000
+		call dxset("rcdno",str$(recordno))
+		call dxset("keyno",ucase$(keyno$))
+		Call dxset("keyvar",keyvar$)
+		call dxset("key",keyvalue$)
+		call dxset("fields",fields$[])
+		call dxset("values",values$[])
+		Call dxset("output",mergedir$ + "dxfiledefqueryrcd.html")
+	else !list
+		call dxget("begkey",keyvar$)
+		call dxset("begkey",keyvar$)
+		call dxget("endkey",endkey$)
+		call dxset("endkey",endkey$)
+		call dxget("element1",tmp$)\element1=tmp$\call dxset("element1",tmp$)
+		call dxget("op1",op1$)\call dxset("op1",op1$)
+		call dxget("value1",value1$)\call dxset("value1",value1$)
+		call dxget("element2",tmp$)\element2=tmp$\call dxset("element2",tmp$)
+		call dxget("op2",op2$)\call dxset("op2",op2$)
+		call dxget("value2",value2$)\call dxset("value2",value2$)
+		call dxget("logic",logic$)\call dxset("logic",logic$)
+		call dxget("includekeyval",tmp$)\call dxset("includekeyval",tmp$)\if ucase$(tmp$)="Y" let  includekeyval=1
+		if ucase$(keyno$)="R" let includekeyval=0 
+		call dxget("includercdno",tmp$)\call dxset("includercdno",tmp$)\if ucase$(tmp$)="Y" let includercdno=1
+		call dxget("format",format$)\format$=ucase$(format$)\if format$="" let format$="HTML"
+		call dxset("format",format$)
+		call dxget("keynext",keynext$)
+		!
+		if options$="DXFILEAU" !audit additional fields
+			call dxget("add",add1$)\call dxset("add",add1$)
+			call dxget("mod",mod1$)\call dxset("mod",mod1$)
+			call dxget("del",del$)\call dxset("del",del$)
+			call dxget("from",from$)\call dxset("from",from$)
+			call dxget("to",to1$)\call dxset("to",to1$)
+		end if
+		if format$="CSV" or format$="XLS" or format$="XML" !build the file
+			customfile$ = "df",str$(spc(6))
+			if format$="XLS" let customfile$=customfile$,".xls" else let customfile$=customfile$,".txt"
+			ttfile$ = "<00> ",customfile$,"!"
+			chant = FindChannel()
+			Build #chant,ttfile$ As "DOS Text"
+		end if
+		!headings
+		rstr$=""
+		if options$="DXFILEAU" !audit columns
+			if format$="CSV"
+				rstr$="Date/Time,User,Type,Reason"
+			else if format$="XLS"
+				rstr$="Date/Time",'ht',"User",'ht',"Type",'ht',"Reason"
+			else if format$="HTML"
+				rstr$="<tr><th class=tableheader nowrap>Date/Time</th><th class=tableheader nowrap>User</th><th class=tableheader nowrap>Type<th class=tableheader nowrap>Reason</th>"
+			end if
+		end if
+		if includekeyval !keyvalcolumn 
+			if format$="CSV"
+				if rstr$<>"" let rstr$=rstr$,","
+				rstr$=rstr$,"Key value"
+			else if format$="XLS"
+				if rstr$<>"" let rstr$=rstr$,'HT'
+				rstr$=rstr$,"Key value"
+			else if format$="HTML"
+				if rstr$="" let rstr$="<tr><th class=tableheader nowrap>" else let rstr$=rstr$,"</th><th class=tableheader nowrap>"
+				rstr$=rstr$,"Key value"
+			end if	
+		end if !keyval
+		if includercdno !rcdno column
+			if format$="CSV"
+				if rstr$<>"" let rstr$=rstr$,","
+				rstr$=rstr$,"Record #"
+			else if format$="XLS"
+				if rstr$<>"" let rstr$=rstr$,'HT'
+				rstr$=rstr$,"Record #"
+			else if format$="HTML"
+				if rstr$="" let rstr$="<tr><th class=tableheader nowrap>" else let rstr$=rstr$,"</th><th class=tableheader nowrap>"
+				rstr$=rstr$,"Record #"
+			end if
+		end if !rcdno
+		for fields=0 to  includecnt-1
+			if format$="CSV"
+				if rstr$<>"" let rstr$=rstr$,","
+				rstr$=rstr$,trim$(fieldsdesc$[fields])
+			else if format$="XLS"
+				if rstr$<>"" let rstr$=rstr$,'HT'
+				rstr$=rstr$,trim$(fieldsdesc$[fields])
+			else if format$="HTML"
+				if rstr$="" let rstr$="<tr><th class=tableheader nowrap>" else let rstr$=rstr$,"</th><th class=tableheader nowrap>"
+				rstr$=rstr$,rtrim$(fieldsdesc$[fields])
+			end if
+		next fields
+		!
+		if format$="HTML"
+			rstr$=rstr$,"</th></tr>"
+			if ucase$(keyno$)="R" let searchdesc$="by record #" else searchdesc$="by key ",keyno$
+			searchdesc$=searchdesc$,", beginning with ",keyvar$
+			if endkey$<>"" let searchdesc$=searchdesc$," ending with ",endkey$
+			if value1$<>"" let searchdesc$=searchdesc$," where ",hold1$," ",op1$," ",value1$
+			if value1$<>"" and value2$<>"" let searchdesc$= searchdesc$," ",logic$," "
+			if value2$<>"" let searchdesc$=searchdesc$," where ",hold2$," ",op2$," ",value2$
+			call dxset("searchdesc",searchdesc$)
+		end if
+		xstr$='FX',rstr$
+		!start list search on data file
+		if ucase$(keyno$)="R" !list by record #
+			begrcd=keyvar$
+			if keynext$<>"" let begrcd=keynext$
+			endrcd=endkey$
+			recordno=begrcd
+			if endkey$="" let endrcd=  chf(000+datafile) !last rcd # used
+		else
+			keyvalue$=keyvar$
+			if options$="DXFILEAU"
+				keyvalue$=lcase$(filename$),"                    "
+				if keyno=1 let keyvalue$=keyvalue$[1,20]
+				if keyno=2 let keyvalue$=keyvalue$[1,20],from$[9,10],from$[1,2],from$[4,5]
+			end if
+			if keynext$<>"" let keyvalue$=keynext$
+			mode = 2
+		end if
+		!
+		do
+			if ucase$(keyno$)<>"R"
+				if options$="DXFILEAU" !audit file
+					search #auditfile,mode,keyno;keyvalue$,recordno,e
+					if mode=2 if e search #auditfile,3,keyno;keyvalue$,recordno,e
+					if keyvalue$[1,20]<>lcase$(filename$[1,20]) let e=2
+					if keyno=2 if keyvalue$[21,26]>to1$[9,10],to1$[1,2],to1$[4,5] let e=2
+					if e exit do
+				else !data file
+					search #datafile,mode,keyno;keyvalue$,recordno,e
+					if mode=2 if e search #datafile,3,keyno;keyvalue$,recordno,e
+					if e exit do
+					if endkey$<>"" 
+						if len(keyvalue$)>len(endkey$) if keyvalue$[1,len(endkey$)]>endkey$ exit do
+						if len(endkey$)>=len(keyvalue$) if keyvalue$>endkey$[1,len(keyvalue$)] exit do
+					end if
+				end if !audit/data
+				mode=3
+			end if !keyno<>"R"
+			!
+			element1$=hold1$
+			element2$=hold2$
+			filechan=datafile
+			e=0
+			if options$="DXFILEAU" 
+				let filechan=auditfile\auditflag=1  !audit file
+				read #auditfile,recordno,22;adate,auserid$,aoptionid$,atype$,akey$,areason$;
+				if atype$="A" if add1$="" let e=-1
+				if atype$="C" if mod1$="" let e=-1
+				if atype$="D" if del$="" let e=-1
+				tmp$=adate using "&&&&&&&&&&&&"
+				if tmp$[1,6]<from$[9,10],from$[1,2],from$[4,5] let e=-1
+				if tmp$[1,6]>to1$[9,10],to1$[1,2],to1$[4,5] let e=-1
+			end if
+			if e=0 let e=readrecord(e$,filename$,version$,c[1],filechan,recordno,fields$[],values$[],element1$,element2$,auditflag)
+			if e>=0 !good record
+				!
+				!field compares
+				checkit=1
+				checkit1=1
+				checkit2=1
+				if element1
+					if prec1<0
+						element1n=element1$\value1=value1$
+						if op1$="=" if element1n=value1 let checkit1=0
+						if op1$="!=" if element1n<>value1 let checkit1=0
+						if op1$="B" 
+							if len(element1$)>=len(value1$) if element1$[1,len(value1$)]=value1$ let checkit1=0
+						end if
+						if op1$=">" if element1n>value1 let checkit1=0
+						if op1$="<" if element1n<value1 let checkit1=0
+						if op1$=">=" if element1n>=value1 let checkit1=0
+						if op1$="<=" if element1n<=value1 let checkit1=0
+					else !string
+						if op1$="=" if element1$=value1$ let checkit1=0
+						if op1$="!=" if element1$<>value1$ let checkit1=0
+						if op1$="B" 
+							if len(element1$)>=len(value1$) if element1$[1,len(value1$)]=value1$ let checkit1=0
+						end if
+						if op1$=">" if element1$>value1$ let checkit1=0
+						if op1$="<" if element1$<value1$ let checkit1=0
+						if op1$=">=" if element1$>=value1$ let checkit1=0
+						if op1$="<=" if element1$<=value1$ let checkit1=0
+					end if !numerif
+				else 
+					if ucase$(logic$)="AND" let checkit1=0
+				end if
+				if element2
+					if prec2<0 
+						let element2n=element2$\value2=value2$
+						if op2$="=" if element2n=value2 let checkit2=0
+						if op2$="!=" if element2n<>value2 let checkit2=0
+						if op2$="B" 
+							if len(element2$)>=len(value2$) if element2$[1,len(value2$)]=value2$ let checkit2=0
+						end if
+						if op2$=">" if element2n>value2 let checkit2=0
+						if op2$="<" if element2n<value2 let checkit2=0
+						if op2$=">=" if element2n>=value2 let checkit2=0
+						if op2$="<=" if element2n<=value2 let checkit2=0
+					else !string
+						if op2$="=" if element2$=value2$ let checkit2=0
+						if op2$="!=" if element2$<>value2$ let checkit2=0
+						if op2$="B" 
+							if len(element2$)>=len(value2$) if element2$[1,len(value2$)]=value2$ let checkit2=0
+						end if
+						if op2$=">" if element2$>value2$ let checkit2=0
+						if op2$="<" if element2$<value2$ let checkit2=0
+						if op2$=">=" if element2$>=value2$ let checkit2=0
+						if op2$="<=" if element2$<=value2$ let checkit2=0
+					end if !numeric
+				else
+					if ucase$(logic$)="AND" let checkit2=0
+				end if
+				if ucase$(logic$)="AND" if checkit1=0 and checkit2=0 let checkit=0
+				if ucase$(logic$)="OR" 
+					if checkit1=1 and checkit2=1 let checkit=1 else let checkit=0
+				end if
+				!load table with this rcd
+				if checkit=0
+					!keyvar,rcdno,  fields & values
+					rstr$=""
+					if options$="DXFILEAU" !audit file
+						tmp$=adate using "&&&&&&&&&&&&"
+						tmp2$=tmp$[3,4],"/",tmp$[5,6],"/",tmp$[1,2]," ",tmp$[7,8],":",tmp$[9,10],":",tmp$[11,12]
+						if format$="XML"
+							rstr$="<record><auditdate>",tmp2$,"</auditdate><audituser>",auserid$,"</audituser><audittype>",atype$,"</audittype><auditreason>",areason$,"</auditreason>"
+						else if format$="CSV"
+							rstr$=tmp2$,",",auserid$,",",atype$,",",areason$
+						else if format$="XLS"
+							rstr$=tmp2$,'HT',auserid$,'HT',atype$,'HT',areason$
+						else if format$="HTML"
+							tmp$="Change"
+							if atype$="A" let tmp$="Add"
+							if atype$="D" let tmp$="Delete"
+							rstr$="<tr><td class=tablecell nowrap>",tmp2$,"</td><td class=tablecell nowrap>",auserid$,"</td><td class=tablecell nowrap>",tmp$,"</td><td class=tablecell nowrap>",areason$
+						end if !format
+					end if
+					if includekeyval !keyvalcolumn
+						tmp$=keyvalue$
+						if options$="DXFILEAU" let tmp$=akey$
+						if format$="XML"
+							rstr$=rstr$,"<keyvalue>",tmp$,"</keyvalue>"
+						else if format$="CSV"
+							if rstr$<>"" let rstr$=rstr$,","
+							rstr$=rstr$,tmp$
+						else if format$="XLS"
+							if rstr$<>"" let rstr$=rstr$,'HT'
+							rstr$=rstr$,tmp$
+						else !html
+							if rstr$="" let rstr$="<tr><td class=tablecell nowrap>" else let rstr$=rstr$,"</td><td class=tablecell nowrap>"
+							rstr$=rstr$,"'",replace$(tmp$," ","&nbsp;"),"'"
+						end if	
+					end if !keyval
+					if includercdno !rcdno column
+						if format$="XML"
+							rstr$=rstr$,"<recordno>",str$(recordno),"</recordno>"
+						else if format$="CSV"
+							if rstr$<>"" let rstr$=rstr$,","
+							rstr$=rstr$,str$(recordno)
+						else if format$="XLS"
+							if rstr$<>"" let rstr$=rstr$,'HT'
+							rstr$=rstr$,str$(recordno)
+						else if format$="HTML"
+							if rstr$="" let rstr$="<tr><td class=tablecell nowrap>" else let rstr$=rstr$,"</td><td class=tablecell nowrap>"
+							rstr$=rstr$,str$(recordno)
+						end if
+					end if !rcdno
+					for fields=0 to includecnt-1
+						if format$="XML"
+							rstr$=rstr$,"<",fields$[fields],">",trim$(values$[fields]),"</",fields$[fields],">"
+						else if format$="CSV"
+							if rstr$<>"" let rstr$=rstr$,","
+							rstr$=rstr$,trim$(values$[fields])
+						else if format$="XLS"
+							if rstr$<>"" let rstr$=rstr$,'HT'
+							rstr$=rstr$,trim$(values$[fields])
+						else if format$="HTML"
+							if rstr$="" let rstr$="<tr><td class=tablecell nowrap" else let rstr$=rstr$,"</td><td class=tablecell nowrap"
+							if prec[fields]<0 let rstr$=rstr$," align=right" !numeric
+							rstr$=rstr$,">"
+							rstr$=rstr$,trim$(values$[fields])
+						end if
+
+					next fields
+					!
+					if options$="DXFILEAU" if atype$="C" !now read new record values
+						if format$="CSV"
+							!?? don't think anything needed
+						else if format$="XLS"
+							!?? don't think anything needed
+						else if format$="HTML"
+							if includekeyval or includercdno let tmp$="5" else let tmp$="4"
+							if includekeyval and includercdno let tmp$="6"
+							rstr$=rstr$,"</td></tr><tr><td colspan=",tmp$,">"
+						end if
+						auditflag=2
+						let e=readrecord(e$,filename$,version$,c[1],filechan,recordno,fields$[],newvalues$[],auditflag)
+						for fields=0 to includecnt-1
+							if format$="XML"
+								rstr$=rstr$,"<new",fields$[fields],">",trim$(newvalues$[fields]),"</new",fields$[fields],">"
+							else if format$="CSV"
+								if rstr$<>"" let rstr$=rstr$,","
+								rstr$=rstr$,trim$(newvalues$[fields])
+							else if format$="XLS"
+								if rstr$<>"" let rstr$=rstr$,'HT'
+								rstr$=rstr$,trim$(newvalues$[fields])
+							else if format$="HTML"
+								let rstr$=rstr$,"</td><td class=tablecell nowrap"
+								if newvalues$[fields]<>values$[fields] let rstr$=rstr$," style=color:red"
+								if prec[fields]<0 let rstr$=rstr$," align=right" !numeric
+								rstr$=rstr$,">"
+								rstr$=rstr$,trim$(newvalues$[fields])
+							end if
+						next fields
+					end if
+					!
+					if format$="XML"
+						rstr$=rstr$,"</record>"
+					else if format$="HTML" 
+						rstr$=rstr$,"</td></tr>"
+					end if
+					if format$="HTML"
+						if len(xstr$)+len(rstr$)>fmtof(xstr$)
+							!expand xstr$
+							if fmtof(xstr$)>500000 exit do !!!?max per screen
+							dim xstr$[fmtof(xstr$)+rowdim]
+						end if
+						xstr$=xstr$,rstr$
+					else !to file
+						print #chant;rstr$
+					end if !html
+				end if !checkit=0
+			end if !e>=0
+			!
+			if ucase$(keyno$)="R" let recordno=recordno+1\if recordno>endrcd exit do
+		loop
+		!dxset for list
+		if format$="CSV" or format$="XLS" or format$="XML" !download the file
+			close #chant
+			Call dxset("s_download",customfile$)
+			Call dxset("s_downloaddelete","y") !delete file after downloading
+			exit sub
+		end if
+		if fmtof(xstr$)>500000 !dxsets for next
+			if ucase$(keyno$)="R" let tmp$=str$(recordno) else let tmp$=keyvalue$
+			call dxset("keynext",tmp$)
+		end if
+		call dxset("output",mergedir$ + "dxfiledefquerylist.html")
+		if options$="DXFILEAU" Call dxset("output",mergedir$ + "dxfiledefauditlist.html")
+		if format$="HTML"
+			call dxset("xstr",xstr$) !data
+		else
+		end if !format
+	end if !record/list
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !filedefquerysearch
+!
+Sub hdrdel()
+  !--------------------------------------------------------------------
+  ! delete hdr routine, delete hdr and all it's components
+  Try 
+    !
+    Try 
+      Search = #c[0],1;filename$,active$,version$
+    Else 
+      e$ = "Filename ",RTrim$(filename$)," is not on file!"
+      Error 10000
+    End Try 
+    !delete field rcds  
+    seq = -2
+    Try Search >= #c[1],1;filename$,version$ Else Rem
+    Do 
+      Try Read Record #c[1],seq;filedeffields. Else Exit Do 
+      If filedeffields.filename$ <> RTrim$(filename$) Exit Do 
+      If filedeffields.version$ <> RTrim$(version$) Exit Do 
+      Delete Record #c[1]
+      seq = -1
+    Loop 
+    !delete key rcds
+    seq = -2
+    Try Search >= #c[2],1;filename$,version$ Else Rem
+    Do 
+      Try Read Record #c[2],seq;filedefkey. Else Exit Do 
+      If filedefkey.filename$ <> RTrim$(filename$) Exit Do 
+      If filedefkey.version$ <> RTrim$(version$) Exit Do 
+      Delete Record #c[2]
+      seq = -1
+    Loop 
+    Delete Record #c[0]
+    e$ = "File Definition ",filename$," has been deleted!"
+    Error 10000
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !hdrdel
+!
+Sub hdrsave()
+  !--------------------------------------------------------------------
+  ! save hdr routine
+  Try 
+    !
+    Call dxget("newkeyvar",filedefhdr.filename$)
+    Call dxget("desc",filedefhdr.desc$)
+    Call dxget("group",filedefhdr.groupname$)
+    Call dxget("version",filedefhdr.version$)
+    Call dxget("active",filedefhdr.active$)
+	call dxget("userdef1",filedefhdr.userdef1$)
+	call dxget("userdef2",filedefhdr.userdef2$)
+	call dxget("userdef3",filedefhdr.userdef3$)
+	call dxget("userdef4",filedefhdr.userdef4$)
+	call dxget("userdef5",filedefhdr.userdef5$)
+
+    !
+    If filekey$ = "" !it's an add
+      Try 
+        filedefhdr.addeddate$ = dateusing$(Tim#(0),"MM/DD/YYYY HH:NN")
+        Call dxget("s_user.id",filedefhdr.addedby$)
+        Add Record #c[0];filedefhdr.
+      Else 
+        e$ = "Could not add new record, try again!"
+        Error 10000
+      End Try 
+      tmp$ = "Filename ",filedefhdr.filename$," added!"
+      Call dxset("msg",tmp$)
+    Else 
+      Try 
+        Search = #c[0],1;filename$,active$,version$
+        Read Record #c[0],-2;oldfiledefhdr.
+        !compate crc's
+        !??
+        filedefhdr.addeddate$ = oldfiledefhdr.addeddate$
+        filedefhdr.addedby$ = oldfiledefhdr.addedby$
+        filedefhdr.updateddate$ = dateusing$(Tim#(0),"MM/DD/YYYY HH:NN")
+        Call dxget("s_user.id",filedefhdr.updatedby$)
+        Write Record #c[0],-2;filedefhdr.;
+      Else 
+        e$ = "Could not update record, try again!"
+        Error 10000
+      End Try 
+      tmp$ = "Filename ",filedefhdr.filename$," is updated!"
+      Call dxset("msg",tmp$)
+    End If 
+    filename$ = filedefhdr.filename$
+    active$ = filedefhdr.active$
+    version$ = filedefhdr.version$
+    !
+    Call hdrchg() !redisplay updated page
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !hdrsave
+!
+Sub hdrcopy()
+  !copy from one version to a new version
+  Try 
+    !
+    Call dxget("newver",newver$)
+    !
+    Try 
+      Search = #c[0],1;filename$,active$,version$
+      Read Record #c[0],-2;filedefhdr.
+      filedefhdr.addeddate$ = dateusing$(Tim#(0),"MM/DD/YYYY HH:NN")
+      Call dxget("s_user.id",filedefhdr.addedby$)
+      filedefhdr.version$ = newver$
+      Add Record #c[0];filedefhdr.
+    Else 
+      e$ = "Could not add new header record, try again!"
+      Error 10000
+    End Try 
+    !copy field rcds
+    seq = -2
+    Try Search >= #c[1],1;filename$,version$ Else Rem
+    Do 
+      Try Read Record #c[1],seq;filedeffields. Else Exit Do 
+      If filedeffields.filename$ <> RTrim$(filename$) Exit Do 
+      If filedeffields.version$ <> RTrim$(version$) Exit Do 
+      filedeffields.version$ = newver$
+      Add Record #c[1];filedeffields.
+      Try Search > #c[1],1;filename$,version$,filedeffields.seq Else Exit Do 
+    Loop 
+    !copy key rcds
+    seq = -2
+    Try Search >= #c[2],1;filename$,version$ Else Rem
+    Do 
+      Try Read Record #c[2],seq;filedefkey. Else Exit Do 
+      If filedefkey.filename$ <> RTrim$(filename$) Exit Do 
+      If filedefkey.version$ <> RTrim$(version$) Exit Do 
+      filedefkey.version$ = newver$
+      Add Record #c[2];filedefkey.
+      Try Search > #c[2],1;filename$,version$,filedefkey.seq,filedefkey.keypart Else Exit Do 
+    Loop 
+    tmp$ = "Filename ",filedefhdr.filename$," version ",newver$," added!"
+    Call dxset("msg",tmp$)
+    !
+    version$ = filedefhdr.version$
+    Call hdrchg() !redisplay updated page
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !hdrcopy
+!
+Sub hdrupdate()
+  !update updated date and id
+  !
+  Try 
+    Search = #c[0],1;filename$,active$,version$
+    Read Record #c[0],-2;filedefhdr.
+    filedefhdr.updateddate$ = dateusing$(Tim#(0),"MM/DD/YYYY HH:NN")
+    Call dxget("s_user.id",filedefhdr.updatedby$)
+    Write Record #c[0],-2;filedefhdr.;
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !hdrupdate
+!
+Sub fieldslist()
+  !--------------------------------------------------------------------
+  ! field list routine
+  Try 
+    !
+    keyno$ = "1"
+    Call dxget("keynext",keynext$)
+    kseq = 0
+    If keynext$ <> ""
+      kseq = keynext$
+    End If 
+    keyno = keyno$
+    lastbyte = -1
+    seq = -2
+    Try Search >= #c[1],keyno;filename$,version$,kseq Else Rem
+    Do 
+      Try Read Record #c[1],seq;filedeffields. Else Exit Do 
+      If filedeffields.filename$ <> RTrim$(filename$) Exit Do 
+      If filedeffields.version$ <> RTrim$(version$) Exit Do 
+      If cnt > maxcnt Exit Do 
+      idlist$[cnt] = Str$(filedeffields.seq)
+      desclist$[cnt] = filedeffields.shortdesc$
+      If desclist$[cnt] = "" Let desclist$[cnt] = " "
+      longdesclist$[cnt] = filedeffields.longdesc$
+      If longdesclist$[cnt] = "" Let longdesclist$[cnt] = " "
+      position = filedeffields.position
+      If filedeffields.position = -1
+        position = lastbyte + 1 !default
+      End If 
+      varnamelist$[cnt] = filedeffields.varname$
+      If varnamelist$[cnt] = "" Let varnamelist$[cnt] = " "
+      lastprecision = filedeffields.precision
+      If filedeffields.precision > 0
+        tmp$ = "S",Str$(filedeffields.precision)
+        !if using separate alpha fields you need to add 1
+        lastbyte = position + filedeffields.precision - 1
+        lenlist$[cnt] = Str$(filedeffields.precision)
+      Else 
+        If position / 2 <> Int(position / 2) Let position = position + 1 !numerics must start on even byte
+        tmp$ = Str$(Int(abs(filedeffields.precision))),"%"
+        lastbyte = position + (Int(filedeffields.precision * -1) * 2) - 1
+        lenlist$[cnt] = "0" !can't determine
+        If Fra(filedeffields.precision)
+          tmp$ = tmp$," ",Str$(Fra(filedeffields.precision) * -10)," dec"
+        End If 
+      End If 
+      precisionlist$[cnt] = tmp$
+      poslist$[cnt] = Str$(position)
+      If filedeffields.position = -1 Let poslist$[cnt] = "A ",Str$(position)
+      !calc end byte for record length
+      If lastbyte > rcdlen Let rcdlen = lastbyte
+      cnt = cnt + 1
+      seq = -1 !get next
+    Loop 
+    !
+    If cnt > maxcnt
+      tmp$ = filedeffields.seq
+      Call dxset("keynext",tmp$)
+    End If
+    Call dxset("fieldseq",idlist$[])
+    Call dxset("fielddesc",desclist$[])
+    Call dxset("fieldlongdesc",longdesclist$[])
+    Call dxset("fieldpos",poslist$[])
+    Call dxset("fieldvarname",varnamelist$[])
+    Call dxset("fieldprecision",precisionlist$[])
+    Call dxset("fieldlen",lenlist$[]) !used by keydef maint to default partlen
+    If lastprecision > 0 Let rcdlen = rcdlen + 1 !may need to add null byte at end of string field
+    Call dxset("rcdlen",Str$(Truncate(rcdlen / 2 + .5,0)))
+    !
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !fieldslist
+!
+Sub calckeylen()
+  ! used by keylist to set total key lengths
+  !populate all same seq with calculated key len
+  If lastcnt >= 0
+    For i = lastcnt To cnt
+      klenlist$[i] = Str$(Truncate(keylen / 2 + .5,0))
+    Next i
+  End If 
+  keylen = 0
+  lastcnt = cnt
+  lastkeyseq = filedefkey.seq
+End Sub !calckeylen
+!
+Sub keylist(...)
+  !--------------------------------------------------------------------
+  ! key list routine
+  ! optional parameter if <>0 then only first field of each key
+  try enter keytype else let keytype=0
+  Try 
+    !
+    cnt = 0
+    keyno$ = "1"
+    Call dxget("keynext",keynext$)
+    kseq = 0
+    kpart = 0
+    If keynext$ <> ""
+      kseq = keynext$[1,2]
+      keypart = keynext$[3,4]
+    End If 
+    keyno = keyno$
+    seq = -2
+    lastkeyseq = 0
+    lastcnt = -1
+    Try Search >= #c[2],keyno;filename$,version$,kseq,keypart Else Rem
+    Do 
+      Try Read Record #c[2],seq;filedefkey. Else Exit Do 
+      If filedefkey.filename$ <> RTrim$(filename$) Exit Do 
+      If filedefkey.version$ <> RTrim$(version$) Exit Do 
+	  if keytype=0 or filedefkey.seq<>lastkeyseq  !if optional parameter passed only want 1st field in key
+
+      If cnt > maxcnt Exit Do 
+      tmp$ = filedefkey.desc$
+	  tmp2$ = filedefkey.desc$
+      If filedefkey.rcdposition !get field rcd
+        Try 
+          Search = #c[1],1;filename$,version$,filedefkey.rcdposition
+          Read Record #c[1],-2;filedeffields.
+          If filedefkey.precision = -1 Let filedefkey.precision = filedeffields.precision
+          tmp$ = filedeffields.shortdesc$," ",filedeffields.varname$," ",filedefkey.desc$
+		  tmp2$= filedeffields.shortdesc$
+        Else 
+          tmp$ = "ERROR KEY PART LINKED TO FIELD # ",Str$(filedefkey.rcdposition)
+        End Try 
+      End If
+	  if filedefkey.opts$<>"" let tmp$=tmp$," opts=",filedefkey.opts$
+	  kdesclist$[cnt]=ltrim$(tmp$)
+	  kdesc2list$[cnt]=ltrim$(tmp2$)
+      If kdesclist$[cnt] = "" Let kdesclist$[cnt] = " "
+      kidlist$[cnt] = Str$(filedefkey.seq)
+      kpartlist$[cnt] = Str$(filedefkey.keypart)
+      kpartlenlist$[cnt] = Str$(filedefkey.precision)
+      If filedefkey.seq <> lastkeyseq Call calckeylen()
+      keylen = keylen + filedefkey.precision
+      cnt = cnt + 1
+
+	  end if
+      seq = -1 !get next
+    Loop 
+    !
+    If cnt > maxcnt
+      tmp$ = filedefkey.seq Using "&&",filedefkey.keypart Using "&&"
+      Call dxset("keynext",tmp$)
+    End If 
+    cnt = cnt - 1
+    If cnt >= 0 Call calckeylen()
+    Call dxset("keyseq",kidlist$[])
+    Call dxset("keylen",klenlist$[])
+    Call dxset("keypart",kpartlist$[])
+    Call dxset("keypartlen",kpartlenlist$[])
+    Call dxset("keydesc",kdesclist$[])
+	call dxset("keydesc2",kdesc2list$[])
+	call dxset("keydescfirst",kdesc2list$[0])
+    !
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !keylist
+!
+Function calcposition(kseq)
+  !--------------------------------------------------------------------
+  ! calcs what the next byte position should be for the field seq passed
+  ! needs to calc from the first field, as each field could be -1 flag
+  ! to autocalc from the previous field
+  Try 
+    position = -1
+    seq = -2
+    Try Search >= #c[1],1;filename$,version$ Else Rem
+    Do 
+      Try Read Record #c[1],seq;filedeffields. Else Exit Do 
+      If filedeffields.filename$ <> RTrim$(filename$) Exit Do 
+      If filedeffields.version$ <> RTrim$(version$) Exit Do 
+      If filedeffields.seq >= kseq Exit Do 
+      If filedeffields.position = -1 Let filedeffields.position = position + 1
+      If filedeffields.precision > 0
+        !if using separate alpha fields you need to add 1
+        position = filedeffields.position + filedeffields.precision - 1
+      Else 
+        If filedeffields.position / 2 <> Int(filedeffields.position / 2) Let filedeffields.position = filedeffields.position + 1 !numerics must start on even byte
+        position = filedeffields.position + (Int(filedeffields.precision * -1) * 2) - 1
+      End If 
+      seq = -1
+    Loop 
+    position = position + 1
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Function position !calcposition
+!
+!
+Sub fieldsadd()
+  !--------------------------------------------------------------------
+  ! add fields routine,assign default seq# 
+  Try 
+    !
+    kseq = 7999
+    position = 0
+    Try 
+      Search <= #c[1],1;filename$,version$,kseq
+      Read Record #c[1],-2;filedeffields.
+      If filedeffields.filename$ <> RTrim$(filename$) Error 10000
+      If filedeffields.version$ <> RTrim$(version$) Error 10000
+    Else 
+      filedeffields.seq = 0
+    End Try 
+    keyvar = filedeffields.seq + 10
+    If keyvar > 0 And keyvar <= 7999
+      keyvar$ = Str$(keyvar)
+    Else 
+      e$ = "Could not generate next field #!"
+      Error 10000
+    End If 
+    !
+    Call dxset("fieldseq",keyvar$)
+    Call dxset("fieldprecision","S")
+    Call dxset("fieldpos",Str$(calcposition(keyvar))) !calc next byte pos
+	Call dxset("fieldactive","checked")
+    Call dxset("output",mergedir$ + "dxfiledeffields.html")
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !fieldsadd
+!
+Sub fieldschg()
+  !--------------------------------------------------------------------
+  ! change fields routine, get/display record
+  !
+  Try 
+    Call dxget("fieldseq",kseq$)
+    kseq = kseq$
+    Try 
+      Search = #c[1],1;filename$,version$,kseq
+    Else 
+      e$ = "Filename ",filename$,", field# ",kseq$," is not on file!"
+      Error 10000
+    End Try 
+    !
+    Read Record #c[1],-2;filedeffields.
+    !
+    Call dxset("keyvar",Str$(filedeffields.seq))
+    Call dxset("fieldseq",Str$(filedeffields.seq))
+    Call dxset("fielddesc",filedeffields.shortdesc$)
+    Call dxset("fieldlongdesc",filedeffields.longdesc$)
+    Call dxset("fieldpos",Str$(filedeffields.position))
+    Call dxset("fieldvarname",filedeffields.varname$)
+    If filedeffields.precision > 0
+      tmp$ = "S"
+      tmp2$ = Str$(filedeffields.precision)
+    Else 
+      tmp$ = Str$(Int(abs(filedeffields.precision)))
+      If Fra(filedeffields.precision)
+        tmp2$ = str$(Fra(filedeffields.precision) * -10)
+      End If 
+    End If 
+    Call dxset("fieldprecision",tmp$)
+    Call dxset("fieldprecdimdec",tmp2$)
+    If filedeffields.position = -1
+      precision = filedeffields.precision
+      position = calcposition(kseq)
+      If precision < 0 !5/11/05, numerics on even byte
+        If position / 2 <> Int(position / 2) Let position = position + 1
+      End If 
+      Call dxset("fieldpos",Str$(position))
+      Call dxset("auto","(Auto)") !5/11/05
+    End If 
+    If LCase$(filedeffields.droplist$) = "y" Call dxset("fielddroplist","checked")
+    If LCase$(filedeffields.required$) = "y" Call dxset("fieldrequired","checked")
+	call dxset("fielddefault",filedeffields.default$)
+    If LCase$(filedeffields.active$) <> "n" Call dxset("fieldactive","checked")
+    call dxset("fieldopts",filedeffields.opts$)
+	call dxset("userdef1",filedeffields.userdef1$)
+	call dxset("userdef2",filedeffields.userdef2$)
+	call dxset("userdef3",filedeffields.userdef3$)
+	call dxset("userdef4",filedeffields.userdef4$)
+	call dxset("userdef5",filedeffields.userdef5$)
+
+    Call dxset("output",mergedir$ + "dxfiledeffields.html")
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !fieldschg
+!
+Sub fieldsdel()
+  !--------------------------------------------------------------------
+  ! delete fields routine
+  Try 
+    !
+    Call dxget("fieldseq",kseq$)
+    kseq = kseq$
+    Try 
+      Search = #c[1],1;filename$,version$,kseq
+    Else 
+      e$ = "Filename ",filename$,",  field # ",kseq$," is not on file!"
+      Error 10000
+    End Try 
+    Delete Record #c[1]
+    tmp$ = "Filename ",filename$," field # ",kseq$," deleted!"
+    Call dxset("msg",tmp$)
+    Call hdrupdate()
+    Call hdrchg()
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !fieldsdel
+!
+Sub fieldssave()
+  !--------------------------------------------------------------------
+  ! save fields routine
+  Try 
+    !
+    Call dxget("keyvar",keyvar$)
+    Call dxget("fieldseq",kseq$)
+    Try 
+      kseq = kseq$
+    Else 
+      e$ = "Error, field sequence must be less than 8000"
+      Error 10000
+    End Try 
+    autoposition = calcposition(kseq)
+    filedeffields.seq = kseq$
+    filedeffields.filename$ = filename$
+    filedeffields.version$ = version$
+    Call dxget("fielddesc",filedeffields.shortdesc$)
+    !call dxget("fieldlongdesc",tmp$)
+    !call dxset("s_msg",'fx'+tmp$)
+    !call dxset("output","dxstd/msg.html")
+    !call dxclose()
+    Call dxget("fieldlongdesc",tmp$)
+    filedeffields.longdesc$ = replace$(tmp$,"\12\","")
+    Call dxget("fieldpos",tmp$)
+    filedeffields.position = tmp$
+    If filedeffields.position = autoposition
+      !not for ubs!!!!!let filedeffields.position=-1 !autoflag
+    Else 
+      autoposition = filedeffields.position !just for display
+    End If 
+    Call dxget("fieldvarname",filedeffields.varname$)
+    Call dxget("fieldprecision",tmp$)
+    Call dxget("fieldprecdimdec",tmp2$)
+    If tmp$[1,1] = "S"
+      filedeffields.precision = tmp2$
+    Else 
+      filedeffields.precision = Val(tmp$) * -1
+      If tmp2$ <> "" Let filedeffields.precision = filedeffields.precision + Val(tmp2$)*-1 / 10
+    End If 
+    Call dxget("fieldrepeat",tmp$)
+    repeat = tmp$
+    If repeat > 1
+      varname$ = filedeffields.varname$
+      filedeffields.varname$ = varname$,"[0]"
+    End If 
+    Call dxget("fielddroplist",tmp$)
+    If LCase$(tmp$) = "y" Let filedeffields.droplist$ = "y" Else Let filedeffields.droplist$ = ""
+    Call dxget("fieldrequired",tmp$)
+    If LCase$(tmp$) = "y" Let filedeffields.required$ = "y" Else Let filedeffields.required$ = ""
+    call dxget("fielddefault",filedeffields.default$)
+    Call dxget("fieldactive",tmp$)
+    If LCase$(tmp$) = "y" Let filedeffields.active$ = "" Else Let filedeffields.active$ = "n"
+	call dxget("fieldopts",filedeffields.opts$)
+	call dxget("userdef1",filedeffields.userdef1$)
+	call dxget("userdef2",filedeffields.userdef2$)
+	call dxget("userdef3",filedeffields.userdef3$)
+	call dxget("userdef4",filedeffields.userdef4$)
+	call dxget("userdef5",filedeffields.userdef5$)
+
+	!
+    If keyvar$ = "" !it's an add
+      Try 
+        Add Record #c[1];filedeffields.
+      Else 
+        e$ = "Could not add new record, try again!"
+        Error 10000
+      End Try 
+      tmp$ = "Filename ",filename$," field # ",kseq$," byte pos ",Str$(autoposition)," added!"
+      Call dxset("msg",tmp$)
+      Call dxget("fieldrepeat",tmp$)
+      repeat = tmp$
+      filedeffields.shortdesc$ = ""
+      filedeffields.longdesc$ = ""
+      filedeffields.position = -1
+      For i = 2 To repeat
+        filedeffields.seq = filedeffields.seq + 10
+        filedeffields.varname$ = varname$,"[",Str$(i - 1),"]"
+        Add Record #c[1];filedeffields.
+      Next i
+      If repeat > 1
+        tmp$ = "Filename ",filename$," fields ",kseq$,"-",Str$(filedeffields.seq),", starting at byte pos ",Str$(autoposition)," added!"
+        Call dxset("msg",tmp$)
+      End If 
+    Else 
+      Try 
+        kseq = keyvar$
+        Search = #c[1],1;filename$,version$,kseq
+        Read Record #c[1],-2;oldfiledeffields.
+        !compate crc's
+        !??
+        Write Record #c[1],-2;filedeffields.;
+      Else 
+        e$ = "Could not update record, try again!"
+        Error 10000
+      End Try 
+      tmp$ = "Filename ",filename$," field # ",kseq$," is updated!"
+      Call dxset("msg",tmp$)
+    End If 
+    !
+    Call hdrupdate()
+    Call hdrchg() !redisplay updated page
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !fieldssave
+!
+Sub keyadd()
+  !--------------------------------------------------------------------
+  ! add key routine,assign default seq#
+  Try 
+    !
+    kseq = 7999
+    Try 
+      Search <= #c[2],1;filename$,version$,kseq
+      Read Record #c[2],-2;filedefkey.
+      If filedefkey.filename$ <> RTrim$(filename$) Error 10000
+      If filedefkey.version$ <> RTrim$(version$) Error 10000
+    Else 
+      filedefkey.seq = 0
+    End Try 
+    kseq = filedefkey.seq + 1
+    kpart = 1
+    If kseq > 0 And kseq <= 99
+      keyvar$ = kseq Using "&&",kpart Using "&&"
+    Else 
+      e$ = "Could not generate next key #!"
+      Error 10000
+    End If 
+    !
+    Call dxset("kseq",Str$(kseq))
+    Call dxset("kpart",Str$(kpart))
+    Call fieldslist()
+    Call dxset("output",mergedir$ + "dxfiledefkey.html")
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !keyadd
+!
+Sub keypartadd()
+  !--------------------------------------------------------------------
+  ! add key part routine,assign default part#
+  Try 
+    !
+    Call dxget("kseq",tmp$)
+    kseq = tmp$
+    kpart = 100
+    Try 
+      Search <= #c[2],1;filename$,version$,kseq,kpart
+      Read Record #c[2],-2;filedefkey.
+      If filedefkey.filename$ <> RTrim$(filename$) Error 10000
+      If filedefkey.version$ <> RTrim$(version$) Error 10000
+      If filedefkey.seq <> kseq Error 10000
+    Else 
+      e$ = "Must add key before adding additional key parts!" \ Error 10000
+    End Try 
+    kpart = filedefkey.keypart + 1
+    If kpart > 0 And kpart <= 99
+      keyvar$ = kseq Using "&&",kpart Using "&&"
+    Else 
+      e$ = "Could not generate next key part #!"
+      Error 10000
+    End If 
+    !
+    Call dxset("kseq",Str$(kseq))
+    Call dxset("kpart",Str$(kpart))
+    Call fieldslist()
+    Call dxset("output",mergedir$ + "dxfiledefkey.html")
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !keypartadd
+!
+Sub keychg()
+  !--------------------------------------------------------------------
+  ! change key routine, get/display record
+  Try 
+    Call dxget("kseq",kseq$)
+    kseq = kseq$
+    Call dxget("kpart",kpart$)
+    kpart = kpart$
+    Try 
+      Search = #c[2],1;filename$,version$,kseq,kpart
+    Else 
+      e$ = "Filename ",filename$,", key # ",kseq," part ",kpart," is not on file!"
+      Error 10000
+    End Try 
+    !
+    Read Record #c[2],-2;filedefkey.
+    !
+    tmp$ = filedefkey.seq Using "&&",filedefkey.keypart Using "&&"
+    Call dxset("keyvar",tmp$)
+    Call dxset("kseq",Str$(filedefkey.seq))
+    Call dxset("kpart",Str$(filedefkey.keypart))
+    Call dxset("kpartlen",Str$(filedefkey.precision))
+    Call dxset("keydesc",filedefkey.desc$)
+    Call dxset("keyfieldseq",Str$(filedefkey.rcdposition))
+    Call dxset("keyopts",filedefkey.opts$)
+	call dxset("userdef1",filedefkey.userdef1$)
+	call dxset("userdef2",filedefkey.userdef2$)
+	call dxset("userdef3",filedefkey.userdef3$)
+	call dxset("userdef4",filedefkey.userdef4$)
+	call dxset("userdef5",filedefkey.userdef5$)
+
+    Call fieldslist()
+    Call dxset("output",mergedir$ + "dxfiledefkey.html")
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !keychg
+!
+Sub keydel()
+  !--------------------------------------------------------------------
+  ! delete key routine
+  Try 
+    !
+    Call dxget("keyvar",kseq$)
+    kseq = kseq$[1,2]
+    kpart = kseq$[3,4]
+    Try 
+      Search = #c[2],1;filename$,version$,kseq,kpart
+    Else 
+      e$ = "Filename ",filename$,", key # ",kseq,", part ",kpart," is not on file!"
+      Error 10000
+    End Try 
+    Delete Record #c[2]
+    tmp$ = "Filename ",filename$," key # ",kseq,", part ",kpart," deleted!"
+    Call dxset("msg",tmp$)
+    Call hdrupdate()
+    Call hdrchg()
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !keydel
+!
+Sub keysave()
+  !--------------------------------------------------------------------
+  ! save key routine
+  Try 
+    !
+    Call dxget("keyvar",keyvar$)
+    filedefkey.filename$ = filename$
+    filedefkey.version$ = version$
+    Call dxget("kseq",kseq$)
+    filedefkey.seq = kseq$
+    Call dxget("kpart",kpart$)
+    filedefkey.keypart = kpart$
+    Call dxget("keyfieldseq",tmp$)
+    filedefkey.rcdposition = tmp$
+    Call dxget("kpartlen",tmp$)
+    filedefkey.precision = tmp$
+    Call dxget("keydesc",filedefkey.desc$)
+    Call dxget("keyopts",filedefkey.opts$)
+    call dxget("userdef1",filedefkey.userdef1$)
+	call dxget("userdef2",filedefkey.userdef2$)
+	call dxget("userdef3",filedefkey.userdef3$)
+	call dxget("userdef4",filedefkey.userdef4$)
+	call dxget("userdef5",filedefkey.userdef5$)
+    !
+    If keyvar$ = "" !it's an add
+      Try 
+        Add Record #c[2];filedefkey.
+      Else 
+        e$ = "Could not add new record, try again!"
+        Error 10000
+      End Try 
+      tmp$ = "Filename ",filename$," key # ",filedefkey.seq," part ",filedefkey.keypart," added!"
+      Call dxset("msg",tmp$)
+    Else 
+      Try 
+        kseq = keyvar$[1,2]
+        kpart = keyvar$[3,4]
+        Search = #c[2],1;filename$,version$,kseq,kpart
+        Read Record #c[2],-2;oldfiledefkey.
+        !compate crc's
+        !??
+        Write Record #c[2],-2;filedefkey.;
+      Else 
+        e$ = "Could not update record, try again!"
+        Error 10000
+      End Try 
+      tmp$ = "Filename ",filename$," key # ",filedefkey.seq," part ",filedefkey.keypart," is updated!"
+      Call dxset("msg",tmp$)
+    End If 
+    !
+    Call hdrupdate()
+    Call hdrchg() !redisplay updated page
+  Else 
+    If Spc(8) <> 10000
+      Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+      !call programdump("")
+    End If 
+    Error 10000
+  End Try 
+End Sub !keysave
+!
+!
+!
+! **main procedure
+!
+!
+! dim variables used by program
+!
+Dim e$[5000],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+Try 
+  Call dxopen()
+  !call dxsave(0,"/tmp/joel.txt")
+  call dxsave(0,"dfin!")
+  !
+  !e$="got here"\error 10000
+  !
+  maxcnt = 400
+
+  Dim mergedir$[60],action$[30],options$[30],b$[200],1%,c[20],z0[31],3%
+  Dim type$[30]
+  Dim keys$[120],keyvar$[120],keynext$[120],keyno$[123],tmp$[360]
+  Dim filename$[200],active$[1],version$[10],newver$[10]
+  Dim filenamelist$[maxcnt,31],desclist$[maxcnt,60],groupnamelist$[maxcnt,20]
+  Dim activelist$[maxcnt,1],versionlist$[maxcnt,10]
+  Dim filekey$[60],1%,seq$[4],seq,kseq,3%
+  Dim idlist$[maxcnt,4],poslist$[maxcnt,6],precisionlist$[maxcnt,8]
+  Dim longdesclist$[maxcnt,360],varnamelist$[maxcnt,20],lenlist$[maxcnt,3]
+  Dim kidlist$[maxcnt,2],kpartlist$[maxcnt,2],kdesclist$[maxcnt,120],kdesc2list$[maxcnt,120]
+  Dim klenlist$[maxcnt,2],kpartlenlist$[maxcnt,3]
+  Dim kseq$[4],kpart$[2],tmp2$[120],tmp3$[3],varname$[20]
+  Dim sendto$[100],excludedirs$[100]
+  dim string$[5000]
+  b$ = " ",b$
+  !
+  Dim config. As config
+  ! need to get filenames from dxsystem.txt
+  !
+  !read system file parameters
+  Call ReadSystemFile(e$,config.)
+  !
+  ! open files
+  !
+  Call openfiles(e$,config.,c[])
+  !
+  !
+  !                     CHANGE mergedir$ to move html to another directory!!!!
+  mergedir$ = "admin/" !examples/"      !"admin/"  or dxget("s_view.mergedir",mergedir$)
+  !
+  !
+  call dxget("option",options$)
+  Call dxget("action",action$)
+  action$ = LCase$(action$)
+  Call dxget("type",type$)
+  type$ = LCase$(type$)
+  Call dxget("u_filekey",filekey$)
+  If filekey$ <> ""
+    filename$ = filekey$[1,20]
+    Call dxset("filename",filename$)
+    active$ = filekey$[21,21]
+    version$ = filekey$[22]
+  End If
+  !
+  If options$="DXFILEPU" !file audit purge
+   if action$="input"
+     call dfdroplistfilenames()
+	 call dxset("output",mergedir$ + "dxfiledefauditpurge.html")
+   else if action$="purge"
+     call auditlogpurge()
+   end if
+  !
+  else If options$="DXFILEAU" !file audit
+    if action$="input"
+	 call dfdroplistfilenames()
+	 call dxset("output",mergedir$ + "dxfiledeffile.html")
+	else if action$="query"
+     call filedefquery()
+	Else If action$ = "searchrecords" or action$="searchrecordsprev" or action$="searchrecordsnext"
+     call filedefquerysearch()
+	end if
+  else
+  If action$ = "input" !initial action
+    Call filedefsearch()
+  Else If action$ = "search"
+    Call filedefsearch()
+  Else If action$ = "add"
+    If type$ = "hdr" Call hdradd()
+    If type$ = "fields" Call fieldsadd()
+  Else If action$ = "add key"
+    Call keyadd()
+  Else If action$ = "add part"
+    Call keypartadd()
+  Else If action$ = "change" Or action$ = "edit"
+    If type$ = "hdr" Call hdrchg()
+    If type$ = "fields" Call fieldschg()
+    If type$ = "key" Call keychg()
+  Else If action$ = "delete"
+    If type$ = "hdr" Call hdrdel()
+    If type$ = "fields" Call fieldsdel()
+    If type$ = "key" Call keydel()
+  Else If action$ = "save"
+    If type$ = "hdr" Call hdrsave()
+    If type$ = "fields" Call fieldssave()
+    If type$ = "key" Call keysave()
+  Else If action$ = "copy"
+    Call hdrcopy()
+  Else If action$ = "print"
+    Call hdrchg()
+  Else If action$ = "gencode"
+    Chain "dfcreatestruct.dl4"
+  Else If action$ = "genodbc"
+    Chain "dfcreateodbc.dl4"
+  Else If action$ = "query"
+    call filedefquery()
+  Else If action$ = "searchrecords" or action$="searchrecordsprev" or action$="searchrecordsnext"
+    call filedefquerysearch()
+  Else If action$ = "dl4query"
+    call dl4query()
+  Else If action$ = "integrity"
+    call integritycheck()
+  End If 
+  end if !options
+  !
+  try Call dxclose() else rem
+Else 
+  ! error routine
+  If Spc(8) <> 10000
+    Call dfsuberr(e$,Spc(8),Spc(10),Msc$(2))
+    !call programdump("")
+  End If 
+  Call dfmainerr(e$,Spc(8),buttonlist$[],nextlist$[])
+End Try 
+End 

@@ -1,0 +1,355 @@
+! pmu_usercntrl_fix 
+!
+! loadsave -w -n 100,10 -o prog/util/pmu_usercntrl_fix.dl4 src/pmu_usercntrl_fix.src
+!
+! Early version of pmu_security_encrypt did not maintain record numbers for
+! usercntrl file.
+!
+! This turns out to be a problem as certain audit records record the record
+! number and not the key value.
+!
+! This progam will redo the usercntrl file assuring the old record numbers are
+! restored, and new records added after are placed in the file.
+!
+! 2 shortcomings:
+!
+! 1. Activity between the time the file had changed record numbers and the time
+!    we fix this will possibly be inaccurate as the record number was different
+!    during that period of time and is now possibly changed again (back to the
+!    original).
+!
+! 2. If there are new records and these record numbers conflict with the old
+!    record numbers, they will have to be moved, again causing inaccuracies.
+!
+! PMUPGRADER ROUTINE
+
+external lib "ubsfunc.dl4"
+declare intrinsic sub programdump,datetojulian
+Declare Intrinsic Sub InpBuf,String,Time
+Declare Intrinsic Function findchannel
+Declare Intrinsic Sub env,findf
+! Option Default Dialect IRIS1
+include "src/utilcopyright.inc"
+dim e$[300],i$[200]
+
+ENTER COID,GROUPID,DBAK$,CH_LOG,COREDUMP,E,...
+! if "fromUpgrade" don't send print statements with
+! control strings as this is being executed via
+! a job not attached to terminal.  Be sure to send
+! all output to ch_log as this will be reviewed and
+! sent back to software repository
+try
+	enter fromUpgrade
+else
+	dim 1%,fromUpgrade
+end try
+try ! main try
+LET E=99
+!
+include "src/dim.pmupgrade.i"
+
+!fields for usercntrl
+dim 1%,a1[9,9],uc_a5[10],slsmcode[9],comedit
+dim 2%,a2[2]
+dim 3%,a4[5],a3[31]
+dim a0$[48],a1$[40],a2$[50],a3$[30],ucf$[10]
+
+dim k2$[100],k3$[100],k4$[100]
+dim 3%,r2,r3
+dim key_file$[100],data_file$[100]
+DIM tmp$[200],p61$[256],backup_file$[100]
+
+DIM 3%
+
+try close #1 else rem
+Open #1,"cntrl/cntrl"+Str$(COID)
+Mat Read #1,61,0;p61$;
+Let COL=0;Row=23
+
+gosub VerifyEncryptionKey:
+if not(canUpgrade) goto OUTEND: ! fatal error
+gosub UpgradeUsercntrl:
+goto do_exit:
+
+!************************************************************************
+! S U B R O U T I N E   A N D   E X I T   C O D E
+!************************************************************************
+
+VerifyEncryptionKey:
+	canUpgrade = 1
+	call env(1,"DL4KEYFILE",key_file$)
+	if key_file$ = ""
+		LOGMSG$ = "DL4KEYFILE variable not defined - exiting!"
+		GOSUB DO_WRITE_LOG:
+		canUpgrade = 0
+		return
+	end if
+	call findf(key_file$,found)
+	if not(found)
+		LOGMSG$ = "DL4KEYFILE: "+key_file$+" not found - exiting!"
+		GOSUB DO_WRITE_LOG:
+		canUpgrade = 0
+		return
+	end if
+Return
+
+UpgradeUsercntrl: !
+	data_file$ = "cntrl/usercntrl"
+
+	ropen #2,data_file$
+	GET #2,-495;X
+	close #2
+	If NOT(X)
+		LOGMSG$ = "USERCNTRL file not encrypted - skipping"
+		GOSUB DO_WRITE_LOG:
+		return
+	end if
+	backup_file$ = "files/databak/usercntrl.cc_security_encrypt"
+	call findf(backup_file$,found)
+	if not(found)
+		LOGMSG$ = "Original backup: "+backup_file$+" not found - skipping"
+		GOSUB DO_WRITE_LOG:
+		return
+	end if
+	ropen #4,backup_file$
+	Let FCode$="USERCNTRL"
+	LET OWRITE$="ne 'usercntrl_fix'"
+	LET MODE=1 ! "move file as we are rebuilding
+	GOSUB DO_BACKUP: ! "ALWAYS BACKUP EXISTING!!!
+	ROPEN #2,DFILE$
+	! this file is completely encrypted!
+	! Create an indexed file with a encrypted 10 character index 1 and
+	Build #3,"<n=''LegacyCreditCard''>(key=e10)[1:384] "+data_file$+"!"
+	Close #3
+	system "chmod g+rw files/"+data_file$
+	system "chmod g+rw files/"+data_file$+".idx"
+	open #3,data_file$
+	!OK here is the channel assignments
+	! #2 = recently backed up file
+	! #3 = newly created file
+	! #4 = original backup from original encryption try
+	gosub StretchNewUsercntrl:
+	gosub RestoreOriginalRecords:
+	gosub RestoreNewRecords:
+	gosub CompressUserCntrl:
+	gosub VerifyUserCntrl:
+	close #2,#3,#4
+return
+
+StretchNewUsercntrl: !
+	! make sure I've got the highest needed record number
+	highestRec = 0
+	tmp$ = " ",tmp$
+	! first search most recently backed up
+	do
+		search #2,3,1;tmp$,r,e
+		if e exit do
+		if r>highestRec let highestRec = r
+	loop
+	! next search original back up
+	tmp$ = " ",tmp$
+	do
+		search #4,3,1;tmp$,r,e
+		if e exit do
+		if r>highestRec let highestRec = r
+	loop
+	! OK - we now have the highest record number
+	! needed - so stretch the file out to accomodate
+	! them all
+	a1$ = " ",a1$
+	a1$[1,10] = "AlLoCaTeD "
+	do
+		tmp$ = " ",tmp$
+		LET E=2;R=0
+		SEARCH #3,1,0;tmp$,R,E \ IF E error 11000
+		mat write #3,r,260;a1$ ! show record as allocated, but not used
+		if r>=highestRec exit do
+	loop
+return
+
+RestoreOriginalRecords: !
+	! restore original records to their original record numbers
+	LET LOGMSG$="Restore Original Records to the Original Record Number"
+	GOSUB DO_WRITE_LOG:
+	LET CH=4 \ GOSUB GET_ACTIVE_RECS:
+	LET LOGMSG$="Estimated number of records to process: "+STR$(ACTRECS)
+	GOSUB DO_WRITE_LOG:
+	k4$ = " ",k4$
+	do
+		! search through original backup
+		search #4,3,1;k4$,r4,e \ if e>2 error 11000
+		if e exit do
+		! does user still exist?
+		k2$ = k4$
+		search #2,2,1;k2$,r2,e \ if e>1 error 11000
+		if not(e) ! still exists
+			r3 = r4 ! force new file to use the original rec #
+			! make sure at this point the record
+			! in the new file has not been used
+			! this will be a fatal error at this
+			! point
+			mat read #3,r3,260;a1$ 
+			if a1$[1,10] <> "AlLoCaTeD "
+				LOGMSG$ = "Record already in use: "+str$(r3)+" fatal error!!"
+				GOSUB DO_WRITE_LOG:
+				goto OUTEND:
+			end if
+			gosub ReadUsercntrl:
+			gosub WriteUsercntrl:
+			SEARCH #3,4,1;k2$,r3,e \ if e error 11000
+			if r4 <> r2 ! original rec # does not match new one
+				LOGMSG$ = "User: "+rtrim$(a1$[1,10])+" rec #: "+str$(r2)+" restored to: "+str$(r3)
+				GOSUB DO_WRITE_LOG:
+			end if
+		end if
+	loop
+return
+
+RestoreNewRecords: !
+	! Any new records added since original must be restored
+	LET LOGMSG$="Restore Newly Created Records"
+	GOSUB DO_WRITE_LOG:
+	LET CH=2 \ GOSUB GET_ACTIVE_RECS:
+	LET LOGMSG$="Estimated number of records to process: "+STR$(ACTRECS)
+	GOSUB DO_WRITE_LOG:
+	k2$ = " ",k2$
+	do
+		search #2,3,1;k2$,r2,e \ if e>2 error 11000
+		if e exit do
+		! see if this record existed originally
+		k4$ = k2$
+		search #4,2,1;k4$,r4,e \ if e>1 error 11000
+		if e
+			! record did not exist originally - so it's a new one
+			! see if we can keep it in the same slot
+			r3 = r2
+			mat read #3,r3,260;a1$ 
+			if a1$[1,10] <> "AlLoCaTeD "
+				! nope - in use, get a new one
+				LET E=2;R3=0
+				SEARCH #3,1,0;k2$,R3,E \ IF E error 11000
+			end if
+			gosub ReadUsercntrl:
+			gosub WriteUsercntrl:
+			SEARCH #3,4,1;k2$,r3,e \ if e error 11000
+			if r3 <> r2 ! new rec # could not be kept in some spot
+				LOGMSG$ = "User: "+rtrim$(a1$[1,10])+" rec #: "+str$(r2)+" moved to: "+str$(r3)
+				GOSUB DO_WRITE_LOG:
+			end if
+		end if
+	loop
+return
+
+CompressUserCntrl: !
+	! get rid of any unused records
+	LET LOGMSG$="Compressing usercntrl file"
+	GOSUB DO_WRITE_LOG:
+	tmp$ = " ",tmp$
+	for r3 = 1 to highestRec
+		mat read #3,r3,260;a1$ 
+		if a1$[1,10] = "AlLoCaTeD "
+			! not in use
+			LET E=3
+			SEARCH #3,1,0;tmp$,R3,E \ IF E error 11000
+		end if
+	next r3
+return
+
+VerifyUserCntrl: !
+	LET LOGMSG$="Verifying usercntrl file"
+	GOSUB DO_WRITE_LOG:
+	k2$ = " ",k2$
+	do
+		search #2,3,1;k2$,r2,e \ if e>2 error 11000
+		if e exit do
+		k3$ = k2$
+		search #3,2,1;k3$,r3,e
+		if e
+			LOGMSG$ = "Missing Record in new File: "+rtrim$(k3$)+" fatal error!!"
+			GOSUB DO_WRITE_LOG:
+			goto OUTEND:
+		end if
+		mat read #3,r3,260;a1$ 
+		if a1$[1,10] <> k3$[1,10]
+			LOGMSG$ = "Key Mismatch: "+rtrim$(k3$)+" REC: "+rtrim$(a1$[1,10])+" fatal error!!"
+			GOSUB DO_WRITE_LOG:
+			goto OUTEND:
+		end if
+	loop
+return
+
+
+ReadUsercntrl: !
+	mat read #2,r2,0;a1
+	mat read #2,r2,200;a2
+	mat read #2,r2,212;a0$
+	mat read #2,r2,260;a1$
+	mat read #2,r2,300;a4
+	mat read #2,r2,336;a2$
+	mat read #2,r2,386;uc_a5
+	mat read #2,r2,408;a3
+	mat read #2,r2,600;a3$
+	mat read #2,r2,630;slsmcode
+	mat read #2,r2,650;comedit
+	mat read #2,r2,652;ucf$
+return
+
+WriteUsercntrl: !
+	mat write #3,r3,0;a1
+	mat write #3,r3,200;a2
+	mat write #3,r3,212;a0$
+	mat write #3,r3,260;a1$
+	mat write #3,r3,300;a4
+	mat write #3,r3,336;a2$
+	mat write #3,r3,386;uc_a5
+	mat write #3,r3,408;a3
+	mat write #3,r3,600;a3$
+	mat write #3,r3,630;slsmcode
+	mat write #3,r3,650;comedit
+	mat write #3,r3,652;ucf$
+return
+
+DO_EXIT: REM---------------- Exit the upgrade -----------------------------------
+LET E=0
+GOTO OUTEND:
+
+DO_BACKUP: REM"Backup the given file
+CALL "sysfbackup",FCODE$,COID,GROUPID,ORIG$,DBAK$,OWRITE$,MODE,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+IF E GOTO OUTEND:
+RETURN 
+
+DO_BUILD: REM"Build the given file
+CALL "Sysfbuild",FCODE$,COID,GROUPID,PTH$,OWRITE$,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+IF E GOTO OUTEND:
+RETURN 
+
+include "src/rtn.pmupgrade.i"
+
+
+OUTEND: REM"Final exit (be sure to set e=0 if successful before branching here)
+try CLOSE #1 Else Rem
+try Close #2 Else Rem
+try Close #3 Else Rem
+try close #4 Else Rem
+try close #5 Else Rem
+try close #6 Else Rem
+try close #7 Else Rem
+END 
+else ! main try
+	e = spc(8)
+	If Spc(8) <> 10000
+		dim msc4$[100] \ msc4$=msc$(4)
+		if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+		call env(2,"PROGNAME",msc4$)
+		if spc(8) = 11000
+			call utilsearcherr(e$, e, Spc(10))
+		else
+			Call utilsuberr(e$,Spc(8),Spc(10),Msc$(2))
+		end if
+		call programdump()
+	End If
+	Call utilmainerr(e$,Spc(8))
+	If ch_log <> -1
+		Print #ch_log;e$
+	End If
+end try

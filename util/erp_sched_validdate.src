@@ -1,0 +1,252 @@
+!
+! loadsave -w -n 100,10 -o prog/util/erp_sched_validdate.dl4 src/erp_sched_validdate.src
+!
+! Based on "validdate" routine - used for ERP Scheduler.  Accepts arguments from
+! the command line as to which date in question is requested and returns
+! the appropriate date if it falls on a weekend or holiday.
+!
+! Must be run via cron_wrapper.sh as this sets the environment and the company
+!
+! Command line ARGS: company, date (MMDDYY), warehouse (optional), division (optional)
+!
+! Outputs resulting date in MMDDYY format
+!
+
+include "src/utilcopyright.inc"
+
+Declare Intrinsic Sub DateToJulian,JulianToDate
+
+External Lib "utillib.lib"
+Declare External Function ParseArguments
+
+Declare Sub GetControl,CheckWeekend,CheckHoliday,CheckClose
+Declare Sub HolidayErrorSetDate,CloseErrorSetDate
+Declare Function GetCommandParameters
+
+!
+! M A I N   L O G I C
+!
+try ! main try
+dim args$[5,80]
+
+Dim 1%,CH_CNTRL,BOGUS,ALWAYSBACK,HOLIERR,CLOZERR,DIRFROM
+Dim 1%,VDAY[6],ADAY[6],DOW,DOW1,INDX,ADJHOLIDAY,ADJCLOZ
+Dim 2%,HOLIDAY[19],CLOZ1[1],CLOZ2[1],CLOZNUM[1]
+Dim 3%,VDSCR,SCRDATE
+Dim SCRATCH$[80],X$[80],D2$[10],RSLTDT$[10]
+Dim HOLIDAY$[400],CLOZ$[40],CLOZCODE$[2],X1$[50],e$[300],tmp$[100]
+
+dim 1%,wh,div
+dim 3%,vdate
+dim 3%
+
+if not(GetCommandParameters()) goto OutEnd
+ropen #1,intco using "cntrl/cntrl#"
+
+DOW1 = SCRDATE Mod 7
+STAT = 0
+call GetControl()
+call CheckWeekend()
+If STAT > -2
+	call CheckHoliday()
+	call CheckClose()
+End If 
+! convert from ddddd to YYMMDD
+SCRATCH$ = SCRDATE Using "######"
+Call JulianToDate(1,SCRATCH$,RSLTDT$,E)
+SCRATCH$ = RSLTDT$[1,2]+RSLTDT$[4,5]+RSLTDT$[7,8]
+VDATE = SCRATCH$
+
+! end result
+print VDATE using "&&&&&&"
+
+OUTEND: Rem"========= exit
+End
+else ! MAIN try statment
+	include "src/utilcallmainerr.inc"
+end try
+
+!-----------------------------------------------------------------------
+! subroutines and functions
+!-----------------------------------------------------------------------
+Function GetCommandParameters()
+try
+	argc = ParseArguments(e$,args$[], msc$(4))
+	if argc<1 or argc>3
+		print "erp_sched_validdate: Invalid number of arguments.  Exiting."
+		exit function 0
+	end if
+	call env(1,"ERP_COMPANY",tmp$)
+	intCo = tmp$
+	if intCo < 1 or intCo > 99
+		print "erp_sched_validdate: Invalid company number.  Exiting."
+		exit function 0
+	end if
+	ALWAYSBACK = 0 ! hold over from original programming, not supported
+	vdate = args$[1]
+	tmp$ = VDATE Using "&&&&&&"
+	! MMDDYY -> YYMMDD
+	scratch$ = tmp$[5,6]+tmp$[1,4]
+	Call DateToJulian(1,SCRATCH$,X$,STAT)
+	if STAT
+		print "erp_sched_validdate: Invalid date. Exiting."
+		exit function 0
+	end if
+	SCRDATE = X$
+	if argc>=2
+		WHSE = args$[2]
+		if whse<0 or whse>99
+			print "erp_sched_validdate: Invalid warehouse. Exiting."
+			exit function 0
+		end if
+	end if
+	if argc=3
+		DIV = args$[3]
+		if div<0 or div>9999
+			print "erp_sched_validdate: Invalid division. Exiting."
+			exit function 0
+		end if
+	end if
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Function 1
+
+Sub GetControl()
+try
+	Mat Read #1,175,0;VDAY;
+	Mat Read #1,175,14;ADAY;
+	Mat Read #1,175,28;CLOZ1;
+	Mat Read #1,175,36;CLOZ2;
+	Mat Read #1,175,44;CLOZ$;
+	Mat Read #1,175,84;CLOZCODE$;
+	Mat Read #1,175,86;CLOZNUM;
+	Mat Read #1,175,94;ADJCLOZ;
+	Mat Read #1,179,0;HOLIDAY;
+	Mat Read #1,179,80;HOLIDAY$;
+	Mat Read #1,179,480;ADJHOLIDAY;
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+Sub  CheckWeekend()
+try
+	WKEND_LOOP: Rem
+		DOW = SCRDATE Mod 7
+		If VDAY[DOW]
+			BOGUS = 0
+		Else 
+			BOGUS = BOGUS + 1
+			If HOLIERR Or CLOZERR
+				call HolidayErrorSetDate()
+			Else 
+				STAT = -1
+				If ADAY[DOW] Or ALWAYSBACK
+					SCRDATE = SCRDATE - 1
+				Else 
+					SCRDATE = SCRDATE + 1
+				End If 
+			End If 
+		End If 
+		If BOGUS And BOGUS < 7 Goto WKEND_LOOP
+	END_WKEND_LOOP: Rem
+	If BOGUS > 6
+		STAT = -3
+	End If 
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+sub CheckHoliday()
+try
+	CHECK_HOLIDAY: !
+	HOLIERR = 0
+	For INDX = 0 To 19
+		If HOLIDAY[INDX] And SCRDATE = HOLIDAY[INDX]
+			If Not(STAT) Let STAT = INDX + 1
+			HOLIERR = 1
+			If DIRFROM < 1 Let DIRFROM = 1
+			call HolidayErrorSetDate()
+			call CheckWeekend()
+			Goto CHECK_HOLIDAY
+		End If 
+	Next INDX
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+sub CheckClose()
+try
+	CHECK_CLOZ: Rem
+	HOLIERR = 0;CLOZERR = 0
+	X1$ = CLOZCODE$[1,1]
+	If X1$ = "C" Or (X1$ = "W" And CLOZNUM[0] = WHSE) Or (X1$ = "D" And CLOZNUM[0] = DIV)
+		If CLOZ1[0] And CLOZ1[1]
+			If SCRDATE >= CLOZ1[0] And SCRDATE <= CLOZ1[1]
+				CLOZERR = 1
+				If DIRFROM < 2 Let DIRFROM = 2
+				If Not(STAT) Let STAT = 1001
+				If ADJCLOZ Or ALWAYSBACK
+					SCRDATE = CLOZ1[0]
+				Else 
+					SCRDATE = CLOZ1[1]
+				End If 
+			End If 
+		End If 
+	End If 
+	X1$ = CLOZCODE$[2,2]
+	If X1$ = "C" Or (X1$ = "W" And CLOZNUM[1] = WHSE) Or (X1$ = "D" And CLOZNUM[1] = DIV)
+		If CLOZ2[0] And CLOZ2[1]
+			If SCRDATE >= CLOZ2[0] And SCRDATE <= CLOZ2[1]
+				CLOZERR = 2
+				If Not(STAT) Let STAT = 1002
+				If ADJCLOZ Or ALWAYSBACK
+					SCRDATE = CLOZ2[0]
+				Else 
+					SCRDATE = CLOZ2[1]
+				End If 
+			End If 
+		End If 
+	End If 
+	If CLOZERR
+		call CloseErrorSetDate()
+		call CheckWeekend()
+		call CheckHoliday()
+		Goto CHECK_CLOZ
+	End If 
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+sub HolidayErrorSetDate()
+try
+	If CLOZERR
+		call CloseErrorSetDate()
+	Else 
+		If ADJHOLIDAY Or ALWAYSBACK
+			SCRDATE = SCRDATE - 1
+		Else 
+			SCRDATE = SCRDATE + 1
+		End If 
+	End If 
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+sub CloseErrorSetDate()
+try
+	If ADJCLOZ Or ALWAYSBACK
+		SCRDATE = SCRDATE - 1
+	Else 
+		SCRDATE = SCRDATE + 1
+	End If 
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+

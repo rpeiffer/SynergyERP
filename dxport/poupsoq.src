@@ -1,0 +1,1423 @@
+! >>> Program POUPSOQ 
+!
+! description - PO RTS Update Sales Order Qty 
+!
+! loadsave -w -n 100,10 -o prog/dxport/poupsoq.dl4 src/poupsoq.src 
+! 1.0 mm/dd/yyyy change??
+!
+! ERPScheduler Enabled
+!
+include "src/copyright.inc"
+! POUPSOQ - PO RTS Update Sales Order Qty
+! cct 161949 - bosworth
+! Last Update: 12/02 - Decided to add to qty Shipped and only update
+!              IF the Backorder field not equal to 0
+!              This way, multiple rts during the day are not lost.
+! Start off from SWAP 2 ONLY - we open what's needed here!
+! ALL we need passed is the R1[] variable from 374
+! All we're doing here is updating Qty on Non-stock
+! Added to Update Sproddesc file - as that is done in MXLine.
+! PO Line to Sales Order, then swapping to total program
+! MX031D - as it's easier than going to "Ordertotal"
+! 05/2005 - add check of any OT 9 to see if "complete"
+! add custom changes as done on htberry.r10 (does stk&non-stk items (only non-inv flag))
+! add task 4469 changes for htberry.r10
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: OCT  5, 2006  09:44:38
+Rem /w2/papermaster/r2005//usr/acct/dave/work/r2005/po/poupsoq.src (univ2) [dave] {00238}
+Rem  Copyright (c) 2006 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+
+include "src/inc/fileporelease.inc"
+include "src/inc/fileedittrack.inc"
+Declare Intrinsic Sub DateToJulian,FindF,FormatDate,InpBuf,Logic,String,Time,VerifyDate
+Declare Intrinsic Sub dxopen,dxget,dxset,dxclose,dxsave,getglobals
+!Option Default Dialect IRIS1
+Declare Intrinsic Sub DateToJulian
+Declare Intrinsic sub programdump,env
+Declare Intrinsic function findchannel
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Function getmsg$,expandarray
+External Lib "ubsfunc.dl4"
+Declare External Function getuidrec,getuidinfo$,OpenFile
+External Lib "libedittrack.lib"
+Declare External Sub MakeEdittrack
+External Lib "librasl.lib"
+Declare External Sub chkwhrasl
+OPTION GOSUB NESTING 16  ! Default is 8
+
+Try
+! If Err 0 Gosub ERR_TRAP
+
+Enter CCHAN[],R1[],e$,IntCo,rstr$
+Dim 2%,S9[9],R5,3%,CFIN[8],PASSINFO[9]
+!If Err 0 Gosub ERR_TRAP
+! If Not(R1[8]) And Not(R1[9]) Goto OUTEXIT
+!
+dim 1%,maxstat
+Dim po$[66],p1$[6],SS0$[36],SOL2$[16]
+dim workkey$[80],workkey1$[80],sord_key$[80],sprod_key$[80],ol1$[20]
+dim 3%,otype,prec[3],LDSTAT[2]
+dim 3%,wh
+Dim 1%,p1[1],P4,SOL1[3],rasl[5],pomisc[2]
+Dim 2%,SOL2[3],OL2[1],P2[2]
+Dim 3%,p3[4],PLTR,sol3[5],ResStkAmt,QtyAllocated
+dim 3%,rec_work
+Dim keysot$[10],1%,ch_sot,ot2[15],3%,rec_sot,2%,lc0[1]
+DIM 3%,ORGLOADCOST,NEWLOADCOST
+
+Rem {begin src/inc/dim.prod.i}
+dim 1%,ch_prod,3%,rec_prod
+Dim pr_A$[156],HZ$[90],PR_A2$[30],C1$[32],PSN$[20],U3$[60]
+Dim PRFLG$[10],PRMKUPTYP$[4],PIC$[50],PRIML$[12]
+Dim 1%,LLC,PFTB[3],PFU1[20],LM[1],UPCT,PR_PO[1]
+Dim 1%,PRBASE,PRPARC2[3],PRD1[4],AGEDAY
+Dim 2%,A2,A3[2],B[24],PR_C4[10],PFCO[3],PLC[3],PSN[1],U2,U4[1]
+Dim 2%,STK[2],FDT[1],PRMKUP[3],PRD0[2]
+Dim 3%,A1[7],A[33],PF_LOAD2,PFU2[6],PLV[1],PRPARC[3],U3,PFN[1]
+Dim 3%,LBSORD,FUT[1],PRREDI[1],PRD2[3]
+Rem {end dim.prod.i}
+
+Rem {begin src/inc/dim.prwh.i}
+dim 1%,ch_prwh,3%,rec_prwh,Key_prwh$[16]
+Dim W1$[32],WH3$[24],WHFLG$[10],WHMKUPTYP$[4],WCOMM$[4]
+Dim 2%,W2[9],W7[14],WH7[3],WHLPOOL,WHFDT[1],WHMKUP[3]
+Dim 1%,W0[3],W1[2],WH8[47],WHPARC[5],WHRPLN,WHLM[1],FCWGT
+Dim 1%,RESTRICTED,WHBASE,WHPARC2[3]
+Dim 3%,W3[24],W5[25],WH9[25],WHLV[2],WHMISC[6],WHMISC2[7]
+Dim 3%,WHFUT[2],VLIST,WHREDI[1],WHLBS[1]
+!
+Dim K1$[50],FLE$[20],S2$[20],T2$[8],A$[40],X$[10],s1$[118]
+Dim P61$[256],CSZONE$[2],P9$[50],l1$[20]
+dim msg$[100],p60$[50]
+dim 1%,chan[50]
+dim 1%,holdcodeflag[12],oldholdcodeflag[12]
+dim 3%,orgcost,orgamt,orgfreight,orgother,tmp3,orgshipamt
+Dim 1%,PL1[5],OL3[3],S2[1],UN[2],H4[2],X1[9]
+DIM 1%,PCHAN[99],fchan[5]
+Dim 2%,H0[12],H5[16],OL4[3],OL6[5],VDATE,JDATE[5],DT3[1],X2[9],PARAM[4]
+Dim 2%,PL2[2],flags[16]
+Dim 3%,PL4[23],PL3[6],OL5[3],OS3[17],OLM[6],R[9],NOVALIDDATE
+Dim 3%,OL7[12],QTYRECV,NETCOST[2],UNF[6],L8[4],SRN[5]
+dim 3%,PARM[20],oref[5]
+Dim 1%,DCLVL,MCTXBL[9]
+Dim 2%,MCODE[9],T1[1]
+Dim 3%,MCHARGE[9,1],T2[25],TOT[4],PONUM
+Dim DEV$[20],HM$[30],nextblockid$[8],Message$[600],WebStr$[600]
+Dim buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp$[800],tmp1$[200],blockid$[100],msg$[100]
+Dim action$[30],options$[30],userid$[8],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+Dim keypor$[50],mode$[3],shipkey$[50],custom_customer$[30]
+Dim POR. as porelease
+Dim etr. as edittrack
+
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) / 100)
+! parameter sents
+!CHan[1] = ctlc ! CONTROL FILE             
+!CHan[2] = ch_poh ! purchase order header
+!CHan[3] = ch_poL ! purchase order line
+!R1[0] = SOURCE (371=RECEIPT TO STOCK)
+!R1[8]  = rec_poh  ! Purchase Order Header Rec#
+!R1[9]  = REC_POL  ! Purchase Order Line #
+
+
+! X2 = Spc(5);COID = Int((X2 - Int(X2 / 16384) * 16384) / 64)
+! FLE$ = "CNTRL" + Str$(COID)
+! Open #1,FLE$
+! 
+! #1 - cntrl                     --- sent over in CChan[1]
+! #2 - poheader - not used -2416 --- sent over in CChan[2]
+! #3 - poline    -2432           --- sent over in CChan[3]
+! #4 - customer  -1808
+! #5 - roh        1840
+! #6 - rol	  1888
+! #7 - SPRODDESC  2128
+! #8 - ROS        1856
+! #9 - ZONEFLE	  1920
+! #10 - product   1792
+! #11 - rot		  1872
+! #12 - prodwhse	1744
+! #13 - prodlot   2528
+! #14 - sordlot	  2320
+! #15 - cpidet
+! #16 - ch_sot
+!-------------------------------------------------------
+! openfiles 
+for ctr=1 to 20
+	let chan[ctr]=cchan[ctr]
+next ctr
+if not (Cchan[1]) ! cntrl file
+	CHAN[1] = OpenFile(9999,intCo) \ If cCHAN[1] = -1 Error 42 !control 
+endif
+Mat Read #chan[1],19,50;P9$;
+Mat Read #chan[1],61,0;P61$;
+if not (Cchan[2]) ! purchase order header  
+	 CHAN[2] = openfile(2416,intCo) \ If CHAN[2]= -1 Error 42     !"po header file
+endif
+if not (Cchan[3]) ! po lines 
+	CHAN[3] = openfile(2432,intCo) \ If CHAN[3] = -1 Error 42     !"po lines file
+endif
+If not (Cchan[4]) ! customer file
+	cHAN[4]=OpenFile(1808,intCo) \ If ChAN[4] = -1 Error 42 ! customer file
+endif
+if not (Cchan[5]) ! order header 
+	 Chan[5] = openfile(1840,intCo) \ If Chan[5]= -1 Error 42     !order  header file
+endif
+if not (cchan[6]) ! order lines 
+	chan[6]=OpenFile(1888,intCo) \if Chan[6] = -1 Error 42 ! order line
+endif
+if not(cchan[7]) ! proddesc - nonstock sales order
+	chan[7]= OpenFile(2128,IntCo) \ if chan[7] = -1 Error 42 ! non-stock lines ! Orders
+endif
+if not(cchan[8])
+	chan[8] = OpenFile( 1856 ,IntCo) \ if chan[8] = -1 Error 42 ! ros
+endif
+if not (cchan[9]) ! zone
+	Chan[9] = openfile(1920,intCo) \ If Chan[9]= -1 Error 42     
+endif
+if not (cchan[10]) ! product file 
+	 Chan[10] = OpenFile(1792,intCo) \ If Chan[10] = -1 Error 42  !product file 
+endif
+If not (cchan[11]) ! order total
+	 Chan[11] = openfile(1872,intCo) \ If Chan[11] = -1 Error 42     !"order total file
+endif
+if not (cchan[12]) ! product warehouse 
+	Chan[12] = OpenFile(1744,intCo) \ If Chan[12] = -1 Error 42  !"product warehouse file
+endif
+if not(cchan[13]) ! sprodlot
+	chan[13] = OpenFile( 2528 ,IntCo) \ if chan[13] = -1 Error 42 
+endif
+if not(cchan[14]) ! sordlot
+	chan[14] = OpenFile( 2320 ,IntCo) \ if chan[14] = -1 Error 42 
+endif
+if not(cchan[15]) ! cpidet
+	if p61$[111,111] = "Y" ! CPI FLAG
+		ch_cpidet = OpenFile(9928,IntCo) \ if ch_cpidet = -1 error 42
+		let chan[15]=ch_cpidet
+	endif
+endif
+if not(cchan[16])
+	ch_sot = OpenFile(-10108,IntCo) \ if ch_sot = -1 error 42
+	let chan[16]=ch_sot
+endif
+
+
+
+
+!For X = 4 To 14
+! Read J1 \ If J1 = -1 Goto NXTFLE
+!  CHNL = Findchannel()
+!  CHAN[X]=CHNL
+!  Read #chan[1],88,Abs(J1);FLE$[1,16];
+!  If J1 >= 0 Open #CHNL,FLE$ Else Ropen #CHNL,FLE$
+!NXTFLE: Next X
+!Data "1808","1840","1888","2128","1856","1920","1792","1872","1744","2528","2320"
+
+
+!if p61$[111,111] = "Y" ! CPI FLAG
+!	ch_cpidet = OpenFile(9928,IntCo) \ if ch_cpidet = -1 error 42
+!END IF
+!ch_sot = OpenFile(-10108,IntCo) \ if ch_sot = -1 error 42
+
+Mat Read #chan[1],60,50;P60$;
+Let RASL=0 \ If P9$[41,41]="Y" Or P9$[41,41]="W" Let RASL=9
+if p61$[86,86]<>"B" and p61$[86,86]<>"S" and p61$[86,86]<>"N"
+	let p61$[86,86]="N"
+endif
+mat read #Chan[1],115,60;custom_customer$;
+Custom_customer$=UCase$(Trim$(custom_customer$))
+!-------------------------------------------------------
+STARTHERE: Rem "read POL
+NOVALIDDATE = 0
+Mat Read #chan[3],R1[9],0;PL1;
+Mat Read #chan[3],R1[9],12;PL2;
+Mat Read #chan[3],R1[9],24;PL3;
+Mat Read #chan[3],R1[9],232;PL4;
+Mat read #chan[3],r1[9],376;pomisc;
+Mat Read #chan[3],R1[9],542;PONUM;
+
+If PL4[10] = 0 Or PL4[11] = 0 Goto OUTEND
+IF P61$[117,117]="Y" and r1[0]=371
+	!if pl3[4]<=0 goto outend:
+else
+	If PL3[4] <= 0 Goto OUTEND
+endif
+X2 = pl1[3]! ! REM UNPACK pol.Flags TO FLAGS[x]  
+For K = 0 To 11                                      
+  flags[K] = Sgn(Fra(X2 / 2)) \ X2 = Int(X2 / 2)     
+Next K                                               
+nonstk = flags[0] 
+if nonstk<>0
+	if p61$[86,86]="S" goto outend: ! updating stock only
+else
+	if p61$[86,86]="N" goto outend: ! updating non-stock only
+endif
+Closedshort = flags[1]                               
+zline = flags[2]                                     
+closed = 0                                           
+If pl1[0] = 3 Let closed = 99                    
+If pl1[0]= 7 Let closed = 99                    
+QTYRECV = PL3[4]
+let maxstat=1
+if nonstk<>0 
+	if p61$[91,91]="Y" let maxstat=5
+endif
+ 
+For X = 1 To 7  ! was to 4 increased to 5 task 47047
+  K1$ = " ",K1$
+  K1$[1,2] = X Using "##"
+  K1$[3] = PL4[10] Using "######"
+  Search #chan[5],2,1;K1$,R[5],E \ If E = 0 Goto GOTORDER
+  If E > 1 Gosub ERR_SEARCH
+  IF X>=7 and x< 90 LET X=90   ! BYPASS CREDITS
+  IF X=92 LET X=94 ! BYPASS 93 IN CM JOURNAL
+  IF X=96  LET X=98! BYPASS 97 CM PROC ERP";
+Next X
+Goto OUTEND
+!-------------------------------------------------------
+GOTORDER: Rem "found sales order - get line
+Mat Read #chan[5],R[5],0;H0;
+Mat Read #chan[5],R[5],78;H4;
+Mat Read #chan[5],R[5],104;H5;
+mat read #Chan[5],r[5],512;oref;
+mat read #chan[8],h0[2],8;s1$;
+Mat Read #chan[8],H0[2],126;S2$;
+Mat Read #chan[8],H0[2],154;SRN;
+mat read #chan[11],h0[3],8;T2;
+let ordstatus=h0[0]
+If p61$[117,117] = "Y" And H5[7]=2 AND R1[0]<>371
+	if h0[0]<5 GOTO OUTEND: ! Updates are at receipts to stock entry time
+	if h0[0]>7 goto outend:
+endif
+IF H5[7]<>2 AND PL3[4]<=0 GOTO OUTEND:  
+let ordstatus=h0[0]
+if h0[0]>6 goto outend:
+let maxstat=1 ! for all order type except for direct order type
+if nonstk<>0  ! for nonstock items
+	if h0[0]>6 goto outend:
+	let maxstat=1
+endif
+if h5[7]=2  if h5[7]=3 And p60$[22,22] <> "Y"! directs 
+	if h0[0]>6 goto outend: ! never create a new order for a direct
+	let maxstat=6
+	goto chkordstat:
+endif
+if h5[7]=3 And p60$[22,22] <> "Y"! directs ! treat as directs
+	if h0[0]>6 goto outend: ! never create a new order for a direct
+	let maxstat=6
+	goto chkordstat:
+endif
+if not(nonstk) ! stock item
+	if h0[0]>4 goto outend: ! stock item and status is greater than 4 bypass
+	let maxstat=1 ! all stock item update the sales order on status 1
+endif
+if h0[0]=1
+	let tmp3=s1$[118,118]
+	if tmp3>1 let ordstatus=2 ! on picklist, need to create the backorder sales order treat like order status 2
+endif
+chkordstat: ! check order status for backorder
+if ordstat>maxstat ! (status 6 for directs, 1 for all other order types)
+	porup=0
+	Gosub Write_PORelease: !
+	Goto outend
+!	endif
+endif
+let keysot$=h5[7] using "##"
+search #ch_sot,2,1;keysot$,rec_sot,e
+if e<>0
+	let ot2[12]=0
+else
+	mat read #ch_sot,rec_sot,32;ot2;
+endif
+etr.Status=h0[0]
+K1$ = " ",K1$;K1$ = H0[4] Using "######"
+Search #chan[4],2,1;K1$,R[4],E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Goto OUTEND
+Mat Read #chan[4],R[4],544;CFIN;
+R5 = R[4]
+K1$ = " ",K1$;K1$[1,6] = H0[7] Using "######"
+K1$[7] = PL4[11] Using "###"
+Search #chan[6],2,1;K1$,R[6],E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Goto OUTEND
+Mat Read #chan[6],r[6],0;Ol2;
+Mat Read #chan[6],R[6],8;OL3;
+Mat Read #chan[6],R[6],16;OL4;
+Mat Read #chan[6],R[6],32;OL5;
+Mat Read #chan[6],R[6],56;OL6;
+Mat Read #chan[6],R[6],140;OL1$;
+mat read #chan[6],r[6],140;l1$;
+Mat Read #chan[6],R[6],168;OL7;
+Mat Read #chan[6],R[6],250;UN;
+Mat Read #chan[6],R[6],256;S2;
+Mat Read #chan[6],R[6],260;OS3;
+Mat Read #chan[6],R[6],404;OLM;
+Mat Read #chan[6],R[6],452;UNF;
+mat read #chan[6],r[6],494;lc0;
+if p61$[117,117]="Y" and r1[0]=371 ! for directs only
+	! If h5[7]<>2 goto outend: ! directs only
+	if s2[0]<>0 goto outend: ! no message lines
+	IF NOT(OL7[3]) and OL7[4]=QTYRECV GOTO OUTEND: ! no back order - qty recvd=qty ship
+	if not(ol3[0]) and OL3[1]<>pomisc[0] !GOTO OUTEND: ! stock item not update stock
+		if not(pomisc[0]) let ol3[1]=pomisc[0] ! set stock update to the same as po ! only update stock update n
+	endif
+	goto updateso:
+endif
+if custom_customer$<>"HTBERRY"
+	if p61$[86,86]="B" or p61$[86,86]="S"
+		wh=ol4[3]\if not (wh) let wh=h4[2]
+		CH_WHI=0 ! set warehouse info channel to 0 to open in call
+		If P9$[41,41]="W" !Call "CHKWRASL",WH,RASL[]
+			Call ChkWhRasl(e$,intco,CH_CNTRL,cH_WHI,Wh,RASL[])
+		ENDIF
+		goto updateso:
+	endif
+	IF P61$[86,86]="S" ! stock only
+		If OL3[0]<>0 Goto OUTEND ! std = only nonstks
+	endif
+	if p61$[86,86]="N" ! nonstock only
+		If Not(OL3[0]) Goto OUTEND ! std = only nonstks
+	endif
+Else ! on berry above is rem'd & below is added
+	if ol3[1] Goto OutEnd: ! "only item not coming from inventory
+Endif
+updateso: ! update the sales order
+If S2[0] Goto OUTEND
+etr.OrgQtyOrd=ol7[2]
+etr.OrgQtyShip=ol7[4]
+etr.OrgQtyBO=ol7[3]
+if ol3[1]<>pomisc[0]
+	if not(pomisc[0]) let ol3[1]=pomisc[0] ! set stock update to the same as po
+endif
+
+IF P61$[117,117]="Y" and R1[0]=371 ! DIRECTS UPDATE SALES ORDER
+	let prevqty=0
+	if ol7[4]<>0 ! qty shipped <>0 
+		if pl3[3]<>0 ! has a shipped qty and prev received amount
+			let prevqty=pl3[3]-ol7[0] ! previously received - previously shipped
+			if prevqty<0 let prevqty=0
+		endif
+	endif
+	IF OL7[3]<>0 ! BACKORDER
+		If QtyRecv> OL7[3] ! "recv more than backorder
+			if not (ol3[0]) and ol3[1]<>0 ! if stock item update only what back ordered and stock update flag is set to N
+				qtyrecv=ol7[3] + ol7[4] ! stock item set to the backorder plus what is already being shipped
+				ol7[3]=0
+			else
+				!If P9$[20,20]<>"F" Let QtyRecv=OL7[3] ! "Not FinePaper - NO OVERSHIP - SHIP WHAT BO
+				!Let OL7[3]=0
+				if ol7[4]<>0 ! has a ship qty
+					let ol7[3]=ol7[2]-ol7[0]-qtyrecv-prevqty ! backorder is qty order- qty prev ship - qtyrecv
+				else
+					LET OL7[3]=OL7[3]-QTYRECV
+				endif
+				if ol7[3]<0 let ol7[3]=0
+			end if
+  		Else ! "did not recv all
+				if ol7[4]<>0
+					let ol7[3]=ol7[2]-ol7[0]-qtyrecv-prevqty ! backorder is qty order- qty prev ship - qtyrecv
+				else
+					Let OL7[3]=OL7[3]-QtyRecv
+				endif
+				if ol7[3]<0 let ol7[3]=0
+ 		Endif
+			! LET OL7[3]=OL7[3]-QTYRECV
+			IF OL7[3]<0 LET OL7[3]=0
+			LET OL7[4]=QTYRECV+prevqty
+			IF CLOSEDSHORT LET OL7[3]=0
+			IF CLOSED<>0 LET OL7[3]=0
+			IF (L3[3]+L3[4])<(L3[2]+PL4[1])! IF (pL3[3]+pL3[4])<(pL3[2]+PL4[1]) *** leave with bad variables
+				if not(closedshort)
+					let ol7[3]=(Pl3[2]+pl4[1])-(Pl3[3]+Pl3[4])
+					if ol7[0]<>0
+						let ol7[3]=ol7[2]-ol7[0]-qtyrecv-prevqty
+						if ol7[3]<0 let ol7[3]=0
+					endif
+				endif
+			endif
+			let ol7[4]=qtyrecv+prevqty
+			if not (ol7[3])
+				IF (PL3[3]+PL3[4])<(PL3[2]+PL4[1])
+					if not(closedshort)
+						let ol7[3]=(PL3[2]+pl4[1])-(PL3[3]+PL3[4])
+						if ol7[0]<>0
+							let ol7[3]=ol7[2]-ol7[0]-qtyrecv-prevqty
+							if ol7[3]<0 let ol7[3]=0
+						endif
+					endif
+				endif
+			endif
+			If Not(OL3[0]) and ol3[1]<>0 ! "only Stocks items/stock update is set to yes
+				wh=ol4[3]\if not (wh) let wh=h4[2]
+				gosub update_prod:
+				gosub update_prwhse:
+				if P61$[111,111] = "Y" and OLM[2] GOSUB UPDATE_CPI
+				gosub update_sprodlot:
+				gosub update_sordlot:
+			end if!!!!
+			GOTO UPDATETOTAL:
+		ELSE
+			if ol7[4]>qtyrecv
+				let ol7[3]=ol7[4]-qtyrecv-prevqty
+				if ol7[0]<>0
+					let ol7[3]=ol7[2]-ol7[0]-qtyrecv-prevqty
+					if ol7[3]<0 let ol7[3]=0
+				endif
+				if closedshort<>0 let ol7[3]=0
+				let ol7[4]=qtyrecv
+			else
+				let ol7[4]=qtyrecv
+				let ol7[3]=0
+			endif
+			IF (PL3[3]+PL3[4])<(PL3[2]+PL4[1])
+				if not(closedshort)
+					let ol7[3]=(PL3[2]+pl4[1])-(PL3[3]+PL3[4])
+					if ol7[0]<>0
+						let ol7[3]=ol7[2]-ol7[0]-qtyrecv-prevqty
+						if ol7[3]<0 let ol7[3]=0
+					endif
+				endif
+			endif
+			If Not(OL3[0]) and ol3[1]<>0! "only Stocks items
+				wh=ol4[3]\if not (wh) let wh=h4[2]
+				gosub update_prod:
+				gosub update_prwhse:
+				if P61$[111,111] = "Y" and OLM[2] GOSUB UPDATE_CPI
+				gosub update_sprodlot:
+				gosub update_sordlot:
+			end if!!!!
+			GOTO UPDATETOTAL:
+		endif
+endif
+If OL7[3]<>0 ! "have a backorder
+	If QtyRecv>OL7[3] ! "recv more than backorder
+		if custom_customer$="HTBERRY"
+			let ol7[3]=ol7[3]-qtyrecv  !"task#4469
+			!PRINT @0,23;'CL';"Shipping qty updated for the sales order ";pl4[10];" line  ";pl4[11];" !!!";
+			!SIGNAL 3,30 
+			if ol7[3]<0 Let OL7[3]=0 ! overship = no more bo
+		else
+			if not (ol3[0])! if stock item update only what back ordered
+				qtyrecv=ol7[3]
+				!let dostat=h0[0]
+				!IF DOSTAT=1 LET ol7[3]=0
+			else
+				!  If P9$[20,20]<>"F" Let QtyRecv=OL7[3] ! "Not FinePaper - NO OVERSHIP - SHIP WHAT BO  *** mtg 
+				Let OL7[3]=0
+			end if
+		endif
+  	Else ! "did not recv all
+		Let OL7[3]=OL7[3]-QtyRecv
+		if ol7[0]<>0
+			let ol7[3]=ol7[2]-ol7[0]-qtyrecv-prevqty
+			if ol7[3]<0 let ol7[3]=0
+		endif
+ 	 Endif
+Else ! "no backorder - no update 12/20/02.
+  Goto OutEnd:
+Endif
+If Not(OL3[0]) and OL3[1]<>0 ! "only Stocks items
+	wh=ol4[3]\if not (wh) let wh=h4[2]
+	gosub update_prod:
+	gosub update_prwhse:
+	if P61$[111,111] = "Y" and OLM[2] GOSUB UPDATE_CPI
+	gosub update_sprodlot:
+	gosub update_sordlot:
+end if!!!!
+OL7[4] = OL7[4] + QTYRECV
+OL7[3] = OL7[2] - OL7[0] - OL7[4]
+If OL7[3] < 0 Let OL7[3] = 0
+! If P9$[20,20] = "F" And (OL7[4] + OL7[3]) > OL7[2] Let OL7[2] = OL7[4] + OL7[3]  !!!!  mtg
+if (OL7[4] + OL7[3]) > OL7[2] Let OL7[2] = OL7[4] + OL7[3]  !!!!  mtg
+if custom_customer$="HTBERRY" ! custom
+	if (OL7[4]+OL7[3])>OL7[2] Let OL7[2]=OL7[4]+OL7[3]  !"task#4469
+Endif
+updatetotal: ! 
+	etoqty[0]=ol7[2]   
+	etoqty[1]=ol7[4]   
+	etoqty[2]=ol7[3]   
+If Not(UNF[5]) Let UNF[5] = 1
+OS3[4] = FNR(Abs((OL6[4] * OL7[4]) / UNF[5]))
+ORDWT = (OL6[4] * OL7[2]) / UNF[5]
+If OS3[11] = -3 And OL7[2] Let CHBASE = (OS3[1] / OL7[2]) Else Let CHBASE = OS3[1]
+NETCOST[0] = OL5[1] + CHBASE
+OL5[0] = FNR(OL7[2] * OLM[3])
+OS3[13] = FNR(OL7[2] * NETCOST[0])
+If H5[7] = 4 Or H5[7] = 15 ! "bill and hold
+  OL5[3] = FNR(OS3[7] * OLM[3])
+  OS3[12] = FNR(OS3[7] * NETCOST[0])
+Else 
+  OL5[3] = FNR(OL7[4] * OLM[3])
+  OS3[12] = FNR(OL7[4] * NETCOST[0])
+End If 
+If UN[1] = -2 Let OL5[0] = FNR(OLM[3]) * Sgn(OL7[2]);OL5[3] = FNR(OLM[3]) * Sgn(OL7[4])
+If UN[2] = -2 Let OS3[12] = FNR(NETCOST[0] * Sgn(OL7[4]));OS3[13] = FNR(NETCOST[0] * Sgn(OL7[2]))
+!--------------------------------------------------------------------
+let dostat=h0[0] ! status
+! if custom_customer$="HTBERRY" let dostat=1 ! custom - ALL ORDERS UPDATE (no used to only chk for status 1)
+if dostat=1
+	let tmp3=s1$[118,118]
+	if tmp3>1 let dostat=2 ! on a picklist treat 
+endif
+if p61$[117,117]="Y" and r1[0]=371 let dostat=1 !write out
+If h5[7]=2 and h0[0]<6 let dostat=1 ! direct write out until status5
+if h5[7]=3 And p60$[22,22] <> "Y" and h0[0]<6 let dostat=1 ! indirect stock update = N
+If dostat=1  ! only write for status 1 orders (originally only status checked)
+    mat write #chan[6],r[6],8;ol3;
+	Mat Write #chan[6],R[6],32;OL5;
+	Mat Write #chan[6],R[6],168;OL7;
+	Mat Write #chan[6],R[6],260;OS3;
+	etr.NewQtyOrd=ol7[2]
+	etr.NewQtyShip=ol7[4]
+	etr.NewQtyBO=ol7[3]
+	if ol3[0]<>0 goto endloadcstupd: ! not a stock item
+	if lc0=11 goto endloadcstupd: !11 - special salesman cost
+	if lc0=10 goto endloadcstupd: ! !10 - rebate salesman cost 
+	if ot2[12]<>1 goto endloadcstupd: ! flag to update load cost
+	if ol4[0]<=0 goto endloadcstupd: ! 
+	! read the product file
+	REC_PROD = OL4[0]
+	ch_prod=Chan[10]
+	gosub read_prod:   
+	let ld1=0 ! that is the new load cost
+	ORGLOADCOST=0
+	NEWLOADCOST=0
+	If P9$[32,32] = "Y" ! warehouse pricing
+		let ch_prwh=chan[12]
+		! get prodwhse file
+		let whlm[0]=0;w3[17]=0
+		Key_prwh$ = " ",Key_prwh$
+		Key_prwh$[1,12] =oL1$[1,12]
+		Key_prwh$[13,14] = H4[2] Using "##"
+		Search #CH_PRWH,2,1;Key_prwh$,REC_PRWH,E \ If E goto outend:
+		If Not(E)
+			gosub read_prwh: 
+		ELSE
+			GOTO ENDWHLOAD: ! no warehouse record
+		endif
+		if whlm[0]=0 
+          	LD1 = W3[17]
+			!goto endwhload:
+			if LD1<=0 goto endwhload:
+			GOTO ENDLOADCOST:
+		endif
+		WH = H4[2];LTBL = WHLM[0]
+        Gosub CALC_LOAD
+        LD1 = CNVTA
+		if ld1>0 goto endloadcost: 
+    End If 
+	endwhload: ! end warehouse load costing
+	! check the product load table
+	If LM[0]
+        WH = 0;LTBL = LM[0]
+        Gosub CALC_LOAD
+        LD1 = CNVTA 
+    Else 
+       	LD1 = B[8]
+    End If ! find load table
+	endloadcost: ! end finding load cost
+	if ld1>0 and ld1<>ol5[1]
+		LET ORGLOADCOST=OL5[1]
+		LET NEWLOADCOST=LD1
+		Mat Read #chan[6],R[6],32;OL5
+		Mat read #chan[6],R[6],260;OS3
+		let ol5[1]=ld1
+		If Not(UNF[5]) Let UNF[5] = 1
+		NETCOST[0] = OL5[1] + CHBASE
+		OS3[13] = FNR(OL7[2] * NETCOST[0])
+		If H5[7] = 4 Or H5[7] = 15 ! "bill and hold
+			OS3[12] = FNR(OS3[7] * NETCOST[0])
+		Else 
+			OS3[12] = FNR(OL7[4] * NETCOST[0])
+		End If 
+		If UN[2] = -2 Let OS3[12] = FNR(NETCOST[0] * Sgn(OL7[4]));OS3[13] = FNR(NETCOST[0] * Sgn(OL7[2]))
+		Mat Write #chan[6],R[6],32;OL5;
+		Mat Write #chan[6],R[6],260;OS3;
+	endif
+	endloadcstupd: ! 
+	if p60$[44,44]="Y" then gosub edittrack ! for everyone? lets try it
+	If custom_customer$<>"HTBERRY" ! normal (only non-stks)
+		IF OL3[0]<>0 ! nonstock item
+			R[7] = OL4[0]
+			Mat Read #chan[7],R[7],72;L8
+			L8[1] = OL7[4]
+			L8[4] = OL5[3]
+			Mat Write #chan[7],R[7],72;L8;
+		endif
+	Else ! custom berry
+	  ! if p60$[44,44]="Y" then gosub edittrack ! or berry only? - lets do for all
+	  IF OL3[0]
+		Let R[7]=OL4[0] ! "sproddesc Rec #
+		Mat Read #chan[7],r[7],72;L8
+		Let L8[1]=OL7[4] ! "qty Shipped
+		Let L8[4]=OL5[3] ! "shipped extension
+		Mat Write #chan[7],r[7],72;L8; ! "no cost or price update?
+	  ENDIF
+	endif ! custom or not
+	
+
+	If H0[10] = 999999 ! "needs ship date calc
+	  If P61$[34,34] = "Y" ! "uses the cust/shipto multizone
+	CSMZONE: Rem "Cust/Shipto MultiZone
+		If Not(SRN[2]) Let SRN[2] = H0[4]
+		JDATE[0] = Tim(6) + 1
+		DT3[0] = JDATE[0];DT3[1] = JDATE[0] \ FLAG = 0
+		Call "JULIANUTIL",DT3[],X$,FLAG
+		VDATE = X$;H0[10] = VDATE
+		Call "MXOHCSZONE",SRN[2],SRN[1],VDATE,H5[8],H4[2],H0[10],CSZONE$,H4[1],IntCo
+		S2$[19,20] = CSZONE$
+		Mat Write #chan[5],R[5],0;H0;
+		Mat Write #chan[5],R[5],78;H4;
+		Mat Write #chan[8],H0[2],126;S2$;
+	  Else ! "uses the single zone of whatever header says
+		A$ = " ",A$;A$ = S2$[19,20]
+		Search #chan[9],2,1;A$,V1,E \ If E > 1 Gosub ERR_SEARCH
+		If Not(E)
+		  Read #chan[9],V1,36;T2$;
+		Else 
+		  T2$ = "Y",T2$
+		End If 
+		X2 = H0[9]
+		If T2$[1,7] = "       " Let T2$[1,7] = "YYYYYYY"
+		If T2$[1,7] = "NNNNNNN" Let T2$[1,7] = "YYYYYYY"
+		X2 = Tim(6)
+		JDATE[1] = X2;JDATE[0] = X2 + 1
+		NOVALIDDATE = 0
+	ADD2LTIME: Rem "Add a day to the date (julian)
+		JDATE[1] = JDATE[1] + 1
+	ZDCHK: Rem "start check of the date JDate[1] to days zone ships
+		DT3[0] = JDATE[1];DT3[1] = JDATE[1] \ FLAG = 0
+		Call "JULIANUTIL",DT3[],X$,FLAG
+		X2 = X$
+		X$ = X2 Using "&&&&&&"
+		Call FormatDate(X$,X$,E)
+		If JDATE[1] - JDATE[0] <= 21 ! "incase Zone has no valid days - limit 3wks
+		  NOVALIDDATE = 0
+		  Gosub CHECK_ZONEDAY \ Goto ADD2LTIME
+		  E = E
+		Else ! "so just use tomorrow - as is.  what else can we do?
+		  DT3[0] = JDATE[0];DT3[1] = JDATE[0] \ FLAG = 0
+		  Call "JULIANUTIL",DT3[],X$,FLAG
+		  X2 = X$
+		  NOVALIDDATE = 1
+		End If 
+		H0[10] = X2
+		VDATE = X2;STAT = 1;WARN = 0;PARAM[0] = H4[2];PARAM[1] = H5[8]
+		Call "validdate",VDATE,STAT,WARN,PARAM[]
+		Rem on NOVALIDDATE- IF NOTHING FOUND BEFORE-LEAVE DATE-IT WILL FAIL
+		If VDATE <> X2 And NOVALIDDATE = 0 !"it chg'd date-Now we need to recheck zone
+		  X2 = VDATE;X$ = X2 Using "&&&&&&"
+		  Call DateToJulian(1,X$,X$,E)
+		  If Not(E) ! "date yymmdd passed back is valid - chk zone
+			JDATE[1] = X$[1,5]
+			Goto ZDCHK
+		  End If ! "we'll just take whatever's sent - let them figure it out
+		End If 
+		H0[10] = VDATE
+		Mat Write #chan[5],R[5],0;H0;
+	  End If ! "of diff zone types
+	End If ! "of ship date re-calc
+	porup=1 ! status 1 order are auto release this is just for the record 
+	Gosub Write_PORelease: !
+	Goto RETOT_ORD
+Else  ! order status 2-4
+	porup=0
+	Gosub Write_PORelease: !
+	Goto outend
+End If ! "of if H0[0]=1
+!-------------------------------------------------------
+CHECK_ZONEDAY: Rem "zone ship that day?  Return=NO  +1=YES
+Gosub L_2900
+I = Z9 + 1
+If T2$[I,I] = "N" Return 
+Return 1
+L_2900: Rem GET DOW # NEED X$ (MM/DD/YY)
+J1 = X$[7,8] \ J2 = X$[1,2] \ J3 = X$[4,5]
+If J1 < 85 Let J1 = J1 + 100
+Z4 = J2 + 1 \ Z5 = Int(1 / Z4 + .7) \ Z6 = J1 - Z5 \ Z7 = Z4 + 12 * Z5
+Z8 = Int(Z7 * 30.6001) + Int(Z6 * 365.25) + J3 \ Z9 = Z8 - 7 * (Int(Z8 / 7))
+Return 
+!-------------------------------------------------------
+RETOT_ORD: Rem "finally off to retotal
+S9[2] = R[5];S9[3] = 6;S9[4] = 374
+PASSINFO[0] = 1
+Mat Read #CHAN[5],R[5],0;H0;
+REC_ROT=h0[3]
+Mat Read #chan[11],REC_ROT,0;T1         
+Mat Read #chan[11],REC_ROT,8;T2         
+Mat Read #chan[11],REC_ROT,168;MCODE    
+Mat Read #chan[11],REC_ROT,208;MCHARGE  
+Mat Read #chan[11],REC_ROT,328;TOT      
+Mat Read #chan[11],REC_ROT,358;MCTXBL   
+Mat Read #chan[11],REC_ROT,378;DCLVL;   
+PCHAN[0] = chan[1]
+PCHAN[1] = 0                                              
+PCHAN[2] = chan[9]  ! zone
+PCHAN[3] = chan[10] ! product ch_prod
+PCHAN[4] = 0! commodity code
+PCHAN[5] = chan[4] ! cust        
+PCHAN[6] = 0 ! ch_prwh
+PCHAN[7] = chan[8] !  ch_ros
+PCHAN[8] = chan[5] ! order header 
+PCHAN[9] = Chan[11] ! ch_rot! ch_rot
+PCHAN[10] =chan[6] !  ch_rol                                                                              
+PCHAN[11] = 0
+PCHAN[12] = 0! custtax
+PCHAN[13] = 0 !slsm
+PCHAN[14] = 0 !ch_tax            
+PCHAN[15] = 0 ! ch_prlt
+PCHAN[16] = 0 !ch_ordl
+PCHAN[17] = 0 ! ch_ccodes   
+
+PARM[0] = 1    ! credit check inquiry - set to Y for existing order                                                             
+PARM[1] = 1   ! do credit check   - set to Y  - maybe increasing sales amount                                                      
+PARM[2] = 1    ! exception     - set to Y to check gp/cost exceptions                                                      
+PARM[3] = 1    ! write total                                                        
+PARM[4] = 1    ! update order total in customer's file                                                       
+If P60$[40,40] = "S" Let PARM[4] = 1                                     
+PARM[5] = 0    ! clear manual fields = N                                                          
+PARM[6] = 0    ! clear cash filed =N 
+PARM[9] = 99	! delivery charge     
+PARM[10] = 99! ar term misc cost charge   - bypass 
+S9[4] = 374                                                             
+R5 = 0! rec_cust
+H1 = R[5] ! ORDER HEADER RECORD #
+V1 = 0 ! REC_SLSM    
+! SAVE ORIGINAL VALUES
+let orgcost=fnr(t2[14])
+let orgamt=fnr(t2[24])
+IF P60$[40,40]="S" 
+	let orgshipamt=fnr(T2[0]) ! Shipped amount
+endif
+let orgfreight=fnr(T2[5])
+LET orgother=fnr(t2[6])
+let tmp3=t2[21]
+For ctr = 1 To 12                       
+	oldholdcodeflag[ctr] = Sgn(Fra(tmp3 / 2))
+	tmp3 = Int(tmp3 / 2)                  
+Next ctr
+Call "ORDERTOTAL",S9[],H1,PARM[],PCHAN[],T1[],T2[],MCODE[],MCHARGE[],TOT[],MCTXBL[],DCLVL,R5,V1,CFIN[]   
+Mat Read #chan[11],REC_ROT,8;T2;
+let tmp3=t2[21]
+For ctr = 1 To 12                       
+		holdcodeflag[ctr] = Sgn(Fra(tmp3 / 2))
+		tmp3 = Int(tmp3 / 2)                  
+Next ctr
+if oldholdcodeflag[1]<>holdcodeflag[1] ! credit 
+	If p60$[40,40]="S"
+		if fnr(t2[0])<=fnr(orgshipamt)
+			let holdcodeflag[1]=oldholdcodeflag[1]
+		endif
+	else
+		if fnr(t2[24])<=fnr(orgamt)  ! amount is less than or equal
+			let holdcodeflag[1]=oldholdcodeflag[1] 
+		endif
+	endif
+endif
+if oldholdcodeflag[2]<>holdcodeflag[2] ! gp exception
+	if fnr(t2[24])=orgamt and t2[14]=fnr(orgcost)
+		let holdcodeflag[2]=oldholdcodeflag[2]
+	else
+		if fnr(t2[24])=orgamt and oldholdcodeflag[2]=0 and holdcodeflag[2]<>0
+			if fnr(orgamt-orgcost)<=fnr(t2[24]-t2[14]) ! original gp is less than new gp
+				let holdcodeflag[2]=oldholdcodeflag[2]
+			endif
+		endif
+	endif
+endif
+if fnr(orgamt)=Fnr(t2[24]) and fnr(orgcost)=fnr(t2[14])
+	for ctr=3 to 12
+		if oldholdcodeflag[ctr]<>holdcodeflag[ctr]
+			let holdcodeflag[ctr]=oldholdcodeflag[ctr]
+		endif
+	next ctr
+endif
+tmp3 = 0                                            
+For ctr = 0 To 11                                   
+	If holdcodeflag[ctr + 1] Let tmp3 = tmp3 + 2 ^ ctr
+Next ctr                                            
+t2[21] = tmp3
+Mat Write #chan[11],REC_ROT,8;T2;
+!Swap 2,"MX031D"
+If H5[7] <> 9 Goto OUTEND
+K1$ = " ",K1$;K1$[1,6] = H0[7] Using "######"
+X1 = 0;X1[1] = 0
+ROLCHKLOOP: Rem "
+Search #chan[6],3,1;K1$,R[6],E \ If E = 2 Goto ROLCDONE
+If E Gosub ERR_SEARCH
+X2 = K1$[1,6] \ If X2 <> H0[7] Goto ROLCDONE
+Mat Read #chan[6],R[6],8;OL3;
+Mat Read #chan[6],R[6],16;OL4;
+Mat Read #chan[6],R[6],32;OL5;
+Mat Read #chan[6],R[6],56;OL6;
+Mat Read #chan[6],R[6],168;OL7;
+X1[1] = X1[1] + 1
+If OL7[3] Goto ROLCDONE
+If OL7[2] = OL7[4] Let X1 = X1 + 1
+Goto ROLCHKLOOP
+ROLCDONE: Rem "done
+If X1 <> X1[1] Goto OUTEND
+H5[7] = 1
+Mat Write #chan[5],R[5],104;H5;
+If P61$[36,36] <> "Y"  and DCLVL<>0 ! need to get delivery charge
+	PCHAN[0] = chan[1]
+	PCHAN[1] = 0                                              
+	PCHAN[2] = chan[9]  ! zone
+	PCHAN[3] = chan[10] ! product ch_prod
+	PCHAN[4] = 0! commodity code
+	PCHAN[5] = chan[4] ! cust        
+	PCHAN[6] = 0 ! ch_prwh
+	PCHAN[7] = chan[8] !  ch_ros
+	PCHAN[8] = chan[5] ! order header 
+	PCHAN[9] = Chan[11] ! ch_rot! ch_rot
+	PCHAN[10] =chan[6] !  ch_rol                                                                              
+	PCHAN[11] = 0
+	PCHAN[12] = 0! custtax
+	PCHAN[13] = 0 !slsm
+	PCHAN[14] = 0 !ch_tax            
+	PCHAN[15] = 0 ! ch_prlt
+	PCHAN[16] = 0 !ch_ordl
+	PCHAN[17] = 0 ! ch_ccodes   
+	PARM[0] = 1    ! credit check inquiry - set to Y for existing order                                                             
+	PARM[1] = 0  ! do credit check   - set to N - already did it                                                      
+	PARM[2] = 0    ! exception     - set to N - already did it                                                    
+	PARM[3] = 1    ! write total                                                        
+	PARM[4] = 1    ! update order total in customer's file                                                       
+	If P60$[40,40] = "S" Let PARM[4] = 1                                     
+	PARM[5] = 0    ! clear manual fields = N                                                          
+	PARM[6] = 0    ! clear cash filed =N 
+	PARM[9] = 0	! delivery charge     0 to calc     
+	PARM[10] = 99! ar term misc cost charge   - bypass 
+	Call "ORDERTOTAL",S9[],H1,PARM[],PCHAN[],T1[],T2[],MCODE[],MCHARGE[],TOT[],MCTXBL[],DCLVL,R5,V1,CFIN[]
+ENDIF
+goto outend:
+!--------------------------------------------------
+Write_PORelease: !
+	If P61$[91,91] <> "Y" Return ! sysflag
+	IF custom_customer$="HTBERRY" and not(OL3[0]) return ! as berry let's prod items through
+	if P61$[117,117]="Y" and r1[0]=371 return! does in it 374 accept 
+	CH_POR = FindChannel()
+	Open #ch_por,"3/porelease"+str$(IntCo)
+	!
+	POR.CustomerCode=H0[4]
+	POR.SordNum=H0[7]
+	POR.SordLineNum=PL4[11]
+	POR.OrigSord=H0[7]
+	POR.ROHREC=R[5]
+	POR.PONum=PONUM
+	POR.POLineNum=PL1[2]
+	POR.POHREC=R1[8]
+	POR.QtyRecv=QTYRECV
+	POR.QtyUM=PL1[4]
+	POR.UnitCost=PL2[0]
+	POR.NetCost=PL4[0]
+	POR.CostUM=PL1[5]
+	x$[1,6]=Tim(8) using "&&" ,Tim(9) using "&&" ,Tim(10) using "&&"  ! YYMMDD
+	! POR.RecvDate=PL4[22]
+	Try POR.RecvDate=x$[1,6] Else POR.RecvDate=0
+	X$[1,6]=Tim(11) using "&&" ,Tim(12) using "&&" ,Tim(13) using "&&"  ! HHMMSS
+	Try POR.RecvTime=x$[1,6] Else POR.RecvTime=0
+	POR.UpdtFlg=porup  ! 0=N 1=Y
+	POR.ShipKey$[1,7]=h0[4] using "######."
+	POR.ShipKey$[8,13]=SRN[1] using "&&&&&&"
+!
+	keypor$=" ",keypor$
+	keypor$[1,1]=POR.UpdtFlg using "&"
+	keypor$[2,7]=POR.SordNum using "######"
+	keypor$[8,10]=POR.SordLineNum using "###" 
+	keypor$[11,16]=POR.RecvDate using "&&&&&&"
+	mode$="=" ! search mode 2
+	dir=1
+ !Call programdump("tmp/rce1.txt!","")
+	rec_tmp=filegetporelease(e$,ch_por,mode$,dir,keypor$,por.)
+	if rec_tmp < 0  ! new rec
+		mode$ = "a" ! add 
+		rec_por=fileupdateporelease(e$,ch_por,mode$,rec_tmp,por.)
+	end if
+ !Call programdump("tmp/rce2.txt!","")
+!
+Close #ch_por
+Return
+!
+Edittrack: ! do edittracking
+FOR I=0 TO 2 \ LET FCHAN[I]=-1 \ NEXT I
+etr.OrdNum=pl4[10]
+etr.LineNum=PL4[11]
+etr.ProdCode$=l1$[1,12]
+etr.etaction=374
+If r1[0]=371
+	etr.etaction=371
+endif
+!CALL $LOGIC,1,2^0,PL1[3],etnonstock
+X2 = pl1[3] ! ! REM UNPACK pol.Flags TO FLAGS[       
+For K = 0 To 11                                         
+	flags[K] = Sgn(Fra(X2 / 2)) \ X2 = Int(X2 / 2)        
+Next K                                                  
+etr.NstkFlag = flags[0]
+etr.umsell=0
+if not(flags[0]) let etr.umsell=un[0]
+etr.InvNum=oref[1]
+etr.OrgOrdTot=t2[0]
+etr.CustNum=h0[4]
+etr.Printer=0
+let etr.OrgLoadCost=0
+let etr.NewLoadCost=0
+let etr.umcost=0
+IF ORGLOADCOST<>0 OR NEWLOADCOST<>0
+	IF ORGLOADCOST<>NEWLOADCOST
+		let etr.umcost=un[2]
+		let etr.OrgLoadCost=ORGLOADCOST
+		let etr.NewLoadCost=NEWLOADCOST ! get load cost
+	ENDIF
+ENDIF
+Call MakeEdittrack(e$,IntCo,fchan[],etr.)
+Let e$=""
+Return
+
+update_prwhse:!update whse record
+	IF P9$[33,33]="N" RETURN 
+	workkey$=" ",workkey$
+	workkey$=ol1$[1,12]
+	workkey$[13,14]=wh using "##"
+	search#chan[12],2,1;workkey$,rec_work,e \if e return
+	MAT  READ #chan[12],rec_work,78;W3
+	MAT  READ #chan[12],rec_work,780;WHLV
+	LET W3[2]=W3[2]+qtyrecv !increase on order amount
+	LET WHLV[0]=WHLV[0]+qtyrecv!increase whse level
+	MAT  WRITE #chan[12],rec_work,78;W3
+	MAT  WRITE #chan[12],rec_work,780;WHLV;
+RETURN 
+
+UPDATE_CPI: !
+	if p61$[111,111] <> "Y" return
+	! determine if this line
+	! is on a cpi contract
+	tmp$ = " ",tmp$
+	tmp$[1,6] = OLM[2] using "C#####"
+	tmp$[7,18] = ol1$[1,12]
+	search #ch_cpidet,2,1;tmp$,r_cpi,e \ if e>1 GOSUB ERR_SEARCH
+	if e return ! not a cpi contract
+	mat read #ch_cpidet,r_cpi,42;ResStkAmt;
+	if not(ResStkAmt) return ! not a reserve stock contract
+	mat read #ch_cpidet,r_cpi,68;QtyAllocated
+	QtyAllocated = QtyAllocated + qtyrecv
+	mat write #ch_cpidet,r_cpi,68;QtyAllocated;
+RETURN
+
+UPDATE_PROD: REM UPDATE PROD
+	LET workkey$=ol1$[1,12]
+	SEARCH #chan[10],2,1;workkey$,rec_work,E
+	IF E GOSUB ERR_SEARCH:
+	mat  read #chan[10],rec_work;a$
+	MAT  READ #chan[10],rec_work,156;b
+	MAT  READ #chan[10],rec_work,256;A
+	MAT  READ #chan[10],rec_work,512;PFU1 
+	MAT  READ #chan[10],rec_work,554;PFU2 
+	MAT  READ #chan[10],rec_work,990;PLV
+	LET A[3]=A[3]+qtyrecv! increase onorder amnt
+	LET PLV[0]=PLV[0]+qtyrecv!increase inventory level
+	MAT  WRITE #chan[10],rec_work,256;A 
+	MAT  WRITE #chan[10],rec_work,990;PLV;
+RETURN 
+
+UPDATE_SPRODLOT: REM UPDATE SPROD LOT
+LET workkey$=" ",workkey$
+LET workkey$[1,12]=ol1$[1,12]
+LET workkey$[13,14]=WH  USING "##"
+LET workkey$[15,20]="STOCK "
+UPD_SPRD_LOOP: REM
+SEARCH #chan[13],3,2;workkey$,rec_work,E \ IF E>2 GOSUB ERR_SEARCH:
+IF NOT (E) AND workkey$[1,12]=ol1$[1,12] and workkey$[15,20]="STOCK "
+	matread#chan[13],rec_work;po$
+	matread#chan[13],rec_work,66;p1
+	matread#chan[13],rec_work,70;p2
+	matread#chan[13],rec_work,82;p3
+	read#chan[13],rec_work,112;p4
+	matread#chan[13],rec_work,114;p1$
+	read#chan[13],rec_work,120;pltr
+	IF P1[0]<>WH  GOTO UPD_SPRD_LOOP:
+	LET P3[4]=P3[4]-qtyrecv! reduce b/o qty
+	IF P3[4]<0 LET P3[4]=0
+	if Not(RASL) ! non-rasl
+		LET P3[3]=P3[3]+qtyrecv!increase qty shipped
+	end if
+	MAT  WRITE #chan[13],rec_work,82;P3;
+ENDIF 
+if RASL     !rasl use "NONE" location for qty shipped
+	LET workkey1$=" ",workkey1$
+	LET workkey1$[1,12]=ol1$[1,12]
+	LET workkey1$[13,14]=WH  USING "##"
+	LET workkey1$[15,20]="NONE  "
+	UPD_SPRD_LOOP1: REM
+	SEARCH #chan[13],3,2;workkey1$,rec_work,E \ IF E>2 GOSUB ERR_SEARCH:
+	IF NOT (E) AND workkey1$[1,12]=ol1$[1,12] and workkey1$[15,20]="NONE  "
+		MAT  READ #chan[13],rec_work,66;P1
+		MAT  READ #chan[13],rec_work,82;P3
+		IF P1[0]<>WH  GOTO UPD_SPRD_LOOP1:
+		LET P3[3]=P3[3]+qtyrecv!increase qty shipped
+	        LET P3[4]=P3[4]-qtyrecv! reduce b/o qty
+	        IF P3[4]<0 LET P3[4]=0
+                MAT  WRITE #chan[13],rec_work,82;P3;
+	else
+		gosub add_sprodlot:
+	end if
+end if
+END_UPD_SPRD_LOOP: REM
+RETURN 
+
+UPDATE_SORDLOT: REM UPDATE SORDLOT
+LET workkey$=" ",workkey$
+LET workkey$[1,12]=ol1$[1,12]
+LET workkey$[13,18]=ol2[1] USING "######"
+LET workkey$[19,21]=ol3[2] USING "###"
+LET workkey$[22,23]=WH  USING "##"
+LET workkey$[24,29]="STOCK "
+UPD_SORDLOT_LOOP: REM
+SEARCH #chan[14],3,1;workkey$,rec_work,E \ IF E>2 GOSUB ERR_SEARCH:
+IF NOT (E) AND workkey$[1,12]=ol1$[1,12] and workkey$[24,29]="STOCK "! prod
+	LET X2=workkey$[13,18]
+	IF X2<>ol2[1] GOTO UPD_SORDLOT_LOOP:
+	LET X2=workkey$[19,21]
+	IF X2<>ol3[2] GOTO UPD_SORDLOT_LOOP:
+	LET X2=workkey$[22,23]
+	IF X2<>WH  GOTO UPD_SORDLOT_LOOP:
+	MAT  READ #chan[14],rec_work,60;sol3;
+	if Not(RASL)   ! non-rasl increase qty required/fulfilled
+		LET sol3[1]=sol3[1]+qtyrecv!increase qty fulfilled
+	else
+		let sol3[0]=sol3[0]-qtyrecv!decrease qrt required
+	end if
+	LET sol3[3]=sol3[3]-qtyrecv!reduce b/o qty
+	MAT  WRITE #chan[14],rec_work,60;sol3;
+
+	if RASL if not (sol3[0]+sol3[1]+sol3[3]) gosub del_sordlot:
+ENDIF 
+if RASL   !RASL UPDATE "NONE" LOCATION
+	LET workkey1$=" ",workkey1$
+	LET workkey1$[1,12]=ol1$[1,12]
+	LET workkey1$[13,18]=ol2[1] USING "######"
+	LET workkey1$[19,21]=ol3[2] USING "###"
+	LET workkey1$[22,23]=WH  USING "##"
+	LET workkey1$[24,29]="NONE  "
+	UPD_SORDLOT_LOOP1: REM
+		SEARCH #chan[14],3,1;workkey1$,rec_work,E \ IF E>2 GOSUB ERR_SEARCH:
+		IF NOT (E) AND workkey1$[1,12]=ol1$[1,12] and workkey1$[24,29]="NONE  "! prod
+			LET X2=workkey1$[13,18]
+			IF X2<>ol2[1] GOTO UPD_SORDLOT_LOOP1:
+			LET X2=workkey1$[19,21]
+			IF X2<>ol3[2] GOTO UPD_SORDLOT_LOOP1:
+			LET X2=workkey1$[22,23]
+			IF X2<>WH  GOTO UPD_SORDLOT_LOOP1:
+			MAT  READ #chan[14],rec_work,60;sol3;
+			rem let sol3[0]=sol3[0]+qtyrecv!increase qty required
+			LET sol3[1]=sol3[1]+qtyrecv!increase qty fulfilled
+			LET sol3[3]=sol3[3]-qtyrecv!b/o qty
+			IF sol3[3]<0 LET sol3[3]=0
+                        MAT  WRITE #chan[14],rec_work,60;sol3;
+		else
+			gosub add_sordlot:	
+		end if
+end if	
+END_UPD_SORDLOT_LOOP: REM
+RETURN 
+
+add_sprodlot:! create sprodlot records for "NONE"
+po$=" ",po$
+po$[1,12]=ol1$[1,12]
+po$[13,19]=H4[2] using "STOCK&#"
+p1$="NONE  "
+P1[0]=H4[2]
+p1[1]=3
+p2[0]=h0[9]
+p2[1]=0;p2[2]=0
+p3[0]=0;p3[1]=0
+p3[2]=b[21]
+p3[3]=qtyrecv
+p3[4]=0
+sprod_key$=" ",sprod_key$
+sprod_key$[1,12]=po$[13,24] ! lot Number
+sprod_key$[13,22]=po$[55,64] ! stock #
+sprod_key$[23,24]=p1[0] using "##" ! warehouse
+sprod_key$[25,30]=p1$[1,6] ! location
+sprod_key$[31,42]=po$[1,12] ! product code
+search #chan[13],2,1;sprod_key$,rec_work,e
+if not(e)
+	mat read #chan[13],rec_work,82;p3
+	let p3[3]=p3[3]+qtyrecv
+    mat write #chan[13],rec_work,82;p3;
+	goto endaddprodlot:
+endif
+e=2
+search#chan[13],1,0;sprod_key$,rec_work,e
+if e gosub err_search:
+matwrite#chan[13],rec_work;po$
+matwrite#chan[13],rec_work,66;p1
+matwrite#chan[13],rec_work,70;p2
+matwrite#chan[13],rec_work,82;p3
+write#chan[13],rec_work,112;p4
+matwrite#chan[13],rec_work,114;p1$
+write#chan[13],rec_work,120;pltr
+sprod_key$[1,12]=po$[13,24]
+sprod_key$[13,22]=po$[55,64]
+sprod_key$[23,24]=p1[0] using "##"
+sprod_key$[25,30]=p1$[1,6]
+sprod_key$[31,42]=po$[1,12]
+search#chan[13],4,1;sprod_key$,rec_work,e
+if e gosub err_search:
+sprod_key$=" ",sprod_key$
+sprod_key$[1,12]=po$[1,12]
+sprod_key$[13,14]=p1[0] using "##"
+sprod_key$[15,20]=p1$[1,6]
+sprod_key$[21,32]=po$[13,24]
+sprod_key$[33,42]=po$[55,64]
+search#chan[13],4,2;sprod_key$,rec_work,e
+if e gosub err_search:
+sprod_key$=" ",sprod_key$
+sprod_key$[1,2]=p1[0] using "##"
+sprod_key$[3,8]=p1$[1,6]
+sprod_key$[9,20]=po$[1,12]
+sprod_key$[21,32]=po$[13,24]
+sprod_key$[33,42]=po$[55,64]
+search#chan[13],4,3;sprod_key$,rec_work,e
+if e gosub err_search:
+sprod_key$=" ",sprod_key$
+sprod_key$[1,12]=po$[1,12]
+sprod_key$[13,14]=p1[0] using "##"
+sprod_key$[15,26]=po$[13,24]
+sprod_key$[27,36]=po$[55,64]
+sprod_key$[37,42]=p1$[1,6]
+search#chan[13],4,4;sprod_key$,rec_work,e
+if e gosub err_search:
+endaddprodlot: ! 
+return
+
+add_sordlot: !                                               
+ss0$=" ",ss0$                                        
+ss0$[1,12]=ol1$[1,12]                                 
+ss0$[13,19]=WH  USING "STOCK&#"                    
+sol1[0]=ol3[2]                                        
+sol1[1]=2                                            
+sol1[2]=WH                                         
+sol2[0]=h0[7]                                        
+sol2[1]=h0[9]                                        
+sol2[2]=h0[4]                                        
+sol2[3]=h0[10]                                       
+sol3[0]=qtyrecv                                       
+sol3[1]=qtyrecv                                    
+sol3[3]=0                               
+sol3[2]=p3[2]                                        
+sol2$=" ",sol2$                                       
+sol2$[11,16]="NONE  "               
+e=2                                                                  
+search#chan[14],1,0;sord_key$,rec_work,e                           
+if e gosub err_search:                                               
+matwrite#chan[14],rec_work;ss0$                                    
+matwrite#chan[14],rec_work,36;sol1                                 
+matwrite#chan[14],rec_work,44;sol2                                 
+matwrite#chan[14],rec_work,60;sol3                                 
+matwrite#chan[14],rec_work,96;sol2$;                               
+sord_key$=" ",sord_key$                                              
+sord_key$[1,12]=ss0$[1,12]                                           
+sord_key$[13,18]=sol2[0] using "######"                              
+sord_key$[19,21]=sol1[0] using "###"                                 
+sord_key$[22,23]=sol1[2] using "##"                                  
+sord_key$[24,29]=sol2$[11,16]                                        
+sord_key$[30,41]=ss0$[13,24]                                         
+sord_key$[42,51]=sol2$[1,10]                                         
+search#chan[14],4,1;sord_key$,rec_work,e                           
+if e gosub err_search:                                               
+sord_key$=" ",sord_key$                                              
+sord_key$[1,12]=ss0$[13,24]                                          
+sord_key$[13,22]=sol2$[1,10]                                         
+sord_key$[23,28]=sol2[0] using "######"        
+sord_key$[29,31]=sol1[0] using "###"           
+sord_key$[32,33]=sol1[2] using "##"            
+sord_key$[34,39]=sol2$[11,16]                  
+sord_key$[40,51]=ss0$[1,12]                    
+search#chan[14],4,2;sord_key$,rec_work,e     
+if e gosub err_search:               
+sord_key$=" ",sord_key$                        
+sord_key$[1,6]=sol2[0] using "######"          
+sord_key$[7,9]=sol1[0] using "###"             
+sord_key$[10,11]=sol1[2] using "##"            
+sord_key$[12,17]=sol2$[11,16]                  
+sord_key$[18,29]=ss0$[13,24]                   
+sord_key$[30,39]=sol2$[1,10]                   
+search#chan[14],4,3;sord_key$,rec_work,e     
+if e gosub err_search:                         
+return                         
+
+del_sordlot: REM delete STOCK record if zero       
+ss0$=" ",ss0$                               
+ss0$[1,12]=ol1$[1,12]                       
+ss0$[13,19]=WH  USING "STOCK&#"          
+sol1[0]=ol3[2]                              
+sol1[2]=WH                               
+sol2[0]=h0[7]                              
+sol2$=" ",sol2$                             
+sol2$[11,16]="STOCK "                      
+sord_key$=" ",sord_key$                    
+sord_key$[1,12]=ss0$[1,12]                 
+sord_key$[13,18]=sol2[0] using "######"    
+sord_key$[19,21]=sol1[0] using "###"       
+sord_key$[22,23]=sol1[2] using "##"        
+sord_key$[24,29]=sol2$[11,16]              
+sord_key$[30,41]=ss0$[13,24]               
+sord_key$[42,51]=sol2$[1,10]               
+search#chan[14],5,1;sord_key$,rec_work,e 
+if e gosub err_search:                     
+sord_key$=" ",sord_key$                    
+sord_key$[1,12]=ss0$[13,24]                
+sord_key$[13,22]=sol2$[1,10]               
+sord_key$[23,28]=sol2[0] using "######"    
+sord_key$[29,31]=sol1[0] using "###"        
+sord_key$[32,33]=sol1[2] using "##"         
+sord_key$[34,39]=sol2$[11,16]               
+sord_key$[40,51]=ss0$[1,12]                 
+search#chan[14],5,2;sord_key$,rec_work,e  
+if e gosub err_search:                     
+sord_key$=" ",sord_key$                     
+sord_key$[1,6]=sol2[0] using "######"       
+sord_key$[7,9]=sol1[0] using "###"          
+sord_key$[10,11]=sol1[2] using "##"         
+sord_key$[12,17]=sol2$[11,16]               
+sord_key$[18,29]=ss0$[13,24]                
+sord_key$[30,39]=sol2$[1,10]                
+search#chan[14],5,3;sord_key$,rec_work,e  
+if e gosub err_search:                      
+return                     
+! ---------------------------------------------------
+read_prod:! read product file
+Rem {begin src/inc/read.prod.i}
+    Mat Read #CH_PROD,REC_PROD,0;PR_A$
+    Mat Read #CH_PROD,REC_PROD,156;B
+    Mat Read #CH_PROD,REC_PROD,256;A
+    Mat Read #CH_PROD,REC_PROD,460;A1
+    Mat Read #CH_PROD,REC_PROD,508;A2
+    Mat Read #CH_PROD,REC_PROD,512;PFU1
+    Mat Read #CH_PROD,REC_PROD,554;PFU2
+    Mat Read #CH_PROD,REC_PROD,596;PRPARC
+    Mat Read #CH_PROD,REC_PROD,620;LM
+    Mat Read #CH_PROD,REC_PROD,624;PR_PO
+    Mat Read #CH_PROD,REC_PROD,628;AGEDAY
+    Read #CH_PROD,REC_PROD,630;LLC
+    Mat Read #CH_PROD,REC_PROD,632;PSN$
+    Mat Read #CH_PROD,REC_PROD,652;PSN
+    Mat Read #CH_PROD,REC_PROD,660;U2
+    Mat Read #CH_PROD,REC_PROD,664;LBSORD
+    Mat Read #CH_PROD,REC_PROD,670;U4
+    Read #CH_PROD,REC_PROD,678;U3
+    Mat Read #CH_PROD,REC_PROD,684;U3$
+    Mat Read #CH_PROD,REC_PROD,744;HZ$
+    Mat Read #CH_PROD,REC_PROD,834;A3
+    Mat Read #CH_PROD,REC_PROD,846;PFTB
+    Read #CH_PROD,REC_PROD,854;UPCT
+    Mat Read #CH_PROD,REC_PROD,856;C1$
+    Mat Read #CH_PROD,REC_PROD,894;PR_C4
+    Read #CH_PROD,REC_PROD,938;PF_LOAD2
+    Mat Read #CH_PROD,REC_PROD,944;PR_A2$
+    Mat Read #CH_PROD,REC_PROD,974;PFCO
+    Mat Read #CH_PROD,REC_PROD,990;PLV
+    Mat Read #CH_PROD,REC_PROD,1002;PLC
+    Mat Read #CH_PROD,REC_PROD,1018;PFN
+    Mat Read #CH_PROD,REC_PROD,1030;STK
+    Mat Read #CH_PROD,REC_PROD,1048;FDT
+    Mat Read #CH_PROD,REC_PROD,1056;PRFLG$
+    Mat Read #CH_PROD,REC_PROD,1066;PRBASE
+    Mat Read #CH_PROD,REC_PROD,1068;PRMKUP
+    Mat Read #CH_PROD,REC_PROD,1084;PRMKUPTYP$
+    Mat Read #CH_PROD,REC_PROD,1088;FUT
+    Mat Read #CH_PROD,REC_PROD,1100;PRPARC2
+    Mat Read #CH_PROD,REC_PROD,1108;PRREDI
+    Mat Read #CH_PROD,REC_PROD,1120;PIC$
+    Mat Read #CH_PROD,REC_PROD,1270;PRD0
+    Mat Read #CH_PROD,REC_PROD,1282;PRIML$
+    Mat Read #CH_PROD,REC_PROD,1294;PRD1
+    Mat Read #CH_PROD,REC_PROD,1304;PRD2
+    Rem {end read.prod.i}
+return
+! --------------------------------------------------
+read_prwh: ! read prodwhse ifle
+	Rem {begin src/inc/read.prwh.i}
+		Mat Read #CH_PRWH,REC_PRWH,0;W1$
+		Mat Read #CH_PRWH,REC_PRWH,32;W1
+		Mat Read #CH_PRWH,REC_PRWH,38;W2
+		Mat Read #CH_PRWH,REC_PRWH,78;W3
+		Mat Read #CH_PRWH,REC_PRWH,228;W5
+      Mat Read #CH_PRWH,REC_PRWH,384;WHPARC
+      Read #CH_PRWH,REC_PRWH,396;WHLPOOL
+      Mat Read #CH_PRWH,REC_PRWH,400;WCOMM$
+      Read #CH_PRWH,REC_PRWH,404;FCWGT
+      Mat Read #CH_PRWH,REC_PRWH,420;W0
+      Mat Read #CH_PRWH,REC_PRWH,428;WH7
+      Mat Read #CH_PRWH,REC_PRWH,444;WH8
+      Mat Read #CH_PRWH,REC_PRWH,540;WH9
+      Mat Read #CH_PRWH,REC_PRWH,696;W7
+      Mat Read #CH_PRWH,REC_PRWH,756;WH3$
+      Mat Read #CH_PRWH,REC_PRWH,780;WHLV
+      Read #CH_PRWH,REC_PRWH,798;WHRPLN
+      Mat Read #CH_PRWH,REC_PRWH,800;WHMISC
+      Mat Read #CH_PRWH,REC_PRWH,842;WHLM
+      Mat Read #CH_PRWH,REC_PRWH,846;WHMISC2
+      Read #CH_PRWH,REC_PRWH,894;RESTRICTED
+      Mat Read #CH_PRWH,REC_PRWH,896;WHFUT
+      Mat Read #CH_PRWH,REC_PRWH,914;WHFDT
+      Read #CH_PRWH,REC_PRWH,922;VLIST
+      Mat Read #CH_PRWH,REC_PRWH,928;WHFLG$
+      Read #CH_PRWH,REC_PRWH,938;WHBASE
+      Mat Read #CH_PRWH,REC_PRWH,940;WHMKUP
+      Mat Read #CH_PRWH,REC_PRWH,956;WHMKUPTYP$
+      Mat Read #CH_PRWH,REC_PRWH,960;WHPARC2
+      Mat Read #CH_PRWH,REC_PRWH,968;WHREDI
+      Mat Read #CH_PRWH,REC_PRWH,980;WHLBS
+      Rem {end read.prwh.i}
+return
+!------------------------------------------------
+CALC_LOAD: Rem
+PREC[0] = REC_PROD
+IF NOT(PREC[0]) LET PREC[0]=OL4[0]
+PREC[2] = FNR(Abs((oL6[4] * oL7[2]) / A[5]))
+If oL6[4] And oL6[4] <> A[6] ! line lbs different from prod file lbs
+  PREC[3] = oL6[4]
+Else 
+  PREC[3] = 0
+End If 
+CNVTA = -999 ! SET TO CALCULATE BASED UPON PROD/PRODWHSE
+OTYPE = - H5[7] 
+Call "MXLOAD5.DL4",OTYPE,WH,LTBL,PREC[],CNVTA,Intco,E$,RSTR$
+Return 
+!--------------------------------------------------
+ERR_SEARCH: Rem
+ENUM = E ;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+MSC$(4)
+Call programdump() 
+E$=msg$ \ Error 10000
+Return ! En
+
+OUTEND: Rem "out - close files
+!for x=4 to 14
+!	Try Close #CHAN[X] Else Rem 
+!next x
+!if p61$[111,111] = "Y" close #ch_cpidet ! CPI FLAG
+!try close #ch_sot else rem
+for ctr=1 to 20
+	if cchan[ctr]=0 ! channel not sent over from call
+		if chan[ctr]<>0
+			Try Close #CHAN[ctr] Else Rem 
+		endif
+	endif
+next ctr
+!End 
+!Stop 
+!! OUTEND HERE !!!
+Rem {begin rtn.error.s}
+Else
+ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+Call programdump() 
+!
+include "src/callmainerrnet.inc"
+end try
+End ! the whole program

@@ -1,0 +1,419 @@
+! program: pmu_expsproddesc
+!
+! loadsave -w -n 100,10 -o prog/util/pmu_expsproddesc.dl4 src/pmu_expsproddesc.src
+!
+! PMUPGRADER ROUTINE
+!
+! This routine will expand the sales order non-stock (sproddesc) file FROM 128W to 192W
+!
+! and initializes the new fields
+! IT will run through the open orders so it can update the NS Record on the order.
+! NOTE: Linerec (L7[2]) = -1 if nstk is complete (with no line, so second run checking 
+! for -1 line rec and expand those)
+
+Declare Intrinsic Sub InpBuf,String,Time
+! Option Default Dialect IRIS1
+include "src/utilcopyright.inc"
+dim e$[300]
+
+! fix control fields for new
+! and initialize values
+
+Enter COID,GROUPID,DBAK$,CH_LOG,COREDUMP,E,...
+! if "fromUpgrade" don't send print statements with
+! control strings as this is being executed via
+! a job not attached to terminal.  Be sure to send
+! all output to ch_log as this will be reviewed and
+! sent back to software repository
+
+! for manual update
+! dim dbak$[500],logname$[500]
+! let dbak$="files/databak/" \ let coid =1 \ let groupid=0
+! let logname$="/tmp/expdnstk"
+! let learnflag=0
+! if learnflag<>0 let logname$=logname$+"lrn"
+! build #0,+logname$
+! close #0
+! open #0,logname$
+! ch_log=0
+
+
+
+try
+	enter fromUpgrade
+else
+	dim 1%,fromUpgrade
+end try
+try ! main try
+E = 99
+include "src/dim.pmupgrade.i"
+Dim Ftemp$[16],BLANK$[80],FFILE$[100],Work$[100]
+dim k1$[60],k2$[60],k3$[60],P61$[256]
+!dim.sproddesc.i   non stock line
+dim 1%, nsl$[30], nsl1$[30], nsl2$[18], ha1$[50]
+Dim NSUDA$[120],SPARENU$[2]
+dim 2%, nsl7[2], ha3[2]
+dim 3%, nsl8[4],NSINVNO
+dim 3%,nsfrt1[2]
+Dim 1%,L3[3],S2[1],2%,L4[3]
+! initalize new fields - task #51999
+
+! NS UDA 1 - Numeric    T        NSFRT1[2]       6   202
+! ns uda$			C    120     208
+BLANK$ = " ",BLANK$
+TRUE = 1;FALSE = Not(TRUE)
+open #1,"cntrl/cntrl" + Str$(COID)
+mat read #1,61,0;p61$; ! read after opening!!!
+ROW = 22;COL = 0
+mat read #1,88,2128;ftemp$;
+LET ORIG$=""
+LET OWRITE$="ne 'expd192'"
+LET ROW=23;COL=0
+Open #2,ftemp$
+Let X2=CHF(302) ! "rec size in words
+Close #2
+UPDATE=0
+If X2>130 ! "it's already done ORIG WAS 128W/REC
+	Let LOGMSG$="File "+Ftemp$+" is already expanded - bypassing"
+	Gosub DO_WRITE_LOG:
+	Goto StartQuote:
+	!UPDATE=1 ! we are just fixing
+Endif
+LET FCODE$="SPRODDESC"
+LET MODE=0 ! COPY
+GOSUB DO_BACKUP:
+FFile$=ftemp$
+if not(fromUpgrade) PRINT @COL,ROW;"Converting "+FFILE$;
+LET COL=COL+13+LEN(FFILE$)
+OPEN #2,DFILE$ ! open original file in new location
+LET CH=2 \ GOSUB GET_ACTIVE_RECS:
+LET LOGMSG$="Estimated number of records to process: "+STR$(ACTRECS)
+GOSUB DO_WRITE_LOG:
+LET FCODE$="SPRODDESC"
+LET PTH$=""
+LET OWRITE$="y"
+LET WORK$=DFILE$
+GOSUB DO_BUILD:
+LET FFILE$=DFILE$
+LET DFILE$=WORK$
+system "chmod go+rw files/3/sproddesc"+str$(coid) ! all -- for permissions
+Open #3,FFile$ ! new file
+mat read #1,88,1888;ftemp$;
+Open #4,Ftemp$ ! current ROL file
+LET ORIG$=""
+LET OWRITE$="ne 'expd192'"
+LET FCODE$="ROLNEW"
+LET MODE=0 ! backup COPY AS WE'RE MAKING CHANGES!
+GOSUB DO_BACKUP:
+! ready to go
+k1$=" ",k1$;Rec=0
+
+NSFLoop: ! loop thru all order lines set up
+search #4,3,1;k1$,r[4],e \ if e=2 goto startanstk:
+if e error 11000
+mat read #4,r[4],8;l3;
+mat read #4,r[4],16;l4;
+mat read #4,r[4],256;s2;
+if s2[0]=0 if l3[0]=1 if L4[0]>0 ! non-stock (NOT MESSAGE)- process it!
+	! let use keys only!
+	k2$=" ",k2$
+	k2$=k1$ ! same as line
+	k2$[10]="" ! in case - strip blank
+	search #2,2,1;k2$,r[2],e \ if e>1 error 11000 ! check orig file
+	if e ! switch to a message line? 
+		!let s2[0]=3 ! let's - as we backed up rolnew
+		!mat write #4,r[4],256;s2;
+		!goto NSFLoop: ! no match - NO xfer
+		if L4[0]>0 if l4[0]<chf(2) let r[2]=L4[0] ! ok if null?
+	endif
+	let ch_sproddesc=2 ! orig
+	let rec_sproddesc=R[2] ! L4[0]
+	gosub read_NSRec:
+	! if nsl7[0]<=0 if nsl7[1]<=0 if nsl7[2]<=0 goto NSFLoop: ! no data bypass?
+	k2$=" ",k2$
+	k2$=k1$ ! same as line
+	k2$[10]="" ! in case - strip blank
+	ORDNO=K2$[1,6]
+	search #3,2,1;k2$,r[3],e ! check new file
+	if not(e) goto nsfloop ! existing?? bypass!!
+	let e=2;r=0
+	search #3,1,0;k2$,r,e \ if e Error 11000
+	let r[3]=r
+	K2$=K2$+Blank$
+	k2$[11]="" ! len = 10!
+	search #3,4,1;k2$,r[3],E \ if e Error 11000
+	LET NSL7[2]=R[4] ! RESET IN CASE!
+	let NSFRT1[2]=0;NSL7[0]=ORDNO
+	NSL7[1]=k2$[7,9]
+	let nsuda$=" ",nsuda$
+	SPARENU$=BLANK$ ! for key
+	let ch_sproddesc=3 ! new
+	let rec_sproddesc=R[3]
+	gosub Wrt_NSRec:
+	let L4[0]=R[3] ! new record in expanded file
+	mat write #4,R[4],16;L4; ! write back new record
+	LET REC=REC+1
+	IF NOT(FRA(REC/100)) GOSUB DISPLAY_PROGRESS:
+Endif ! of it's non-stock
+goto NSFLoop
+
+startanstk: ! OK - NOW BACK THROUGH FOR ACCEPTED NON-STOCKS! 
+! first make sure history file is built!!
+LET FCODE$="SPRDDESCH"
+LET PTH$=""
+LET OWRITE$="y"
+LET WORK$=DFILE$
+GOSUB DO_BUILD:  ! rebuild the correct size!
+system "chmod go+rw files/4/sprddesch"+str$(coid) ! all -- for permissions
+LET LOGMSG$="Built SPRDDESCH, working on Accepted NStk's "
+GOSUB DO_WRITE_LOG:
+! per 227b - set L7[2]=-1 and ordline is deleted!  ONLY ON ORDERS!!
+K1$=" ",k1$;rec=0
+NSFOLoop2: ! loop 2
+search #2,3,1;k1$,R[2],E \ if e goto startquote:
+let ch_sproddesc=2 ! orig
+	let rec_sproddesc=R[2]
+	gosub read_NSRec:
+	if NSL7[2]<>-1 goto NSFOLoop2: ! not accepted
+	k2$=" ",k2$
+	let K2$=k1$ ! same key
+	k2$[10]="" ! in case - strip blank
+	ORDNO=K2$[1,6]
+	search #3,2,1;k2$,r[3],E \ if not(e) goto NSFOLoop2:
+	let e=2;r=0
+	search #3,1,0;k2$,r,e \ if e Error 11000
+	let r[3]=r
+	K2$=K2$+Blank$
+	k2$[11]="" ! len = 10!
+	search #3,4,1;k2$,r[3],E \ if e Error 11000
+	let NSFRT1[2]=0
+	let nsuda$=" ",nsuda$
+	SPARENU$=BLANK$ ! for key
+	NSL7[0]=ORDNO;NSL7[1]=k2$[7,9]
+	let ch_sproddesc=3 ! new
+	let rec_sproddesc=R[3]
+	gosub Wrt_NSRec:
+	LET REC=REC+1
+	IF NOT(FRA(REC/100)) GOSUB DISPLAY_PROGRESS:
+goto NSFOLoop2:
+
+startquote: ! as quotes have same layout as orders!!
+try 
+	close #2
+	close #3
+	close #4
+else
+end try
+mat read #1,88,1424;ftemp$;
+LET ORIG$=""
+LET OWRITE$="ne 'expd192'"
+LET ROW=23;COL=0
+
+Open #2,ftemp$
+Let X2=CHF(302) ! "rec size in words
+Close #2
+UPDATE=0
+If X2>130 ! "it's already done
+	Let LOGMSG$="File "+Ftemp$+" is already expanded - bypassing"
+	Gosub DO_WRITE_LOG:
+	Goto endquote:
+	!UPDATE=1 ! we are just fixing
+Endif
+LET FCODE$="QPRODDESC"
+LET MODE=0 ! COPY
+GOSUB DO_BACKUP:
+FFile$=ftemp$
+if not(fromUpgrade) PRINT @COL,ROW;"Converting "+FFILE$;
+LET COL=COL+13+LEN(FFILE$)
+OPEN #2,DFILE$ ! open original file in new location
+LET CH=2 \ GOSUB GET_ACTIVE_RECS:
+LET LOGMSG$="Estimated number of records to process: "+STR$(ACTRECS)
+GOSUB DO_WRITE_LOG:
+LET FCODE$="QPRODDESC"
+LET PTH$=""
+LET OWRITE$="y"
+LET WORK$=DFILE$
+GOSUB DO_BUILD:
+LET FFILE$=DFILE$
+LET DFILE$=WORK$
+system "chmod go+rw files/3/qproddesc"+str$(coid) ! all -- for permissions
+Open #3,FFile$ ! new file
+mat read #1,88,1344;ftemp$;
+Open #4,Ftemp$ ! QOL file
+LET ORIG$=""
+LET OWRITE$="ne 'expd192'"
+LET FCODE$="QOL"
+LET MODE=0 ! BACKUP COPY AS WE'RE MAKING CHANGES!
+GOSUB DO_BACKUP:
+! READY TO GO!
+k1$=" ",k1$;rec=0
+
+QTELoop: ! loop thru all order lines set up - gets rid of any orphaned nstk records
+search #4,3,1;k1$,r[4],e \ if e=2 goto endquote: 
+if e error 11000
+mat read #4,r[4],8;l3;
+mat read #4,r[4],16;l4;
+mat read #4,r[4],256;s2;
+if s2[0]=0 if l3[0]=1 if L4[0]>0 ! non-stock (NOT MESSAGE)- process it!
+	! let use keys only!
+	k2$=" ",k2$
+	k2$=k1$ ! same as line
+	k2$[10]="" ! in case - strip blank
+	search #2,2,1;k2$,r[2],e \ if e>1 error 11000 ! check orig file
+	if e ! switch to a message line? 
+		!let s2[0]=3 ! let's - as we backed up qol
+		!mat write #4,r[4],256;s2;
+		!goto QTELoop: ! no match - NO xfer
+		if L4[0]>0 if l4[0]<chf(2) let r[2]=L4[0] ! ok if null?
+	endif
+	let ch_sproddesc=2 ! orig
+	let rec_sproddesc=R[2] ! L4[0]
+	gosub read_NSRec:
+	k2$=" ",k2$
+	k2$=k1$ ! same as line key
+	k2$[10]="" ! in case - strip blank
+	ORDNO=K2$[1,6]
+	search #3,2,1;k2$,r[3],e ! check new file
+	if not(e) goto Qteloop ! existing?? bypass!!
+	let e=2;r=0
+	search #3,1,0;k2$,r,e \ if e Error 11000
+	let r[3]=r
+	K2$=K2$+Blank$
+	k2$[11]="" ! len = 10!
+	search #3,4,1;k2$,r[3],E \ if e Error 11000
+	LET NSL7[2]=R[4] ! RESET IN CASE!
+	let NSFRT1[2]=0;NSL7[0]=ORDNO
+	NSL7[1]=k2$[7,9]
+	let nsuda$=" ",nsuda$
+	SPARENU$=BLANK$ ! for key
+	let ch_sproddesc=3 ! new
+	let rec_sproddesc=R[3]
+	gosub Wrt_NSRec:
+	let L4[0]=R[3]
+	mat write #4,R[4],16;L4; ! write back new record of nonstk
+	LET REC=REC+1
+	IF NOT(FRA(REC/100)) GOSUB DISPLAY_PROGRESS:
+Endif ! of it's non-stock
+goto QTEloop
+
+Read_NSRec: ! read original
+!read.sproddesc.i   non stock line
+mat read #ch_sproddesc, rec_sproddesc,   0;nsl7
+mat read #ch_sproddesc, rec_sproddesc,  12;nsl$
+mat read #ch_sproddesc, rec_sproddesc,  42;nsl1$
+mat read #ch_sproddesc, rec_sproddesc,  72;nsl8
+mat read #ch_sproddesc, rec_sproddesc, 102;nsl2$
+mat read #ch_sproddesc, rec_sproddesc, 120;ha3
+mat read #ch_sproddesc, rec_sproddesc, 132;ha1$
+mat read #ch_sproddesc, rec_sproddesc, 182;NSinvno
+mat read #ch_sproddesc, rec_sproddesc, 190;nsfrt1
+Return 
+
+Wrt_NSRec: ! write back with new
+!read.sproddesc.i   non stock line
+mat Write #ch_sproddesc, rec_sproddesc,   0;nsl7
+mat Write #ch_sproddesc, rec_sproddesc,  12;nsl$
+mat Write #ch_sproddesc, rec_sproddesc,  42;nsl1$
+mat Write #ch_sproddesc, rec_sproddesc,  72;nsl8
+mat Write #ch_sproddesc, rec_sproddesc, 102;nsl2$
+mat Write #ch_sproddesc, rec_sproddesc, 120;ha3
+mat Write #ch_sproddesc, rec_sproddesc, 132;ha1$
+mat Write #ch_sproddesc, rec_sproddesc, 182;NSinvno
+mat Write #ch_sproddesc, rec_sproddesc, 188;sparenu$
+mat Write #ch_sproddesc, rec_sproddesc, 190;nsfrt1
+mat write #ch_sproddesc, rec_sproddesc, 208;NSUDA$;
+Return
+
+EndQuote: ! 
+Try 
+	close #2
+	close #3
+	close #4
+Else
+end try
+dIM 1%,D1[1],3%
+DIM R4$[20]
+! Have to fix/change the control fields
+work$="cp files/cntrl/fielddes files/databak/fielddes.expd192"
+system work$ ! copy whole file
+work$="cp files/cntrl/fielddes.idx files/databak/fielddes.expd192.idx"
+system work$ ! copy whole file
+ffile$="cntrl/fielddes"
+Open #2,ffile$
+k1$=" ",K1$
+k1$[1,6]=" 68 13" ! SO NEXT IS 14!
+flddloop: ! until 18+
+search #2,3,1;k1$,r,e \ if e=2 goto endfldd
+IF E Error 11000
+if k1$[1,3]<>" 68" goto endfldd
+! if k1$[4,6]>" 18" goto endfldd
+let x2=k1$[4,6] \ IF X2<14 OR X2>18 GOTO FLDDLOOP
+READ #2,R,6;R4$;
+if x2=14 let R4$="NS ORD LINE UDA 1  "+BLANK$
+IF X2=15 let R4$="NS ORD LINE UDA 2  "+BLANK$
+IF X2=16 let R4$="NS ORD LINE UDA 3  "+BLANK$
+IF X2=17 let R4$="NS ORD LINE UDA 4  "+BLANK$
+IF X2=18 let R4$="NS ORD LINE UDA 5  "+BLANK$
+WRITE #2,R,6;R4$;
+GOTO FLDDLOOP:
+endfldd: ! done - next fielddesc
+try close #2 else rem
+! Have to fix/change the control fields
+work$="cp files/cntrl/fielddesc1 files/databak/fielddesc1.expd192"
+system work$ ! copy whole file
+ffile$="cntrl/fielddesc1" ! +str$(coid)
+Open #3,ffile$
+Mat READ #3,68,30;D1;
+LET D1[1]=18 ! CHANGE qty TO 18 FIELDS (WAS 13!)
+Mat WRITE #3,68,30;D1;
+CLOSE #3
+LET LOGMSG$="Finished Addon Control files fielddes and fielddesc1"
+GOSUB DO_WRITE_LOG:
+! NOW WE'RE DONE!
+goto do_exit
+
+DO_EXIT: Rem---------------- Exit the upgrade -----------------------------------
+	E = 0
+Goto OUTEND
+
+DO_BACKUP: Rem"Backup the given file
+	Call "sysfbackup",FCODE$,COID,GROUPID,ORIG$,DBAK$,OWRITE$,MODE,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+	If E Goto OUTEND
+Return
+DO_BUILD: Rem"Build the given file
+	Call "Sysfbuild",FCODE$,COID,GROUPID,PTH$,OWRITE$,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+	If E Goto OUTEND
+Return
+
+include "src/rtn.pmupgrade.i"
+
+
+OUTEND: Rem"Final exit (be sure to set e=0 if successful before branching here)
+	try ! "close any possible file opened herein
+		Close #1
+		close #2
+		close #3
+		close #4
+	else
+		rem
+	end try
+End
+
+else ! main try
+	e = spc(8)
+	If Spc(8) <> 10000
+		dim msc4$[100] \ msc4$=msc$(4)
+		if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+		call env(2,"PROGNAME",msc4$)
+		if spc(8) = 11000
+			call utilsearcherr(e$, e, Spc(10))
+		else
+			Call utilsuberr(e$,Spc(8),Spc(10),Msc$(2))
+		end if
+		call programdump()
+	End If
+	Call utilmainerr(e$,Spc(8))
+	If ch_log <> -1
+		Print #ch_log;e$
+	End If
+end try

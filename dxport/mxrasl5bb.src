@@ -1,0 +1,1268 @@
+! mxrasl5bb - Best Pick call
+!
+! loadsave -w -n 100,10 -o prog/dxport/mxrasl5bb.dl4 src/mxrasl5bb.src
+!
+Rem MXRASL5 - callable rasl allocation routine
+Rem CUSTOM FOR HTBERRY
+Rem This version was originally pulled from AW Mendenhall.
+! SETUP NEEDED BEFORE THIS ROUTINE CAN BE CALLED
+! ----------------------------------------------
+!
+! passed variables:
+!
+! S9 should be dimmed as 9 (DIM S9[9])
+! S9[2] - set to the order header record number of order to be allocated
+! S9[4] - set to the program # of the caller
+!
+! file channels:
+!
+! channel 1 - should have control file open
+! channel 2 - should have order header (ROH) open
+! channel 4 - should have order line (ROL) open
+! channel 5 - should have customer (CUST) open
+! channel 6 - should have product (PROD) open
+! channel 16 - should have U/M codes (CCODES) open
+! channel 19 - should have kit lines (SORDLKITL) open
+! channel 43 - reserved for loc/lot allocations (SORDLOT) opened and closed here
+! channel 44 - reserved for bin locations (WHLOC) opened and closed here
+! channel 45 - reserved for primary bin file (PRODLOC) opened and closed here
+! channel 46 - reserved for product locations (SPRODLOT) opened and closed here
+! channel 49 - reserved for temporary sort file - opened and closed here
+!
+! ALLOCATION PRIORITIES
+! ---------------------
+! This version will allocate stock by the following priorities:
+!
+! 1. Oldest stock first, based on sprodlot last received date (with locations
+!    STOCK AND NONE being forced to the bottom of the list)
+!
+! 2. Location
+!
+! NOTES:
+!
+! 1. Primary location does not alter priority here.  In other words, does
+!    not necessarily allocate from primary first.
+!
+! 2. If the bin location (352) allocate ok flag is set to "N", the bin
+!    will be ignored.
+!
+! 3. Quantity not able to be allocated from RASL bin locations will be
+!    allocated from STOCK, forcing it negative if necessary.
+
+! Add Best Pick logic (183138) - (you don't want to know!)
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: JAN 22, 2010  13:51:54
+Rem /w2/papermaster/r2005//usr/acct/valerie/work/custom/htberry.r10/mxrasl5bb.src (univ2) [valerie] {42244}
+Rem  Copyright (c) 2010 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+include "src/copyright.inc"
+include "src/inc/fileinvtrans.inc" ! inv trans
+External Lib "librasl.lib"
+Declare External Sub Allocordlot,ChkWHRasl
+External Lib "invttrans.dl4"
+Declare External Sub maketrans
+External Lib "ubsfunc.dl4"
+Declare External Function GETUIDRec
+Declare Intrinsic Sub DateToJulian,FindF,InpBuf,String
+! Option Default Dialect IRIS1
+
+Enter S9[],CHOPEN[],IntCo
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+Dim rstr$[500]
+Dim 1%,PFU1[20],CNVTU[2],WH,FOPEN[20]
+Dim 3%,PFU2[6],CNVTA,A[33],Z9[9]
+Dim 2%,TYPE,J4$[50],A$[156],WLOT$[12],SEL,SEL$[5]
+Rem {begin src/inc/dim.getchan.i}
+Dim 1%,CHNL
+Dim 3%,CHNLSCR,CHNLFREE
+Rem {end dim.getchan.i}
+If Err 0 Gosub ERR_TRAP
+! Print 'CR';"RASL allocating stock...."
+Dim 1%,CH_PRODLOC,CH_WHLOC,CH_PROD,CH_ROH,CH_ROL,CH_CCODES,CH_KIT
+Dim 1%,CH_PRODWH,CH_INVTR,CH_USERPORT
+Dim 1%,CH_PRODLOT,CH_ORDLOT,CH_CUST
+Dim 1%,PASS,OPEN_CHAN[10],RASL[5],OWHS,BPICK[5]
+Dim F$[17],V$[60],V1$[31],V6$[60],K1$[60],K2$[60],M1$[4],I$[80]
+Dim F1$[24],F2$[30],K$[60],TMPKEY$[60],TMPKEY2$[60]
+Dim 2%,R[50],X,X2,TS9[3],1%,LS2[1],L1[3]
+Dim 1%,L3[3],WHSE,H4[2],P1[1],OL1[3],UN[2],FOUND,2%,D9[20]
+Dim 1%,D1,E,J0,J2,J3,J4,J5,J6,J8,J9[5],3%,J1,R0[100]
+Dim 1%,WLA[1],LT1[3],WHOAMI
+Dim J$[40],J0$[12],J1$[40],J2$[40],J5$[75],J7$[75],J9$[40],LOT$[12]
+Dim 2%,H0[12],L4[3],P2[2],OL2[3],H5[11],AXCESS,TMPREC
+Dim 2%,SYSDATE,PRODRECVDATE,JULDATE[1],BPKQTY
+Dim TIER$[1],TIEB$[2],KEY_$[55],SRT$[60],1%,SRT[2],3%,LOCSRT
+Dim C2$[20],P0$[66],P1$[156],S0$[36],LOC$[6],TEMP$[12],SPACES$[80]
+Dim B1$[200],B2$[200],A$[156],KLOT$[60],PRIM$[6],K20$[40],K21$[20]
+Dim OL2$[16],SP1$[6],P9$[50],P60$[50],L6$[60],X$[20],PN$[16]
+Dim ROL$[40],K16$[50],KL$[58],1%,KL1[5],3%,KL3[1],2%,KL2[1]
+Dim 3%,P3[4],L5[3],T7[5],OL3[5],L7[12],B3[17],K17$[60],K18$[60],SK17$[60]
+Dim 3%,UNALLOCAMOUNT,LOCUNALLOC
+Dim 3%,QSHP,QORD,QBO,TORD,TSHP,TBO,RELQTY,QTA,QTA1,QTB,ORIG_L7_4
+Dim 3%,W3[24],LT2[5],prim_avail
+Dim 4%,AMOUNT
+Dim 2%,B1[24],3%
+Dim SCRATCH$[80],RASLUNALLOCLOC$[6],DFLTRCVLOC$[6]
+Dim LT0$[56],LT1$[6],Userid$[10],tmp$[200]
+Z9[1] = 3;Z9[3] = 16
+SPACES$ = " ",SPACES$
+If TYPE = 5 If S9[9] <= 0 Goto L_9040
+If S9[2] <= 0 Goto L_9040
+If Err 0 Gosub ERR_TRAP
+Dim itr. as invtrans
+CH_CNTRL = CHOPEN[0]
+CH_PROD = CHOPEN[1]
+CH_ROH = CHOPEN[2]
+CH_ROL = CHOPEN[3]
+CH_PRODLOT = CHOPEN[6]
+CH_ORDLOT = CHOPEN[8]
+CH_PRODLOC = CHOPEN[9]
+CH_WHLOC = CHOPEN[7]
+CH_CCODES = CHOPEN[5]
+CH_KIT = CHOPEN[4]
+X2 = Intco ! Spc(5)
+F$ = "cntrl/CNTRL"+Str$(IntCo) ! Int((X2 - Int(X2 / 16384) * 16384) / 64) Using "CNTRL#"
+If Not(CHOPEN[0]) ! "CNTRL File
+  CHNL = 98 \ Gosub GETCHAN
+  If CHNL Let FOPEN[0] = CHNL Else Error 11000 ! Gosub ERR_SEARCH
+  CH_CNTRL = CHNL
+  Open #CH_CNTRL,F$
+End If 
+Read #CH_CNTRL,88,208;F$[1,16];
+If Not(CHOPEN[9]) ! "ProdLoc File
+  CHNL = 98 \ Gosub GETCHAN
+  If CHNL Let FOPEN[9] = CHNL Else Error 11000 ! Gosub ERR_SEARCH
+  CH_PRODLOC = CHNL
+  Ropen #CH_PRODLOC,F$
+End If 
+Read #CH_CNTRL,88,2736;F$[1,16];
+If Not(CHOPEN[7]) ! "WHLoc File
+  CHNL = 98 \ Gosub GETCHAN
+  If CHNL Let FOPEN[7] = CHNL Else Error 11000 ! Gosub ERR_SEARCH
+  CH_WHLOC = FOPEN[7]
+  Ropen #CH_WHLOC,F$
+End If 
+Read #CH_CNTRL,88,1792;F$[1,16];
+If Not(CHOPEN[1]) ! "Product File
+  CHNL = 98 \ Gosub GETCHAN
+  If CHNL Let FOPEN[1] = CHNL Else Error 11000 ! Gosub ERR_SEARCH
+  CH_PROD = FOPEN[1]
+  Ropen #CH_PROD,F$
+End If 
+Read #CH_CNTRL,88,1840;F$[1,16];
+If Not(CHOPEN[2]) ! "Order Header
+  CHNL = 98 \ Gosub GETCHAN
+  If CHNL Let FOPEN[2] = CHNL Else Error 11000 ! Gosub ERR_SEARCH
+  CH_ROH = FOPEN[2]
+  Ropen #CH_ROH,F$
+End If 
+Read #CH_CNTRL,88,1888;F$[1,16];
+If Not(CHOPEN[3]) ! "Order Line
+  CHNL = 98 \ Gosub GETCHAN
+  If CHNL Let FOPEN[3] = CHNL Else Error 11000 ! Gosub ERR_SEARCH
+  CH_ROL = FOPEN[3]
+  Open #CH_ROL,F$
+End If 
+Read #CH_CNTRL,88,1728;F$[1,16];
+If Not(CHOPEN[5]) ! "U/M Codes
+  CHNL = 98 \ Gosub GETCHAN
+  If CHNL Let FOPEN[5] = CHNL Else Error 11000 ! Gosub ERR_SEARCH
+  CH_CCODES = FOPEN[5]
+  Ropen #CH_CCODES,F$
+End If 
+Read #CH_CNTRL,88,1312;F$[1,16];
+If Not(CHOPEN[4]) ! "Kit File
+  CHNL = 98 \ Gosub GETCHAN
+  If CHNL Let FOPEN[4] = CHNL Else Error 11000 ! Gosub ERR_SEARCH
+  CH_KIT = FOPEN[4]
+  Ropen #CH_KIT,F$
+End If 
+Read #CH_CNTRL,88,2528;F$[1,16];
+If Not(CHOPEN[6]) ! "Product Lot File
+  CHNL = 98 \ Gosub GETCHAN
+  If CHNL Let FOPEN[6] = CHNL Else Error 11000 ! Gosub ERR_SEARCH
+  CH_PRODLOT = FOPEN[6]
+  Open #CH_PRODLOT,F$
+End If 
+Read #CH_CNTRL,88,2320;F$[1,16];
+If Not(CHOPEN[8]) ! "Order Lot File
+  CHNL = 98 \ Gosub GETCHAN
+  If CHNL Let FOPEN[8] = CHNL Else Error 11000 ! Gosub ERR_SEARCH
+  CH_ORDLOT = FOPEN[8]
+  Open #CH_ORDLOT,F$
+End If 
+CHNL = 99 \ Gosub GETCHAN \ CH_PRODWH = CHNL
+Read #CH_CNTRL,88,1744;F$[1,16];
+Ropen #CH_PRODWH,F$
+CHNL = 99 \ Gosub GETCHAN \ CH_USERPORT = CHNL
+!Ropen #CH_USERPORT,"CNTRL/USERPORT"
+CHNL = 99 \ Gosub GETCHAN \ CH_INVTR = CHNL
+Read #CH_CNTRL,88,2512;F$[1,16];
+Open #CH_INVTR,F$
+Read #CH_CNTRL,88,1808;F$[1,16];
+Mat Read #CH_CNTRL,19,50;P9$; \ Mat Read #CH_CNTRL,60,50;P60$;
+RASL = 0
+If P9$[41,41] = "Y" Or P9$[41,41] = "W" Let RASL = 9
+If Not(RASL) Goto L_9040
+Mat Read #CH_CNTRL,69,52;DFLTRCVLOC$
+Mat Read #CH_CNTRL,69,166;RASLUNALLOCLOC$;
+Read #CH_CNTRL,60,26;BPKQTY;
+!Read #CH_USERPORT,Spc(6);WHOAMI;
+call dxget("S_USER.ID",tmp$) ! get from system variable
+ Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+whoami=GetUIDRec(e$,IntCo,Userid$)
+Read #CH_CNTRL,3,172;SYSDATE;
+If S9[4] = 203
+  Mat Read #CH_ROH,S9[2],0;H0
+  Mat Read #CH_ROH,S9[2],104;H5
+Else 
+  Mat Read #CH_ROH,S9[2],0;H0;
+  Mat Read #CH_ROH,S9[2],104;H5;
+End If 
+If H5[7] = 20 Goto L_9100
+USELOT = 99;V1$ = ""
+Mat Read #CH_CNTRL,115;D9;
+KIT = 0 \ If TYPE = 5 Let KIT = 9
+If S9[3] = 4 Or S9[3] = 44 Let TYPE = 3 Else Let TYPE = 2
+If Err 0 Gosub ERR_TRAP
+Gosub BUILDSORT
+If S9[4] = 203
+  Mat Read #CH_ROH,S9[2];H0
+  Mat Read #CH_ROH,S9[2],78;H4
+  Mat Read #CH_ROH,S9[2],104;H5
+Else 
+  Mat Read #CH_ROH,S9[2];H0;
+  Mat Read #CH_ROH,S9[2],78;H4;
+  Mat Read #CH_ROH,S9[2],104;H5;
+End If 
+If H4[2] <= 0 Or H4[2] > D9[5] Let H4[2] = 1
+WHSE = H4[2] \ If H5[7] = 7 Let WHSE = H5[11]
+Gosub GET_WHINFO
+WH = WHSE
+!Call "CHKWRASL",WHSE,RASL[]
+Call CHKWHRASL(e$,intco,CH_CNTRL,0,WHSE,RASL[]) ! "RASL by Whse
+RASL[1] = 2
+If RASLUNALLOCLOC$ <> "" And RASLUNALLOCLOC$[1,1] <> " "
+  K21$ = WHSE Using "##",RASLUNALLOCLOC$[1,6]
+  Search #CH_WHLOC,2,1;K21$,R[21],E \ If E > 1 Error 11000 ! Gosub ERR_SEARCH
+  If E Let RASLUNALLOCLOC$ = ""
+  If RASLUNALLOCLOC$ <> ""
+    SCRATCH$ = " ",SCRATCH$
+    SCRATCH$[1,Len(RASLUNALLOCLOC$)] = RASLUNALLOCLOC$
+    RASLUNALLOCLOC$ = SCRATCH$
+  End If 
+Else 
+  RASLUNALLOCLOC$ = ""
+End If 
+If DFLTRCVLOC$ <> "" And DFLTRCVLOC$[1,1] <> " "
+  K21$ = WHSE Using "##",DFLTRCVLOC$[1,6]
+  Search #CH_WHLOC,2,1;K21$,R[21],E \ If E > 1 Error 11000 ! Gosub ERR_SEARCH
+  If E Let DFLTRCVLOC$ = ""
+  If DFLTRCVLOC$ <> ""
+    SCRATCH$ = " ",SCRATCH$
+    SCRATCH$[1,Len(DFLTRCVLOC$)] = DFLTRCVLOC$
+    DFLTRCVLOC$ = SCRATCH$
+  End If 
+Else 
+  DFLTRCVLOC$ = ""
+End If 
+Gosub DFLT_STOCK
+PRIM$ = " ",PRIM$
+If KIT Goto GET_KITS
+ROL$ = " ",ROL$;ROL$[1,6] = H0[7] Using "######"
+MAIN_LOOP: Rem "=================================== order line loop is here
+Search #CH_ROL,3,1;ROL$,V1,E \ If E > 2 Error 11000 ! Gosub ERR_SEARCH
+X2 = ROL$[1,6]
+If E Or X2 <> H0[7] Goto L_9100
+If (H5[7] = 21 Or H5[7] = 22) And ROL$[7,9] = "   " Goto MAIN_LOOP
+REC_ROL = V1
+Mat Read #CH_ROL,REC_ROL,8;L3;
+Mat Read #CH_ROL,REC_ROL,16;L4;
+Mat Read #CH_ROL,REC_ROL,32;L5;
+Mat Read #CH_ROL,REC_ROL,80;L6$;
+Mat Read #CH_ROL,REC_ROL,140;C2$;
+Mat Read #CH_ROL,REC_ROL,168;L7;
+Mat Read #CH_ROL,REC_ROL,250;UN;
+Mat Read #CH_ROL,REC_ROL,256;LS2;
+Mat Read #CH_ROL,REC_ROL,260;B3;
+Read #CH_ROL,REC_ROL,550;OWHS;
+If OWHS <= 0 Or OWHS > D9[5] Or Fra(OWHS) Let OWHS = 0
+If L4[3] <= 0 Or L4[3] > D9[5] Or Fra(L4[3]) Let L4[3] = H4[2]
+If H5[7] = 15
+  If H0[5] <> 0 Let L7[4] = 0 Else Let L7[4] = L7[2]
+End If 
+WHSE = L4[3] \ If H5[7] = 7 Let WHSE = H5[11]
+Gosub GET_WHINFO
+WH = WHSE
+!Call "CHKWRASL",WHSE,RASL[]
+Call CHKWHRASL(e$,intco,CH_CNTRL,0,WHSE,RASL[]) ! "RASL by Whse
+RASL[1] = 2
+Gosub DFLT_STOCK
+If L7[11] Goto MAIN_LOOP
+RELQTY = B3[6]
+A$ = " ",A$
+If L3[2] <= 900 And L3[0] = 0 And LS2[0] <> 3 !  sprod
+  If H5[7] = 4 Or H5[7] = 15 Let L7[4] = L7[2] - L7[0] - L7[3]
+  Mat Read #CH_PROD,L4,0;A$;
+  Mat Read #CH_PROD,L4,156;B1;
+  Mat Read #CH_PROD,L4,256;A;
+  Mat Read #CH_PROD,L4,512;PFU1;
+  Mat Read #CH_PROD,L4,554;PFU2;
+End If 
+If LS2[0] = 3 Let L3[0] = 1
+If L3[2] > 900 Let L3[1] = 0
+If Not(L3[0]) Gosub GET_LOTCNTRL
+If C2$[17,20] = "LABR" Or C2$[17,20] = "TIME" Let L3[1] = 0
+If H5[7] = 2 Let L3[1] = 0
+KIT_ENTRY: Rem "======= this is the KIT gosub entry point from 10000 rtn.
+LOCSHIP = L7[4]
+ORGWHSE = WHSE
+If OWHS Let WHSE = OWHS
+Gosub CLEAN_ORDLOT
+OWHS = 0;WHSE = ORGWHSE
+If L3[2] > 900 Or L3[0] Goto L_2140
+If L3[1] ! "Stock Allocate=Y
+  FORCEWINDOW = 0
+  Gosub GET_LOTCNTRL
+L_1964: Gosub DFLT_STOCK
+  ITM = 0
+  Gosub GET_QTYASGND
+  If Abs(L7[4]) < Abs(QTA) !* if shipped less then assigned
+    If RASLUNALLOCLOC$ <> "" And RASLUNALLOCLOC$[1,1] <> " " And H5[7] <> 4 And H5[7] <> 15
+      UNALLOCAMOUNT = QTA - L7[4]
+      Gosub DOUNALLOCATE
+      If UNALLOCAMOUNT > 0 Goto TOTALREALLOCATE
+      Gosub GET_QTYASGND
+      If Abs(L7[4]) < Abs(QTA) Goto TOTALREALLOCATE
+    Else 
+TOTALREALLOCATE: Rem* reallocate everything
+      L3[1] = 0 \ Gosub CLEAN_ORDLOT
+      L3[1] = 1;QTA = 0 \ Goto L_1964
+    End If 
+  End If 
+  Gosub GET_PRIMLOC
+  ORIG_L7_4 = L7[4]
+  If QTA Let L7[4] = L7[4] - QTA
+  QORD = L7[4] + L7[3];QSHP = L7[4];QBO = L7[3]
+  If H5[7] = 4 Or H5[7] = 15 Let QORD = L7[2] - L7[0] \ QSHP = QORD - QBO
+  BPICK[0] = 0
+  If BPKQTY ! "using best pick as a qty is entered in 922
+    CNVTU[0] = 0;CNVTU[1] = PFU1[8];CNVTU[2] = 1;CNVTA = QSHP
+    Gosub L_20000
+    If AMOUNT >= BPKQTY Let BPICK[0] = 1
+    If RASL[1] = 1 Let BPICK[0] = 0
+    If RELQTY Let BPICK[0] = 0
+  End If 
+  If QSHP >= 0 Or QBO >= 0 Gosub DO_ALLOCATE
+End If 
+Gosub SERIAL_NUMBERS
+If Not(KIT) If C2$[13,15] = "KIT" ! DO KIT PART OF LINE ALSO
+  KIT = 9;S9[9] = L3[2];HLDLOT = USELOT
+  Gosub L_10000
+  Gosub GET_KITS \ KIT = 0;USELOT = HLDLOT
+End If 
+L_2140: Rem
+If KIT
+  Return 
+Else 
+  OWHS = 0
+  Write #CH_ROL,REC_ROL,550;OWHS;
+  Goto MAIN_LOOP
+End If 
+DFLT_STOCK: Rem "=================================== SET UP DEFAULT STOCK LOT
+LOT$ = " ",LOT$
+LOT$[1,7] = WHSE Using "STOCK&&"
+LOC$[1,6] = "STOCK "
+If H5[7] = 7 Let LOC$[1,6] = "STOCK "
+Return 
+CREATE_SORDLOT: Rem "========================================= CREATE SORDLOT
+K1$ = " ",K1$
+K1$[1,12] = C2$[1,12]
+K1$[13,18] = H0[7] Using "######"
+K1$[19,21] = L3[2] Using "###"
+K1$[22,23] = WHSE Using "##"
+K1$[24,29] = LOC$[1,6]
+K1$[30,41] = LOT$[1,12]
+If KIT Let K1$[42,44] = "KIT";K1$[45,47] = KL1[1] Using "&&&"
+Search #CH_ORDLOT,2,1;K1$,V1,E \ If E > 1 Error 11000 ! Gosub ERR_SEARCH
+If E
+  E = 2 \ Search #CH_ORDLOT,1,0;K1$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+  Search #CH_ORDLOT,4,1;K1$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+  K2$ = " ",K2$
+  K2$[1,22] = K1$[30,51]
+  K2$[23,39] = K1$[13,29]
+  K2$[40,51] = K1$[1,12]
+  Search #CH_ORDLOT,4,2;K2$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+  K2$ = " ",K2$
+  K2$[1,39] = K1$[13,51]
+  Search #CH_ORDLOT,4,3;K2$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+  S0$[1,12] = C2$[1,12]
+  S0$[13,24] = LOT$[1,12]
+  OL2$ = " ",OL2$ \ OL2$[11,16] = LOC$[1,6]
+  If KIT Let OL2$[1,3] = "KIT";OL2$[4,6] = KL1[1] Using "&&&"
+  OL1 = L3[2];OL1[1] = TYPE;OL1[2] = WHSE
+  If S9[3] = 4 Let OL1[1] = 3
+  If H5[7] = 12 Let OL1[1] = 5
+  OL2 = H0[7];OL2[1] = H0[9];OL2[2] = H0[4]
+  OL3[0] = QORD;OL3[1] = QSHP;OL3[2] = P3[2]
+  If H5[7] = 4 Or H5[7] = 15
+    If OL3[1] < 0 Let OL3[1] = 0
+    SCR = OL3[0] - OL3[1] + QSHP
+    If RELQTY > SCR
+      OL3[5] = SCR;RELQTY = RELQTY - SCR
+    Else 
+      OL3[5] = RELQTY;RELQTY = 0
+    End If 
+  End If 
+  If (H5[7] <> 8 And H5[7] <> 16) Let OL3[4] = 0
+  OL3[3] = QBO
+  S0$[25,36] = " ",S0$[25,36];OL1[3] = 0;OL2[3] = 0
+  Mat Write #CH_ORDLOT,V1;S0$;
+  Mat Write #CH_ORDLOT,V1,36;OL1;
+  Mat Write #CH_ORDLOT,V1,44;OL2;
+  Mat Write #CH_ORDLOT,V1,60;OL3;
+  Mat Write #CH_ORDLOT,V1,96;OL2$;
+End If 
+Return 
+UPD_SORDLOT: Rem "======================================= sordlot maint
+PASS = 1
+K1$ = " ",K1$
+K1$ = " ",K1$;K1$[1,6] = H0[7] Using "######"
+K1$[7,9] = L3[2] Using "###"
+K1$[10,11] = WHSE Using "##"
+If PRIM$[1,6] <> "      " Let LOC$[1,6] = PRIM$ Else Let LOC$[1,6] = "STOCK "
+K1$[12,17] = LOC$[1,6]
+K1$[18,29] = LOT$[1,12]
+If KIT Let K1$[30,32] = "KIT";K1$[33,35] = KL1[1] Using "&&&"
+K2$ = K1$
+K6 = 0
+X = 9
+Search #CH_ORDLOT,2,3;K1$,V1,E \ If E > 1 Error 11000 ! Gosub ERR_SEARCH
+If E
+  If (QSHP And (QTA1 Or LOC$[1,6] = "STOCK ")) Or (LOC$[1,6] = "STOCK " And (RELQTY Or QBO))
+    Gosub CREATE_SORDLOT
+  Else 
+    PASS = 0
+    OL2$ = " ",OL2$
+  End If 
+  Return 
+End If 
+If K1$[1,11] = K2$[1,11]
+  R[7] = V1
+  Mat Read #CH_ORDLOT,R[7];S0$;
+  Mat Read #CH_ORDLOT,R[7],36;OL1;
+  Mat Read #CH_ORDLOT,R[7],44;OL2;
+  Mat Read #CH_ORDLOT,R[7],60;OL3;
+  Mat Read #CH_ORDLOT,R[7],96;OL2$;
+  TORD = QORD \ TSHP = QSHP \ TBO = QBO \ M1 = -1
+  QSHP = OL3[1];QBO = OL3[3] \ Gosub UPD_SPRODLOT
+  QORD = TORD \ QSHP = TSHP \ QBO = TBO
+  If H5[7] <> 4 Let OL3 = OL3 + QORD \ OL3[1] = OL3[1] + QSHP \ OL3[2] = P3[2]
+  If H5[7] = 4 Or H5[7] = 15
+    If H5[7] = 4 Let SCR = OL3[0] Else Let SCR = OL3[0] - OL3[1] + QSHP
+    If RELQTY > SCR
+      OL3[5] = SCR;RELQTY = RELQTY - SCR
+    Else 
+      OL3[5] = RELQTY;RELQTY = 0
+    End If 
+  End If 
+  If (H5[7] <> 8 And H5[7] <> 16) Let OL3[4] = 0
+  OL3[3] = OL3[3] + QBO
+  OL2[2] = H0[4]
+  Mat Write #CH_ORDLOT,R[7];S0$;
+  Mat Write #CH_ORDLOT,R[7],36;OL1;
+  Mat Write #CH_ORDLOT,R[7],44;OL2;
+  Mat Write #CH_ORDLOT,R[7],60;OL3;
+  Mat Write #CH_ORDLOT,R[7],96;OL2$;
+Else 
+  PASS = 0
+End If 
+Return 
+GET_PRIMLOC: Rem GET PRIMARY LOCATION
+PRIM$ = " ",PRIM$;K20$ = " ",K20$
+K20$ = C2$[1,12];K20$[13] = WHSE Using "##"
+Search #CH_PRODLOC,2,1;K20$,R[20],E \ If E > 1 Error 11000 ! Gosub ERR_SEARCH
+If E Let K20$[15,20] = "      "
+PRIM$ = K20$[15,20]
+If Not(RASL) Let PRIM$ = "STOCK "
+Gosub L_5120
+Return 
+GET_WHINFO: Rem GET WHSE INFO
+K21$ = WHSE Using "##";K21$[3] = "  @    "
+Search #CH_WHLOC,2,1;K21$,R[21],E \ If E > 1 Error 11000 ! Gosub ERR_SEARCH
+If E = 1 Let SRT[1] = 2;SRT[2] = 3;LOCSRT = 0 \ Return 
+Mat Read #CH_WHLOC,R[21],40;SRT;
+Mat Read #CH_WHLOC,R[21],46;LOCSRT;
+Mat Read #CH_WHLOC,R[21],76;WLA;
+Return 
+CLEAN_ORDLOT: Rem "===================== CHECK FOR LOTS WHICH SHOULDN'T BE THERE
+V$ = " ",V$
+V$[1,6] = H0[7] Using "######"
+V$[7,9] = L3[2] Using "###"
+V$[10,11] = WHSE Using "##"
+If OWHS Let V$[10,11] = OWHS Using "##"
+I$ = V$ \ V1 = 0 \ E = 0
+CO_LOOP: Rem
+Search #CH_ORDLOT,3,3;V$,V1,E \ If E > 2 Error 11000 ! Gosub ERR_SEARCH
+If Not(E) And V$[1,11] = I$[1,11]
+  If Not(KIT) And V$[30,32] = "KIT" Goto CO_LOOP
+  If KIT And V$[30,32] <> "KIT" Goto CO_LOOP
+  LN = V$[33,35]
+  If KIT And LN <> KL1[1] Goto CO_LOOP
+  If V$[40,40] = "4" Goto CO_LOOP
+  R[7] = V1
+  I$ = V$
+  Mat Read #CH_ORDLOT,V1;S0$;
+  Mat Read #CH_ORDLOT,V1,36;OL1;
+  Mat Read #CH_ORDLOT,V1,44;OL2;
+  Mat Read #CH_ORDLOT,V1,60;OL3;
+  Mat Read #CH_ORDLOT,V1,96;OL2$;
+  If H5[7] = 4
+    OL3[5] = 0
+    Mat Write #CH_ORDLOT,V1,60;OL3;
+  End If 
+  If L3[0] <> 0 Or L3[1] = 0 Goto CO_DEL
+  If OWHS Goto CO_DEL
+  If RASL
+    If OL2$[11,16] = "NONE  " Or OL2$[11,16] = "STOCK " Goto CO_DEL
+  Else 
+    If OL2$[11,16] <> "STOCK " Goto CO_DEL
+  End If 
+  If LOTCNTRL
+    If S0$[13,17] = "STOCK" Goto CO_DEL
+  Else 
+    If S0$[13,17] <> "STOCK" Goto CO_DEL
+  End If 
+  If S0$[1,12] <> C2$[1,12] Goto CO_DEL
+  If OL1[2] <> WHSE Goto CO_DEL
+  If S0$[13,17] = "STOCK"
+    X2 = S0$[18,19]
+    If X2 <> OL1[2] Goto CO_DEL
+  End If 
+  Goto CO_LOOP
+End If 
+Return 
+CO_DEL: Rem FOUND A SORDLOT
+QSHP = OL3[1];QORD = OL3[1];QBO = OL3[3];TEMP$ = C2$[1,12];C2$[1,12] = S0$[1,12]
+Gosub DEL_SORDLOT
+C2$[1,12] = TEMP$;V$ = I$
+Goto CO_LOOP
+DEL_SORDLOT: Rem "======================================== DELETE SORDLOT
+K1$ = " ",K1$;K2$ = " ",K2$
+K1$[1,12] = S0$[1,12]
+K1$[13,18] = OL2 Using "######"
+K1$[19,21] = OL1 Using "###"
+K1$[22,23] = OL1[2] Using "##"
+K1$[24,29] = OL2$[11,16]
+K1$[30,41] = S0$[13,24]
+K1$[42,51] = OL2$[1,10]
+T7 = OL3 \ E = 0
+Search #CH_ORDLOT,5,1;K1$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+If V1 <> R[7] Error 11000 ! Print "RECORDS DO NOT AGREE" \ E = 0 \ Gosub ERR_SEARCH
+K2$[1,22] = K1$[30,51]
+K2$[23,39] = K1$[13,29]
+K2$[40,51] = K1$[1,12]
+Search #CH_ORDLOT,5,2;K2$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+If V1 <> R[7] Error 11000 ! Print "RECORDS DO NOT AGREE" \ E = 0 \ Gosub ERR_SEARCH
+K2$ = " ",K2$ \ E = 0
+K2$[1,39] = K1$[13,51]
+Search #CH_ORDLOT,5,3;K2$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+If V1 <> R[7] Error 11000 ! Print "RECORDS DO NOT AGREE" \ E = 0 \ Gosub ERR_SEARCH
+K2$ = " ",K2$;V1 = R[7]
+E = 3 \ Search #CH_ORDLOT,1,0;K2$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+If V1 <> R[7] Error 11000 ! Print "RECORDS DO NOT AGREE" \ E = 0 \ Gosub ERR_SEARCH
+M1 = -1 \ Gosub UPD_SPRODLOT
+QSHP = 0;QBO = 0
+Return 
+UPD_SPRODLOT: Rem "================================== UPDATE SPRODLOT
+If OL2$[11,11] = "" Or OL2$[11,16] = "      " Let OL2$[11,16] = LOC$[1,6]
+K2$ = " ",K2$
+K2$[1,12] = S0$[13,24]
+K2$[23,24] = WHSE Using "##"
+K2$[25,30] = OL2$[11,16]
+K2$[31,42] = C2$[1,12]
+Search #CH_PRODLOT,2,1;K2$,V1,E \ If E > 1 Error 11000 ! Gosub ERR_SEARCH
+If E
+  If K2$[1,4] = "    " Or K2$[25,28] = "    " Return 
+  If K2$[1,5] = "STOCK"
+    If K2$[25,28] = "NONE" Or K2$[25,29] = "STOCK" Gosub CREATE_SPRODLOT
+  Else 
+    Error 11000 ! Gosub ERR_SEARCH
+  End If 
+End If 
+Mat Read #CH_PRODLOT,V1,82;P3
+If TYPE <> 3
+  If QSHP > 0 Let P3[3] = P3[3] + (QSHP * M1)
+  P3[4] = P3[4] + (QBO * M1)
+  If P3[4] < 0 Let P3[4] = 0
+End If 
+Mat Write #CH_PRODLOT,V1,82;P3;
+Return 
+GET_LOTCNTRL: Rem "======================== CHECK LOT CNTRL FOR A SPECIFIC PRODUCT
+LOTCNTRL = 0
+If P9$[1,1] = "N" Return 
+If P9$[1,1] = "B" If A$[113,113] = "N" ! "by product, this product is "N"
+  LOT$[1,7] = WHSE Using "STOCK&&"
+  Return 
+End If 
+LOTCNTRL = 1
+Return 
+CREATE_SPRODLOT: Rem
+If OL2$[11,11] = "" Or OL2$[11,14] = "    " Return 
+If S0$[13,13] = "" Or S0$[13,16] = "    " Return 
+K1$ = " ",K1$
+K1$[1,12] = C2$[1,12]
+K1$[13,18] = H0[7] Using "######"
+K1$[19,21] = L3[2] Using "###"
+K1$[22,23] = WHSE Using "##"
+K1$[24,29] = OL2$[11,16]
+K1$[30,41] = S0$[13,24]
+V6$ = " ",V6$
+V6$[1,22] = K1$[30,51];V6$[23,30] = K1$[22,29];V6$[31,42] = K1$[1,12]
+Search #CH_PRODLOT,2,1;V6$,V1,E
+If E <> 1 Error 11000 ! Gosub ERR_SEARCH
+E = 2 \ Search #CH_PRODLOT,1,0;I$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+R[6] = V1
+V6$ = " ",V6$
+V6$[1,22] = K1$[30,51];V6$[23,30] = K1$[22,29];V6$[31,42] = K1$[1,12]
+Search #CH_PRODLOT,4,1;V6$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+P0$ = " ",P0$
+SP1$ = " ",SP1$
+For I = 0 To 4
+  P3[I] = 0
+  If I <= 2 Let P2[I] = 0
+  If I <= 1 Let P1[I] = 0
+Next I
+P0$[1,12] = C2$[1,12]
+P0$[13,24] = V6$[1,12]
+SP1$[1,6] = V6$[25,30]
+P1 = WHSE \ P1[1] = 3
+P2 = H0[9];P3[2] = B1[21]
+Mat Write #CH_PRODLOT,R[6];P0$;
+Mat Write #CH_PRODLOT,R[6],66;P1;
+Mat Write #CH_PRODLOT,R[6],70;P2;
+Mat Write #CH_PRODLOT,R[6],82;P3;
+Mat Write #CH_PRODLOT,R[6],114;SP1$;
+V6$ = " ",V6$
+V6$[1,12] = K1$[1,12]
+V6$[13,20] = K1$[22,29]
+V6$[21,42] = K1$[30,51]
+V1 = R[6]
+Search #CH_PRODLOT,4,2;V6$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+V6$ = " ",V6$
+V6$[1,8] = K1$[22,29]
+V6$[9,20] = K1$[1,12]
+V6$[21,42] = K1$[30,51]
+V1 = R[6]
+Search #CH_PRODLOT,4,3;V6$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+V6$ = " ",V6$
+V6$[1,12] = K1$[1,12]
+V6$[13,14] = K1$[22,23]
+V6$[15,36] = K1$[30,51]
+V6$[37,42] = K1$[24,29]
+V1 = R[6]
+Search #CH_PRODLOT,4,4;V6$,V1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+V6$ = " ",V6$
+M1 = 1
+Return 
+L_5120: Rem CHECK FOR PRIMARY SPRODLOT
+V6$ = " ",V6$;V6$[1,12] = C2$[1,12];V6$[13,14] = WHSE Using "##"
+V6$[15,20] = PRIM$[1,6];V6$[21] = ""
+Search #CH_PRODLOT,2,2;V6$,V1,E \ If E > 1 Error 11000 ! Gosub ERR_SEARCH
+If Not(E) Return 
+PRIM$ = " ",PRIM$
+PRIM$ = "STOCK "
+Return 
+DO_ALLOCATE: Rem THRU SPRODLOT BASED ON PRIM$ LOCATION first
+Gosub SORT_PRODLOT
+SRT$ = " ",SRT$;BPMODE = 0
+ALLOCATE_LOOP: Rem
+If Not(BPICK[0]) ! "not using Best Pick
+  Search #49,3,1;SRT$,R[16],E \ If E > 2 Error 11000 ! Gosub ERR_SEARCH
+Else 
+  If Not(BPMODE) And BPICK[1] >= 1 Let DSMODE = 2
+  If DSMODE = 2 ! "check on qty match
+    SRT$ = " ",SRT$;SRT$ = QSHP Using "##########"
+  End If 
+  If Not(DSMODE) ! "not qty match - start at qty to ship
+    If Not(BPMODE) Let SRT$ = " ",SRT$;SRT$ = QSHP Using "##########"
+    DSMODE = 3;BPMODE = 1
+  End If 
+  Search #49,DSMODE,1;SRT$,R[16],E \ If E > 2 Error 11000 ! Gosub ERR_SEARCH
+  If E = 1 And DSMODE = 2 ! "no match on exact qty try
+    DSMODE = 3;BPICK[1] = 0;BPMODE = 1
+    Goto ALLOCATE_LOOP
+  End If 
+  If E = 2 And QSHP And DSMODE = 3 ! "reached eof and still a Qty?
+    BPMODE = 1;BPICK[1] = 0
+    DSMODE = 6;SRT$ = "z",SRT$
+    Goto ALLOCATE_LOOP
+  End If 
+End If 
+If Not(E)
+  K16$ = " ",K16$;BPICK[1] = 0
+  If BPICK[0] And DSMODE <> 6 Let DSMODE = 0
+  K16$ = SRT$[17]
+  If K16$[15,20] = "STOCK " Goto ALLOCATE_LOOP
+  Mat Read #CH_PRODLOT,R[16],82;P3;
+  QSHP = LOCSHIP - QTA
+  If QSHP Or RELQTY ! "?release qty allocates no matter what?
+    Gosub CHECK_WLA
+	If Not(BPick[0]) and SRT$[1,4]="   P" let wla[1] = 0 ! forcing 2nd primary at end of sort, allow both broken and full
+    If WLA[1] Gosub BROKEN_UNITS
+    If QSHP <= 0 And Not(RELQTY) Goto ALLOCATE_LOOP
+    QTA1 = P3[0] - P3[1] - P3[3]
+    If QTA1 <= 0 And Not(RELQTY) Goto ALLOCATE_LOOP
+    Mat Read #CH_PRODLOT,R[16],66;P1;
+    If P1[0] <> WHSE Goto ALLOCATE_LOOP
+    If QTA1 < QSHP Let QSHP = QTA1
+    PRIM$ = K16$[15,20];LOT$ = K16$[21,32]
+    If PRIM$ <> "STOCK " Let QBO = 0
+    QORD = QSHP + QBO
+    Gosub UPD_SORDLOT
+    If PASS
+      QORD = OL3;QSHP = OL3[1];QBO = OL3[3];M1 = 1
+      Gosub UPD_SPRODLOT
+      ITM = 0 \ Gosub GET_QTYASGND
+    End If 
+    If BPICK[0] ! "Best Pick - set up for next go round
+      BPMODE = 0;BPICK[1] = 1
+    End If 
+    Goto ALLOCATE_LOOP
+  End If ! "of qty to allocate
+End If ! "of found sprodlot rec
+If QTA <> (L7[2] - L7[0]) Or QTB <> L7[3] ! "have a remainder to allocate to "STOCK"
+  QSHP = ORIG_L7_4 - QTA
+  QBO = L7[3]
+  QORD = QSHP + QBO
+  Gosub DFLT_STOCK
+  PRIM$[1,6] = LOC$[1,6]
+  Gosub UPD_SORDLOT
+  K1$ = " ",K1$
+  K1$[1,12] = C2$[1,12]
+  K1$[13,18] = H0[7] Using "######"
+  K1$[19,21] = L3[2] Using "###"
+  K1$[22,23] = WHSE Using "##"
+  K1$[24,29] = LOC$[1,6]
+  K1$[30,41] = LOT$[1,12]
+  M1 = 1
+  Gosub UPD_SPRODLOT
+End If 
+PRIM$ = " ",PRIM$
+QSHP = LOCSHIP - QTA
+QBO = L7[3]
+QORD = QSHP + QBO
+Return 
+DOUNALLOCATE: Rem
+If UNALLOCAMOUNT <= 0 Return 
+Gosub SORTFORUNALLOCATE
+SRT$ = "99999"
+UNALLOCATELOOP: Rem*
+Search #49,6,1;SRT$,K17,E \ If E > 2 Error 11000 ! Gosub ERR_SEARCH
+If E Goto ENDUNALLOCATELOOP
+Mat Read #CH_ORDLOT,K17;S0$;
+Mat Read #CH_ORDLOT,K17,36;OL1;
+Mat Read #CH_ORDLOT,K17,44;OL2;
+Mat Read #CH_ORDLOT,K17,60;OL3;
+Mat Read #CH_ORDLOT,K17,96;OL2$;
+If Not(OL3[1]) Goto UNALLOCATELOOP
+LOCUNALLOC = UNALLOCAMOUNT
+If UNALLOCAMOUNT > OL3[1] Let LOCUNALLOC = OL3[1]
+QSHP = 0 - LOCUNALLOC
+QORD = QSHP
+QBO = 0
+PRIM$ = SRT$[11,16];LOT$ = SRT$[37,48]
+Gosub UPD_SORDLOT
+If PASS
+  QORD = OL3;QSHP = OL3[1];QBO = OL3[3];M1 = 1
+  Gosub UPD_SPRODLOT
+  Gosub MOVEPRODUCT
+  UNALLOCAMOUNT = UNALLOCAMOUNT - LOCUNALLOC
+End If 
+If UNALLOCAMOUNT > 0 Goto UNALLOCATELOOP
+ENDUNALLOCATELOOP: Rem
+Gosub GET_QTYASGND
+QSHP = LOCSHIP - QTA;QBO = L7[3] - QTB;QORD = QSHP + QBO
+PRIM$ = " ",PRIM$
+If QORD Or QSHP Or QBO ! alloc remainder to stock loc
+  Gosub DFLT_STOCK
+  Gosub UPD_SORDLOT
+  K1$ = " ",K1$
+  K1$[1,12] = C2$[1,12]
+  K1$[13,18] = H0[7] Using "######"
+  K1$[19,21] = L3[2] Using "###"
+  K1$[22,23] = WHSE Using "##"
+  K1$[24,29] = LOC$[1,6]
+  K1$[30,41] = LOT$[1,12]
+  M1 = 1
+  Gosub UPD_SPRODLOT
+End If 
+Return 
+SORTFORUNALLOCATE: Rem
+Gosub L_12320
+K18$ = " ",K18$;K18$[1,6] = H0[7] Using "######"
+K18$[7,9] = L3[2] Using "###";K18$[10,11] = WHSE Using "##"
+SORTASSIGNEDLOOP: Rem*
+Search #CH_ORDLOT,3,3;K18$,K17,E \ If E > 2 Error 11000 ! Gosub ERR_SEARCH
+If E Goto ENDSORTASSIGNEDLOOP
+O2 = K18$[1,6]
+LN = K18$[7,9]
+If Not(E) And O2 = H0[7] And LN = L3[2]
+  X2 = K18$[10,11] \ If X2 <> WHSE Goto SORTASSIGNEDLOOP
+  If KIT And K18$[30,32] <> "KIT" Goto SORTASSIGNEDLOOP
+  If Not(KIT) And K18$[30,32] = "KIT" Goto SORTASSIGNEDLOOP
+  LN = K18$[33,35]
+  If KIT And LN <> KL1[1] Goto SORTASSIGNEDLOOP
+  Mat Read #CH_ORDLOT,K17;S0$;
+  K16$ = " ",K16$
+  K16$[1,8] = K18$[10,17]
+  K16$[9,20] = S0$[1,12]
+  Search #CH_PRODLOT,3,3;K16$,R[16],E
+  If E Error 11000 ! Gosub ERR_SEARCH
+  If K16$[1,8] <> K18$[10,17] Or K16$[9,20] <> S0$[1,12] Error 11000 ! Let E = 1 \ Gosub ERR_SEARCH
+  Mat Read #CH_PRODLOT,R[16],70;P2;
+  LOC$ = K16$[3,8]
+  X$ = P2[0] Using "&&&&&&"
+  Call DateToJulian(1,X$,X$,E) \ If E Let X$ = "00000"
+  JLRDATE = X$[1,5]
+  If LOC$[1,6] = DFLTRCVLOC$ Let JLRDATE = 999997
+  If LOC$[1,6] = "STOCK " Let JLRDATE = 999998
+  If LOC$[1,6] = "NONE  " Let JLRDATE = 999999
+  SRT$ = "   0"
+  SRT$[5,10] = JLRDATE Using "######"
+  SRT$[11,16] = LOC$
+  SRT$[17] = K16$
+  Search #49,4,1;SRT$,K17,E \ If E Error 11000 ! Gosub ERR_SEARCH
+  Goto SORTASSIGNEDLOOP
+End If 
+ENDSORTASSIGNEDLOOP: Rem
+Return 
+MOVEPRODUCT: Rem
+TMPKEY$ = C2$[1,12],WHSE Using "##"
+Search #CH_PRODWH,2,1;TMPKEY$,TMPREC,E \ If E Error 11000 ! Gosub ERR_SEARCH
+Mat Read #CH_PRODWH,TMPREC,78;W3;
+Clear itr.
+itr.ProdCode$ = C2$[1,12]+SPACES$
+itr.LotNum$=LOT$[1,12]+SPACES$
+itr.SrcCode$="PROG MXRASL5"+SPACES$
+itr.Comment$="LINE QTY REDUCTION  "+SPACES$
+itr.TrnsType = 28;itr.Whse = WHSE;itr.EntBy= WHOAMI;itr.Tiebrkr = 0
+itr.TrnsDate = SYSDATE;itr.RunInvt= W3[0];itr.Qty= LOCUNALLOC
+If P9$[32,32] = "Y"
+  itr.CostLoad= W3[17]
+  itr.CostAvg = W3[15]
+Else 
+  itr.CostLoad= B1[8]
+  itr.CostAvg= B1[21]
+End If 
+itr.NetPrice= 0
+itr.Loc$= PRIM$[1,6]+spaces$
+if A[5]<=0 let A[5]=1
+itr.Wgt = itr.qty*A[6]/A[5] ! "std weight
+!Call "MAKETRANS",LT0$,LT1[],LT2[],LT1$,CH_INVTR
+Call MakeTrans(e$,IntCo,CH_invtr,Status,ITR.)
+itr.TrnsType = 10
+itr.Tiebrkr = 0
+itr.Loc$ = RASLUNALLOCLOC$[1,6]
+!Call "MAKETRANS",LT0$,LT1[],LT2[],LT1$,CH_INVTR
+Call MakeTrans(e$,IntCo,CH_invtr,Status,ITR.)
+TMPKEY2$ = WHSE Using "##",PRIM$[1,6],C2$[1,12],LOT$[1,12]
+Search #CH_PRODLOT,2,3;TMPKEY2$,TMPREC,E \ If E Error 11000 ! Gosub ERR_SEARCH
+Mat Read #CH_PRODLOT,TMPREC,70;P2
+Mat Read #CH_PRODLOT,TMPREC,82;P3
+PRODRECVDATE = P2[0]
+P2[1] = SYSDATE
+P3[1] = P3[1] + LOCUNALLOC
+Mat Write #CH_PRODLOT,TMPREC,70;P2
+Mat Write #CH_PRODLOT,TMPREC,82;P3;
+TMPKEY$ = TMPKEY2$
+TMPKEY$[3,8] = RASLUNALLOCLOC$[1,6]
+Search #CH_PRODLOT,2,3;TMPKEY$,TMPREC,E \ If E > 1 Error 11000 ! Gosub ERR_SEARCH
+If E
+  E = 2 \ Search #CH_PRODLOT,1,0;TMPKEY$,TMPREC,E
+  If E Error 11000 ! Gosub ERR_SEARCH
+  TMPKEY$ = TMPKEY2$[21,42],TMPKEY2$[1,2],RASLUNALLOCLOC$[1,6],TMPKEY2$[9,20]
+  Search #CH_PRODLOT,4,1;TMPKEY$,TMPREC,E \ If E Error 11000 ! Gosub ERR_SEARCH
+  TMPKEY$ = TMPKEY2$[9,20],TMPKEY2$[1,2],RASLUNALLOCLOC$[1,6],TMPKEY2$[21,42]
+  Search #CH_PRODLOT,4,2;TMPKEY$,TMPREC,E \ If E Error 11000 ! Gosub ERR_SEARCH
+  TMPKEY$ = TMPKEY2$
+  TMPKEY$[3,8] = RASLUNALLOCLOC$[1,6]
+  Search #CH_PRODLOT,4,3;TMPKEY$,TMPREC,E \ If E Error 11000 ! Gosub ERR_SEARCH
+  TMPKEY$ = TMPKEY2$[9,20],TMPKEY2$[1,2],TMPKEY2$[21,42],RASLUNALLOCLOC$[1,6]
+  Search #CH_PRODLOT,4,4;TMPKEY$,TMPREC,E \ If E Error 11000 ! Gosub ERR_SEARCH
+  P0$ = " ",P0$
+  P0$[1,12] = C2$[1,12]
+  P0$[13,24] = LOT$[1,12]
+  P0$[25,41] = "RASL: LINE EDIT"
+  Write #CH_PRODLOT,TMPREC;P0$
+  P1[0] = WHSE \ P1[1] = 3
+  Mat Write #CH_PRODLOT,TMPREC,66;P1
+  P2[0] = SYSDATE \ P2[1] = 0 \ P2[2] = 1
+  Mat Write #CH_PRODLOT,TMPREC,70;P2
+  P3[0] = LOCUNALLOC \ P3[1] = 0 \ P3[2] = 0 \ P3[3] = 0 \ P3[4] = 0
+  Mat Write #CH_PRODLOT,TMPREC,82;P3
+  Mat Write #CH_PRODLOT,TMPREC,114;RASLUNALLOCLOC$[1,6]
+  Write #CH_PRODLOT,TMPREC,120;P3[1];
+Else 
+  Mat Read #CH_PRODLOT,TMPREC,70;P2
+  Mat Read #CH_PRODLOT,TMPREC,82;P3
+  If P3[0] - P3[1] = 0
+    P2[0] = PRODRECVDATE
+  Else 
+    JULDATE[0] = 0;JULDATE[1] = 0
+    SCRATCH$ = PRODRECVDATE Using "&&&&&&"
+    If Err 0 Let JULDATE[0] = -999999
+    Call DateToJulian(1,SCRATCH$)
+    If Err 0 Gosub ERR_TRAP
+    If Not(JULDATE[0]) Let JULDATE[0] = SCRATCH$
+    SCRATCH$ = P2[0] Using "&&&&&&"
+    If Err 0 Let JULDATE[1] = -999999
+    Call DateToJulian(1,SCRATCH$)
+    If Err 0 Gosub ERR_TRAP
+    If Not(JULDATE[1]) Let JULDATE[1] = SCRATCH$
+    If JULDATE[0] = -99999 !* err in recv date in orig loc.
+      If JULDATE[1] = -99999 Let P2[0] = SYSDATE
+    Else 
+      If JULDATE[1] = -99999
+        P2[0] = PRODRECVDATE
+      Else 
+        If JULDATE[0] < JULDATE[1] Let P2[0] = PRODRECVDATE
+      End If 
+    End If 
+  End If 
+  P2[0] = SYSDATE
+  P2[2] = P2[2] + 1
+  P3[0] = P3[0] + LOCUNALLOC
+  Mat Write #CH_PRODLOT,TMPREC,70;P2
+  Mat Write #CH_PRODLOT,TMPREC,82;P3;
+End If 
+Return 
+GET_QTYASGND: Rem "===========================  ADD UP TOTAL ASSIGNED
+ROW = 9
+If ITM > 7 Let ITM2 = (ITM - (ITM - 7)) + 1 Else Let ITM2 = 0
+If ITM2 < 0 Let ITM2 = 0
+If ITM2 Let ITM = ITM2 - 1 Else Let ITM = 0
+QTA = 0 \ QTA1 = 0 \ QTB = 0
+K18$ = " ",K18$;K18$[1,6] = H0[7] Using "######"
+K18$[7,9] = L3[2] Using "###";K18$[10,11] = WHSE Using "##"
+QTYASGND_LOOP: Rem
+PASS = 0
+Search #CH_ORDLOT,3,3;K18$,K17,E \ If E > 2 Error 11000 ! Gosub ERR_SEARCH
+O2 = K18$[1,6]
+LN = K18$[7,9]
+If Not(E) And O2 = H0[7] And LN = L3[2]
+  X2 = K18$[10,11] \ If X2 <> WHSE Goto QTYASGND_LOOP
+  If KIT And K18$[30,32] <> "KIT" Goto QTYASGND_LOOP
+  If Not(KIT) And K18$[30,32] = "KIT" Goto QTYASGND_LOOP
+  LN = K18$[33,35]
+  If KIT And LN <> KL1[1] Goto QTYASGND_LOOP
+  If K18$[40,40] = "4" Goto QTYASGND_LOOP
+  Mat Read #CH_ORDLOT,K17;S0$;
+  Mat Read #CH_ORDLOT,K17,36;OL1;
+  Mat Read #CH_ORDLOT,K17,44;OL2;
+  Mat Read #CH_ORDLOT,K17,60;OL3;
+  Mat Read #CH_ORDLOT,K17,96;OL2$;
+  If K18$[12,17] = "STOCK " Let PASS = 1
+  If H5[7] = 7 Let PASS = 1
+  If PASS
+    QSHP = OL3[1] \ QBO = OL3[3]
+    R[7] = K17
+    Gosub DEL_SORDLOT
+    Goto QTYASGND_LOOP
+  End If 
+  QTA = QTA + OL3[1]
+  QTB = QTB + OL3[3]
+  Goto QTYASGND_LOOP
+End If 
+Return 
+SERIAL_NUMBERS: Rem see if we need to enter serial numbers
+If S9[4] = 203 Or S9[4] = 205 Or S9[4] = 772 Return 
+If P60$[25,25] = "N" Return 
+If A$[8,8] <> "Y" Return 
+S9[0] = REC_ROL
+If KIT Let S9[8] = R46
+Swap 1,"snoeent"
+Return 
+L_5900: Rem ROUTINE FOR LOCATION SORT
+KEY_$ = " ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+If SRT[1] < 2 Or SRT[1] > 3 Let SRT[1] = 2
+If LOC$[1,5] = "STOCK" Goto L_5970
+If DFLTRCVLOC$ <> "" ! "do default receiving location set up
+  If LOC$[1,6] = DFLTRCVLOC$
+    SRT$ = "}}} ",LOC$
+L_6980: Rem" get out of routine
+  End If 
+End If 
+BIN = 0 \ If SRT[1] = 2 Let BIN = LOC$[3,5];TIER$ = LOC$[6,6]
+If SRT[1] = 3 Let BIN = LOC$[4,6];TIER$ = LOC$[3,3]
+If LOCSRT = 0 Goto L_5960
+If BIN <= 0 Or BIN > 999 Or Fra(BIN) Goto L_5970
+TIEB$ = "  "
+If LOCSRT = 1 ! "Left/right side of aisle
+  If Fra(BIN / 2) Let BIN1 = BIN + 1
+  BIN1 = BIN1 / 2
+  X = Int(BIN1 / 53) \ X = X + 1
+  X1 = 54 - ((X - 1) * 54 - BIN1) - 54 + X
+  TIEB$ = KEY_$[X,X],KEY_$[X1,X1]
+End If 
+SRT$[1,4] = LOC$[1,2],TIEB$
+If LOCSRT = 2 Let SRT$[5,7] = BIN Using "&&&";SRT$[8,8] = TIER$[1,1]
+If LOCSRT = 1 Let SRT$[5,5] = TIER$[1,1];SRT$[6,8] = BIN Using "&&&"
+Goto L_5980
+L_5960: Rem REM NO SORT ORDER - AS IS
+SRT$ = "   0",LOC$
+Goto L_5980
+L_5970: Rem NO BIN HERE - use at end
+SRT$ = "}}}}",LOC$
+L_5980: Rem INSERT
+Return 
+OUTEND: Rem "outta here
+L_9040: Rem ALL EXIT HERE call to
+If Err 0 Rem
+For X = 0 To 20
+  If FOPEN[X] Close #FOPEN[X]
+Next X
+Close #CH_PRODWH
+!Close #CH_USERPORT
+Close #CH_INVTR
+If Err 0 Gosub ERR_TRAP
+End 
+L_9100: Rem "====================================== outta here...
+! Print @0,22;'CE';
+If KIT Let TYPE = 5
+If H5[7] = 8 Or H5[7] = 16
+  OPEN_CHAN[0] = CH_PROD
+  OPEN_CHAN[1] = CH_ROH
+  OPEN_CHAN[2] = CH_ROL
+  OPEN_CHAN[3] = CH_ORDLOT
+  OPEN_CHAN[4] = CH_PRODLOT
+  !Call "MX201LCON5",S9[],OPEN_CHAN[]
+  call "mx201lcon5.dl4",intco,CH_CNTRL,S9[],OPEN_CHAN[] !
+End If 
+If KIT Or S9[4] = 31 Goto L_9040
+Goto L_9040
+L_10000: Rem "=========================================== FROM KIT ENTRY
+If Not(KIT) Return 
+V1$ = " ",V1$;V1$[1,6] = H0[7] Using "######";V1$[7,9] = S9[9] Using "###"
+L_10020: Search #CH_KIT,3,1;V1$,R46,E \ If E > 2 Error 11000 ! Gosub ERR_SEARCH
+If E Return 
+X2 = V1$[1,6];LN = V1$[7,9]
+If X2 <> H0[7] Or LN <> S9[9] Return 
+Mat Read #CH_KIT,R46,0;KL$;
+Mat Read #CH_KIT,R46,58;KL1;
+If KL1[3] = 1 Goto L_10020
+PN$ = " ",PN$;PN$[1,12] = KL$[13,24]
+Search #CH_PROD,2,1;PN$,L4,E
+If E Goto L_10020
+Mat Read #CH_PROD,L4,0;A$;
+If A$[152,155] = "MACH" Or A$[152,155] = "TIME" Or A$[152,155] = "LABR" Goto L_10020
+Gosub GET_LOTCNTRL
+If LOTCNTRL Let USELOT = 99
+Goto L_10020
+GET_KITS: Rem "=================================== READ THRU KIT LINES
+L3[2] = S9[9]
+V1$ = " ",V1$;V1$[1,6] = H0[7] Using "######";V1$[7,9] = L3[2] Using "###"
+L_10120: Search #CH_KIT,3,1;V1$,R46,E \ If E > 2 Error 11000 ! Gosub ERR_SEARCH
+If E Return 
+X2 = V1$[1,6];LN = V1$[7,9]
+If X2 <> H0[7] Or LN <> L3[2] Return 
+Mat Read #CH_KIT,R46,0;KL$;
+Mat Read #CH_KIT,R46,58;KL1;
+Mat Read #CH_KIT,R46,78;KL3;
+If KL1[5] = -2 Let KL1[3] = 1 \ Goto L_10256
+PN$ = " ",PN$;PN$ = KL$[13,24]
+Search #CH_PROD,2,1;PN$,L4,E \ If E Goto L_10120
+Mat Read #CH_PROD,L4,0;A$;
+Mat Read #CH_PROD,L4,156;B1;
+Mat Read #CH_PROD,L4,256;A;
+Mat Read #CH_PROD,L4,512;PFU1;
+Mat Read #CH_PROD,L4,554;PFU2;
+C2$[1,12] = PN$[1,12]
+REC_ROL = R46;L3[1] = 1;UN[0] = KL1[4];L7[3] = 0;L7[2] = KL3[1]
+If A$[152,155] = "MACH" Or A$[152,155] = "TIME" Or A$[152,155] = "LABR" Let L3[1] = 0
+L_10256: If KL1[3] = 1 Let L3[1] = 0
+If H5[7] = 4 Or H5[7] = 15 Let B3[6] = KL3[1];RELQTY = KL3[1]
+L7[4] = KL3[1];L5[1] = KL3[0];L7[0] = 0;L7[1] = 0;L3[0] = 0
+L6$[1,30] = A$[9,38];L6$[31,60] = A$[63,92]
+J$ = " ",J$;J$ = V1$[1,9]
+Search #CH_ROL,2,1;J$,V1,E \ If E Goto L_10120
+REC_ROL = V1
+Read #CH_ROL,REC_ROL,28;L4[3];
+Read #CH_ROL,REC_ROL,550;OWHS;
+If OWHS <= 0 Or OWHS > D9[5] Or Fra(OWHS) Let OWHS = 0
+If L4[3] <= 0 Or L4[3] > D9[5] Or Fra(L4[3]) Let L4[3] = H4[2]
+WHSE = L4[3] \ If H5[7] = 7 Let WHSE = H5[11]
+Gosub GET_WHINFO
+WH = WHSE
+!Call "CHKWRASL",WHSE,RASL[]
+Call CHKWHRASL(e$,intco,CH_CNTRL,0,WHSE,RASL[]) ! "RASL by Whse
+RASL[1] = 2
+Gosub DFLT_STOCK
+Gosub KIT_ENTRY
+Goto L_10120
+BUILDSORT: Rem
+If Err 0 Rem
+Close #49
+If Err 0 Gosub ERR_TRAP
+A$ = Spc(6) \ A$ = A$[2,Len(A$) - 1]
+F1$ = "6/RASLWORK*30"
+If F1$ = "" Gosub L_12170
+L_12030: If F1$[Len(F1$)] = " " Let F1$ = F1$[1,Len(F1$) - 1] \ Goto L_12030
+P2 = 0 \ Let F2$ = F1$ To "*" : P2 \ If Not(P2) Goto L_12160
+KSIZE = F1$[P2 + 1]
+If KSIZE <> 30 Let KSIZE = 30
+F1$[P2] = A$
+Call FindF(F1$,H1)
+If H1 Kill F1$
+F2$ = "[1:256] ",F1$
+Build #49,F2$
+Search #49,0,1;K$,KSIZE,E \ If E Error 11000 ! Gosub ERR_SEARCH
+L1 = 1000 \ Search #49,0,0;K$,L1,E \ If E Error 11000 ! Gosub ERR_SEARCH
+FOPEN[20] = 49
+Return 
+L_12160: F1$ = "6/RASLWORK*30" \ Goto L_12030
+L_12170: F1$ = "6/RASLWORK*30" \ Return 
+SORT_PRODLOT: Rem SORT IN ORDER
+Gosub L_12320
+Let PRIM_AVAIL=0
+If Not(RASL) Goto L_12390
+K16$ = " ",K16$;BPICK[1] = 0
+K16$[1,12] = C2$[1,12];K16$[13,14] = WHSE Using "##"
+L_12230: Rem "sprodlot dir 2 (Prod/whse/loc/lot) (len=42 char/21 wrd)
+Search #CH_PRODLOT,3,2;K16$,R[16],E \ If E = 2 Goto L_12390
+If E Error 11000 ! Gosub ERR_SEARCH
+If K16$[1,12] <> C2$[1,12] Goto L_12390
+If K16$[21,25] = "STOCK" Let X2 = K16$[26,27] \ If X2 <> WHSE Goto L_12230
+X2 = K16$[13,14] \ If X2 <> WHSE Goto L_12390
+Mat Read #CH_PRODLOT,R[16],66;P1; \ If P1[0] <> WHSE Goto L_12230
+Mat Read #CH_PRODLOT,R[16],70;P2;
+Mat Read #CH_PRODLOT,R[16],82;P3;
+Gosub CHECK_WLA \ If Not(WLA) Goto L_12230
+If BPICK[0] = 1 ! "using Best Pick
+  QTA1 = P3[0] - P3[1] - P3[3]
+  If QTA1 = QSHP Let BPICK[1] = BPICK[1] + 1
+End If 
+SRT$ = " ",SRT$
+If RASL[1] < 0 Or RASL[1] > 2 Let RASL[1] = 0
+LOC$ = K16$[15,20] \ If RASL[1] = 0 Gosub L_5900
+If RASL[1] = 1 And LOC$ <> PRIM$ Goto L_12230
+If RASL[1] = 2 ! "primary - then FIFO (HT BERRY - ALWAYS THIS!)
+  X$ = P2[0] Using "&&&&&&"
+  Call DateToJulian(1,X$,X$,E) \ If E Let X$ = " ",X$
+  X$ = X$ + "      "
+  SRT$[1,4] = "   0"
+  SRT$[5,10] = X$[1,6]
+  If LOC$[1,6] = DFLTRCVLOC$ Let SRT$[5,10] = "999997"
+  If LOC$[1,6] = "STOCK " Let SRT$[5,10] = "999998"
+  If LOC$[1,5] = "NONE " Let SRT$[5,10] = "999999"
+  SRT$[11,16] = LOC$
+End If 
+
+IF LOC$=PRIM$ AND NOT(CREDIT)
+	PRIM_AVAIL = P3[0]-P3[1]-P3[3]
+	IF BPICK[0]=0 and prim_avail>0
+		LET SRT$[1,4]="   P"  ! forcing 2nd primary at end of sort
+		Let Srt$=Srt$+Spaces$ ! "make sure it's space filled
+		LET SRT$[17]=K16$ ! "moved to 17 to give room (only 2 extra chars at endofkey)
+		SEARCH #CH_Sort,4,1;SRT$,R[16],E ! \ IF E GOSUB ERR_SEARCH:
+		if e
+			e$="Search error "+str$(E)+" sorting locations in mxrasl5"
+			system "echo ''" + msc$(0)+" "+ e$ + "'' >> files/1/erp.errlog"
+			dim msc4$[100] \ msc4$=msc$(4)
+			if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+			call env(2,"PROGNAME",msc4$)
+			call programdump()
+		Endif
+	ENDIF
+ENDIF
+IF LOC$=PRIM$ then LET SRT$[1,4]="    " ! "primary always first
+
+If BPICK[0] = 1 ! "best pick - change sort so qty first part of sort
+  SCRATCH$ = SRT$[1,16] + SPACES$
+  If QTA1 < 0 Let QTA1 = 0
+  SRT$ = " ",SRT$
+  If QTA1 >= QSHP
+    SRT$ = QTA1 Using "##########"
+  Else 
+    SRT$ = 999999999 - QTA1 Using "##########"
+  End If 
+  If SRT$[1,2] = "**" Let SRT$ = "9999999999"
+  If LOC$[1,6] = DFLTRCVLOC$ Let SRT$ = "AAAAAAAAAA"
+  If RASL[1] = 0 Let SRT$[11,16] = SCRATCH$[1,6]
+  If RASL[1] = 2 Let SRT$[11,16] = SCRATCH$[5,10]
+End If 
+SRT$[17] = K16$
+Search #49,4,1;SRT$,R[16],E \ If E Error 11000 ! Gosub ERR_SEARCH
+Goto L_12230
+L_12320: Rem CLEAR SORT
+SRT$ = " ",SRT$
+L_12340: Search #49,3,1;SRT$,R[9],E \ If E > 2 Error 11000 ! Gosub ERR_SEARCH
+If E Goto L_12390
+Search #49,5,1;SRT$,R[9],E \ If E Error 11000 ! Gosub ERR_SEARCH
+Goto L_12340
+L_12390: Return 
+CHECK_WLA: Rem --------------------------- ok to allocate from this loc?
+K21$ = K16$[13,20]
+Search #CH_WHLOC,2,1;K21$,R[21],E \ If E > 1 Error 11000 ! Gosub ERR_SEARCH
+If E
+  WLA = 1
+  WLA[1] = 0
+Else 
+  Mat Read #CH_WHLOC,R[21],76;WLA;
+End If 
+IF pfu1[0] = pfu1[8]  ! prod.BaseUM=prod.UMStkDefault
+	LET WLA[1]=0  !! set to all cal allocate, since there is not broken stocking u/m
+endif
+Return 
+BROKEN_UNITS: Rem ---------------------------------- it hurts
+CNVTU[0] = 0 \ CNVTU[1] = PFU1[8] \ CNVTU[2] = 1
+CNVTA = QSHP \ Gosub L_20000
+CNVTU[0] = PFU1[8] \ CNVTU[1] = 0
+CNVTA = Int(AMOUNT)
+Gosub L_20000
+If WLA[1] > 0
+  QSHP = AMOUNT
+Else 
+  QSHP = QSHP - AMOUNT
+End If 
+Return 
+L_20000: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)
+If CNVTU[2] = 3 Goto L_20050
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[2] = 0 Goto L_20050
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+If L3 Let AMOUNT = CNVTA \ Goto L_20160
+L_20050: Rem
+L_20120: Rem "====== unibasic 5+ logic
+!Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+Call "MXPRCONV5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,e$,rstr$
+If CNVTU[2] = 0 Goto L_20160
+If FLAG Let E = FLAG \ Error 11000 ! Gosub ERR_SEARCH
+AMOUNT = CNVTA
+L_20160: Return 
+Rem {begin src/inc/rtn.getchan.i}
+GETCHAN: Rem search for open channel (counts down from supplied chnl #)
+For SCR = CHNL To 1 Step -1
+  CHNL = SCR
+  Gosub CHNLFREE
+  If CHNLFREE
+    SCR = 1
+  Else 
+    CHNL = 0
+  End If 
+Next SCR
+Return 
+CHNLFREE: Rem check to see if a channel is being used
+If Err 0 Let CHNLFREE = Spc(8)
+CHNLFREE = 0
+CHNLSCR = Chf(CHNL)
+If Err 0 Gosub ERR_TRAP
+If CHNLFREE And CHNLFREE <> 49 Gosub ERR_TRAP
+END_CHNLFREE: Rem
+Return 
+Rem {end rtn.getchan.i}
+Rem {begin rtn.error.s}
+Err_Trap: ! 
+include "src/callmainerrnet_call.inc"
+End

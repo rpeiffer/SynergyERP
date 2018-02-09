@@ -1,0 +1,820 @@
+! --- serp115.dl4
+! Zone maintenance program converted from mx115
+!
+! 1.0 10/28/2009 - initial conversion
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp115.dl4 src/serp115.src
+!
+! From the original code:
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: MAR 25, 2008  16:54:11
+Rem /w2/papermaster/r2005//usr/acct/txc/work/r2005/mx1/mx115.src (univ2) [txc] {47487}
+Rem  Copyright (c) 2008 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+Rem MX115    zone file maintanance
+Rem     *************
+Rem
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+! include "src/inc/file?.inc"
+!
+Declare Intrinsic Sub ConvertCase,InpBuf,String
+Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile
+!Declare External Function openfile,pdate$,jdate$,Formatdate2$
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200]
+b$=" ",b$
+dim message$[150],webstr$[200]
+!
+! call dxopen()
+!
+! call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+Dim F$[16]
+Dim 2%,X,X1,H0[12]
+Dim 3%,J1,X2,DELREC
+Dim U9$[50],U3$[80],W$[60],Y$[80]
+Dim U5$[50]
+Dim W9$[9],DELKEY$[50],DELZONE$[2],DELZONE2$[3],CSZ$[14]
+W9$ = "WATCH IT!"
+W$ = W9$
+W = 0
+Dim K1$[5],2%,D0,K,K1,D1,tmp_K1$[5]
+Dim A1$[28],T2$[7],A2$[2],Z2$[30],Z3$[12],P61$[256],tmp_A1$[28]
+Dim 1%,Z0,Z2[4],2%,Z1[4]
+Dim 3%
+U3$ = " ",U3$
+
+! * open files, read system flags
+Read #1,88,1920;F$;
+Open #2,F$
+Mat Read #1,61,0;P61$;
+
+if action1$ <> "GETLIST"
+	! except for GETLIST we always need to either read
+	! or do a new record
+	call DxGet("ZoneID", tmp$)
+	! check for validate zone (0-9,a-z,A-Z,' ')
+	tmp$ = rtrim$(tmp$)
+	if tmp$ = "" e$ = "You must select or enter a zone!" \ Error 10000
+	badChar = 0
+	for i = 1 to len(tmp$)
+		if tmp$[i,i] <> " "
+			If tmp$[i,i] < "0" Or tmp$[i,i] > "z" badChar = 1
+			If tmp$[i,i] > "9" and tmp$[i,i] < "A" badChar = 1
+			If tmp$[i,i] > "Z" and tmp$[i,i] < "a" badChar = 1
+		end if
+	next i
+	if badChar e$ = "Invalid character in zone code!" \ error 10000
+	K1$ = tmp$,b$
+	Search #2,2,1;K1$,K1,E \ if e>1 Error 42
+	IF E
+		! new record
+		A2$=K1$
+		E = 2 \ Search #2,1,0;K1$,K1,E
+		If E Error 42
+		Search #2,4,1;K1$,K1,E \ if E Error 42
+		gosub InitZone
+		call DxGet("Description", tmp$) \ a1$[1,25] = tmp$,b$
+		gosub WriteZone
+	else
+		a2$ = k1$
+		gosub ReadZone
+	end if
+end if
+
+!
+! get list of zones
+!
+if action1$ = "GETLIST"
+	!
+	gosub BuildZoneDroplist ! * added to rstr
+	!
+	! section - status
+	Message$=""
+	goto OutEnd:
+!
+! GETTING DATA FOR A SPECIFIC WH
+!
+else if action1$ = "GETDATA"
+	!
+	! zone selected from list or new one added
+	! load the data to send back to the web
+	!
+	gosub LoadData
+	gosub LoadDataDroplists
+	Message$=""
+	goto OutEnd:
+!
+! SUBMITTING DATA
+!
+else if action1$ = "SUBMITDATA"
+	gosub UnloadDataAndSave
+	! section - status
+	Message$="Record updated."
+	goto OutEnd:
+!
+! DELETE WH
+!
+else if action1$ = "DELETE"
+	gosub DeleteData
+	! section x - status
+	Message$="Record deleted."
+	goto OutEnd:
+!
+! UNKNOWN ACTION
+!
+else
+	e$ = "Unknown action1: "+action1$ \ error 10000
+end if
+
+! ***********************************************************************
+! Nobody but us subroutines and exit code down here
+! ***********************************************************************
+
+!----------------------------------------------------------------------------
+! build initial drop list of existing zones
+!----------------------------------------------------------------------------
+BuildZoneDroplist: !
+	! Add section header and column defs
+	tmp$=bsdel$+"ZoneDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$,rstr$,tmp$)
+	tmp_K1$ = " ",tmp_K1$
+	do
+		Search #2,3,1;tmp_K1$,I,E \ if e>2 Error 42
+		if E exit do
+		Mat Read #2,I;tmp_A1$;
+		tmp$=tmp_K1$+fdel$+tmp_K1$+" - "+rtrim$(tmp_a1$[1,25])+fdel$+rdel$
+		call addToStr(e$, rstr$, tmp$)
+	loop
+	call addToStr(e$, rstr$, esdel$)
+Return
+
+!----------------------------------------------------------------------------
+! load requested zone data and for tx to web
+!----------------------------------------------------------------------------
+LoadData: !
+	! header and column info.
+	tmp$=bsdel$+"TableData"+fdel$+rdel$
+	tmp$=tmp$+"ZoneID"+fdel$
+	tmp$=tmp$+"Description"+fdel$+"Description2"+fdel$+"ShipVia"+fdel$
+	tmp$=tmp$+"TruckNumber"+fdel$
+	If P61$[34,34] <> "Y" ! customer shipto multi-zone
+		tmp$=tmp$+"LeadTime"+fdel$
+		for i = 1 to 7
+			tmp$=tmp$+"Trip"+str$(i)+fdel$
+		next i
+	end if
+	tmp$=tmp$+"UPSZone"+fdel$
+	for i = 1 to 5
+		tmp$=tmp$+"UseOnWeight"+str$(i)+fdel$
+	next i
+	for i = 1 to 5
+		tmp$=tmp$+"Weight"+str$(i)+fdel$
+	next i
+	call addToStr(e$,rstr$,tmp$+rdel$)
+	! data
+	tmp$=a2$[1,2]+fdel$+a1$[1,25]+fdel$+z2$+fdel$+z3$+fdel$+str$(d1)+fdel$
+	If P61$[34,34] <> "Y" ! customer shipto multi-zone
+		tmp$=tmp$+str$(d0)+fdel$
+		for i = 1 to 7
+			tmp$=tmp$+t2$[i,i]+fdel$
+		next i
+	end if
+	tmp$=tmp$+str$(Z0)+fdel$
+	for i = 0 to 4
+		tmp$=tmp$+str$(z2[i])+fdel$
+	next i
+	for i = 0 to 4
+		tmp$=tmp$+str$(z1[i])+fdel$
+	next i
+	call addToStr(e$,rstr$,tmp$+rdel$+esdel$)
+Return
+
+!----------------------------------------------------------------------------
+! load zone data droplist for tx to web
+!----------------------------------------------------------------------------
+LoadDataDroplists: !
+	! "USE" droplist
+	tmp$=bsdel$+"UseShipDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	tmp$=tmp$+"0"+fdel$+"Zone Truck"+fdel$+rdel$
+	tmp$=tmp$+"1"+fdel$+"UPS"+fdel$+rdel$
+	tmp$=tmp$+"0"+fdel$+"Ship Via"+fdel$+rdel$
+	call addToStr(e$,rstr$,tmp$+esdel$)
+	! ups zone drop list
+	tmp$=bsdel$+"UPSDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	tmp$=tmp$+"0"+fdel$+"None"+fdel$+rdel$
+	for i = 2 to 25
+		if i <= 8 OR i=12 OR (i>=14 and i<=16) OR i=22 OR i>=24
+			tmp$=tmp$+str$(i)+fdel$+"Zone "+str$(i)+fdel$+rdel$
+		end if
+	next i
+	call addToStr(e$,rstr$,tmp$+esdel$)
+	! ship via lookup
+	tmp$=bsdel$+"ShipViaLookup"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$,rstr$,tmp$)
+	for I = 0 to 105
+		Read #1,130,I*12;tmp2$[1,12];
+		tmp$=str$(i+1)+fdel$+tmp2$[1,12]+fdel$+rdel$
+		call addToStr(e$,rstr$,tmp$)
+	next i
+	call addToStr(e$,rstr$,esdel$)
+Return
+
+!----------------------------------------------------------------------------
+! rcv from web
+!----------------------------------------------------------------------------
+UnloadDataAndSave: !
+	call DXGet("Description", tmp$) \ a1$[1,25]=tmp$,b$
+	call DXGet("Description2", tmp$) \ z2$=tmp$,b$
+	call DXGet("ShipVia", tmp$) \ z3$=tmp$,b$
+	call DXGet("TruckNumber", tmp$) \ d1=tmp$
+	If P61$[34,34] <> "Y" ! customer shipto multi-zone
+		call DXGet("LeadTime", tmp$) \ d0 = tmp$
+		for i = 1 to 7
+			call DXGet("Trip"+str$(i), tmp$) \ t2$[i,i] = tmp$
+		next i
+	end if
+	call DXGet("UPSZone", tmp$)
+	for i = 1 to 5
+		call DXGet("UseOnWeight"+str$(i), tmp$) \ z2[i-1] = tmp$
+		call DXGet("Weight"+str$(i), tmp$) \ z1[i-1] = tmp$
+	next i
+	!
+	! *** Data Validations
+	!
+	! if no weight defined, default back to zone truck (except
+	! for first weight entry which is the default)
+	For I = 1 To 4
+		If Z1[I] = 0 Let Z2[I] = 0
+	Next I
+	!
+	! check weights for continuity
+	!
+	For I = 0 To 3
+		If Z1[I + 1] <> 0
+			If Z1[I] > Z1[I + 1]
+				e$ = "Weights must be lowest to highest!"
+				Error 10000
+			end if
+		end if
+	Next I
+	!
+	! check if at least 1 ship day
+	!
+	If P61$[34,34] <> "Y" ! customer shipto multi-zone
+		found = 0
+		For I = 1 To 7
+			If T2$[I,I] = "Y" found = 1
+		Next I
+		if not(found)
+			e$ = "You must ship to zone at least 1 day a week!"
+			error 10000
+		end if
+	end if
+	gosub WriteZone
+Return
+
+!----------------------------------------------------------------------------
+! rcv delete request from web
+!----------------------------------------------------------------------------
+DeleteData: !
+	Gosub CheckInUse
+	if USE_FLAG
+		! e$ should be set with the error message
+		e$ = e$+"  Zone not deleted!"
+		error 10000
+	end if
+	gosub DeleteZone
+Return
+
+!----------------------------------------------------------------------------
+! read zone data record (K1 is recno)
+!----------------------------------------------------------------------------
+ReadZone: !
+	Mat Read #2,K1;A1$
+	Read #2,K1,28;D0;
+	Read #2,K1,32;D1;
+	Mat Read #2,K1,36;T2$
+	Mat Read #2,K1,46;Z2$
+	Mat Read #2,K1,76;Z3$
+	Mat Read #2,K1,88;Z0
+	Mat Read #2,K1,90;Z1
+	Mat Read #2,K1,110;Z2
+Return
+
+!----------------------------------------------------------------------------
+! write zone data record (K1 is recno)
+!----------------------------------------------------------------------------
+WriteZone: !
+	Mat Write #2,K1;A1$;
+	Write #2,K1,28;D0;
+	Write #2,K1,32;D1;
+	Mat Write #2,K1,36;T2$;
+	Mat Write #2,K1,44;A2$;
+	Mat Write #2,K1,46;Z2$
+	Mat Write #2,K1,76;Z3$
+	Mat Write #2,K1,88;Z0
+	Mat Write #2,K1,90;Z1
+	Mat Write #2,K1,110;Z2;
+Return
+
+!----------------------------------------------------------------------------
+! delete zone data record (K1 is recno)
+!----------------------------------------------------------------------------
+DeleteZone: !
+	Search #2,5,1;K1$,K1,E \ if e error 42
+	E = 3
+	Search #2,1,0;K1$,K1,E \ if e error 42
+Return
+
+
+!----------------------------------------------------------------------------
+! initialize zone data record
+!----------------------------------------------------------------------------
+InitZone: !
+	A1$ = " ",A1$ \ T2$ = " ",T2$
+	D0 = 0;D1 = 0;Z0 = 0
+	For I = 0 To 4
+		Z1[I] = 0;Z2[I] = 0
+	Next I
+	Z2$ = " ",Z2$;Z3$ = " ",Z3$
+	If P61$[34,34] <> "Y" ! customer shipto multi-zone
+		t2$[1,7] = "NNNNNNN"
+	end if
+Return
+
+!----------------------------------------------------------------------------
+! verify zone is not being used in the system before deleting.
+!----------------------------------------------------------------------------
+CheckInUse: !
+	USE_FLAG = 1
+	If P61$[34,34] <> "Y"
+		! Checking customers...
+		Read #1,88,1808;F$;
+		Ropen #10,F$
+		DELKEY$ = " ",DELKEY$
+		do
+			Search #10,3,1;DELKEY$,DELREC,E \ If E>2 Error 42
+			If E exit do
+			Mat Read #10,DELREC,376;DELZONE$
+			If DELZONE$ = A2$
+				Close #10
+				e$ = "Zone in use on customer "+DELKEY$
+				return
+			End If
+		loop
+		Close #10
+		! Checking shiplists...
+		Read #1,88,2112;F$;
+		Ropen #10,F$
+		DELKEY$ = " ",DELKEY$
+		do
+			Search #10,3,1;DELKEY$,DELREC,E \ if e>2 Error 42
+			If E exit do
+			Mat Read #10,DELREC,180;DELZONE2$
+			If DELZONE2$[2,3] = A2$
+				Close #10
+				e$ = "Zone in use on shiplist "+DELKEY$
+				return
+			End If
+		loop
+		Close #10
+	Else
+		F$ = intCO Using "3/cszone#"
+		Ropen #10,F$
+		DELKEY$ = " ",DELKEY$
+		do
+			Search #10,3,1;DELKEY$,DELREC,E \ if E>2 Error 42
+			If E exit do
+			Mat Read #10,DELREC,26;CSZ$
+			For I = 1 To 13 STEP 2
+				If CSZ$[I,I + 1] = A2$
+					Close #10
+					If DELKEY$[7,13] = ".000000"
+						e$ = "Zone in use on customer "+DELKEY$[1,6]
+					Else
+						e$ = "Zone in use on shiplist "+DELKEY$
+					End If
+					return
+				End If
+			Next I
+		loop
+		Close #10
+	End If
+	! Checking open orders...
+	Read #1,88,1840;F$;
+	Ropen #10,F$
+	Read #1,88,1856;F$;
+	Ropen #11,F$
+	DELKEY$ = " ",DELKEY$
+	do
+		Search #10,3,1;DELKEY$,DELREC,E \ if E>2 Error 42
+		If E exit do
+		TMP = DELKEY$[1,2]
+		If TMP <= 19 Or (TMP >= 29 And TMP <> 90 And TMP <> 91)
+			Mat Read #10,DELREC,0;H0
+			Mat Read #11,H0[2],144;DELZONE$
+			If DELZONE$ = A2$
+				Close #10,#11
+				e$ = "Zone in use on order/credit "+DELKEY$[3]
+				return
+			End If
+		End If
+	loop
+	Close #10,#11
+	USE_FLAG = 0
+Return
+
+
+!
+! display initial screen
+!
+! L_1005: Print 'CS'
+! Print @24,0;"ZONE FILE MAINTENANCE";@0,0;"-MX115-";
+! Print @0,2;"ZONE";
+! Print @0,4;" 1> DESCRIPTION";@0,5;" 2> DESCRIPT #2";
+! If P61$[34,34] <> "Y" Print @0,6;" 3> LEAD TIME ";
+! Print @35,6;"4> UPS ZONE";
+! Print @0,7;" 5> TRUCK # ";@35,7;"6> SHIP VIA";
+! If P61$[34,34] <> "Y" ! " Customer shipto multi-zone
+! 	Print @0,8;" 7> SUNDAY ";
+! 	Print @0,9;" 8> MONDAY ";
+! 	Print @0,10;" 9> TUESDAY ";
+! 	Print @0,11;"10> WEDNESDAY ";
+! 	Print @0,12;"11> THURSDAY ";
+! 	Print @0,13;"12> FRIDAY ";
+! 	Print @0,14;"13> SATURDAY ";
+! End If
+! Print @0,16;"14> WEIGHT 1 <=";@30,16;" USE ";
+! Print @0,17;"15> WEIGHT 2 <=";@30,17;" USE ";
+! Print @0,18;"16> WEIGHT 3 <=";@30,18;" USE ";
+! Print @0,19;"17> WEIGHT 4 <=";@30,19;" USE ";
+! Print @0,20;"18> WEIGHT 5 <=";@30,20;" USE ";
+! Signal 3,0
+
+! 
+! L_1900: Mat Read #2,K1;A1$
+! Read #2,K1,28;D0;
+! Read #2,K1,32;D1;
+! Mat Read #2,K1,36;T2$
+! Mat Read #2,K1,46;Z2$
+! Mat Read #2,K1,76;Z3$
+! Mat Read #2,K1,88;Z0
+! Mat Read #2,K1,90;Z1
+! Mat Read #2,K1,110;Z2
+! Gosub L_5000
+! L_2020: If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTIN.hsf\177\";
+! Gosub L_4700
+! L_2022: Rem
+! L_2025: Print @0,22;'CE';"ENTER #:field to edit  ";
+! Print "DELETE  ";
+! Print "<CR>: end   ";
+! Input Len 16384 + 6;""U5$
+! Print @0,23;'CL';
+! If U5$ = "" Goto L_2500
+! If U5$ = "DELETE"
+! 	If NEWREC
+! 		Goto L_8900
+! 	Else
+! 		Gosub CHECK_IN_USE
+! 		If USE_FLAG = 0 Goto L_8900
+! 	End If
+! End If
+! If Len(U5$) > 2 Goto L_2020
+! W = U5$
+! K = W
+! If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTDIS.hsf\177\";
+! On W - 0 Goto L_3000,L_3012,L_3022,L_3030,L_3038,L_3050,L_3080,L_3100,L_3120,L_3140
+! On W - 10 Goto L_3160,L_3180,L_3200,L_3220,L_3270,L_3320,L_3370,L_3420
+! Goto L_2020
+! 
+! L_3000: J0$ = "2 002517 4"
+! 	J1$ = A1$[1,25] \ J5$ = "Enter Zone Description"
+! 	Gosub L_7000
+! 	If J4$ = "END" Goto L_2020
+! 	A1$[1,25] = J$
+! If K = 1 Goto L_2020
+! 
+! L_3012: J0$ = "2 003017 5" \ J5$ = "Enter Zone Description 2"
+! 	J1$ = Z2$[1,30]
+! 	Gosub L_7000
+! 	Z2$[1,30] = J$
+! If K = 2 Goto L_2020
+! 
+! L_3022: J5$ = "Enter Lead Time (days)"
+! 	If P61$[34,34] = "Y" Goto BYPLT
+! 	J0$ = "30000417 6" \ J1 = D0
+! 	Gosub L_7000
+! 	D0 = J1
+! 	BYPLT: Rem "bypass
+! If K = 3 Goto L_2020
+! 
+! L_3030: J5$ = "Enter the UPS Zone for this Zone, 0=none"
+! 	J0$ = "30000249 6" \ J1 = Z0
+! 	Gosub L_7000
+! 	If J1 Gosub L_4400 \ Goto L_3030
+! Z0 = J1 \ If K = 4 Goto L_2020
+! 
+! L_3038: J5$ = "Enter the Truck # going to this Zone"
+! 	J0$ = "30000617 7" \ J1 = D1
+! 	Gosub L_7000
+! D1 = J1 \ If K = 5 Goto L_2020
+! 
+! L_3050: J5$ = "Enter the Ship Via, Desc # (1-106), or -"
+! 	J0$ = "2 001250 7" \ J1$ = Z3$[1,12]
+! 	Gosub L_7000
+! 	If J4$ = "-" Swap 1,"SW130" \ Goto L_3050
+! 	J1 = J$[1,3] \ If J1 Gosub L_4500
+! Z3$[1,12] = J$ \ If K = 6 Goto L_2020
+! 
+! L_3080: J5$ = "Does this Zone have Sunday Deliveries? (Y/N)"
+! If P61$[34,34] = "Y" Goto BYPSUN
+! J1 = 0 \ If T2$[1,1] = "Y" Let J1 = 1
+! J0$ = "6 000117 8" \ Gosub L_7000
+! T2$[1,1] = J$[1,1]
+! BYPSUN: Rem "
+! If K = 7 Goto L_2020
+! 
+! L_3100: J5$ = "Does this Zone have Monday Deliveries? (Y/N)"
+! If P61$[34,34] = "Y" Goto BYPMON
+! J1 = 0 \ If T2$[2,2] = "Y" Let J1 = 1
+! J0$ = "6 000117 9" \ Gosub L_7000
+! T2$[2,2] = J$[1,1]
+! BYPMON: Rem "
+! If K = 8 Goto L_2020
+! 
+! L_3120: J5$ = "Does this Zone have Tuesday Deliveries? (Y/N)"
+! If P61$[34,34] = "Y" Goto BYPTUE
+! J1 = 0 \ If T2$[3,3] = "Y" Let J1 = 1
+! J0$ = "6 00 11710" \ Gosub L_7000
+! T2$[3,3] = J$[1,1]
+! BYPTUE: Rem "
+! If K = 9 Goto L_2020
+! 
+! L_3140: J5$ = "Does this Zone have Wednesday Deliveries? (Y/N)"
+! If P61$[34,34] = "Y" Goto BYPWED
+! J1 = 0 \ If T2$[4,4] = "Y" Let J1 = 1
+! J0$ = "6 00 11711" \ Gosub L_7000
+! T2$[4,4] = J$[1,1]
+! BYPWED: Rem "
+! If K = 10 Goto L_2020
+! 
+! L_3160: J5$ = "Does this Zone have Thursday Deliveries? (Y/N)"
+! If P61$[34,34] = "Y" Goto BYPTHUR
+! J1 = 0 \ If T2$[5,5] = "Y" Let J1 = 1
+! J0$ = "6 00 11712" \ Gosub L_7000
+! T2$[5,5] = J$[1,1]
+! BYPTHUR: Rem "
+! If K = 11 Goto L_2020
+! 
+! L_3180: J5$ = "Does this Zone have Friday Deliveries? (Y/N)"
+! If P61$[34,34] = "Y" Goto BYPFRI
+! J1 = 0 \ If T2$[6,6] = "Y" Let J1 = 1
+! J0$ = "6 00 11713" \ Gosub L_7000
+! T2$[6,6] = J$[1,1]
+! BYPFRI: Rem "
+! If K = 12 Goto L_2020
+! 
+! L_3200: J5$ = "Does this Zone have Saturday Deliveries? (Y/N)"
+! If P61$[34,34] = "Y" Goto BYPSAT
+! J1 = 0 \ If T2$[7,7] = "Y" Let J1 = 1
+! J0$ = "6 00 11714" \ Gosub L_7000
+! T2$[7,7] = J$[1,1]
+! BYPSAT: Rem "
+! If K = 13 Goto L_2020
+! 
+! L_3220: J5$ = "Enter the Total Order Weight applicable"
+! 	J0$ = "3000061716" \ J1 = Z1[0]
+! 	Gosub L_7000
+! 	Z1[0] = J1
+! 	L_3240: J5$ = "Enter the Shipping to Use: 0=Truck, 1=UPS, 2=Ship Via"
+! 	J0$ = "3000013516" \ J1 = Z2[0]
+! 	Gosub L_7000
+! 	If J1 >= 0 If J1 < 3 Goto L_3260
+! 	J7$ = "INVALID ENTRY" \ Gosub L_7600 \ Goto L_3240
+! L_3260: Z2[0] = J1 \ If K = 14 Goto L_2020
+! 
+! L_3270: J5$ = "Enter the Total Order Weight applicable"
+! 	J0$ = "3000061717" \ J1 = Z1[1]
+! 	Gosub L_7000
+! 	Z1[1] = J1
+! If Z1[1] = 0 Let Z2[1] = 0 \ Print Using "##";@35,17;Z2[1] \ Goto L_2020
+! 
+! L_3290: J5$ = "Enter the Shipping to Use: 0=Truck, 1=UPS, 2=Ship Via"
+! 	J0$ = "3000013517" \ J1 = Z2[1]
+! 	Gosub L_7000
+! 	If J1 >= 0 If J1 < 3 Goto L_3310
+! 	J7$ = "INVALID ENTRY" \ Gosub L_7600 \ Goto L_3290
+! L_3310: Z2[1] = J1 \ If K = 15 Goto L_2020
+! 
+! L_3320: J5$ = "Enter the Total Order Weight applicable"
+! 	J0$ = "3000061718" \ J1 = Z1[2]
+! 	Gosub L_7000
+! 	Z1[2] = J1
+! If Z1[2] = 0 Let Z2[2] = 0 \ Print Using "##";@35,18;Z2[2] \ Goto L_2020
+! 
+! L_3340: J5$ = "Enter the Shipping to Use: 0=Truck, 1=UPS, 2=Ship Via"
+! 	J0$ = "3000013518" \ J1 = Z2[2]
+! 	Gosub L_7000
+! 	If J1 >= 0 If J1 < 3 Goto L_3360
+! 	J7$ = "INVALID ENTRY" \ Gosub L_7600 \ Goto L_3340
+! L_3360: Z2[2] = J1 \ If K = 16 Goto L_2020
+! 
+! L_3370: J5$ = "Enter the Total Order Weight applicable"
+! 	J0$ = "3000061719" \ J1 = Z1[3]
+! 	Gosub L_7000
+! 	Z1[3] = J1
+! If Z1[3] = 0 Let Z2[3] = 0 \ Print Using "##";@35,19;Z2[3] \ Goto L_2020
+! 
+! L_3390: J5$ = "Enter the Shipping to Use: 0=Truck, 1=UPS, 2=Ship Via"
+! 	J0$ = "3000013519" \ J1 = Z2[3]
+! 	Gosub L_7000
+! 	If J1 >= 0 If J1 < 3 Goto L_3410
+! 	J7$ = "INVALID ENTRY" \ Gosub L_7600 \ Goto L_3390
+! L_3410: Z2[3] = J1 \ If K = 17 Goto L_2020
+! 
+! L_3420: J5$ = "Enter the Total Order Weight applicable"
+! 	J0$ = "3000061720" \ J1 = Z1[4]
+! 	Gosub L_7000
+! 	Z1[4] = J1
+! If Z1[4] = 0 Let Z2[4] = 0 \ Print Using "##";@35,20;Z2[4] \ Goto L_2020
+! 
+! L_3440: J5$ = "Enter the Shipping to Use: 0=Truck, 1=UPS, 2=Ship Via"
+! 	J0$ = "3000013520" \ J1 = Z2[4]
+! 	Gosub L_7000
+! 	If J1 >= 0 If J1 < 3 Goto L_3460
+! 	J7$ = "INVALID ENTRY" \ Gosub L_7600 \ Goto L_3440
+! 	L_3460: Z2[4] = J1 \ If K = 18 Goto L_2020
+! Goto L_2020
+! 
+! L_4400: Rem CHK UPS ZONE
+! 	If J1 >= 2 If J1 <= 8 Return 1
+! 	If J1 = 12 Return 1
+! 	If J1 >= 14 If J1 <= 16 Return 1
+! 	If J1 = 22 Return 1
+! 	If J1 >= 24 If J1 <= 25 Return 1
+! 	J7$ = "INVALID UPS ZONE!" \ Gosub L_7600
+! Return
+! 
+! L_4500: Rem NUMBER ENTERED
+! 	If J1 <= 0 Return
+! 	If J1 > 106 Return
+! 	If Fra(J1) Return
+! 	J1 = (J1 * 12) - 12
+! 	If J1 < 0 Let J1 = 0
+! 	Read #1,130,J1;J$[1,12];
+! 	Print @50,7;J$[1,12];
+! Return
+! 
+! L_4700: Rem CHECK WEIGHTS FOR CONTINUITY
+! 	For I = 0 To 3 \ If Z1[I + 1] = 0 Goto L_4715
+! 		If Z1[I] > Z1[I + 1] Goto L_4730
+! 	L_4715: Next I
+! 	Goto L_4755
+! 	L_4730: J7$ = "WEIGHTS MUST BE LOWEST TO HIGHEST! WEIGHT MUST BE CORRECTED"
+! 	Gosub L_7600
+! Return
+! 
+! L_4755: Rem CHECK IF AT LEAST 1 SHIP DAY
+! 	If P61$[34,34] = "Y" Return 1
+! 	For I = 1 To 7
+! 		If T2$[I,I] = "Y" Return 1
+! 	Next I
+! 	J7$ = "YOU MUST SHIP TO ZONE AT LEAST 1 DAY A WEEK!"
+! 	Gosub L_7600
+! Return
+! 
+! L_5000: Rem
+! 	Print @17,4;A1$[1,25];@17,5;Z2$[1,30];@50,7;Z3$[1,12]
+! 	Print Using "######";@17,7;D1;
+! 	If P61$[34,34] <> "Y" ! "only if not active
+! 		Print Using "####";@17,6;D0;
+! 		Print @17,8;T2$[1,1];
+! 		Print @17,9;T2$[2,2];@17,10;T2$[3,3];@17,11;T2$[4,4];@17,12;T2$[5,5];
+! 		Print @17,13;T2$[6,6];@17,14;T2$[7,7];
+! 	End If
+! 	Print Using "##";@50,6;Z0;@35,16;Z2[0];@35,17;Z2[1];@35,18;Z2[2]
+! 	Print Using "##";@35,19;Z2[3];@35,20;Z2[4];
+! 	Print Using "######";@17,16;Z1[0];@17,17;Z1[1];@17,18;Z1[2]
+! 	Print Using "######";@17,19;Z1[3];@17,20;Z1[4]
+! 	Gosub L_5100
+! 	Signal 3,0
+! 	U9$ = ""
+! Return
+! 
+! L_5100: Rem PRINT USE DESC
+! 	For I = 0 To 4
+! 		If I > 0 If Z1[I] = 0 Let Z2[I] = 0
+! 		If Z2[I] = 0 If Z1[I] Print @45,I + 16;"ZONE TRUCK"
+! 		If Z2[I] = 1 Print @45,I + 16;"UPS"
+! 		If Z2[I] = 2 Print @45,I + 16;"SHIP VIA"
+! 	Next I
+! Return
+! 
+! L_6000: Rem
+! 	Print @37 - (Len(W$) / 2) - 1,23;W$;'RB';
+! 	If W = 1 Goto L_6060
+! 	Signal 3,20
+! 	If W <> 9 Goto L_6070
+! 	Return
+! 	L_6060: Input ""J$
+! 	L_6070: Print @0,23;'CL';
+! 	W = 0
+! 	W$ = W9$
+! Return 
+! 
+! L_6300: E9 = Spc(9)
+! 	Search #2,7,1;K1$,R1,E
+! 	If E Gosub ERR_SEARCH
+! 	E8 = 1
+! Return -3
+
+
+!
+! dead code!
+!
+! W$ = "FILE NOT FOUND!"
+! Gosub L_6000
+! Chain ""
+! L_6600: W$ = "DO YOU WISH TO ABORT THIS REPORT? (Y/N) "
+! 	W = 1
+! 	Gosub L_6000
+! 	If J$ = "Y" Goto OUTEND
+! 	If J$ <> "N" Goto L_6600
+! Return
+
+!
+! validate zone - return +1 if A-OK
+!
+! L_6700: Rem CHECK ZONE
+! 	If J$[1,1] <> " " ! "CHECK FOR SPECIAL
+! 		J6$ = "INVALID CHARACTERS ENTERED!"
+! 		If J$[1,1] < "0" Or J$[1,1] > "z" Let J7$ = J6$ \ Gosub L_7600 \ Return
+! 		If J$[1,1] > "9" If J$[1,1] < "A" Let J7$ = J6$ \ Gosub L_7600 \ Return
+! 		If J$[1,1] > "Z" If J$[1,1] < "a" Let J7$ = J6$ \ Gosub L_7600 \ Return
+! 	End If
+! 	If J$[2,2] <> " " ! "CHECK FOR SPECIAL
+! 		J6$ = "INVALID CHARACTERS ENTERED!"
+! 		If J$[2,2] < "0" Or J$[2,2] > "z" Let J7$ = J6$ \ Gosub L_7600 \ Return
+! 		If J$[2,2] > "9" If J$[2,2] < "A" Let J7$ = J6$ \ Gosub L_7600 \ Return
+! 		If J$[2,2] > "Z" If J$[2,2] < "a" Let J7$ = J6$ \ Gosub L_7600 \ Return
+! 	End If
+! Return 1
+! 
+! L_8000: A1$ = " ",A1$ \ T2$ = " ",T2$
+! 	D0 = 0;D1 = 0;Z0 = 0
+! 	For I = 0 To 4
+! 		Z1[I] = 0;Z2[I] = 0
+! 	Next I
+! 	Z2$ = " ",Z2$;Z3$ = " ",Z3$
+! Return
+! 
+! L_8900: E9 = Spc(9)
+! 	Search #2,5,1;K1$,K1,E
+! 	If E Gosub ERR_SEARCH
+! 	E = 3
+! 	E9 = Spc(9)
+! 	Search #2,1,0;K1$,K1,E
+! 	If E Gosub ERR_SEARCH
+! 	Gosub L_8000
+! Goto L_1005
+
+! OUTEND: Rem EXIT ROUTINE
+! Print 'CS'
+! Close 
+! Chain "MX000"
+! Stop 
+! End
+
+
+OUTEND: Rem EXIT ROUTINE
+ReturnStatus=1
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call addToStr(e$,rstr$,webstr$)
+call setoutput(e$,rstr$)
+Close
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end

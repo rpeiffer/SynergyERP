@@ -1,0 +1,766 @@
+! serp298.dl4
+!
+! Truck Routing (PM program 298)
+! Enter/edit Shipping Data - oemenu = TRKRTE298
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp298.dl4 src/serp298.src
+!
+! ------------------------------------------------------------------------------
+! 09/14/12 vst task18206/ mtg task ######- added "RUTHERFORD" custom code for:
+! 04/15/04 zyc cct177662 - add more order types
+! ------------------------------------------------------------------------------
+! ----- notes for Synergy/ERP (xrev9) upgrade for Athens Janitor Supply --------
+! 10/16/11 vst task#9037 - used xrev9 program & added in custom code for:
+! 03/06/02 kag cct155219 - include order type 37 for ATHENS
+! 01/31/03 kag cct164788 - include order types 21, 26 and 27
+! ------------------------------------------------------------------------------
+! 1.0 12/22/2009
+
+!
+include "src/copyright.inc"
+! internal files needed
+include "src/inc/filecust.inc" ! customer
+include "src/inc/fileordhead.inc" ! order header, order shipto, order rot
+include "src/inc/filezonefle.inc" ! zone file
+Include "src/inc/filewhinfoz.inc" ! wh info file (rec 0 fix)
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$,buildsort
+Declare External Function formatdate2$
+Declare External Sub UserCntrl
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+! internal subs/functions 
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian,JulianToDate
+Declare Intrinsic Function findchannel
+
+Declare Sub Updatelog,OpenFiles
+Declare Sub SendLBox,SndOList
+Declare Sub SndTTLS,SbmtOrds,GetParams
+Declare Function chkDateFrmt$,Ctrldesc$,getcname$
+
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],action1$[30],action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200],Comd$[4]
+	Dim P9$[50],P60$[50],P61$[256],Custom_customer$[30]
+	Dim QMask$[20],PMask$[20],Key1$[60],UCA2$[50]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim K3$[60],SZone$[2],ARDate$[8]
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2],UCA5[10],maxstatus
+	Dim 2%,Q0[1],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	Dim K1$[50],k2$[50],mode$[2]
+	Dim TUID$[10]
+	Dim CName$[30]
+	Dim 1%,WH[99],V9[6],twh[99]
+	dim 2%,SDate,JDate[5],D9[5]
+	Dim 3%,NumRec[1],T0[4],c1
+	Dim 3%,TRKTTL[10]
+	dim 1%,X1[9],ORD_TYPE[38]
+	Dim 2%,x2[9],sysdate,cURDATe
+	Dim 3%,OHR,OTR,OSR,holdcodeflag[15]
+	Dim 3%,CNVTA,Amount,X3[9],R[99]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/tr298.log" ! fields for DEBUG
+
+	dim Cust. as cust ! customer
+	dim billto. as cust ! bill to customer
+	dim roh. as roh ! order header
+	dim ros. as ros ! order ship to file
+	dim rot. as rot ! order total file
+	dim zn. as zonefle ! zone file
+	Dim WHI. as whinfo ! wh info file
+
+	! call dxopen() ! opened in oemenu - standalone use
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp298"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action2$=UCase$(Action2$)
+	ACtion2$=RTrim$(Action2$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	
+	if debugdetail
+		dmsg$="SERP298 ACTION1 "+action1$
+		If Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	Call OpenFiles() ! open any/all files
+
+	Read #CTLC,3,0;CName$; \ CName$=RTrim$(CName$)
+	MAT  READ #CTLC,3,172;SysDate;
+	Mat read #ctlc,0,100;ardATE$;
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	mat read #ctlc,115,60;custom_customer$;
+	Custom_customer$=UCase$(Trim$(custom_customer$))
+	mat read #ctlc,115,0;D9; ! num of whses
+	Mat Read #CTLC,115,40;Q0;
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	TUID$=UserID$+Blank$
+	If Len(TUID$)>10 let TUID$[11]=""
+	Call UserCntrl(TUID$,UCA2$,UCA5[],status,intCo)
+	Let COST_LEV[0]=UCA5[0]
+	Let COST_LEV[1]=UCA5[1]
+	Let COST_LEV[2]=UCA5[2]
+	Let COST_LEV[3]=UCA5[3]
+	Let COMM_LEV=UCA5[4]
+	tmp$=Tim(8) using "&&"
+	tmp$[3]=TIM(9) using "&&"
+	tmp$[5]=TIM(10) using "&&"
+	CurDate=tmp$[1,6] ! yymmdd
+	DEF FNP(X)=SGN(X)*(INT(ABS(X)*10^Q0[1]+.5)/10^Q0[1])
+	CLEAR ORD_TYPE[]
+	ORD_TYPE[1]=1;Ord_Type[16]=1;Ord_type[24]=1 ! ALLOWED ORDER TYPES
+	ORD_TYPE[8]=1;Ord_type[37]=1
+	let maxstatus=4
+	IF custom_customer$="AMERICANOSMENT"
+	let maxstatus=6
+	endif
+	if custom_customer$="STERLING"
+     	ORD_TYPE[29]=1;ORD_TYPE[15]=1
+	Endif
+	if custom_customer$="HATHAWAY" ! ADD ot 24,28
+		ORD_TYPE[24]=1;ORD_TYPE[28]=1
+	Endif
+	if custom_customer$= "JACKSON"       
+  ord_type[31]=1                     
+    Endif                                
+	if custom_customer$="RUTHERFORD"
+		ord_type[4]=1
+		ord_type[6]=1
+		ord_type[9]=1
+		ord_type[10]=1
+		ord_type[15]=1
+		ord_type[21]=1
+		ord_type[22]=1
+		ord_type[24]=1
+	endif
+	IF CUSTOM_CUSTOMER$="ATHENS"
+		let ORD_TYPE[4]=4
+		ord_type[8]=8  \ LET ORD_TYPE[15]=15 ! added for ATHENS
+		LET ORD_TYPE[21]=21 \ LET ord_type[22]=22   ! added for ATHENS
+		LET ORD_TYPE[23]=23 !added - ATHENS
+		LET ORD_TYPE[26]=26 \ LET ORD_TYPE[31]=31 \ LET ORD_TYPE[32]=32 !added - ATHENS
+	ENDIF
+	if custom_customer$="WHITERIVER"
+		ord_type[4]=1	! cct237928
+		ord_type[35]=1	! cct237928
+	Endif
+	!call dxsave(0,"tmp/jcs298.txt!")
+	returnstatus=0
+	Message$="Action 1 not found"
+	select case action1$
+		case "DLISTS" ! all droplists happen				doc=TRT-GetDropLists.doc
+		!
+			Let ReturnStatus=1
+			Message$="OK";e$=""
+			Clear List$[]
+			Call SendLBox()
+			if debugdetail
+				dmsg$="DROPLISTS sent "+message$ \ Call updatelog(debug)
+			Endif
+			! end of droplists
+			! call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+			! end of Droplist
+	    case "GETLIST" ! get the list						doc=TRT-GetDataList.doc
+			Let ReturnStatus=1
+			Message$="OK"
+			Call SndOList()
+			if debugdetail
+				dmsg$="ORDER LIST sent "+message$ \ Call updatelog(debug)
+			Endif
+			! end of GetList
+		case "TRKTOTALS" ! send totals for trucks			doc=TRT-GetTruckTotals.doc
+			Let ReturnStatus=1
+			Message$="OK"
+			call getparams()
+			If returnstatus=0 goto TRTGDone ! bad date?
+			Call SndTTLS()
+			if debugdetail
+				dmsg$="Truck Totals sent "+message$ \ Call updatelog(debug)
+			Endif
+			! end of TRKTOTALS
+		case "SUBMITORD" ! submit changes					doc=TRT-SubmitOrderList.doc
+			Let ReturnStatus=1
+			Message$="OK"
+			Call SbmtOrds()
+			if debugdetail
+				dmsg$="ORDER Changed "+message$ \ Call updatelog(debug)
+			Endif
+			! end of TRKTOTALS
+		case "SHIPADDR" ! send full ship					doc=TRT-GetShipAddr.doc
+			Let ReturnStatus=1
+			Message$="OK"
+			Call dxget("ORDREC",tmp$)
+			OHR=tmp$
+			if OHR<=0 or ohr>CHF(OHC)-1
+				returnstatus=0
+				message$="Order Record Invalid"
+			Else ! ok
+				Read record #OHC,OHR,0;roh.;
+				OSR=roh.ShipRec
+				read record #OSC,OSR,0;ros.;
+				Clear list$[]
+				List$[0]=bsdel$,"SHIPADDR",fdel$
+				Webstr$="ORDERID",fdel$,"TRUCK",fdel$,"STOP",fdel$
+				webstr$=webstr$,"NAME",fdel$,"ADDR1",fdel$,"ADDR2",fdel$
+				webstr$=webstr$,"CITY",fdel$,"STATE",fdel$,"ZIPCODE",fdel$
+				list$[1]=webstr$
+				webstr$=Str$(roh.ordnum),fdel$
+				webstr$=webstr$,Str$(ros.Truck),fdel$,Str$(roh.StopNum),fdel$
+				webstr$=webstr$,RTrim$(ros.Name$),fdel$
+				webstr$=webstr$,RTrim$(ros.Address$),fdel$
+				webstr$=webstr$,RTrim$(ros.Address2$),fdel$
+				webstr$=webstr$,RTrim$(ros.City$),fdel$
+				webstr$=webstr$,RTrim$(ros.State$),fdel$
+				tmp$=ros.ZipCode$+ros.Zip4$
+				webstr$=webstr$,RTrim$(tmp$),fdel$
+				List$[2]=webstr$
+				List$[3]=esdel$
+			Endif
+			call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+			if debugdetail
+				dmsg$="ORDER "+Str$(roh.OrdNum)+" Ship to display "+message$ \ Call updatelog(debug)
+			Endif
+			! end of SHIPADDR
+	End Select
+	TRTGDone: ! finished
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	! call programdump("/tmp/trtlog1!","")
+  if debugdetail
+	dmsg$="End of Program serp298" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	CMC = OpenFile(-1808,IntCo) \ if CMC=-1 Error 42 ! customer
+	OHC = OpenFile(-1840,IntCo) \ if OHC=-1 Error 42 ! roh
+	OSC = OpenFile(-1856,IntCo) \ if OSC=-1 Error 42 ! ros
+	OTC = OpenFile(-1872,IntCo) \ if OTC=-1 Error 42 ! rot
+	ZNC = OpenFile(-1920,IntCo) \ if ZNC=-1 Error 42 ! zone
+	WHI = OpenFile(-2768,IntCo) \ if whi = -1 Error 42 ! wh info file (rec 0 fix)
+ 	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Function CtrlDesc$(rec,fld,lgth)
+! send record & field & length - return desc
+  Try
+	Dim Desc$[lgth]
+	desc$=Blank$
+	if rec<=0 let rec=18 ! 18 is default
+	if lgth<=0 let lgth=10 ! 10 char length default
+	LET J2=(fld-1)*lgth         
+	READ #CTLC,rec,J2;Desc$;
+  else
+    include "src/callsuberr.inc"
+  end try
+end Function Desc$ ! CtrlDesc$
+! 
+!--------------------------------------------------------------------
+Sub SendLBox()
+! send the line list boxes
+ Try
+	Dim RUD$[28],C$[20],CName$[30]
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"WHSELIST",fdel$
+	List$[1]="ID",fdel$,"NAME",fdel$
+	row=2
+	!if p9$[32,32]="Y" ! just send set up whses
+		!Webstr$="A",fdel$,"ALL WHSES",fdel$
+		!List$[row]=webstr$
+		!row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		for x=0 to 98 ! translate to 1-99
+			Try 
+				read record #WHI,x,0;whi.;
+			Else
+				clear whi.
+			End try
+			! whi.whname$="WHSE "+Str$(X+1)   !!!! WANTED ALL WHSES SENT! REMOVE WHEN COMPLETE!
+			tmp$=RTrim$(whi.WhName$)
+			if tmp$<>""
+				webstr$=Str$(X+1),fdel$,tmp$,fdel$
+				List$[row]=webstr$
+				row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			Endif
+		Next x
+	!Endif
+	List$[row]=esdel$
+	call addtostr(e$,rstr$,List$[])
+	Clear List$[]
+	!! - "ZONELIST" ! send all with a "A - ALL" option
+	call filedroplistzonefle(e$,list$[],tmpcnt,ZNC,"",Field$[],1,"","A")
+	call addtostr(e$,rstr$,List$[])
+	! add status
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SendLBox
+! 
+!--------------------------------------------------------------------
+Function chkDateFrmt$(DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY
+! if not make it MM/DD/YYYY
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE" or len(din$)<6
+	  Let DOut$=UCase$(DIn$)+Blank$
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function DOut$ ! chkDateFrmt$
+! 
+!--------------------------------------------------------------------
+Sub GetParams()
+! get parameters for routings
+  Try
+	Call dxget("PSHIPDT",tmp$)
+	tmp1$=chkDateFrmt$(tmp$) ! chk/convert to mm/dd/yyyy
+	if tmp1$[1,1]<"0" and tmp1$[1,1]>"9" let tmp1$=""
+	x$=formatdate2$(tmp1$) ! from mm/dd/yyyy to yyyymmdd
+	SDate=X$[3,8]
+	if SDate<=0
+		returnstatus=0
+		message$="Invalid Date"
+		goto GPDone:
+	Endif
+	Call DateToJulian(5,x$,tmp1$,e) ! from yyyymmdd to jjjjj
+	if not(e) 
+		let JDate[0]=tmp1$
+	Else
+		returnstatus=0
+		message$="Invalid Date"
+		goto GPDone:
+	Endif
+	call dxget("EXDATE",tmp$) ! exact date
+	EXDMATCH=0 \ if UCase$(RTrim$(tmp$))="Y" let EXDMATCH=1
+	! exdmatcH=1 ! TEST (it passed test)
+	Call dxget("PZONE",tmp$)
+	if tmp$="A" let tmp$="" ! web has A for ALL
+	SZone$=tmp$+blank$
+	Call dxget("PTRUCK",tmp$)
+	STruck=tmp$
+	call dxget("PWHSE",tmp$)
+	! sent as comma delimited
+	CPOS=1
+	stloop: ! loop it
+	Search tmp$[CPOS],",",EPOS
+	If EPOS
+		x1 = cpos + epos - 2 ! move to before comma
+		tmp1$=tmp$[CPOS,X1]
+		let x2=tmp1$
+		if x2>0 and x2<100
+			wh[x2]=1
+			wh[0]=wh[0]+1
+		Endif
+		cpos = cpos + epos ! start after comma
+		EPOS=0
+		Goto STLoop ! look for next
+	Else ! no more commas, was there no comma at end?
+		if cpos>1 and CPOS<=Len(tmp$) ! found one comma
+			tmp1$=tmp$[CPOS]
+			let x2=tmp1$
+			if x2>0 and x2<100
+				wh[x2]=1
+				wh[0]=wh[0]+1
+			Endif
+		Else ! no commas at all - use what sent
+			let x2=tmp$
+			if x2>0 and x2<100
+				wh[x2]=1
+				wh[0]=wh[0]+1
+			Endif
+		Endif
+	Endif
+	if wh[0]=0 ! none sent
+		returnstatus=0
+		Message$="No Warehouse sent"
+		goto GPDone
+	Endif
+	STC=buildsort(e$,20,0)
+	IF stc<=0
+		returnstatus=0
+		message$="Can not open Sorting File"
+		goto gpDone
+	Endif
+
+	! okay go thru & sort then done
+	K1$=" ",K1$
+	DO ! make sure sort cleared
+		SEARCH #sTc,3,1;k1$,R,E
+		if e exit do
+		search #sTc,5,1;k1$,R,E
+	Loop
+	! now thru orders
+	K1$=" ",k1$
+	do
+		search #OHC,3,1;k1$,R[1],E
+		if e exit do
+		
+		x2=k1$[1,2] \ if x2>maxstatus exit do ! status 1 - 4 per mx298
+
+		OHR=r[1]
+		read record #OHC,OHR,0;roh.;
+		OSR=roh.ShipRec
+		read record #OSC,OSR,0;ros.;
+		OTR=roh.TotRec
+		read record #OTC,OTR,0;rot.;
+		if roh.Status>maxstatus goto NxtOrdLoop
+		if roh.TotSellUnits=0 goto NxtOrdLoop
+		If STruck and struck<>ros.Truck goto nxtOrdLoop
+		if SZone$<>"  " and SZone$<>ros.Zone$ goto NxtOrdLoop
+		If not(Wh[roh.Wh]) goto NxtOrdLoop
+		IF NOT(ORD_TYPE[ROH.ORDTYPE]) GOTO NxtOrdLoop
+		x2=roh.ShipDate
+		if x2<>999999
+			tmp$=X2 Using "&&&&&&"
+			Call DateToJulian(1,tmp$,tmp1$,e) ! from yymmdd to jjjjj
+			if not(e) let JDate[1]=tmp1$ Else Let JDate[1]=0
+			Let X2=JDate[1]
+		Else ! is 999999
+			if exdmatch goto NxtOrdLoop
+		Endif
+		JDate[1]=x2
+		if exdmatch and jdate[0]<>jdate[1] goto NxtOrdLoop
+		if JDate[0]<JDate[1] goto NxtOrdLoop
+		LET K2$=" ",K2$
+		LET K2$[1,2]=" 1"  ! was causing problems during submit  roh.Wh USING "##"
+		LET K2$[3,8]=ros.Truck USING "######"
+		LET K2$[9,14]=roh.StopNum USING "######"
+		LET K2$[15,16]=ros.Zone$
+		LET K2$[17,22]=roh.CustNum USING "######"
+		LET K2$[23,28]=roh.OrdNum USING "######"
+		SEARCH #STC,4,1;K2$,OHR,E
+		NxtOrdLoop: ! bypass
+	Loop
+	GPDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetParams
+! 
+!--------------------------------------------------------------------
+Sub SndOList()
+! send all orders matching parameters
+  Try
+	call getparams()
+	If returnstatus=0 goto SOLDone ! bad date?
+	! okay sorted selections - now send 'em
+	call SndTtls() ! send truck totals first
+	! as no interactive Cust or Shipto Name - send them also
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"ORDLIST",fdel$
+	webstr$="ORDREC",fdel$,"ORDERID",fdel$,"CHOLD",fdel$,"ZONE",fdel$
+	Webstr$=Webstr$,"WHSE",fdel$,"TRUCK",fdel$,"STOP",fdel$
+	webstr$=webstr$,"UNTSHIP",fdel$,"WEIGHT",fdel$,"CUBES",fdel$
+	webstr$=webstr$,"SHIPCITY",fdel$,"SHIPSTATE",fdel$
+	webstr$=webstr$,"SHIPDATE",fdel$,"STATUS",fdel$,"CUSTID",fdel$
+	webstr$=webstr$,"CUSTNAME",fdel$,"SHIPID",fdel$,"SHIPNAME",fdel$
+	webstr$=webstr$,"GP$",fdel$,"GP%",fdel$
+	List$[1]=webstr$
+	row=2
+	lET K1$=" ",k1$
+	do
+		search #stc,3,1;k1$,OHR,E
+		if e exit do
+		read record #OHC,OHR,0;roh.;
+		OSR=roh.ShipRec
+		read record #OSC,OSR,0;ros.;
+		OTR=roh.TotRec
+		read record #OTC,OTR,0;rot.;
+		! unpack holds
+		x3=rot.holdcode 
+		for ctr=0 to 12   
+ 			LET holdcodeflag[ctr]=SGN(FRA(x3/2))
+			LET x3=INT(x3/2)
+		next ctr
+		! start load - Send Order Header Rec for ease of update, etc
+		webstr$=Str$(OHR),fdel$,Str$(roh.OrdNum),fdel$
+		tmp$="N" \ if holdcodeflag[0] let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$
+		webstr$=webstr$,ros.Zone$,fdel$
+		webstr$=webstr$,Str$(roh.wh),fdel$
+		webstr$=webstr$,Str$(ros.Truck),fdel$,Str$(roh.StopNum),fdel$
+		webstr$=webstr$,sTR$(roh.TotSellUnits),fdel$
+		webstr$=webstr$,LTrim$(rot.TotWgt using QMask$),fdel$
+		webstr$=webstr$,LTrim$(rot.TotCubes using QMask$),fdel$
+		webstr$=webstr$,RTrim$(ros.City$),fdel$,RTrim$(ros.State$),fdel$
+		x2=roh.ShipDate
+		tmp$="" \ if x2 let tmp$=PDate$(x2)
+		webstr$=webstr$,RTrim$(tmp$),fdel$
+		webstr$=webstr$,Str$(ROH.Status),fdel$
+		webstr$=webstr$,Str$(roh.CustNum),fdel$
+		tmp$=getcname$(roh.custnum)
+		webstr$=webstr$,RTrim$(tmp$),fdel$ ! custname
+		webstr$=webstr$,Str$(ros.ShipCust),fdel$
+		webstr$=webstr$,RTrim$(ros.Name$),fdel$ ! shipname
+		if cost_lev[1] ! load security
+			x3=roh.TotDol4Prof
+			x3[1]=roh.TotDol4Prof-roh.TotCost4Prof
+			x3[2]=-100
+			if x3 let x3[2]=(x3[1]/x3)*100
+			webstr$=webstr$,LTrim$(X3[1] using QMask$),fdel$ ! GP$
+			webstr$=webstr$,LTrim$(X3[2] using QMask$),fdel$ ! GP%
+		Else ! no costsec
+			webstr$=webstr$,fdel$,fdel$ ! gp$,gp%
+		Endif
+		List$[row]=webstr$
+		row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Loop
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	SOLDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndOList
+! 
+!--------------------------------------------------------------------
+Sub SndTTLS()
+! send truck totals for all orders matching parameters
+  Try
+	! move get/build to case stmt
+	! okay sorted selections - now total 'em
+	Clear List$[]
+	List$[0]=bsdel$,"TRKTOTALS",fdel$
+	Webstr$="TRUCK",fdel$,"NUMORDS",fdel$,"NUMSTOPS",fdel$
+	webstr$=webstr$,"TTLUNITS",fdel$,"TTLWGT",fdel$,"TTLCUBE",fdel$
+	List$[1]=webstr$
+	row=2
+	tmpcnt=maxcnt
+	Clear TRKTTL[]
+	HldTrk=-99
+	HldStp=-99
+	K1$=" ",k1$
+	do
+		search #stc,3,1;k1$,OHR,E
+		if e exit do
+		tmp2=k1$[3,8]
+		if hldtrk<0 let hldtrk=tmp2
+		if hldtrk<>tmp2 ! send total
+			webstr$=Str$(trkttl[0]),fdel$,str$(trkttl[1]),fdel$
+			webstr$=webstr$,str$(trkttl[2]),fdel$,str$(trkttl[3]),fdel$
+			webstr$=webstr$,Ltrim$(trkttl[4] using QMask$),fdel$
+			webstr$=webstr$,LTrim$(trkttl[5] using QMask$),fdel$
+			list$[row]=webstr$
+			row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			clear trkttl[]
+			trkttl[0]=tmp2
+			hldtrk=tmp2
+			hldstp=-99
+		Endif
+		trkttl[0]=tmp2
+		x2=k1$[9,14]
+		if hldstp<>x2
+			trkttl[2]=trkttl[2]+1
+			hldstp=x2
+		Endif
+		read record #OHC,OHR,0;roh.;
+		OSR=roh.ShipRec
+		read record #OSC,OSR,0;ros.;
+		OTR=roh.TotRec
+		read record #OTC,OTR,0;rot.;
+		trkttl[1]=trkttl[1]+1
+		trkttl[3]=trkttl[3]+roh.TotSellUnits
+		trkttl[4]=trkttl[4]+rot.TotWgt
+		trkttl[5]=trkttl[5]+rot.TotCubes
+	Loop
+	! send final totals
+	webstr$=Str$(trkttl[0]),fdel$,str$(trkttl[1]),fdel$
+	webstr$=webstr$,str$(trkttl[2]),fdel$,str$(trkttl[3]),fdel$
+	webstr$=webstr$,Ltrim$(trkttl[4] using QMask$),fdel$
+	webstr$=webstr$,LTrim$(trkttl[5] using QMask$),fdel$
+	list$[row]=webstr$
+	row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	STTLDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndTTLS
+! 
+!--------------------------------------------------------------------
+Sub SbmtOrds()
+! record changes to Orders
+  Try
+	dim croh. as roh
+	dim cros. as ros
+	! first close readonly & open as read/write
+	Try Close #OHC Else Rem
+	Try Close #OSC Else Rem
+	Try Close #OTC Else Rem
+	OHC = OpenFile(1840,IntCo) \ if OHC=-1 Error 42 ! roh
+	OSC = OpenFile(1856,IntCo) \ if OSC=-1 Error 42 ! ros
+	OTC = OpenFile(1872,IntCo) \ if OTC=-1 Error 42 ! rot
+	! get order & new data
+	numchgd=0
+	! this may end up a list of orders
+	call dxget("NUMORDS",tmp$)
+	if tmp$="" goto SBODone ! let tmp$="1"
+	numords=tmp$
+	kchgd=0 ! a key changed in sortfile
+	for x=1 to numords ! if only 1 order ever, no for/next or Str$(X)
+		call dxget("ORDREC"+Str$(X),tmp$)
+		x3=tmp$
+		if x3<1 or x3>9999999 or fra(x3)
+			returnstatus=0
+			message$="Invalid Record Number on line "+Str$(X)
+			goto SBODone
+		Endif
+		ohr=x3
+		call dxget("ORDERID"+STR$(X),tmp$) ! as a check the order #
+		let x2=tmp$
+		read record #OHC,ohr,0;croh.; ! copy of
+		read record #OHC,ohr,0;roh.
+		osr=roh.ShipRec
+		read record #OSC,OSR,0;cros.; ! copy of
+		read record #OSC,OSR,0;ros.
+		if roh.OrdNum<>x2
+			returnstatus=0
+			message$="Record disagress with data on line "+str$(X)
+			goto SBODone
+		Endif
+		! okay now get data
+		call dxget("ZONEID"+str$(X),tmp$)
+		IF RTrim$(tmp$)<>"" ! sent something
+			let ros.Zone$=tmp$+blank$
+			if cros.zone$<>ros.Zone$ let kchgd=1
+		Endif
+		call dxget("TRUCKID"+Str$(X),tmp$)
+		if RTrim$(tmp$)<>"" ! sent truck
+			let ros.Truck=tmp$
+			if cros.truck<>ros.truck let kchgd=1
+		endif
+		call dxget("STOPID"+str$(X),tmp$)
+		if RTrim$(tmp$)<>"" ! sent stop
+			x2=tmp$ ! got to check if >7999?!
+			if x2<0 or x2>7999 or fra(x2)
+				returnstatus=0
+				message$="Invalid Stop number"+str$(x)
+				goto SBODone
+			Endif
+			let roh.StopNum=tmp$
+			if croh.StopNum<>roh.StopNum let kchgd=1
+		Endif
+		call dxget("SHIPDATE"+Str$(X),tmp$)
+		if RTrim$(tmp$)<>"" ! sent date
+			tmp1$=chkDateFrmt$(tmp$) ! chk/convert to mm/dd/yyyy
+			if tmp1$[1,1]<"0" and tmp1$[1,1]>"9" let tmp1$=""
+			x$=formatdate2$(tmp1$) ! from mm/dd/yyyy to yyyymmdd
+			let roh.ShipDate=x$[3,8] ! just yymmdd
+			if croh.ShipDate<>roh.ShipDate let kchgd=1 ! could drop off list!
+		Endif
+		write record #OHC,OHR,0;roh.;
+		write record #OSC,OSR,0;ros.;
+		numchgd=numchgd+1
+	Next x
+	returnstatus=1
+	message$="OK" ! finished ok
+	SBODone: ! finished
+	! 
+	if kchgd>0 ! something changed - resend list? (also select params needed)
+		Call SndOList()
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SbmtOrds
+! 
+!--------------------------------------------------------------------
+Function getcname$(custid)
+! get customer's name
+  Try
+	Dim CName$[30]
+	k3$=" ",k3$
+	K3$=CustId Using "######"
+	CMR=filegetCust(e$,CMC,"=",1,K3$,cust.)
+	if cmr<=0
+		clear cust.
+		cust.name$="CUSTOMER NOT FOUND"
+	Endif
+	CName$=Cust.Name$
+   else
+    include "src/callsuberr.inc"
+  end try
+end Function CName$ ! getcname$
+! 
+!--------------------------------------------------------------------

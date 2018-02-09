@@ -1,0 +1,171 @@
+Rem MXOHCSZONE - Order Header Check Multi-Zone
+! 
+! loadsave -w -n 100,10 -o prog/dxport/mxohcszone src/mxohcszone.src
+! DO NOT SAVE AS ".DL4" !!!! already one that's different
+! and several programs are using "mxohcszone" (THIS PROGRAM!)
+!
+! ERPScheduler Enabled
+!
+include "src/copyright.inc" ! dx
+Rem Author:  cct 144356  02/12/2001
+Rem Last Update:
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: JUN 27, 2002  12:19:47
+Rem /usr/acct/r97//usr/acct/txc/work/devl/mx2/mxohcszone.src (univ2) [txc] {44165}
+Rem  Copyright (c) 2002 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+! ADDED - PASS SHIPDATE AS NEGATIVE FOR SHIPDATE CHECK (NO CALC FROM ORDDATE)
+External Lib "libgeneral.lib"
+Declare External Sub suberr,mainerr,GetSession,AddToStr,SetOutput,CreateNetStatus
+
+Declare Intrinsic Sub DateToJulian,InpBuf,JulianToDate,MiscStr,String,VerifyDate
+Declare Intrinsic Sub programdump
+!Option Default Dialect IRIS1
+
+Enter CUSTNO,SHIPNO,ORDDATE,ORDDIV,ORDWHSE,SHIPDATE,CSZONE$,CSSTOP,IntCo
+If Err 0 Gosub ERR_TRAP
+Dim e$[500],Msg$[200],Message$[200],WebStr$[500],RSTR$[1000]
+Rem {begin srcdevl/inc/dim.getchan.i}
+Dim 1%,CHNL
+Dim 3%,CHNLSCR,CHNLFREE
+Rem {end dim.getchan.i}
+Dim CSKEY$[40],CSZ$[14],X$[20],CLOZCODE$[2],P61$[256]
+Dim 1%,CSZ1[6],DOW,X1[9],VDAY[6],CLOZNUM[1],H4[2]
+Dim 1%,COID,CHAN,X
+Dim 2%,CSZCUST[2],JDATE[5],X2[9],H0[12]
+Dim 2%,HOLIDAY[19],CLOZ1[1],CLOZ2[1],H5[16]
+Dim 3%,X3[9]
+COID = IntCo ! Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64)
+If Not(ORDDATE) Or Not(CUSTNO) Goto OUTEND
+Mat Read #1,61,0;P61$;
+If P61$[34,34] <> "Y" Goto OUTEND
+Mat Read #1,175,0;VDAY;
+Mat Read #1,175,28;CLOZ1;
+Mat Read #1,175,36;CLOZ2;
+Mat Read #1,175,84;CLOZCODE$;
+Mat Read #1,175,86;CLOZNUM;
+Mat Read #1,179,0;HOLIDAY;
+H4[2] = ORDWHSE
+H5[8] = ORDDIV
+X$ = ORDDATE Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Goto OUTEND
+JDATE[0] = X$[1,5]
+If Shipdate<0 ! just see if date valid
+	CHKSDate=1;Shipdate=ABS(ShipDate)
+	X$=ShipDate using "&&&&&&"
+	Call DateToJulian(1,X$,X$,E) \ If E let CHKSDate=0
+	JDate[1]=X$[1,5]
+	if Chksdate<>1 let JDate[1]=0
+Endif
+CHNL = 99 \ Gosub GETCHAN
+If CHNL > 1
+  X$ = "3/CSZONE" + Str$(COID)
+  CHAN = CHNL
+  Ropen #CHAN,X$
+Else 
+  Goto OUTEND
+End If 
+Call MiscStr(1,CSZ$)
+CSKEY$ = " ",CSKEY$
+CSKEY$[1,6] = CUSTNO Using "######"
+CSKEY$[7,7] = "."
+CSKEY$[8] = SHIPNO Using "&&&&&&"
+Search #CHAN,2,1;CSKEY$,CSREC,E \ If E > 1 Gosub ERR_SEARCH
+If Not(E)
+  Mat Read #CHAN,CSREC,0;CSZCUST;
+  Mat Read #CHAN,CSREC,12;CSZ1;
+  Mat Read #CHAN,CSREC,26;CSZ$;
+Else 
+  If SHIPNO = 0 Let SHIPDATE = ORDDATE
+End If 
+GOT1ZONE = 0
+For X = 0 To 6
+  X1 = (X * 2) + 1
+  If CSZ$[X1,X1] = "" Or CSZ$[X1,X1 + 1] = "  " Goto NXTZONE
+  GOT1ZONE = 9
+NXTZONE: Next X
+If Not(GOT1ZONE) Goto OUTDONE
+if chksdate and JDate[1]>0 goto trydateloop ! use passed for check
+JDATE[1] = JDATE[0] + CSZCUST[2]
+SHIPDATE = 999999
+TRYDATELOOP: Rem "if date changed loop here
+If JDATE[1] - JDATE[0] > 365 Goto OUTDONE
+Gosub CHECKCLOSED
+DOW = JDATE[1] Mod 7
+X1 = (DOW * 2) + 1
+If CSZ$[X1,X1] = "" Or CSZ$[X1,X1 + 1] = "  " ! "no Zone that day Next?
+  JDATE[1] = JDATE[1] + 1
+  Goto TRYDATELOOP
+End If 
+CSZONE$ = CSZ$[X1,X1 + 1]
+CSSTOP = CSZ1[DOW]
+X$ = JDATE[1] Using "#####"
+Call JulianToDate(1,X$,X$,E) \ If E Gosub ERR_SEARCH
+Call VerifyDate(X$,X$,E) \ If E Gosub ERR_SEARCH
+SHIPDATE = X$[1,6]
+Goto OUTDONE
+CHECKCLOSED: Rem "see if Holiday or Closed
+For X1 = 0 To 19
+  If JDATE[1] = HOLIDAY[X1] Goto CLOZDSORRY
+Next X1
+If JDATE[1] >= CLOZ1[0] And JDATE[1] <= CLOZ1[1] ! "in range what kind?
+  If CLOZCODE$[1,1] = "C" Goto CLOZDSORRY
+  If CLOZCODE$[1,1] = "D" And H5[8] = CLOZNUM[0] Goto CLOZDSORRY
+  If CLOZCODE$[1,1] = "W" And H4[2] = CLOZNUM[0] Goto CLOZDSORRY
+End If 
+If JDATE[1] >= CLOZ2[0] And JDATE[1] <= CLOZ2[1] ! "in range what kind
+  If CLOZCODE$[2,2] = "C" Goto CLOZDSORRY
+  If CLOZCODE$[2,2] = "D" And H5[8] = CLOZNUM[1] Goto CLOZDSORRY
+  If CLOZCODE$[2,2] = "W" And H4[2] = CLOZNUM[1] Goto CLOZDSORRY
+End If 
+Return 
+CLOZDSORRY: Rem "add a day and try Again
+JDATE[1] = JDATE[1] + 1
+Goto CHECKCLOSED
+OUTDONE: Rem "close open file
+If CHAN > 1 Close #CHAN
+OUTEND: Rem "Done
+End 
+Rem {begin srcdevl/inc/rtn.getchan.i}
+GETCHAN: Rem search for open channel (counts down from supplied chnl #)
+For SCR = CHNL To 1 Step -1
+  CHNL = SCR
+  Gosub CHNLFREE
+  If CHNLFREE
+    SCR = 1
+  Else 
+    CHNL = 0
+  End If 
+Next SCR
+Return 
+CHNLFREE: Rem check to see if a channel is being used
+If Err 0 Let CHNLFREE = Spc(8)
+CHNLFREE = 0
+CHNLSCR = Chf(CHNL)
+If Err 0 Gosub ERR_TRAP
+If CHNLFREE And CHNLFREE <> 49 Gosub ERR_TRAP
+END_CHNLFREE: Rem
+Return 
+Rem {end rtn.getchan.i}
+Rem {begin rtn.error.s}
+ERR_SEARCH: Rem
+If Msg$<>"" let e$=msg$ \ goto err_msg ! Error 10000 ! sent reason
+ENUM = E ;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+e$ = "RETURN STATUS",(E + (CTERR * .001))
+e$ = e$,"/ STATEMENT",ELINE," IN PROGRAM "+Msc$(4)
+call programdump("tmp/seohcsz!","")
+goto err_msg ! Error 10000
+Return ! End
+ERR_MSG: ! send message
+!ReturnStatus=1 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)
+!Message$=E$
+!	  call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+!	  call AddToStr(e$,rstr$,WebStr$)
+!	  call SetOutPut(e$,rstr$)
+!End
+ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+!
+include "src/callsuberr.inc"
+
+End ! the whole program

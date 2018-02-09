@@ -1,0 +1,228 @@
+! serp931d - Import Broker Entry/Edit
+!
+! 1.0 02/22/2009 - initial conversion
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp931d.dl4 src/serp931d.src
+!.
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+!
+!include structure,filehandler libs & default structure dims
+! include "src/inc/file?.inc"
+
+Declare Intrinsic Sub InpBuf,String
+Option Default Dialect IRIS1
+
+External Lib "ubsfunc.dl4"
+Declare External Function openfile
+
+include "src/inc/filepobroker.inc" ! broker
+dim pobr. as pobroker ! broker rate file
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[500],tmp2$[1000],b$[200]
+b$=" ",b$
+dim message$[150]
+!
+! call dxopen()
+!
+! call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+! call dxsave(0, "tmp/tmpsave!")
+! If Err 0 Gosub ERR_TRAP
+! If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTIN.hsf\177\";
+dim List$[100,2000],WebStr$[1000]
+dim 1%,ch_pobr,3%,rec_pobr,keypobr$[50],blank$[100],p9$[50]
+
+dim 3%
+blank$=" ",blank$
+!
+! open files
+!
+ch_pobr= OpenFile("POBROKER",Intco) 
+
+
+MAT  READ #1,19,50;P9$; !FLAGS
+Read #1,0,112;PCDATE;
+! X = S9[0];K[3] = S9[1]
+! If X = 142 Goto L_3500 ! edit
+
+if action1$ <> "GETLIST"
+	call dxget("BROKERID", tmp$) 
+	LET keypobr$=rtrim$(tmp$)+blank$
+	pobr.BrokerKey$=keypobr$
+	Search #ch_pobr,2,1;keypobr$,rec_pobr, E
+	If E>1 ! Error 42
+		message$="Search Error "+Str$(E)+" dir=1  key="+keypobr$
+		returnstatus=0 \ goto bp931d !error 10000
+	Endif
+	If E<>0
+		rec_pobr=-1
+		clear pobr.
+		pobr.BrokerKey$=keypobr$
+		pobr.Description$=" ",pobr.Description$
+	else
+		Read Record #Ch_pobr,rec_pobr;pobr.;
+	endif
+endif
+
+
+select case action1$
+	case "GETLIST"
+	    CLEAR LIST$[]
+		call filedroplistpobroker(e$,list$[],maxcnt,Ch_pobr)
+		call AddToStr(e$,rstr$,List$[])
+		Clear List$[]
+		List$[0]=bsdel$+"RateTypeDropList"+fdel$
+		List$[1]="ID"+fdel$+"Description"+fdel$
+		List$[2]="D"+fdel$+"Dollar"+fdel$
+		List$[3]="P"+fdel$+"Percent"+fdel$
+		List$[4]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		! status section
+		Message$=""
+	case "GETDATA"
+		gosub LoadData
+		! status section
+		Message$="ok"
+	case "SUBMITDATA"
+		gosub UnloadDataAndSave
+		! status section
+		! message$ set in subroutine
+	case "DELETE"
+		gosub DeleteData
+		! status section
+		Message$="Record deleted."
+	case else
+		message$ = "Unknown action1: "+action1$;returnstatus=0 \ goto bp931d ! error 10000
+endselect
+! message should be set.  if we got here - we've got a good status
+ReturnStatus=1
+bp931d: ! bypass =1 - use what's sent!
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call addToStr(e$,rstr$,webstr$)
+goto OutEnd:
+
+
+! ***********************************************************************
+! Nobody but us subroutines and exit code down here
+! **********************************************************************
+
+!----------------------------------------------------------------------------
+! load salesrep data and return
+!----------------------------------------------------------------------------
+LoadData: !
+	! header information
+	Clear List$[]
+	List$[0]=bsdel$+"Data"+fdel$
+	List$[1]="BrokerID"+fdel$+"Description"+fdel$+"RateType"+fdel$+"Rate"+fdel$
+	webstr$=pobr.BrokerKey$,fdel$
+	webstr$=webstr$+rtrim$(pobr.Description$),fdel$
+	let tmp$="D"
+	if pobr.ratetype=1 let tmp$="P"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,str$(pobr.rate),fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+Return
+
+!----------------------------------------------------------------------------
+! result of submit call
+!----------------------------------------------------------------------------
+UnloadDataAndSave: !
+	call DxGet("Description", tmp$) \ tmp$ = ucase$(tmp$) 
+	if rtrim$(tmp$)=""
+		returnstatus=0
+		message$="Description is required!"
+		returnstatus=0 \ goto bp931d ! return
+	Endif
+	let pobr.Description$=rtrim$(tmp$)+blank$
+	call DxGet("RateType", tmp$) \ tmp$ = ucase$(tmp$) 
+	let pobr.ratetype=-1
+	if rtrim$(tmp$)="D" let pobr.ratetype=0
+	if rtrim$(tmp$)="P" let pobr.ratetype=1
+	if pobr.ratetype<0 or pobr.ratetype>1
+		let returnstatus=0
+		message$="Invalid Rate Type Submitted"
+		goto bp931d
+	endif
+	call DxGet("Rate", tmp$) 
+	let tmp3=tmp$
+	if tmp3<0 or tmp3>9999.9999
+		let returnstatus=0
+		message$="Invalid Rate Entered"
+	endif
+	if fra(tmp3*10000)<>0
+		let returnstatus=0
+		message$="Too Many Decimal Places in Rate"
+	endif
+	pobr.rate=tmp3
+	LET keypobr$=rtrim$(pobr.BrokerKey$)+blank$
+	Search #ch_pobr,2,1;keypobr$,rec_pobr, E
+	If E>1 ! Error 42
+		message$="Search Error "+Str$(E)+" dir=1  key="+keypobr$
+		returnstatus=0 \ goto bp931d !error 10000
+	Endif
+	If E<>0
+		let e=2\search #ch_pobr,1,0;keypobr$,rec_pobr,e
+		if e<>0
+			message$="Search Error "+Str$(E)+" dir=1  key="+keypobr$
+			returnstatus=0 \ goto bp931d !error 10000
+		endif
+		write record #ch_pobr,rec_pobr;pobr.;
+		Search #ch_pobr,4,1;keypobr$,rec_pobr,e
+		if e<>0
+			message$="Search Error "+Str$(E)+" dir=1  key="+keypobr$
+			returnstatus=0
+			goto bp931d
+		endif
+	else
+		Write Record #Ch_pobr,rec_pobr;pobr.;
+	endif
+
+Return
+
+!----------------------------------------------------------------------------
+! result of delete call
+!----------------------------------------------------------------------------
+DeleteData: !
+	LET keypobr$=rtrim$(pobr.BrokerKey$)+blank$
+	Search #ch_pobr,2,1;keypobr$,rec_pobr, E
+	If E>1 ! Error 42
+		message$="Search Error "+Str$(E)+" dir=1  key="+keypobr$
+		returnstatus=0
+		goto bp931d
+	Endif
+	If Not(E)
+		clear pobr.
+		Write Record #ch_pobr,rec_pobr;pobr.;
+		Search #ch_pobr,5,1;keypobr$,rec_pobr,e
+		if e<>0
+			message$="Search Error "+Str$(E)+" dir=1  key="+keypobr$
+			returnstatus=0
+			goto bp931d
+		endif
+		let e=3\Search #ch_pobr,1,0;keypobr$,rec_pobr,e
+		if e<>0
+			message$="Search Error "+Str$(E)+" dir=1  key="+keypobr$
+			returnstatus=0
+			goto bp931d
+		endif
+	endif
+Return
+
+
+OUTEND: Rem EXIT ROUTINE
+call setoutput(e$,rstr$)
+Close
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end

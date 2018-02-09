@@ -1,0 +1,640 @@
+! --- serp783.dl4
+! Product Roll Maintenance maintenance program 
+!
+! 1.0 10/28/2009 - initial conversion
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp783.dl4 src/serp783.src
+!
+!
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+include "src/inc/fileprodroll.inc"
+include "src/inc/filewhinfoz.inc" ! warehouse!
+Include "src/inc/fileprtdefault.inc" ! port default
+Include "src/inc/fileprod.inc" ! product file
+include "src/inc/fileprodwhse.inc" ! prodwhse 
+Declare Intrinsic Sub InpBuf,String,checknumber
+Declare Intrinsic function findchannel
+! Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,FormatDate2$
+Declare External Function getuidrec,getuidinfo$
+Declare External Function CHKBADCHARS,clrtxtc$
+
+Declare sub GetProdDetail
+
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+! dim the structure
+dim wh. as whinfo ! warehouse file
+dim prt. as prtdefault ! port defaults
+dim prdrl. as prodroll ! product roll id 
+dim pr. as prod ! product file
+dim pw. as prodwhse ! product warehouse file
+
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200]
+b$=" ",b$
+dim message$[150],webstr$[200]
+dim whlist$[100,100]
+dim List$[2500,2000]
+
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+call GetPortDefault(e$,IntCO,UserID$,portnum,rec_uac,prt.) 
+
+Dim P9$[50],C$[36],P60$[50],P61$[256],RTYPE$[1]
+dim keyprod$[30],keyprwh$[30],keyroll$[50],f$[16],custom_customer$[30]
+dim prod$[12],blank$[100],work$[20],name$[30],rollid$[20],desc$[30]
+dim xdate$[10],keyror$[50],keytmp$[50]
+DIM 3%,currdate
+dim 3%
+let blank$=" ",blank$
+tmp$=tim(4) using "&&&&&&"
+let work$=tmp$[5,6],tmp$[1,2],tmp$[3,4]
+currdate=work$
+Mat Read #ctlc,19,50;P9$;
+Mat Read #ctlc,60,50;P60$;
+mat read #ctlc,61,0;p61$;
+mat read #ctlc,115,60;custom_customer$;
+Custom_customer$=UCase$(Trim$(custom_customer$))
+! file open 
+if p61$[104,104]="Y"
+	ch_prdrl=findchannel()
+	let f$="2/PRODROLL"+STR$(INTCO)
+	open #CH_prdrl,F$
+endif
+ch_wh=findchannel()
+read #ctlc,88,2768;f$;
+ropen #ch_wh,f$
+ch_prod=findchannel()
+read #ctlc,88,1792;f$;
+ropen #ch_prod,f$
+ch_prwh=findchannel()
+read #ctlc,88,1744;f$;
+ropen #ch_prwh,f$
+
+select case action1$
+
+CASE "START"
+	let returnstatus=1
+	let message$="OK"
+	! whse droplist
+	Call FileDropListWhinfoz(e$,whList$[],100,ch_wh)  
+	Call AddToStr(e$,rstr$,whList$[])
+	! Default Warehouse
+	clear list$[]
+	let list$[0]=bsdel$,"Defaults",fdel$
+	webstr$ = "DfltWhse",fdel$ 
+	webstr$ = webstr$,"ROLLFLAG",fdel$
+	list$[1]=webstr$
+	let tmp3=prt.wh
+	if tmp3<=0 or tmp3>99 let tmp3=1
+	webstr$=str$(tmp3),fdel$ !!!
+	let webstr$=webstr$,p61$[104,104],fdel$
+	if p61$[104,104]<>"Y"
+		let returnstatus=0
+		let message$="Roll Inventory Module is Not Available "
+	endif
+	list$[2]=webstr$
+	list$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[]) 
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+    call SetOutput(e$,rstr$) 
+
+CASE "WHLIST"
+	let returnstatus=1
+	let message$="OK"
+	! whse droplist
+	Call FileDropListWhinfoz(e$,whList$[],100,ch_wh)  
+	Call AddToStr(e$,rstr$,whList$[])
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+    call SetOutput(e$,rstr$) 
+
+Case "GETPRODDETAIL"
+	returnstatus=1
+	message$="OK"
+	call getproddetail()
+
+Case "ROLLLIST"
+	let returnstatus=0
+	let message$="OK"
+	webstr$=""
+	ReturnStatus=1
+	Message$="OK" 
+	! set list header
+	Clear List$[]
+	Call DXGet("PRODID",tmp$)
+	tmp$=Ucase$(RTrim$(tmp$))
+	if tmp$="" 
+		let returnstatus=0
+		Let message$="Invalid Product Code Submitted"
+		goto endrolllist:
+	endif
+	Prod$=tmp$+blank$
+	Keyprod$ = prod$                                                                       
+	rec_prod = filegetprod(e$,ch_prod,"=",1,Keyprod$,pr.) ! product mode                                                                 
+	If rec_prod < 0 ! Product record not found                          
+		Clear pr.                                                         
+		ReturnStatus = 0                                                  
+		Message$ = "Product "+rtrim$(keyprod$)+" Not on File "
+		goto endrolllist:
+	endif
+	Call DXGet("WHSE",tmp$)
+	WHSE=TMP$
+	if WHSE<0 OR WHSE>99
+		let returnstatus=0
+		Let message$="Invalid Warehouse Submitted"
+		goto endrolllist:
+	endif
+	if whse<>0
+		Keyprwh$ = " ",Keyprwh$                                                   
+		Keyprwh$[1,12] = prod$[1,12]                                              
+		Keyprwh$[13] = whse Using "##"                                            
+		rec_prwh = filegetprodwhse(e$,ch_prwh,"=",1,Keyprwh$,pw.,e)               
+		If rec_prwh < 0 ! NOT FOUND                                               
+			Clear pw.                                                                 
+		endif
+	endif
+	endrolllist: ! 
+	let totonroll=0
+	!Prod$=tmp$+blank$
+	! section 1 
+	clear list$[]
+	list$[0]=bsdel$,"RollItems",fdel$
+	webstr$="Roll Id",fdel$
+	webstr$=webstr$,"Weight ",fdel$
+	webstr$=webstr$,"Whse",fdel$
+	list$[1]=webstr$
+	let row=2
+	if returnstatus>0
+		tmpcnt=2500
+		!Prod$=tmp$+blank$
+		let keyroll$=" ",keyroll$
+		Let keyroll$=Prod$
+		if whse<>0
+			Let keyroll$[13,14]=whse using "##"
+		endif
+		do
+			rec_prdrl = filegetprodroll(e$,ch_prdrl,">",1,Keyroll$,PRdrl.)
+			IF rec_prdrl<0 exit do
+			if keyroll$[1,12]<>prod$[1,12] exit do
+			if whse<>0
+				let tmp3=keyroll$[13,14]
+				if tmp3<>whse exit do
+			endif
+			webstr$=rtrim$(prdrl.rollid$),fdel$
+			webstr$=webstr$,str$(prdrl.wgt),fdel$
+			webstr$=webstr$,str$(prdrl.whse),fdel$
+			let totroll=totroll+prdrl.wgt
+			list$[row]=webstr$
+			row=row+1
+			If row > tmpcnt Let tmpcnt = expandarray(e$,List$[])			
+	     loop
+	endif
+	list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+		! section 2
+	CLEAR list$[]
+	list$[0]=bsdel$,"ProdInfo",fdel$
+	webstr$=""
+	webstr$="On Hand ",fdel$
+	webstr$=webstr$,"In Rolls ",fdel$
+	webstr$=webstr$,"Variance ",fdel$
+	webstr$=webstr$,"Whse",fdel$
+	list$[1]=webstr$
+	let row=2
+	if returnstatus>0
+		let totonhand=0
+		if whse<>0
+			let totonhand=pw.qtyonhand
+		else
+			let totonhand=pr.qtyonhand
+		endif
+		webstr$=str$(totonhand),fdel$
+		webstr$=webstr$,str$(totroll),fdel$
+		webstr$=webstr$,str$(totonhand-totroll),fdel$
+		if whse<>0
+			let webstr$=webstr$,str$(whse),fdel$
+		else
+			let webstr$=webstr$,"All",fdel$
+		endif
+		list$[2]=webstr$
+		row=3
+	endif
+	webstr$=""
+	LIST$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+    call SetOutput(e$,rstr$) 
+
+Case "GETROLL"
+	! status section
+	ReturnStatus=1
+	Message$="OK" 
+	Call DXGet("PRODID",tmp$)
+	tmp$=Ucase$(RTrim$(tmp$))
+	if tmp$="" 
+		let returnstatus=0
+		Let message$="Invalid Product Code Submitted"
+		goto endgetroll:
+	endif
+	Prod$=tmp$+blank$
+	Keyprod$ = prod$                                                                       
+	rec_prod = filegetprod(e$,ch_prod,"=",1,Keyprod$,pr.) ! product mode                                                                 
+	If rec_prod < 0 ! Product record not found                          
+		Clear pr.                                                         
+		ReturnStatus = 0                                                  
+		Message$ = "Product "+rtrim$(keyprod$)+" Not on File "
+		goto endgetroll:
+	endif
+	Call DXGet("WHSE",tmp$)
+	WHSE=TMP$
+	if WHSE<1 OR WHSE>99
+		let returnstatus=0
+		Let message$="Invalid Warehouse Submitted"
+		goto endgetroll:
+	endif
+	Call DXGet("ROLLID",tmp$)
+	ROLLID$=UCASE$(RTRIM$(TMP$))+BLANK$
+	KEYROLL$=" ",KEYROLL$
+	KEYROLL$[1,12]=PROD$[1,12]
+	KEYROLL$[13,14]=WHSE USING "##"
+	KEYROLL$[15,34]=ROLLID$[1,20]
+	let newrecord=0
+    rec_roll = filegetprodroll(e$,ch_prdrl,"=",1,Keyroll$,prdrl.) 
+	if rec_roll<0 ! new record
+		let newrecord=99
+		clear prdrl.
+		let prdrl.prod$[1,12]=prod$[1,12]
+		let prdrl.rollid$[1,20]=rollid$[1,20]
+		let prdrl.desc$=" ",prdrl.desc$
+		let prdrl.spare$=" ",prdrl.spare$
+		let prdrl.spare1$=" ",prdrl.spare1$
+		let prdrl.user$=" ",prdrl.user$
+		let prdrl.user$=rtrim$(userid$)+blank$
+		let prdrl.whse=whse
+		let prdrl.rcvddate= currdate! set a date
+		let prdrl.editdate= currdate !
+		let prdrl.source=781 ! manual entry
+	endif ! sectio
+	clear list$[]
+	list$[0]=bsdel$,"RollDetail",fdel$
+	webstr$="PRODID",fdel$
+	webstr$=webstr$,"ROLLID",fdel$
+	webstr$=webstr$,"DESCRIPTION",fdel$
+	webstr$=webstr$,"WEIGHT",fdel$
+	webstr$=webstr$,"WHSE",fdel$
+	webstr$=Webstr$,"NEWRECORD",fdel$
+	webstr$=webstr$,"Last Edit Date",fdel$
+	webstr$=webstr$,"Old Weight",fdel$
+	webstr$=webstr$,"Source",fdel$
+	list$[1]=webstr$
+	let row=2
+	if returnstatus>0
+		let webstr$=rtrim$(prdrl.prod$),fdel$
+		let webstr$=webstr$,rtrim$(prdrl.rollid$),fdel$
+		tmp$=clrtxtc$(e$,prdrl.Desc$)
+		let webstr$=webstr$,rtrim$(tmp$),fdel$
+		let webstr$=webstr$,str$(prdrl.wgt),fdel$
+		let webstr$=webstr$,str$(whse),fdel$
+		let tmp$="N"
+		if newrecord<>0 let tmp$="Y"
+		let webstr$=webstr$,tmp$,fdel$
+		let xdate$=""
+		if prdrl.editdate<>0
+			let xdate$=pdate$(prdrl.editdate)
+		endif
+		let webstr$=webstr$,xdate$,fdel$
+		let webstr$=webstr$,str$(prdrl.oldwgt),fdel$
+		let tmp$=""
+		if prdrl.source=781
+			let tmp$="Manual Entry "
+		endif
+		if prdrl.source=374 ! purchase order
+			let name$=" ",name$
+			if prdrl.refcode<>0
+				ch_vend=findchannel()
+				read #ctlc,88,2400;f$;
+				ropen #ch_vend,f$
+				let keytmp$=prdrl.refcode using "######"
+				search #ch_vend,2,1;keytmp$,rec_tmp,e
+				if not(e)
+					read #ch_vend,rec_tmp,0;name$;
+					let tmp$="Vendor: "+str$(prdrl.refcode)+" "+name$
+				endif
+			endif
+			if prdrl.refnum<>0
+				let tmp$=tmp$+" P.O.# "+str$(prdrl.refnum)
+				if prdrl.refline<>0
+					let tmp$=tmp$+" Line# "+str$(prdrl.refline)
+				endif
+				if prdrl.rcvddate<>0
+					let xdate$=pdate$(prdrl.rcvddate)
+					let tmp$=tmp$+" Received On: "+xdate$
+				endif
+			endif
+		endif
+		if prdrl.source=247 ! credit memo
+			let name$=" ",name$
+			if prdrl.refcode<>0
+				ch_vend=findchannel()
+				read #ctlc,88,1808;f$;
+				ropen #ch_cust,f$
+				let keytmp$=prdrl.refcode using "######"
+				search #ch_cust,2,1;keytmp$,rec_tmp,e
+				if not(e)
+					read #ch_cust,rec_tmp,0;name$;
+					let tmp$="Customer: "+str$(prdrl.refcode)+" "+name$
+				endif
+			endif
+			if prdrl.refnum<>0
+				let tmp$=tmp$+" C.M# "+str$(prdrl.refnum)
+				if prdrl.refline<>0
+					let tmp$=tmp$+" Line# "+str$(prdrl.refline)
+				endif
+				if prdrl.rcvddate<>0
+					let xdate$=pdate$(prdrl.rcvddate)
+					let tmp$=tmp$+" Returned On: "+xdate$
+				endif
+			endif
+		endif
+		let webstr$=webstr$,tmp$,fdel$
+		list$[2]=webstr$
+		let row=3
+	endif
+	endgetroll: ! end submit of roll
+	let list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+    call SetOutput(e$,rstr$) 
+!! end getroll
+!!! submit roll
+Case "SUBMITROLL"
+	! status section
+	ReturnStatus=1
+	Message$="OK" 
+	Call DXGet("PRODID",tmp$)
+	tmp$=Ucase$(RTrim$(tmp$))
+	if tmp$="" 
+		let returnstatus=0
+		Let message$="Invalid Product Code Submitted"
+		goto endSUBroll:
+	endif
+	Prod$=tmp$+blank$
+	Keyprod$ = prod$                                                                       
+	rec_prod = filegetprod(e$,ch_prod,"=",1,Keyprod$,pr.) ! product mode                                                                 
+	If rec_prod < 0 ! Product record not found                          
+		Clear pr.                                                         
+		ReturnStatus = 0                                                  
+		Message$ = "Product "+rtrim$(keyprod$)+" Not on File "
+		goto endsubroll:
+	endif
+	Call DXGet("WHSE",tmp$)
+	WHSE=TMP$
+	if WHSE<1 OR WHSE>99
+		let returnstatus=0
+		Let message$="Invalid Warehouse Submitted"
+		goto endsubroll:
+	endif
+	Call DXGet("WEIGHT",tmp$)
+	let newwgt=tmp$
+	if newwgt<=0
+		let returnstatus=0
+		let message$="Weight must be greater than 0"
+		goto endsubroll:
+	endif
+	Call DXGet("ROLLID",tmp$)
+	if rtrim$(tmp$)=""
+		let returnstatus=0
+		let message$="Invalid Roll Id Submitted "
+		goto endsubroll:
+	endif
+	strgok=chkbadchars(e$,tmp$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Roll Id"
+		goto endsubroll:
+	Endif
+	ROLLID$=UCASE$(RTRIM$(TMP$))+BLANK$
+	KEYROLL$=" ",KEYROLL$
+	KEYROLL$[1,12]=PROD$[1,12]
+	KEYROLL$[13,14]=WHSE USING "##"
+	KEYROLL$[15,34]=ROLLID$[1,20]
+    rec_roll = filegetprodroll(e$,ch_prdrl,"=",1,Keyroll$,prdrl.) 
+	if rec_roll<0 ! new record
+		clear prdrl.
+		let prdrl.prod$[1,12]=prod$[1,12]
+		let prdrl.rollid$[1,20]=rollid$[1,20]
+		let prdrl.desc$=" ",prdrl.desc$
+		let prdrl.spare$=" ",prdrl.spare$
+		let prdrl.spare1$=" ",prdrl.spare1$
+		let prdrl.user$=" ",prdrl.user$
+		let prdrl.user$=rtrim$(userid$)+blank$
+		let prdrl.whse=whse
+		let prdrl.wgt=newwgt
+		let prdrl.rcvddate= currdate! set a date
+		let prdrl.editdate= currdate !
+		let prdrl.source=781 ! manual entry
+
+		e$=""
+		rec_roll=fileupdateprodroll(e$,ch_prdrl,"a",0,prdrl.)
+		if rec_roll<0
+			let returnstatus=0
+			Let message$="Roll "+rollid$+" Cannot Add. "+e$
+			goto endsubroll:
+		endif
+		
+	endif ! sectio
+	Call DXGet("DESCRIPTION",tmp$)
+	strgok=chkbadchars(e$,tmp$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Description"
+		goto endsubroll:
+	Endif
+	desc$=RTRIM$(TMP$)+BLANK$
+	if desc$<>prdrl.desc$
+		let prdrl.desc$=desc$
+		let prdrl.editdate=currdate
+		let prdrl.user$=rtrim$(userid$)+blank$
+	endif
+	if newwgt<>prdrl.wgt
+		let prdrl.oldwgt=prdrl.wgt
+		let prdrl.wgt=newwgt
+		let prdrl.editdate=currdate
+		let prdrl.user$=rtrim$(userid$)+blank$
+	endif
+	write record #ch_prdrl,rec_roll;prdrl.;
+	
+	endsubroll: ! end submit of roll
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+    call SetOutput(e$,rstr$) 
+
+!! end submit roll
+!!! delete roll
+Case "DELETEROLL"
+	! status section
+	ReturnStatus=1
+	Message$="OK" 
+	if p61$[104,104]="Y"
+		ch_ror=findchannel()
+		let f$="3/SORDROLL"+STR$(INTCO)
+		open #CH_ROR,F$
+	ELSE
+		let returnstatus=0
+		let message$="Roll Inventory Module is not Available"
+		goto enddelroll:
+	endif
+	Call DXGet("PRODID",tmp$)
+	tmp$=Ucase$(RTrim$(tmp$))
+	if tmp$="" 
+		let returnstatus=0
+		Let message$="Invalid Product Code Submitted"
+		goto enddelroll:
+	endif
+	Prod$=tmp$+blank$
+	Keyprod$ = prod$                                                                       
+	rec_prod = filegetprod(e$,ch_prod,"=",1,Keyprod$,pr.) ! product mode                                                                 
+	If rec_prod < 0 ! Product record not found                          
+		Clear pr.                                                         
+		ReturnStatus = 0                                                  
+		Message$ = "Product "+rtrim$(keyprod$)+" Not on File "
+		goto enddelroll:
+	endif
+	Call DXGet("WHSE",tmp$)
+	WHSE=TMP$
+	if WHSE<1 OR WHSE>99
+		let returnstatus=0
+		Let message$="Invalid Warehouse Submitted"
+		goto enddelroll:
+	endif
+	Call DXGet("ROLLID",tmp$)
+	ROLLID$=UCASE$(RTRIM$(TMP$))+BLANK$
+	KEYROLL$=" ",KEYROLL$
+	KEYROLL$[1,12]=PROD$[1,12]
+	KEYROLL$[13,14]=WHSE USING "##"
+	KEYROLL$[15,34]=ROLLID$[1,20]
+    rec_roll = filegetprodroll(e$,ch_prdrl,"=",1,Keyroll$,prdrl.) 
+	if rec_roll<0
+		let returnstatus=0
+		Let message$="Roll "+rollid$+" Not on File. Cannot Delete."
+		goto enddelroll:
+	endif ! sectio
+	! verify if roll is on an order
+	let keyror$=" ",keyror$
+	let keyror$[1,20]=rollid$[1,20]
+	let keyror$[21,26]=rec_prod using "######"
+	search #ch_ror,3,1;keyror$,rec_ror,e
+	if e=2 goto deliroll:
+	if e<>0
+		let returnstatus=0
+		let message$="Error Locating Roll "+rollid$+" On Orders. Cannot Delete. "
+		goto enddelroll:
+	endif
+	if keyror$[1,20]<>rollid$[1,20] goto deliroll:
+	let rec_tmp=keyror$[21,26]
+	if rec_tmp<>rec_prod goto deliroll:
+	let returnstatus=0
+	let message$="Roll is allocated on sales order. Cannot Delete. "
+	goto enddelroll:
+
+	deliroll: ! delete the roll item
+	rec_tmp=fileupdateprodroll(e$,ch_prdrl,"d",rec_roll,prdrl.)
+	if rec_tmp<0
+		let returnstatus=0
+		let message$="Error Deleting Roll "+rollid$
+		goto enddelroll:
+	endif
+	enddelroll: ! end the delete roll
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+    call SetOutput(e$,rstr$) 
+
+
+
+
+!!! delete roll
+
+ end select
+  ! call dxclose()
+else
+  include "src/callmainerrnet.inc"
+  call dxclose()
+end try
+end
+! ***********************************************************************
+! Nobody but us subroutines and exit code down here
+! ***********************************************************************
+Sub getPRODDETAIL()! take pad list - send line details
+ Try
+	ReturnStatus=1
+	Message$="OK" 
+	! set list header
+	Clear List$[]
+	List$[0]=bsdel$,"PRODUCTDETAIL",fdel$
+	WebStr$="ProdID",fdel$,"Desc1",fdel$,"Desc2",fdel$
+    List$[1]=WebStr$
+	row=2
+	Call DXGet("PRODID",tmp$)
+	tmp$=Ucase$(RTrim$(tmp$))
+	if tmp$="" 
+		let returnstatus=0
+		Let message$="Invalid Product Code Submitted"
+		goto endproddetail:
+	endif
+	Prod$=tmp$+blank$
+	Let keyprod$=Prod$
+	Let keyprod$[13]="";e=0 ! no lock
+    rec_prod = filegetprod(e$,ch_prod,"=",1,Keyprod$,PR.,e)
+	If rec_prod<=0 ! not found
+		Let message$="PRODUCT "+rtrim$(prod$)+" NOT FOUND"
+		Let ReturnStatus=0
+		goto endproddetail:
+	Endif
+	if ucase$(rtrim$(pr.rollinv$))<>"Y"
+		let returnstatus=0
+		let message$="Product is not designated as a Roll Inventory Item "
+		goto endproddetail:
+	endif
+	Webstr$=""
+	!WebStr$="ProdID",fdel$,"Desc1",fdel$,"Desc2",fdel$
+	Webstr$=rtrim$(pr.prodcode$),fdel$
+	Webstr$=webstr$,rtrim$(pr.desc1$),fdel$
+	Webstr$=webstr$,rtrim$(pr.desc2$),fdel$
+	list$[2]=webstr$
+	row=3
+    endproddetail: ! end the product detail entry
+	LIST$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! GETPRODDETAIL
+
+

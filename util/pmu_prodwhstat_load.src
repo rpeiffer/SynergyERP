@@ -1,0 +1,346 @@
+! pmu_prodwhstat_load - This will initialize the new product / wh statistics file
+! with data from invoice history
+!
+! loadsave -w -n 100,10 -o prog/util/pmu_prodwhstat_load.dl4 src/pmu_prodwhstat_load.src
+!
+! PMUPGRADER ROUTINE
+
+external lib "ubsfunc.dl4"
+declare intrinsic sub programdump,datetojulian
+Declare Intrinsic Sub InpBuf,String,Time
+Declare Intrinsic Function findchannel
+! Option Default Dialect IRIS1
+include "src/utilcopyright.inc"
+dim e$[300]
+
+ENTER COID,GROUPID,DBAK$,CH_LOG,COREDUMP,E,...
+! if "fromUpgrade" don't send print statements with
+! control strings as this is being executed via
+! a job not attached to terminal.  Be sure to send
+! all output to ch_log as this will be reviewed and
+! sent back to software repository
+try
+	enter fromUpgrade
+else
+	dim 1%,fromUpgrade
+end try
+try ! main try
+LET E=99
+!
+include "src/dim.pmupgrade.i"
+
+
+DIM tmp$[200],p61$[256]
+DIM k_2$[100],k_3$[100],K_5$[100]
+dim l1$[20],p9$[50]
+dim 1%,l3[3],h4[2],wh
+dim 2%,ARDATE
+dim 2%,h5[16]
+dim 3%,OREF[5],L5[3],S3[17],L7[12]
+dim 3%,USAGE_TY[12],USAGE_LY[12],SALES_TY[12],SALES_LY[12]
+dim 3%,LDCOST_TY[12],LDCOST_LY[12],AVGCOST_TY[12],AVGCOST_LY[12]
+dim 3%,t1,CST,WHMISC[6],HITS_TY[12],HITS_LY[12]
+DIM 3%
+
+try close #1 else rem
+Open #1,"cntrl/cntrl"+Str$(COID)
+Mat Read #1,19,50;P9$;
+Read #1,0,108;ARDATE;
+Mat Read #1,61,0;p61$;
+TMP$ = ARDATE Using "######"
+curYear = tmp$[1,2]
+curYear = curYear + 2000
+curMonth = tmp$[3,4]
+
+Let COL=0;Row=23
+
+open #2,"2/PRODWHSTAT" + str$(coid)
+ropen #3,"4/SORDFLEHHKEY" + str$(coid)
+ropen #4,"4/SORDFLEHH" + str$(coid)
+ropen #5,"4/SORDFLELH" + str$(coid)
+ropen #6,"2/SPRODWHSE" + str$(coid)
+! for purposes of being able to
+! run this utility multiple times,
+! first clear out the current
+! contents of the file
+GOSUB ClearProdwhstat:
+GOSUB LoadFromHistory:
+
+goto do_exit:
+
+
+ClearProdwhstat: ! clear out all prior contents
+	LET LOGMSG$="Clearing old PRODWHSTAT records."
+	GOSUB DO_WRITE_LOG:
+	k_2$ = " ",k_2$
+	do
+		search #2,3,1;k_2$,r2,e
+		if e exit do
+		search #2,5,1;k_2$,r2,e
+		if e error 11000
+		Let E=3 ! return
+		Search #2,1,0;k_2$,r2,E
+		if e error 11000
+	loop
+RETURN
+
+LoadFromHistory: !
+	LET LOGMSG$="Loading PRODWHSTAT records from history."
+	GOSUB DO_WRITE_LOG:
+	REC = 0
+	k_3$ = " ",k_3$
+	! start with prior year
+	k_3$[1,4] = (curYear - 2) using "####"
+	do
+		search #3,3,1;k_3$,r4,e
+		if e exit do
+		histYear = k_3$[1,4]
+		histMonth = K_3$[5,6]
+		if histYear>curYear exit do
+		! figure out where to accumulate
+		! last year contains months buckets
+		! for last year where AR month <= current month and
+		! the year prior for everything after current month
+		! this year contains months buckets
+		! for this year where AR month <= current month and
+		! last year for everything after current month
+		! (confusing I know, but it's a rolling 24 month which
+		! is really weird to put together for past history)
+		if histYear = curYear - 2 AND histMonth <= curMonth goto SkipInvoice:
+		accumPeriod = 1
+		totalPeriod = 1
+		if histYear = curYear - 2 ! 2 years ago
+			accumPeriod = 2 ! add to last year month totals
+			totalPeriod = 0 ! do not add to YTD totals
+		end if
+		if histYear = curYear - 1
+			accumPeriod = 2 ! add to last year month totals
+			totalPeriod = 2 ! add to last year YTD totals
+			if histMonth > curMonth ! last years data, but still in current buckets
+				accumPeriod = 1 ! add to this year month totals
+			end if
+		end if
+		LET REC=REC+1
+		IF NOT(FRA(REC/100)) GOSUB DISPLAY_PROGRESS: ! to screen or log
+		creditMulitplier = 1 \ if k_3$[7,8] = "31" creditMulitplier = -1
+		gosub ReadHistoryHeader:
+		! do some checking on the
+		if h5[7] = 8 goto SkipInvoice:
+		! order type
+		gosub ProcessInvoiceLines:
+	SkipInvoice: !
+	loop
+RETURN
+
+ReadHistoryHeader: !
+	mat read #4,r4,78;h4;
+	mat read #4,r4,104;h5;
+	mat read #4,r4,512;OREF;
+RETURN
+
+ProcessInvoiceLines: !
+	k_5$ = " ",K_5$
+	k_5$[1,10] = OREF[1] using "##########" ! NOT OREF[2]!! (THAT IS ORIG INV!)
+	do
+		search #5,3,1;k_5$,r5,e
+		if e exit do
+		if val(k_5$[1,10]) <> OREF[1] exit do
+		gosub ReadHistoryLine:
+		if l3[0] goto SkipInvoiceLine: ! description / NS
+		if not(l3[1]) goto SkipInvoiceLine: ! not updating stock
+		! update specific warehouse totals
+		k_2$ = " ",k_2$
+		k_2$[1,12] = l1$[1,12]
+		k_2$[13,14] = h4[2] using "##"
+		if h5[7] = 16
+			gosub ReadProdWh:
+			if WHMISC[6]=0 goto SkipInvoiceLine: ! Whse Flag - no update
+		end if
+		gosub ReadCreateProdWhStat:
+		gosub UpdateProdWhStat:
+		! update totals for ALL warehouses
+		k_2$ = " ",k_2$
+		k_2$[1,12] = l1$[1,12]
+		k_2$[13,14] = " 0"
+		gosub ReadCreateProdWhStat:
+		gosub UpdateProdWhStat:
+	SkipInvoiceLine: !
+	loop
+RETURN
+
+ReadProdWh: !
+	search #6,2,1;k_2$,r6,e
+	if e
+		clear WHMISC[]
+	else
+		mat read #6,r6,800;WHMISC;
+	end if
+return
+
+ReadHistoryLine: !
+	mat read #5,r5,8;l3;
+	mat read #5,r5,32;l5;
+	mat read #5,r5,140;l1$;
+	mat read #5,r5,168;l7;
+	mat read #5,r5,260;S3;
+	Mat Read #5,r5,502;CST;
+	sales = l5[3]
+	units = L7[4]
+	If H5[7] = 15 !bill & hold
+		units = 0 \ s3[12] = 0
+		If Not(H0[5]) Let units = L7[2];S3[12] = s3[13]
+	End If 
+	loadCost = s3[12]
+	avgCost = L7[10]
+	If P9$[17,17] = "N" Let avgCost = (units * CST)
+	If Not(avgCost) Let avgCost = loadCost
+	units = units * creditMulitplier
+	sales = sales * creditMulitplier
+	loadCost = loadCost * creditMulitplier
+	avgCost = avgCost * creditMulitplier
+RETURN
+
+ReadCreateProdWhStat: ! read record if there, if not, create
+	search #2,2,1;k_2$,r2,e
+	if e ! not found - create
+		Let E=2 ! get record
+		Search #2,1,0;k_2$,r2,E
+		if e error 11000
+		search #2,4,1;K_2$,r2,e
+		if e error 11000
+		mat write #2,r2,0;k_2$[1,12]
+		wh = k_2$[13,14]
+		mat write #2,r2,12;wh
+		for i = 0 to 12
+			USAGE_TY[I] = 0
+			USAGE_LY[I] = 0
+			SALES_TY[I] = 0
+			SALES_LY[I] = 0
+			LDCOST_TY[I] = 0
+			LDCOST_LY[I] = 0
+			AVGCOST_TY[I] = 0
+			AVGCOST_LY[I] = 0
+			Hits_TY[i]=0
+			Hits_LY[i]=0
+		next i
+	else
+		gosub ReadProdWhStat:
+	end if
+RETURN
+
+UpdateProdWhStat: !
+	if accumPeriod = 1
+		! this year
+		usage_ty[histMonth] = usage_ty[histMonth] + units
+		sales_ty[histMonth] = sales_ty[histMonth] + sales
+		ldcost_ty[histMonth] = ldcost_ty[histMonth] + loadCost
+		avgcost_ty[histMonth] = avgcost_ty[histMonth] + avgCost
+		! hits = the sale affects usage and is the first shipment for order
+		if units<>0 and not(L7[0]) ! it affects usage and no previous shipment so it's a hit
+			hits_ty[histMonth]=hits_ty[histMonth] + creditMulitplier ! (1 or -1)
+		ENDIF
+	end if
+	if accumPeriod = 2
+		! last year
+		usage_ly[histMonth] = usage_ly[histMonth] + units
+		sales_ly[histMonth] = sales_ly[histMonth] + sales
+		ldcost_ly[histMonth] = ldcost_ly[histMonth] + loadCost
+		avgcost_ly[histMonth] = avgcost_ly[histMonth] + avgCost
+		if units<>0 and not(L7[0]) ! it affects usage and no previous shipment so it's a hit
+			hits_Ly[histMonth]=hits_Ly[histMonth] + creditMulitplier ! (1 or -1)
+		ENDIF
+	end if
+	if totalPeriod = 1
+		! total for current period
+		usage_ty[0] = usage_ty[0] + units
+		sales_ty[0] = sales_ty[0] + sales
+		ldcost_ty[0] = ldcost_ty[0] + loadCost
+		avgcost_ty[0] = avgcost_ty[0] + avgCost
+		if units<>0 and not(L7[0]) ! no previous shipment so it's a hit
+			hits_ty[0]=hits_ty[0] + creditMulitplier ! (1 or -1)
+		ENDIF
+	end if
+	if totalPeriod = 2
+		! total for prior period
+		usage_ly[0] = usage_ly[0] + units
+		sales_ly[0] = sales_ly[0] + sales
+		ldcost_ly[0] = ldcost_ly[0] + loadCost
+		avgcost_ly[0] = avgcost_ly[0] + avgCost
+		if units<>0 and not(L7[0]) ! no previous shipment so it's a hit
+			hits_Ly[0]=hits_Ly[0] + creditMulitplier ! (1 or -1)
+		ENDIF
+	end if
+	gosub WriteProdWhStat:
+RETURN
+
+ReadProdWhStat: !
+	mat read #2,r2,14;USAGE_TY
+	mat read #2,r2,92;USAGE_LY
+	mat read #2,r2,170;SALES_TY
+	mat read #2,r2,248;SALES_LY
+	mat read #2,r2,326;LDCOST_TY
+	mat read #2,r2,404;LDCOST_LY
+	mat read #2,r2,482;AVGCOST_TY
+	mat read #2,r2,560;AVGCOST_LY
+	mat read #2,r2,638;HITS_TY
+	mat read #2,r2,716;HITS_LY
+RETURN
+
+WriteProdWhStat: !
+	mat write #2,r2,14;USAGE_TY
+	mat write #2,r2,92;USAGE_LY
+	mat write #2,r2,170;SALES_TY
+	mat write #2,r2,248;SALES_LY
+	mat write #2,r2,326;LDCOST_TY
+	mat write #2,r2,404;LDCOST_LY
+	mat write #2,r2,482;AVGCOST_TY
+	mat write #2,r2,560;AVGCOST_LY
+	mat write #2,r2,638;HITS_TY
+	mat write #2,r2,716;HITS_LY;
+RETURN
+
+
+DO_EXIT: REM---------------- Exit the upgrade -----------------------------------
+LET E=0
+GOTO OUTEND:
+
+DO_BACKUP: REM"Backup the given file
+CALL "sysfbackup",FCODE$,COID,GROUPID,ORIG$,DBAK$,OWRITE$,MODE,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+IF E GOTO OUTEND:
+RETURN 
+
+DO_BUILD: REM"Build the given file
+CALL "Sysfbuild",FCODE$,COID,GROUPID,PTH$,OWRITE$,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+IF E GOTO OUTEND:
+RETURN 
+
+include "src/rtn.pmupgrade.i"
+
+
+OUTEND: REM"Final exit (be sure to set e=0 if successful before branching here)
+try CLOSE #1 Else Rem
+try Close #2 Else Rem
+try Close #3 Else Rem
+try close #4 Else Rem
+try close #5 Else Rem
+try close #6 Else Rem
+try close #7 Else Rem
+END 
+else ! main try
+	e = spc(8)
+	If Spc(8) <> 10000
+		dim msc4$[100] \ msc4$=msc$(4)
+		if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+		call env(2,"PROGNAME",msc4$)
+		if spc(8) = 11000
+			call utilsearcherr(e$, e, Spc(10))
+		else
+			Call utilsuberr(e$,Spc(8),Spc(10),Msc$(2))
+		end if
+		call programdump()
+	End If
+	Call utilmainerr(e$,Spc(8))
+	If ch_log <> -1
+		Print #ch_log;e$
+	End If
+end try

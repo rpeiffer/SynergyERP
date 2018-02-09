@@ -1,0 +1,1893 @@
+! MXSLSCOM5H - calculate HYPOTHETICAL salesman commission
+! (based on mxslscom5 of course)
+!
+! loadsave -w -n 100,10 -o prog/dxport/mxslscom5h src/mxslscom5h.src
+!
+include "src/copyright.inc"
+include "src/inc/fileordhead.inc" ! order header, order shipto, order rot
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Function getmsg$,expandarray
+External Lib "ubsfunc.dl4"
+Declare External Function openfile
+Declare Intrinsic Sub FindF,InpBuf,String,programdump,DATETOJULIAN
+Declare Intrinsic Function findchannel
+try ! MAIN TRY
+Declare Sub OpenFilesAndLoadControl,ReadOrderHeader,GetCustInfo,ReadOrderTotal
+Declare Sub ReadOrderLine,CheckProductCommodityCommission
+Declare Sub ReadCustSalesCategory,GetCommissionGrid,FindGridRate
+Declare Sub CalculateLineCommissions,WriteOrderHeader,DoCategorySplits
+Declare Sub CalculateGPDollars,ClearMultiSalesman,CalcOnOrder,CalcOnShip
+Declare Sub GetMaxforMaterialCode,SortOrderLines,GetCommissionRateFromHist
+Declare Sub GetControlInfo,DoSplitType1,DoSplitType2,DoSplitType3
+Declare Sub GetSplits,GetListPrice1,CheckIfMeetsMinimum
+! hypothetical
+Declare Sub GetHypotheticalHeader,GetHypotheticalLine,GetHypotheticalLineOverrides
+
+!*******************************************************************
+!* PARAMETERS
+!
+! S9[4] - program - primarly to determine if this is a credit (241,243)
+! **
+! file channels - if any of these are 0, program will open / close
+! ch[1] - control file
+! ch[3] - product file
+! ch[4] - commodity code file
+! ch[5] - customer file
+! ch[6] - product warehouse file
+! ch[8] - invoice header file
+! ch[9] - invoice total file
+! ch[10] - invoice line file
+! ch[13] - salesman file
+! ch[14] - invoice header file
+! ch[15] - invoice lines file
+! ch[16] - commission grid file (hypothetical)
+! ch[17] - hypothetical invoice header
+! ch[18] - hypothetical invoice lines
+! **
+! R5 - customer record number (-99 has special meaning, history??)
+! H1 - order header record number
+! V1 - salesman record number
+! CFIN - array from customer record, primarily used for CFIN[8]
+!        commission service charge
+!
+!*******************************************************************
+Enter S9[],ch[],R5,H1,V1,CFIN[],...
+try
+	enter doHypo
+else
+	dim 3%,doHypo
+end try
+Def FNR(H) = Sgn(H) * (Int(Abs(H) * 100 + .5) * .01)
+Def FNW(H) = Sgn(H) * (Int(Abs(H) * 1 + .5) * 1)
+Def FND(H) = FNR(H - (H * D3))
+
+dim roh. as roh ! order header
+
+Dim F$[16],F1$[16],P9$[50],K1$[50],K11$[50],K5$[50],K14$[50],HMAT$[2],P60$[50]
+Dim MT$[2],KEY_$[130],F2$[26],PORT_$[26],K9$[50],MAXMT$[1],K80$[50]
+DIM KSLSM$[50],DATe1$[10],date2$[10],jlastinv
+Dim 1%,H4[2],L3[3],SO[20],S2[1],NCL,CUSTCOMGRID,x1[9],SCType,COMBYCAT
+dim 1%,bonusdays,comdif,bonus,bonuspercent,allowbonus,sw[20],EditComm
+dim 1%,tmpCommissionSource,HCommissionSource,CommissionSource
+dim 1%,OT19Part,ListPriceComm,SplitFlag,MeetsMin,LP_USEGP[9]
+Dim 2%,CG1[99,11],L4[3],PCOM,PCOM1,CSPLT[4],CUSTC3[1],BONUSEND
+Dim 2%,LP_PERCENT[9],LP_RATE[9],USE_GP[9],LINE_PERCENT,CommBase[4]
+Dim 2%,SLSM[9],MAX[8],S0[7],H5[16],H0[12],CG[13],MCODE[9],3%,R[99]
+Dim 2%,H6[8],ordchrg,3%,OREF[5],REFNO,ORD,REC_ROT,X3[9],SCST1[4]
+Dim 3%,T9,T2[25],GP,SSL1[3],SCOM[4],CP,TOTAL[9],SALE,COST,SALE1,COST1
+Dim 3%,SMER[4],SCST[4],TYPE,GP_DOLLARS,SLSMS3[9],SMER1[4],OLM[6]
+Dim 3%,CATGY[20,1],SALESM[999,5],L5[5],S3[17],CATGY1[20,1],SALESM1[999,1]
+Dim 3%,MAXAMT,COMM,LNCOM[21,2],COMPRV[4,2],A$[156],L2$[20],MCHARGE[9,1],TOT[4]
+Dim 3%,LineBreakDown[999,4]
+Dim 3%,comm_gp_dollars,comm_gp_prc,commsrvchg,adj_sale,adj_merch,LP1,ListPrice1,ListPriceTmp
+Dim 3%,LineProfit,LineCommission,LineRate,TotalLineProfit,CommissionWithoutSplit
+DIM 3%,MINGPD,TOTGP_DOLLARS
+DIM 3%,INVNO
+Dim Custom_Customer$[30],P61$[256]
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+dim tmp$[800],tmp1$[800],tmp2$[800],Message$[600],msg$[100],rstr$[2000],webstr$[2000]
+dim action$[30],options$[30],userid$[8],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10],action1$[30],action2$[30]
+
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+call OpenFilesAndLoadControl()
+EditComm=0 \ if custom_customer$="MSPLASTICS" let EditComm=1 ! can edit comm %/$ on inv/cm
+! EditComm=1 ! **************** TEST TEST TEST ONLY *************
+if s9[4]=241 or s9[4]=243 let editcomm=1 ! credits commission manual edit
+if EditComm and P60$[24,24]="Y" let editcomm=0 ! not on comm by line
+Call ReadOrderHeader()
+Call GetCustInfo()
+! determine if we are working with history
+
+REFNO = H0[7];HIST = 0
+if s9[4]=411 or h1<0 ! evap is from invoice history!!
+	let H1=ABS(H1) ! evap(mx411) sends hist rec negative
+	let refno=OREF[1];hist=1
+	if h0[0]=31 let refno=h0[7] ! saved as cm #
+	! rec_rot driven by Hist flag
+Endif
+If R5 = -99 And H0[0] = 30 Let REFNO = OREF[1];HIST = 1
+If H0[0] = 30 Or H0[0] = 31
+	Let HIST = 1 
+	if doHypo and h0[0] = 30 REFNO = oref[1]
+end if
+REC_ROT = H0[3]
+If HIST Let REC_ROT = OREF[5]
+if doHypo call GetHypotheticalHeader()
+Call ReadOrderTotal()
+LET LINECOM=0
+LET InLineSort = 1
+call SortOrderLines() ! by material code - also sets LINECOM
+LET InLineSort = 0
+if custom_customer$="PHILLIPS"
+	Let Credit_Memo=0;NegOnly=0
+	If H0[0]>=9 And H0[0]<=11 Let Credit_Memo=9
+	If H6[2]>=9 And H6[2]<=11 Let Credit_Memo=9 ! "in case in process/Edit
+	If Not(Credit_Memo) And (Not(H0[5]) and Not(oref[2])) ! "credits or Backorders - no check
+		Call CalculateGPDollars() ! Gosub Calc_GP_Dollars: ! "need first!!! total order GP $
+		!If GP_Dollars>=0 And GP_Dollars<MinGPD Let NegOnly=9 ! "only calc on neg GP
+		!If totgp_dollars<MinGPD Let NegOnly=9 !"only calc on neg GP
+	Endif
+	IF Credit_Memo<>0 AND H5[3]<>0 LET LINECOM=0 ! "comm % was overridden 
+endif
+If Custom_customer$="MSPLASTICS"
+	LET K14$=" ",K14$;K14$=H0[11] USING "###"                 
+	SEARCH #CH_SLSM,2,1;K14$,R14,E \ If E error 11000    
+	MAT  READ #CH_SLSM,R14,118;SSL1;                           
+        LET CG[12]=0
+	REM just for grid lookup                              
+	CALL GetCommissionGrid()
+	REM read grid, only need to know if vs merch $ or gp  
+	if H5[3] LET LINECOM=0 ! "comm % was overridden 
+Endif
+If EditComm ! customer chgs $/% on inv/cm
+	if H5[3] LET LINECOM=0 ! "comm % was overridden 
+Endif
+If P9$[21,21]="Y" Or SCTYPE=0
+	FOR X=1 TO 4 \ LET SLSM[X]=0 \ NEXT X ! "leave slsm for splits
+Endif
+let commsrvchg=cfin[8]!commission service charge (used as both names!)
+Call CalculateGPDollars()
+! check for commission by line if commission by line flag set
+! OR we had a line that tripped flag
+if custom_customer$="PHILLIPS"
+	IF P60$[24,24]="Y" OR LINECOM<>0  ! "must do by line for comm% & $ first
+		call CalculateLineCommissions()!GOSUB L_2000:
+		If Not(Credit_Memo) And (Not(H0[5]) and Not(oref[2]))
+			IF totgp_dollars<MinGPD IF LNCOM[0,0]>0  
+				LET NEGONLY=9 
+				call CalculateLineCommissions()!\ GOSUB L_2000: 
+			ENDIF
+		ENDIF
+	ENDIF
+else
+	If P60$[24,24] = "Y" Or LINECOM<>0 call CalculateLineCommissions()
+ENDIF
+if EditComm ! customer chgs $/% on inv/cm
+	IF H5[3]=1 LET CP=SLSM[5] \ GOTO BypassFindCommissionRate ! L_1940: ! "comm % was over-ridden (mx243c)
+	if h5[3]=2
+		if not(slsm[0]) let slsm[0]=h0[11]
+		goto BypassNonLineCalcs ! l_1962:
+	end if
+Endif
+! check if multi-salesrep flag set
+If P9$[21,21] = "Y" goto DoSalesrepSplits:
+Let SMER[0]=SALE;SCST[0]=COST ! "$ shipped
+if SCType = 2 goto DoSalesrepSplits:
+Mat Read #CH_SLSM,V1,118;SSL1;
+Mat Read #CH_SLSM,V1,862;SLSMS3;
+mat read #ch_slsm,v1,1054;allowbonus;
+! if commission by line (note - forced flag, not tripped by product/commodity
+If P60$[24,24] = "Y" Goto BypassNonLineCalcs:
+!
+! FOR NON-LINE BASED CP COMMISSION
+! 
+! priority #1:
+!
+! commission override for credits.
+!
+If H5[3] Let CP = SLSM[5] \ Goto BypassFindCommissionRate:
+!
+! priority #2:
+!
+! backorder - use original % if there
+!
+if s9[4]<>411 ! NOT FOR EVAP
+If H5[7] <> 24 And H5[7] <> 4 And H5[7]<>19 And (OREF[2] Or H0[5])
+	if CommBase[0]
+		Let CP = CommBase[0]
+	else
+		Let CP = SLSM[5]
+	end if
+	Goto BypassFindCommissionRate:
+end if
+Endif
+MERCH = T2[24]
+TAMOUNT = T2[24]
+MAMOUNT = MERCH \ GPAMOUNT = GP_DOLLARS
+SLSM[0] = H0[11] \ X = 0
+!
+! priority #3:
+! 
+! commission grid
+!
+! priority #4:
+!
+! commission defined on salesrep record
+!
+If SSL1[1]
+	! if commission grid defined, find the rate
+	Let X = 0 \ call FindGridRate()
+else
+	Let CP = SSL1[0]
+	! didn't meet mimimum?
+	If GP_DOLLARS > 0 If GP_DOLLARS < SLSMS3[0] Let CP = 0
+end if
+IF CP and allowbonus and BONUS and  not (ORef[2] OR H0[5])
+	LEt cp=CP+BONUSPERCENT
+ENDIF
+BypassFindCommissionRate: If Not(SLSM[0]) Let SLSM[0] = H0[11]
+IF CUSTOM_CUSTOMER$="PHILLIPS"
+	If NegOnly<>0 And GP_Dollars>0 Let CP=0 ! "Custom - Phillips
+endif
+SLSM[5] = CP \ CommBase[0] = CP
+If TOTAL[0] If CFIN[8] Let TOTAL[0] = TOTAL[0] - FNR((T2[1] * (CFIN[8] / 100)))
+SCOM[0] = FNR(TOTAL[0] * (CP / 100))
+!if custom_customer$="HTBERRY"
+	IF (H0[0]>=9 AND H0[0]<=11) or s9[4]=241 or s9[4]=243  
+	   let scom[0]=scom[0]      !"credit memo - skip the $3.00 order charge
+	else
+	 if (not(h0[5]) and H0[7]<800000) 
+		if ssl1[0] or ssl1[1]  !  got a grid or com percent
+			let scom[0]=scom[0]-ordchrg
+		endif
+	 endif
+	endif
+!Endif
+BypassNonLineCalcs: ! 
+!If custom_customer$<>"HTBERRY" ! std?
+!	If P60$[24,24] = "Y" Or LINECOM Let SCOM[0] = SCOM[0] + LNCOM[0,0]
+!Else
+	IF P60$[24,24]="Y" OR LINECOM 
+		LET SCOM[0]=LNCOM[0,0]
+		IF (H0[0]>=9 AND H0[0]<=11) or s9[4]=241 or s9[4]=243 
+			let scom[0]=scom[0]      !"credit memo - skip the $3.00 order charge      
+		else                                                              
+			if ssl1[0] or ssl1[1] !  got a grid or com amount
+				if (not(h0[5]) and H0[7]<800000) let scom[0]=scom[0]-ordchrg 
+			endif
+		endif
+		!
+		! OK, we have some sort of commission by line here.  By
+		! definition we may not have a single commission rate that
+		! applies to everything, so calculate a blended rate
+		!
+		if (total[0] + LNCOM[0,1] - LNCOM[0,2]) <> 0
+			let slsm[5] = fnr(SCOM[0] / (total[0] + LNCOM[0,1] - LNCOM[0,2]) * 100)
+			if  P9$[14,14]="S" AND LNCOM[0,1] let slsm[5]=fnr((scom[0]/LNCOM[0,1])*100)
+		end if
+	endif
+!Endif
+if custom_customer$ = "OMAHA"
+	If Not(T2[5]) ! FOR OMAHA PAPER.  REM OUT ELSEWHERE =============
+			LET SCOM[0]=SCOM[0]-T2[20] !FOR OMAHA PAPER 3/26/92 - DD
+	End If ! "======================================================
+end if
+If H5[7] = 10 Or H5[7] = 6 Let SCOM[0] = 0;SLSM[5] = 0;CommBase[0]=0 ! sample /donations
+
+DoSalesrepSplits: !
+if P9$[21,21] = "Y"
+	call DoCategorySplits()
+else
+	if SCTYPE=1 call DoSplitType1()
+	if SCTYPE=2 call DoSplitType2()
+	if SCTYPE=3 call DoSplitType3()
+end if
+
+! HMAT$ = "  " \ HMAT$[1,1] = MAXMT$[1,1]
+Call WriteOrderHeader()
+
+OUTEND: Rem EXIT
+If Not(CH[1]) Try Close #CH_CNTRL Else Rem
+If Not(CH[3]) Try Close #CH_PROD Else Rem
+If Not(CH[4]) Try Close #CH_COMCDE Else Rem
+If Not(CH[5]) Try Close #CH_CUST Else Rem
+If Not(CH[6]) Try Close #CH_PRWH Else Rem
+If Not(CH[8]) Try Close #CH_ROH Else Rem
+If Not(CH[9]) Try Close #CH_ROT Else Rem
+If Not(CH[10]) Try Close #CH_ROL Else Rem
+If Not(CH[13]) Try Close #CH_SLSM Else Rem
+If Not(CH[14]) Try Close #ch_invh Else Rem
+If Not(CH[15]) Try Close #ch_invl Else Rem
+if ListPriceComm
+	Try Close #CH_COMMGD else Rem
+else
+	If Not(CH[16]) Try Close #CH_COMMGD Else Rem
+end if
+if doHypo
+	If Not(CH[17]) Try Close #ch_invhh Else Rem
+	If Not(CH[18]) Try Close #ch_invlh Else Rem
+end if
+Try Close #CH_SORT Else Rem
+End
+Stop
+
+!**********************************************************************
+! Subroutines
+!**********************************************************************
+Sub OpenFilesAndLoadControl()
+try
+	CH_CNTRL = Abs(CH[1])
+	CH_PROD = Abs(CH[3])
+	CH_COMCDE = Abs(CH[4])
+	CH_CUST = Abs(CH[5])
+	CH_PRWH = Abs(CH[6])
+	CH_ROH = Abs(CH[8])
+	CH_ROT = Abs(CH[9])
+	CH_ROL = Abs(CH[10])
+	CH_SLSM = Abs(CH[13])
+	ch_invh = Abs(CH[14])
+	ch_invl = Abs(CH[15])
+	CH_COMMGD = Abs(CH[16])
+	if doHypo
+		ch_invhh = Abs(CH[17])
+		ch_invlh = Abs(CH[18])
+	end if
+	If Not(CH[1])
+		ch_cntrl = openfile(-9999, intCO) \ if ch_cntrl = -1 error 42
+	End If
+	! control file open - load needed flags and configuration
+	! information
+	call GetControlInfo() ! get flags and control information
+	If Not(CH[3])
+		ch_prod = openfile(-1792, intCO) \ if ch_prod = -1 error 42
+	End If
+	If Not(CH[4])
+		ch_comcde = openfile(-2288, intCO) \ if ch_comcde = -1 error 42
+	End If
+	If Not(CH[5])
+		ch_cust = openfile(-1808, intCO) \ if ch_cust = -1 error 42
+	End If
+	If Not(CH[6])
+		ch_prwh = openfile(-1744, intCO) \ if ch_prwh = -1 error 42
+	End If
+	If Not(CH[8])
+		if doHypo
+			! history
+			ch_roh = openfile(-1136, intCO) \ if ch_roh = -1 error 42
+		else
+			ch_roh = openfile(-1840, intCO) \ if ch_roh = -1 error 42
+		end if
+	End If
+	If Not(CH[9])
+		if doHypo
+			! history
+			ch_rot = openfile(-1168, intCO) \ if ch_rot = -1 error 42
+		else
+			ch_rot = openfile(-1872, intCO) \ if ch_rot = -1 error 42
+		end if
+	End If
+	If Not(CH[10])
+		if doHypo
+			! history
+			ch_rol = openfile(-1184, intCO) \ if ch_rol = -1 error 42
+		else
+			ch_rol = openfile(-1888, intCO) \ if ch_rol = -1 error 42
+		end if
+	End If
+	If Not(CH[13])
+		ch_slsm = openfile(-1824, intCO) \ if ch_slsm = -1 error 42
+	End If
+	If Not(CH[14])
+		ch_invh = openfile(-1136, intCO) \ if ch_invh = -1 error 42
+	End If
+	If Not(CH[15])
+		ch_invl = openfile(-1184, intCO) \ if ch_invl = -1 error 42
+	End If
+	if ListPriceComm
+		ch_commgd = openfile(-9917, intCO) \ if ch_commgd = -1 error 42
+	else
+		If Not(CH[16])
+			if doHypo
+				ch_commgd = openfile(-9906, intCO) \ if ch_commgd = -1 error 42
+			else
+				ch_commgd = openfile(-1584, intCO) \ if ch_commgd = -1 error 42
+			end if
+		End If
+	end if
+	if doHypo
+		If Not(CH[17])
+			ch_invhh = openfile(-9908, intCO) \ if ch_invhh = -1 error 42
+		End If
+		If Not(CH[18])
+			ch_invlh = openfile(-9907, intCO) \ if ch_invlh = -1 error 42
+		End If
+	end if
+	CH_SORT = FindChannel()
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetControlInfo()
+try
+	mat read #1,188,0;bonusdays;
+	mat read #1,188,2;bonuspercent;
+	mat read #1,188,4;comdif;
+	Mat Read #CH_CNTRL,19,50;P9$;
+	Read #CH_CNTRL,60,4;NCL;
+	Mat Read #CH_CNTRL,60,50;P60$;
+	mat read #ch_cntrl,61,0;p61$;
+	mat read #ch_cntrl,115,60;custom_customer$;
+	Custom_customer$=UCase$(Trim$(custom_customer$))
+	! set various switches based on who the customer is
+	sw[0] = 0 	! for contract / product / commodity overrides - does
+			! does order have to meet minimum GP to get
+			! commission for the line with the override?
+			! (standard is no)
+	select case custom_customer$
+		case "GTI"
+			sw[0] = 1 ! have to meet min for overrides
+		case "PHILLIPS"
+			Read #1,19,4;MinGPD; ! "Min GP $ - CUSTOM  PHILLIPS
+			If MinGPD<0 Or MinGPD>9999 Let MinGPD=0
+		case "ETNA"
+			IF CFIN[4]=2 LET P9$[14,14]="N" ! division 2 no commission at all
+	end select
+	! do splits by category - does not play nice with with other types
+	! of splits, so if category splits, override other types of
+	! splits
+	Let SCType=0 ! "comm split type: 1=split 1 $, 2=multi-rate/type , 3= split GP
+	if p9$[21,21] <> "Y" ! if not category split
+		Let SCType=P61$[72,72] \ if p61$[72,72]="Y" let sctype=1
+	end if
+	MAT  READ #1,182,136;ordchrg; ! berry custom? NO - it's in 922
+	If ordchrg<0 or ordchrg>100 let ordchrg=0 ! validity check
+	TYPE = P9$[30,30] ! multiple commission tables (never used?)
+	If H1<0 Let H1=ABS(H1);s9[4]=411 ! evap sends invh rec as negative
+	ListPriceComm = 0
+	if custom_customer$ = "CSS"
+		ListPriceComm = 1
+	end if
+	if ListPriceComm
+		! commission based on list price, you MUST
+		! have line level enabled to do this as each
+		! line could vary in discount from list price
+		P61$[24,24] = "Y"
+		! because list price commission grids find the
+		! commission rate based on markup from list price
+		! on the individual line basis, this will not play nice
+		! with split types that require a total amount to 
+		! determine splits
+		P9$[21,21] = "N"
+		if SCTYPE = 3 let SCTYPE = 0
+	end if
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub CalculateGPDollars()
+try
+	! calc_gp_dollars:
+	! total shipped
+	! used for non-line based commission to calculate commission
+	! amount on shipped.  if commission by line tripped, zero
+	! this out as the only thing it should contain is the "total
+	! screen" costs if appropriate as all of the line commissions
+	! have will already be calc'd and in LNCOM[0,0]
+	SALE = T2[1] \ IF P60$[24,24]="Y" OR LINECOM SALE = 0
+	COST = T2[17] \ IF P60$[24,24]="Y" OR LINECOM COST = 0
+	! total ordered
+	SALE1 = T2[24]
+	merch = T2[24]
+	COST1 = T2[14]
+	! include freight?
+	If P9$[35,35] = "Y" Let SALE = SALE + T2[5] \ SALE1 = SALE1 + T2[5]
+	! include order discount?
+	If P9$[36,36] = "Y" Let SALE = SALE - T2[3] \ SALE1 = SALE1 - T2[3]
+	! include freight cost?
+	If P9$[37,37] = "Y" Let COST = COST + T2[20] \ COST1 = COST1 + T2[20]
+	! include misc. $?
+	If P9$[38,38] = "Y" Let SALE = SALE + (T2[6]) \ SALE1 = SALE1 + (T2[6])
+	LET SALE=SALE+TOT[1];SALE1=SALE1+TOT[1]
+	LET COST=COST+TOT[2];COST1=COST1+TOT[2]
+	! GP Dollars Ordered
+	TOTAL[0] = SALE - COST
+	! GP Dollars Shipped
+	TOTAL[1] = SALE1 - COST1
+	! Gross Profit % - used for grid lookup, base on ordered
+	GP = 0 \ If SALE1 Let GP = TOTAL[1] / SALE1 * 100
+	adj_sale=0
+	adj_merch=0
+	! if custom_customer$="HTBERRY" ! no longer custom - use sysflg
+		if p61$[79,79]="Y" 
+			adj_sale=sale1-(sale1*(commsrvchg/100))
+			let total[1]=total[1]-(sale1*(commsrvchg/100))
+			LET GP=0 \ IF SALE1 LET GP=TOTAL[1]/adj_sale*100
+			let adj_merch=merch-(merch*(commsrvchg/100))
+		END IF
+	!Endif
+	If Not(SALE1) And COST1 Let GP = -100
+	GP_DOLLARS = TOTAL[1]
+	If H5[7] = 4 Let GP_DOLLARS = TOTAL[0]
+	If custom_customer$="MSPLASTICS"
+		IF NOT(P9$[14,14]="P" OR P9$[14,14]="L") OR CG[12]=1
+			total[0]=t2[1]
+			total[1]=t2[24]
+		endif
+	else
+		if not (p9$[14,14]="P" or p9$[14,14]="L")
+			total[0]=t2[1]
+			total[1]=t2[24]
+		endif
+	endif
+	If P9$[14,14] = "N" ! don't calculate any commission
+		GP = 0
+		GP_DOLLARS = 0
+		TOTAL[0] = 0 \ TOTAL[1] = 0
+	End If
+	if custom_customer$="PHILLIPS"
+	! TOTGP_DOLLARS=H5[13]-H5[14]
+		totgp_dollars=T2[24]-H6[6]-t2[14]+tot[1]-tot[2]
+		IF P9$[35,35]="Y" LET totgp_dollars=totgp_dollars+T2[5]+H6[6]
+		IF P9$[36,36]="Y" LET totgp_dollars=totgp_dollars-T2[3]      
+		IF P9$[37,37]="Y" LET totgp_dollars=totgp_dollars+T2[20]     
+		IF P9$[38,38]="Y" LET totgp_dollars=totgp_dollars+T2[6] 
+	endif
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub CalculateLineCommissions()
+try
+	Rem !L_2000: "======= a sprod or commodity comm% was used, go line by line
+	If P9$[14,14] = "N" exit sub ! was return ! commission type = "none"
+	!
+	! LineBreakDown - For every line that is not a message line
+	! this array will contain (needed for splits later on):
+	! [0] - commission source - 0 = regular rate,
+	!       1 = spec prc contract, 2 = prodwhse / prod / commodity
+	! [1] - Total resale considered
+	! [2] - Total cost considered
+	! [3] - Commission Rate
+	! [4] - Commission Amount
+	!
+	SLSM[0] = H0[11]
+	K11$ = " ",K11$;K11$[1] = REFNO Using "######  0"
+	If HIST Let K11$ = REFNO Using "##########  0"
+	if custom_customer$="PHILLIPS"
+		FOR XX=0 TO 21                                    
+			LET LNCOM[XX,0]=0;LNCOM[XX,1]=0;LNCOM[XX,2]=0 
+		NEXT XX
+		COMM=0
+	EndiF
+	do
+		! CP - temporary commission percentage
+		! PCOM - final commission rate
+		! ListPrice1 - List Price to Use for Calc (-1 = use GP)
+		CP = 0;PCOM = 0;ListPrice1=0
+		Search #CH_ROL,3,1;K11$,R11,E \ If E > 2 error 11000
+		if E exit do
+		If Not(HIST) Let ORD = K11$[1,6]
+		If HIST Let ORD = K11$[1,10]
+		If ORD <> REFNO exit do
+		Call ReadOrderLine()
+		If S2[0] = 3 Goto SkipMessageLine
+		if s9[4]=411 and L5[3]=0 Goto SkipMessageLine ! "Not Billing Line
+		if custom_customer$="PHILLIPS"
+			let gp_dollars=l5[0]-s3[13]
+		endif
+		let LineBreakDown[L3[2],0]=0
+		HCP = 0
+		If P9$[21,21] <> "Y" Let L4[1] = 0 ! no multi-salesman
+		If L4[1] = 0 Let L4[1] = H0[11] ! set to main salesrep
+		K14$ = " ",K14$;K14$ = L4[1] Using "###"
+		Search #CH_SLSM,2,1;K14$,R14,E \ If E error 11000
+		Mat Read #CH_SLSM,R14,118;SSL1;
+		Mat Read #CH_SLSM,R14,862;SLSMS3;
+		mat read #ch_slsm,r14,1054;allowbonus;
+		if sw[0] call CheckIfMeetsMinimum()
+		if custom_customer$="PHILLIPS"
+			IF H5[3]<>0 and Credit_Memo<>0 
+				LET CP=OLM[5]
+				Goto DoneCheckingLineCommission !\ GOTO L_2220:
+			endif
+		endif
+		if doHypo
+			If h0[0] = 31 AND OREF[1] <> H0[7] call GetCommissionRateFromHist()
+		else
+			If OREF[1] And OREF[1] <> H0[7] call GetCommissionRateFromHist()
+		end if
+		!
+		! history check used to just jam the history line
+		! commission into special price contract.  This raises
+		! all kinds of problems with commission splits as a true
+		! special price contract comm rate overrides everything
+		! for the other salesreps as well
+		!
+		if HCP <> 0
+			PCOM = HCP
+			LineBreakDown[L3[2],0] = HCommissionSource
+			IF ListPriceComm Let ListPrice1 = LP1
+			if HCommissionSource = 0 and SALESM[l4[1],5] = 0
+				LET SALESM[l4[1],5] = HCP ! save comm base rate
+			end if
+			Goto DoneCheckingLineCommission
+		end if
+		!
+		! #1 priority:
+		!
+		! check for special price contract commisson rate
+		!
+		If OLM[4] > 0
+			if sw[0] and not(MeetsMin) goto SkipToStandardRate:
+			LineBreakDown[L3[2],0] = 1 ! Commission Source
+			Let PCOM = OLM[4]
+			if bonus and allowbonus and  not (ORef[2] OR H0[5]) PCOM = PCOM + BONUSPERCENT
+			IF ListPriceComm Let ListPrice1 = LP1
+			Goto DoneCheckingLineCommission
+		end if
+		!
+		! #2 priority:
+		!
+		! check for commission % on this line if this is a
+		! backorder and commission % set on the line
+		!
+		if s9[4]<>411 ! NOT FOR EVAP
+		If H5[7] <> 24 and H5[7]<>19 And (H0[5] Or OREF[2]) And OLM[5]
+			! Commission source is whatever it was
+			LineBreakDown[L3[2],0] = CommissionSource
+			Let PCOM = OLM[5]
+			if ListPriceComm LET ListPrice1 = LP1
+			Goto DoneCheckingLineCommission
+		end if
+		Endif
+		!
+		! #3,4,5 priority:
+		!
+		! product warehouse
+		! product
+		! commodity
+		!
+		call CheckProductCommodityCommission()
+		if ListPriceComm
+			! get list price 1 as commission is probably
+			! going to be based on this
+			call GetListPrice1()
+		end if
+		If PCOM
+			if sw[0] and not(MeetsMin) goto SkipToStandardRate:
+			if bonus and allowbonus and  not (ORef[2] OR H0[5]) PCOM = PCOM + BONUSPERCENT
+			LineBreakDown[L3[2],0] = 2 ! commission source
+			Goto DoneCheckingLineCommission
+		end if
+		! no product / commodity commission at line level
+		!
+		! priority #6:
+		!
+		! Check for commission override
+		! must be a credit (orig status 9-11)
+		!
+		If H5[3] If H6[2] >= 9 And H6[2] <= 11
+			! Commission source is whatever it was
+			LineBreakDown[L3[2],0] = CommissionSource
+			Let CP = OLM[5]
+			Goto DoneCheckingLineCommission
+		end if
+		SkipToStandardRate: !
+		LineBreakDown[L3[2],0] = 0 ! source flag - default to "normal"
+		GP_DOLLARS = L5[0] - S3[13]
+		GP = 0 \ If L5[0] Let GP = GP_DOLLARS / L5[0] * 100
+		If Not(L5[0]) And S3[13] Let GP = -100
+		GP_DOLLARS = T2[24] - T2[14];GPAMOUNT = GP_DOLLARS;MAMOUNT = T2[24]
+		!
+		! priority #7:
+		!
+		! grids - see grid priorities in comments in that
+		! routine.
+		!
+		if ssl1[1]
+			call GetCommissionGrid()
+			if ListPriceComm
+				! get % of list price for list price commission
+				! price per unit (base)
+				if ListPrice1 > 0
+					LINE_PERCENT = 100 - (OLM[3] / ListPrice1 * 100) 
+				else
+					LINE_PERCENT = 0
+				end if
+			end if
+			X = 0 \ call FindGridRate()
+			if cp and bonus and allowbonus and  not (ORef[2] OR H0[5]) CP = CP + BONUSPERCENT
+			IF CP LET SALESM[l4[1],5] = CP ! save comm base rate
+			Goto DoneCheckingLineCommission
+		end if
+		!
+		! priority #8:
+		!
+		! rate defined in salesrep master file
+		! if gp does not meet minimum in master salesrep
+		! no commission
+		!
+		Let CP = SSL1[0]
+		if cp and bonus and allowbonus and  not (ORef[2] OR H0[5]) CP = CP + BONUSPERCENT
+		if cp LET SALESM[l4[1],5] = CP ! save comm base rate
+		if not(ListPriceComm)
+			If GP_DOLLARS > 0 If GP_DOLLARS < SLSMS3[0] Let CP = 0
+		end if
+		IF CP LET SALESM[l4[1],5] = CP ! save comm base rate
+		DoneCheckingLineCommission: !
+		if custom_customer$="PHILLIPS"
+			LET GP_DOLLARS=L5[0]-S3[13] ! "line's gp $
+			!If OLM[4]<=0 And NegOnly And GP_Dollars>0 Let PCOM=0;CP=0;COMM=0
+			If OLM[4]<=0 And NegOnly<>0 Let PCOM=0;CP=0;COMM=0
+		endif
+		If Not(PCOM) AND CP<>0 Let PCOM = CP \ LINECOM = 1
+		! figure commission based on ordered or shipped (p9$[34,34)
+		! do calc for merchandise $, then, if set, override
+		! with loaded g/p / raw g/p (P9$[14,14] setting)
+		If P9$[34,34] = "O"
+			Let COMM = FNR(L5[0] * PCOM / 100)
+			If P9$[14,14] = "P" Or P9$[14,14] = "L" call CalcOnOrder()
+			LineBreakDown[L3[2],1] = L5[0] ! Total Price
+			LineBreakDown[L3[2],2] = S3[13] ! Total Cost
+		Else
+			Let COMM = FNR(L5[3] * PCOM / 100)
+			If P9$[14,14] = "P" Or P9$[14,14] = "L" call CalcOnShip()
+			LineBreakDown[L3[2],1] = L5[3] ! Total Price
+			LineBreakDown[L3[2],2] = S3[12] ! Total Cost
+		end if
+		If H5[7] = 10 Or H5[7] = 6
+			Let PCOM = 0;COMM = 0;ListPrice1 = 0
+			for i = 0 to 4
+				LineBreakDown[l3[2],i] = 0
+			next i
+		end if
+		OLM[5] = PCOM;OLM[6] = COMM;LP1 = ListPrice1
+		LineBreakDown[L3[2],3] = PCOM
+		LineBreakDown[L3[2],4] = COMM
+		CommissionSource = LineBreakDown[L3[2],0]
+		if hist<>2
+			w_chn = ch_rol
+			w_rec = R11
+			if doHypo
+				w_chn = ch_invlh
+				call GetHypotheticalLine()
+				w_rec = r_invlh
+			end if
+			Mat Write #w_chn,w_rec,404;OLM;
+			Mat Write #w_chn,w_rec,616;LP1;
+			Mat Write #w_chn,w_rec,622;CommissionSource;
+		end if
+		! LNCOM[0,?] - track the total
+		! 0 = commission
+		! 1 = ext amt shipped
+		! 2 = ext cost (based on shipped
+		LNCOM[0,0] = LNCOM[0,0] + COMM
+		LNCOM[0,1] = LNCOM[0,1] + L5[3]
+		LNCOM[0,2] = LNCOM[0,2] + S3[12]
+		! total by sales category in case doing category
+		! splits
+		If L3[3] < 1 Let L3[3] = 1
+		If L3[3] > 20 Let L3[3] = 20
+		LNCOM[L3[3],0] = LNCOM[L3[3],0] + COMM
+		LNCOM[L3[3],1] = LNCOM[L3[3],1] + L5[3]
+		LNCOM[L3[3],2] = LNCOM[L3[3],2] + S3[12]
+		SkipMessageLine: !
+	loop
+	! ! NO COMM%
+	! LET LNCOM[21,0]=LNCOM[21,0]+L5[3] ! "total sales with no comm%
+	! LET LNCOM[21,1]=LNCOM[21,1]+S3[12] ! "total cost with no comm%
+	! GOTO L_2040:
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub CheckIfMeetsMinimum()
+! check to see if the GP meets a minimum - will set
+! MeetsMin to either 0 or the base rate for the order
+try
+	GP_DOLLARS = L5[0] - S3[13]
+	GP = 0 \ If L5[0] Let GP = GP_DOLLARS / L5[0] * 100
+	If Not(L5[0]) And S3[13] Let GP = -100
+	GP_DOLLARS = T2[24] - T2[14];GPAMOUNT = GP_DOLLARS;MAMOUNT = T2[24]
+	! check for grid use first
+	if ssl1[1]
+		call GetCommissionGrid()
+		if ListPriceComm
+			! get % of list price for list price commission
+			! price per unit (base)
+			if ListPrice1 > 0
+				LINE_PERCENT = 100 - (OLM[3] / ListPrice1 * 100) 
+			else
+				LINE_PERCENT = 0
+			end if
+		end if
+		X = 0 \ call FindGridRate()
+		if cp and bonus and allowbonus and  not (ORef[2] OR H0[5]) CP = CP + BONUSPERCENT
+	else
+		! rate defined in salesrep record
+		Let CP = SSL1[0]
+		if cp and bonus and allowbonus and  not (ORef[2] OR H0[5]) CP = CP + BONUSPERCENT
+		if not(ListPriceComm)
+			If GP_DOLLARS > 0 If GP_DOLLARS < SLSMS3[0] Let CP = 0
+		end if
+	end if
+	MeetsMin = CP
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub GetListPrice1()
+try
+	if L3[0] ! non-stock
+		ListPrice1 = 0
+		! what in the world do we do here?
+	else
+		Read #CH_PROD,L4,376;ListPrice1;
+		If P9$[32,32] = "Y" ! if wh pricing is enabled
+			Mat Read #CH_PROD,L4;A$;
+			F1$ = " ",F1$;F1$[1,12] = A$[140,151];F1$[13,14] = WHSE Using "##"
+			Search #CH_PRWH,2,1;F1$,R30,E
+			If not(E)
+				Read #CH_PRWH,R30,192;ListPrice1Tmp;
+				If ListPrice1Tmp Let ListPrice1 = ListPrice1Tmp
+			end if
+		end if
+	end if
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub DoCategorySplits()
+try
+	! L_3000: MULTI SALES MAN
+	K11$ = " ",K11$
+	If Not(HIST) Let K11$[1,6] = REFNO Using "######"
+	If HIST Let K11$[1,10] = REFNO Using "##########"
+	!
+	! add up dollars and costs by category
+	!
+	do
+		Search #CH_ROL,3,1;K11$,R11,E \ If E > 2 error 11000
+		If E exit do
+		ORD = K11$[1,6] \ If HIST Let ORD = K11$[1,10]
+		If ORD <> REFNO exit do
+		Call ReadOrderLine()
+		if doHypo call GetHypotheticalLineOverrides()
+		If S9[4]=411 AND L5[3]=0 Goto L_3030 ! "not billing Line
+		! CTGY = shipped, price, cost
+		! CTGY1 = ordered, price, cost
+		If S2[0] <> 3 ! skip message lines
+			CATGY[L3[3],0] = CATGY[L3[3],0] + L5[3]
+			CATGY1[L3[3],0] = CATGY1[L3[3],0] + L5[0]
+			CATGY[L3[3],1] = CATGY[L3[3],1] + S3[12]
+			CATGY1[L3[3],1] = CATGY1[L3[3],1] + S3[13]
+		end if
+		L_3030: ! skip line
+	loop
+
+	!
+	! add up dollars and costs for salesrep based category
+	! assignment
+	!
+	call ReadCustSalesCategory()
+	For X = 1 To 20
+		!
+		! Consolidate the category price / costs to the
+		! appropriate salesrep
+		!
+		! give this category to main rep if not defined
+		If Not(SO[X]) Let SO[X] = H0[11]
+		! SALESM = shipped price, cost, and LINE LEVEL stuff
+		! 0 = extended amount shipped
+		! 1 = extended cost shipped
+		! 2 = LINE LEVEL commission
+		! 3 = LINE LEVEL extended amount shipped
+		! 4 = LINE LEVEL extended cost shipped
+		! SALESM1 = ordered price, cost
+		! 0 = extend cost shipped
+		! 1 = extended cost ordred
+		SALESM[SO[X],0] = SALESM[SO[X],0] + CATGY[X,0]
+		SALESM[SO[X],1] = SALESM[SO[X],1] + CATGY[X,1]
+		SALESM[SO[X],2] = SALESM[SO[X],2] + LNCOM[X,0]
+		SALESM[SO[X],3] = SALESM[SO[X],3] + LNCOM[X,1]
+		SALESM[SO[X],4] = SALESM[SO[X],4] + LNCOM[X,2]
+		SALESM1[SO[X],0] = SALESM1[SO[X],0] + CATGY1[X,0]
+		SALESM1[SO[X],1] = SALESM1[SO[X],1] + CATGY1[X,1]
+	Next X
+	!
+	! reconsolidate up to 5 reps back to
+	! commission fields and calculate
+	!
+	COUNT = 0
+	For X = 1 To 999
+		If SALESM[X,0] + SALESM[X,1] ! "check for sales+costs
+			If COUNT > 4 Let E = 0 \ error 11000
+			!
+			! based on shipped
+			!
+			SMER[COUNT] = SALESM[X,0]
+			SCST[COUNT] = SALESM[X,1]
+			!
+			! LINE LEVEL
+			!
+			For I = 0 To 2
+				COMPRV[COUNT,I] = SALESM[X,I + 2]
+			Next I
+			!
+			! based on ordered
+			!
+			SMER1[COUNT] = SALESM1[X,0]
+			SCST1[COUNT] = SALESM1[X,1]
+			SLSM[COUNT] = X
+			COUNT = COUNT + 1
+		End If
+	Next X
+	For X = 0 To 4
+		If SLSM[X] = 0 Goto SkipSLSM
+		GP = 0
+		If P9$[34,34] = "O" Let GP_DOLLARS = SALESM1[SLSM[X],0] - SALESM1[SLSM[X],1]
+		If SMER1[X] Let GP = (SMER1[X] - SCST1[X]) / SMER1[X] * 100
+		GP_DOLLARS = SMER[X] - SCST[X]
+		MERCH = SALESM1[SLSM[X],0]
+		GP_DOLLARS1 = SMER1[X] - SCST1[X]
+		TAMOUNT = SALESM1[SLSM[X],0]
+		MAMOUNT = MERCH \ GPAMOUNT = SMER1[X] - SCST1[X]
+		If Not(TAMOUNT) And GPAMOUNT < 0 Let GP = -100
+		K14$ = " ",K14$;K14$ = SLSM[X] Using "###"
+		Search #CH_SLSM,2,1;K14$,R14,E \ If E error 11000
+		Mat Read #CH_SLSM,R14,118;SSL1;
+		Mat Read #CH_SLSM,R14,862;SLSMS3;
+		mat read #ch_slsm,r14,1054;allowbonus;
+		! check for commission override for credits
+		if custom_customer$="PHILLIPS"
+			IF H5[3]<>0 and Credit_Memo<>0 
+				LET CP=SLSM[X+5]
+				Goto CATSPLIT_GOTRATE: !\ GOTO L_3500:
+			endif
+		else
+			If EditComm ! customer chgs $/% on inv/cm
+				IF H5[3]=1 LET CP=SLSM[X+5] \ GOTO CATSPLIT_GOTRATE: ! L_3500:! % commis override
+				if h5[3]=2 goto SkipSLSM ! l_3570:! $ commission override
+			Endif
+			If H5[3] If H6[2] >= 9 And H6[2] <= 11 Let CP = SLSM[X + 5] \ Goto CATSPLIT_GOTRATE:
+		endif
+		
+		If SSL1[1] = 0 Let CP = SSL1[0]
+		! back order
+		if s9[4]<>411 ! NOT FOR EVAP
+		If H5[7] <> 24 and H5[7]<>19 And (OREF[2] Or H0[5]) Goto L_3480
+		Endif
+		If GP_DOLLARS > 0 If GP_DOLLARS < SLSMS3[0] Let CP = 0
+		L_3480: If P60$[24,24] <> "Y" If Not(LINECOM) If SSL1[1] call FindGridRate()
+		If H5[7] = 10 Or H5[7] = 6 Let CP = 0 ! sample / donation
+		if custom_customer$="PHILLIPS"
+			If NegOnly<>0 And GP_Dollars>0 Let CP=0
+		endif
+		if bonus and allowbonus and  not (ORef[2] OR H0[5])                
+				let cp=cp+bonuspercent      
+		endif                       
+		SLSM[X + 5] = CP \ CommBase[x] = CP
+		COMM = 0
+		CATSPLIT_GOTRATE: !
+		If P9$[14,14] = "P" Or P9$[14,14] = "L"
+			COMM = FNR((SMER[X] - SCST[X]) - (SMER[X] * (CFIN[8] / 100)))
+			If LINECOM Or P60$[24,24] = "Y"
+				TEMPCOMPRV = FNR((COMPRV[X,1] - COMPRV[X,2]) - (COMPRV[X,1] * (CFIN[8] / 100)))
+				COMM = COMM - TEMPCOMPRV
+			End If
+		End If
+		If P9$[14,14] = "S"
+			COMM = FNR(SMER[X])
+			If LINECOM Or P60$[24,24] = "Y"
+				LET TEMPCOMPRV = FNR(COMPRV[X,1])
+				Let COMM = COMM - TEMPCOMPRV
+			END IF
+		End If
+		SCOM[X] = FNR(COMM * (CP / 100))
+		If LINECOM Or P60$[24,24] = "Y"
+			Let SCOM[X] = SCOM[X] + COMPRV[X,0]
+			! on splits we may not have even captured
+			! a base commission rate, so it is stored
+			! at the time of line calculations IF a line
+			! fell back to a base rate (no overrides in
+			! effect)
+			if not(CommBase[x]) let CommBase[X] = SALESM[slsm[x],5]
+			!
+			! OK, we have some sort of commission by line here.  By
+			! definition we may not have a single commission rate that
+			! applies to everything, so calculate a blended rate
+			!
+			if COMM + TEMPCOMPRV <> 0
+				let slsm[x+5] = fnr(SCOM[X] / (COMM + TEMPCOMPRV) * 100)
+			else
+				let slsm[x+5] = 0
+			end if
+		END IF
+		SkipSLSM: 
+	Next X
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub DoSplitType1() ! split commission dollars by percentages in cust rec
+try
+	Let COMM=SCOM[0] ! "comm$ as calculated
+	LET CP=SLSM[5]
+	For X=0 to 4
+		If Slsm[x] ! "got to have one to get any
+			Let SCom[x]=fnr(COMM*(CSPLT[x]/100)) ! "his 'split' of COMM $
+			let slsm[x+5] = cp \ CommBase[x] = CommBase[0]
+		Endif
+	Next X
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub DoSplitType2() ! split commission by type by rate in customer record
+try
+	! IF CFIN[8] LET Sale=Sale-FNR((T2[1]*(CFIN[8]/100))) ! "customer surchrg
+	! if p61$[79,79]="Y"  ! "flag to apply another surcharge (order)
+	!   let Sale=Sale-(T2[1]*(commsrvchg/100)) ! "is actually CFIN[8]!
+	! ENDIF
+	Let GP_DOLLARS=Sale-Cost ! "ALL ON SHIPPING - after surchg on sale $
+	Let X3=GP_DOLLARS ! "remaining profit
+	For X=0 to 4
+		If Slsm[x]=0 goto NxtScn: ! "no slsm
+		Let PCom=Slsm[x+5] ! "get comm % (in variable already)
+		IF H5[7]=10 OR H5[7]=6 LET PCOM=0 ! "sample/donations = NO COMM
+		If CSPLT[x]=1 ! "% of merch
+			Let TOTAL[0]=SALE
+			IF CFIN[8] LET TOTAL[0]=Sale-FNR((T2[1]*(CFIN[8]/100))) ! "customer surchrg
+			Let SCOM[x]=FNR(TOTAL[0]*(PCOM/100))
+		Endif
+		If CSPLT[x]=2 ! "% of profit
+			Let TOTAL[0]=GP_DOLLARS
+			IF CFIN[8] LET Total[0]=GP_Dollars-FNR((T2[1]*(CFIN[8]/100))) ! "customer surchrg
+			Let SCOM[x]=FNR(TOTAL[0]*(PCOM/100))
+		Endif
+		If CSplt[x]=3 ! "% of remain profit
+			Let TOTAL[0]=X3 ! "remaining profit
+			IF CFIN[8] LET TOTAL[0]=X3-FNR((T2[1]*(CFIN[8]/100))) ! "customer surchrg
+			!! If total[0]<0 let total[0]=0 ! "no profit left - no comm
+			Let SCOM[x]=FNR(TOTAL[0]*(PCOM/100))
+		Endif
+		Let X3=X3-SCOM[X] ! "reduce remain GP
+	NxtSCN: Next X
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub DoSplitType3() ! split a % of the profit (defined in cust rec)
+try
+	for slsmx2=0 to 4
+		IF not(SLSM[SLSMX2]) GOTO NXSLSM:
+		IF H5[7]=10 OR H5[7]=6
+			LET SCOM[slsmx2]=0;SLSM[slsmx2+5]=0;CommBase[slsmx2]=0
+			goto NXSLSM:
+		END IF
+		KSLSM$=" ",KSLSM$
+		LET KSLSM$[1,3]=SLSM[SLSMX2] USING "###"
+		SEARCH #CH_SLSM,2,1;KSLSM$,RECSL,E
+		IF E error 11000
+		MAT  READ #CH_SLSM,recsl,118;SSL1;
+		MAT  READ #CH_SLSM,recsl,862;SLSMS3;
+		mat read #ch_slsm,recsl,1054;allowbonus;
+		IF H5[3] LET CP=SLSM[slsmx2+5] \ GOTO GotSplit3Rate:
+		IF SSL1[1]=0 LET CP=SSL1[0]
+		if s9[4]<>411 ! NOT FOR EVAP
+		IF H5[7]<>24 AND H5[7]<>4 AND (OREF[2] OR H0[5])
+			if CommBase[slsmx2]
+				LET CP=CommBase[slsmx2]
+			else
+				LET CP=SLSM[slsmx2+5]
+			end if
+			GOTO GotSplit3Rate:
+		end if
+		Endif
+		IF GP_DOLLARS>0 IF GP_DOLLARS<SLSMS3[0] LET CP=0
+		LET MERCH=T2[24]
+		LET TAMOUNT=T2[24]
+		LET MAMOUNT=MERCH \ LET GPAMOUNT=GP_DOLLARS
+		rem LET SLSM[0]=H0[11] \ LET X=0
+		IF SSL1[1]
+			call GetCommissionGrid()
+			LET X=0 \ call FindGridRate()
+		end if
+		GotSplit3Rate: ! rem IF NOT SLSM[0] LET SLSM[0]=H0[11]
+		if bonus and allowbonus and cp and  not (ORef[2] OR H0[5])
+			let cp=cp+bonuspercent
+		endif
+		LET SLSM[slsmx2+5]=CP \ CommBase[slsmx2]=cp
+		! OK - we've got the commission rate
+		! for items that did not have special rates at
+		! the line
+		rem    IF TOTAL[0] IF CFIN[8] LET TOTAL[0]=TOTAL[0]-FNR((T2[1]*(CFIN[8]/100)))
+		rem type 3 commission split splits the % of the GP across the slsm 
+		rem TOTAL[0]=total[0]-fnr(total[0]*(csplt[slsmx2]/100))
+		! needed if commission by line hit to determine
+		! effective rate
+		LET CommissionWithoutSplit = fnr(total[0]*(CP/100))
+		LET SCOM[slsmx2]=FNR(fnr(total[0]*(csplt[slsmx2]/100))*(CP/100))
+		IF P60$[24,24]<>"Y" AND NOT(LINECOM) goto nXslsm:
+		! OK - got some commission by line junk to split
+		! spin through the line lines
+		TotalLineProfit = total[0]
+		for i = 1 to 999
+			! if sale or cost - there is something there
+			LineProfit = LineBreakDown[i,1] - LineBreakDown[i,2]
+			if LineProfit <> 0
+				TotalLineProfit = TotalLineProfit + LineProfit
+				LineRate = SLSM[slsmx2+5] / 100
+				if LineBreakDown[i,0] ! rate override
+					LineRate = LineBreakDown[i,3]/100
+				end if
+				LET CommissionWithoutSplit = CommissionWithoutSplit + FNR(LineProfit * LineRate)
+				! reduce profit by split rate
+				LineProfit = LineProfit * (csplt[slsmx2]/100)
+				LineCommission = FNR(LineProfit * LineRate)
+				LET SCOM[slsmx2]=SCOM[slsmx2]+LineCommission
+			end if
+		next i
+		!
+		! recalculate effective rate (NOTE: this needs to be the
+		! effective rate that does not take into account the
+		! split percentages)
+		if TotalLineProfit <> 0
+			Let slsm[slsmx2+5] = fnr((CommissionWithoutSplit / TotalLineProfit) * 100)
+		else
+			Let slsm[slsmx2+5] = 0
+		end if
+		nXslsm: !
+	next slsmx2
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub CheckProductCommodityCommission()
+try
+	! L_4000: TRY FOR COMM % FROM SPROD,SPRDWHSE, OR COMMODITY
+	! returns PCOM, 0 for no product/commodity commission found
+	! else PCOM = commission rate
+	PCOM = 0 ! default to no
+! 	Mat Read #CH_SLSM,V1,118;SSL1;
+! 	mat read #ch_slsm,v1,1054;allowbonus;
+	If S2[0] = 3 exit sub ! message line
+	! PRODUCT / PRODUCT WAREHOUSE level check
+	If L3[0] Goto CommodityCheck ! non stock
+	Read #CH_PROD,L4,224;PCOM;
+	If P9$[32,32] <> "Y" Goto CommodityCheck ! if wh pricing not enabled
+	Mat Read #CH_PROD,L4;A$;
+	F1$ = " ",F1$;F1$[1,12] = A$[140,151];F1$[13,14] = WHSE Using "##"
+	Search #CH_PRWH,2,1;F1$,R30,E \ If E Goto CommodityCheck
+	Read #CH_PRWH,R30,54;PCOM1;
+	If PCOM1 Let PCOM = PCOM1
+	CommodityCheck: ! try commodity file for commission %
+	if not(PCOM) ! do commodity check only if no product level found
+		F1$ = " ",F1$;F1$ = L2$[17,20]
+		Search #CH_COMCDE,2,1;F1$,R4,E
+		If not(E)
+			Read #CH_COMCDE,R4,36;PCOM1;
+			PCOM = PCOM1
+		END IF
+	else ! got one at the product or product wh level
+		if CUSTOM_CUSTOMER$="GTI"
+			REM gti HAS A DIFFERNT RATE PER ITEM FOR DIRECTS 
+			IF H5[7]=2
+				LET PCOM=PCOM+COMDIF
+			ENDIF
+		ENDIF
+	end if
+	if not(PCOM) exit sub ! didn't find one
+	! if we are in the line sort, we haven't even determined
+	! who the salesrep is yet (possible category split)
+ 	IF ssl1[1] = 0 and not(InLineSort) ! use commission in salesman file, not grid
+! 		! force commission percentage to be what's
+! 		! in salesman file??
+! 		If SSL1[0] If PCOM Let PCOM = SSL1[0]
+ 		If SSL1[0] = 0 If PCOM Let PCOM = 0 ! no grid, no %, no Comm
+ 	end if
+	! sanity check
+	If PCOM < 0 Or PCOM > 100 Or Fra(PCOM * 1000) Let PCOM = 0
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub ReadCustSalesCategory()
+try
+	! L_4500: READ CUSTOMER SLSM COMM % ARRAY
+	K5$ = " ",K5$
+	K5$[1,6] = H0[4] Using "######"
+	Search #CH_CUST,2,1;K5$,R5,E \ If E error 11000
+	Mat Read #CH_CUST,R5,502;SO;
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub FindGridRate()
+try
+	! L_5000: "===================== FIND COMM % BASED ON GRID
+	!
+	! sets CP to commission percentage
+	!
+	!if custom_customer$="HTBERRY" ! no longer custom
+		if p61$[79,79]="Y"                                 
+			let adj_merch=merch-(merch*(commsrvchg/100))   
+		END IF                                             
+	!Endif
+	
+	! backordered - use existing commission %
+	if s9[4]<>411 ! NOT FOR EVAP
+	If H5[7] <> 24 And H5[7] <> 4 And H5[7]<>19 And SLSM[X + 5] And (OREF[2] Or H0[5])
+		Let CP = SLSM[X + 5]
+		if ListPriceComm LET ListPrice1 = LP1
+		exit sub
+	end if
+	Endif
+	! CM FROM HIST INVOICE - use existing %
+	If SLSM[X + 5] And H5[10] = 1
+		Let CP = SLSM[X + 5]
+		if ListPriceComm LET ListPrice1 = LP1
+		exit sub
+	end if
+	if ListPriceComm
+		! get % of list price for list price commission
+		! price per unit (base)
+		if ListPrice1 > 0
+			LINE_PERCENT = 100 - (OLM[3] / ListPrice1 * 100) 
+		else
+			LINE_PERCENT = 0
+		end if
+		for i = 0 to 9
+			if LP_PERCENT[i] = 0 and LP_RATE[i] = 0 ! end of table
+				if i>0 rec = i - 1 ! default to last entry
+				i = 10
+			else
+				rec = i ! this record OK for now
+				if LP_PERCENT[i] >= Line_Percent
+					! this is it, period
+					let i = 10
+				end if
+			end if
+		next i
+		! rec set to correct line
+		CP = LP_RATE[rec]
+		IF (LP_USEGP[rec]) let ListPrice1 = -1
+		exit sub
+	end if
+	TOT = 0
+	if P60$[24,24]<> "Y" call GetMaxforMaterialCode()
+	! check to see if we meet the minimum - otherwise
+	! the rate is 0
+	If CG[12] = 1 And Abs(GP_DOLLARS) < CG[13]
+		CP = 0
+		exit sub
+	end if
+	ROW_GP = Abs(Int(GP))
+	If ROW_GP > 99 Let ROW_GP = 99
+	If ROW_GP < -99 Let ROW_GP = -99
+	! find the row based on GP%
+	For REC = ROW_GP To 1 Step -1
+		! see if there is anything defined
+		! in this row
+		For X5 = 0 To 11
+			If CG1[REC,X5] Goto L_5075
+		Next X5
+	Next REC
+	L_5075: If ROW_GP > REC Let ROW_GP = REC
+	REC = ROW_GP
+	! find the column based on amount
+	For X5 = 11 To 0 Step -1
+		If CG[X5] <= Abs(TAMOUNT)
+			CP = CG1[Abs(ROW_GP),X5]
+			exit sub
+		end if
+	Next X5
+	CP = 0
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub SortOrderLines()
+try
+	! L_6000:
+	! each record is a salesrep / material code
+	! data record contains total ext amount orderded
+	! for all lines per salesrep / material code
+	!
+	! sets LINECOM if any commission by line found
+	!
+	LINECOM = 0
+	! build the actual sort file (or clear it out if found)
+	PORT_$ = Spc(6);PORT_$ = PORT_$[2,Len(PORT_$) - 1]
+	! Read #CH_CNTRL,88,912;F$;
+	Let F$="6/COMMSORT*" ! "so no conflict - use unique name
+	f$ = rtrim$(f$)
+	COUNT = 0 \ Search F$,"*",COUNT \ If Not(COUNT) error 11000
+	KSIZE = 25
+	F$[COUNT] = PORT_$
+	Call FindF(F$,FOUND)
+	If FOUND Kill F$
+	F2$ = "[1:256] ",F$
+	Build #CH_SORT,F2$
+	Search #CH_SORT,0,1;KEY_$,KSIZE,E \ If E error 11000
+	REC = 1 \ Search #CH_SORT,0,0;KEY_$,REC,E \ If E error 11000
+	!
+	! sort the lines
+	!
+	K11$ = " ",K11$;LINECOM = 0
+	If Not(HIST) Let K11$[1,6] = REFNO Using "######"
+	If HIST Let K11$[1,10] = REFNO Using "##########"
+	do
+		Search #CH_ROL,3,1;K11$,R11,E \ If E > 2 error 11000
+		If E exit do
+		ORD = K11$[1,6] \ If HIST Let ORD = K11$[1,10]
+		If ORD <> REFNO exit do
+		Call ReadOrderLine()
+		if doHypo call GetHypotheticalLine()
+		If S2[0] = 3 Goto SkipLine ! message line
+		! see if this line has special commission rate
+		! if so, make sure commission by line flag tripped
+		! (LINECOM)
+		! check for special price contract commisson rate
+		If OLM[4] > 0 Let PCOM = OLM[4] \ Goto EndLineCommCheck
+		! check for commission % on this line if this is a
+		! backorder and commission % set on the line
+		if s9[4]<>411 ! NOT FOR EVAP
+		If H5[7] <> 24 And H5[7]<>19 And (H0[5] Or OREF[2]) And OLM[5] Let PCOM = OLM[5] \ Goto EndLineCommCheck
+		Endif
+		call CheckProductCommodityCommission()
+		EndLineCommCheck: If PCOM Let LINECOM = 1
+		K9$ = " ",K9$
+		If P9$[21,21] <> "Y" Let L4[1] = 0 ! no to multi-salesman
+		If Not(L4[1]) Let L4[1] = H0[11] ! set to main sales rep
+		If P9$[21,21] = "Y" ! yes to multi-salesman
+			call ReadCustSalesCategory()
+			If SO[L3[3]] Let L4[1] = SO[L3[3]]
+			if hist<>2
+				if doHypo
+					Mat Write #ch_invlh,r_invlh,16;L4;
+				else
+					Mat Write #CH_ROL,R11,16;L4;
+				end if
+			end if
+			K9$[1,3] = L4[1] Using "###"
+		else
+			Let K9$[1,3] = H0[11] Using "###"
+		End If
+		K9$[4,4] = MT$[1,1]
+		Search #CH_SORT,2,1;K9$,R9,E
+		If E
+			E = 2
+			Search #CH_SORT,1,0;K9$,R9,E
+			If E error 11000
+			Search #CH_SORT,4,1;K9$,R9,E
+			If E error 11000
+			T9 = 0
+		Else
+			Read #CH_SORT,R9,0;T9;
+		End If
+		T9 = T9 + L5[0]
+		Write #CH_SORT,R9,0;T9;
+		SkipLine: !
+	loop
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub GetMaxforMaterialCode()
+try
+	! L_6500:
+	! for salesrep in SLSM[X] position
+	!
+	! sets maxamt to the largest the largest amount
+	! ordered for a material code
+	! sets MAXMT$ to the material code that has the
+	! largest amount
+	!
+	MAXAMT = 0 \ MAXMT$ = " ",MAXMT$
+	K9$ = " ",K9$
+	K9$[1,3] = SLSM[X] Using "###"
+	do
+		Search #CH_SORT,3,1;K9$,R9,E
+		If E
+			If P60$[24,24] <> "Y" ! not commission by line
+				call GetCommissionGrid()
+			End If
+			exit do
+		End If
+		S9 = K9$[1,3]
+		If S9 <> SLSM[X]
+			If P60$[24,24] <> "Y" ! not commission by line
+				call GetCommissionGrid()
+			End If
+			exit do
+		End If
+		Read #CH_SORT,R9,0;T9;
+		If T9 > MAXAMT
+			MAXAMT = T9
+			MAXMT$ = K9$[4,4]
+		End If
+		If T9 = 0 And MAXAMT = 0
+			If MAXMT$[1,1] = " " Let MAXMT$[1,1] = K9$[4,4]
+		End If
+	loop
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetCommissionGrid()
+try
+	! L_6640: GET CORRECT GRID
+	!
+	! WHICH GRID?:
+	! 
+	! priority #1:
+	!
+	! if GP < 0 and negative commission grid defined,
+	! use that grid.
+	!
+	! priority #2:
+	!
+	! if customer grid defined, use that grid
+	!
+	! priority #3:
+	!
+	! use grid defined in salesrep
+	!
+	If SSL1[1] And CUSTCOMGRID Let SSL1[1] = CUSTCOMGRID
+	If (GPAMOUNT < 0 And SSL1[1] And NCL) Let SSL1[1] = NCL
+	if ListPriceComm ! totally different grid system
+		K80$[1,6] = SSL1[1] Using "######"
+		Search #CH_COMMGD,2,1;K80$,R80,E \ if E>1 error 11000
+		if not(E)
+			MAT READ #CH_COMMGD,R80,34;LP_PERCENT;
+			MAT READ #CH_COMMGD,R80,74;LP_RATE;
+			MAT READ #CH_COMMGD,R80,114;LP_USEGP;
+		else
+			clear LP_PERCENT[]
+			clear LP_RATE[]
+			clear LP_USEGP[]
+		end if
+		exit sub ! all done
+	end if
+	HMAT$ = "  " \ HMAT$[1,1] = MAXMT$[1,1]
+	K80$ = " ",K80$
+	K80$[1,3] = SSL1[1] Using "###"
+	K80$[4,5] = H5[7] Using "##"
+	! if not commission by line use the "max" material code to
+	! determine material code differentiation
+	If P60$[24,24] <> "Y" Let K80$[6,6] = MAXMT$[1,1] Else Let K80$[6,6] = MT$[1,1]
+	K80$[7] = ""
+	!
+	! WHICH LEVEL WITHIN THE GRID:
+	!
+	! priority #1:
+	!
+	! most specific - grid/order type/material code
+	!
+	! NOTE: for non P60$[24,24], commission by line, the material
+	! code used to check will be the material code with the largest
+	! amount ordered on the order.
+	!
+	Search #CH_COMMGD,2,1;K80$,R80,E
+	If Not(E) Goto FoundGrid
+	!
+	! priority #2:
+	!
+	! grid/all order types/specific material code
+	!
+	K80$[4,5] = " 0"
+	Search #CH_COMMGD,2,1;K80$,R80,E
+	If Not(E) Goto FoundGrid
+	!
+	! priority #3:
+	!
+	! grid/specific order type/all materials codes
+	!
+	K80$[4,5] = H5[7] Using "##"
+	K80$[6,6] = " "
+	Search #CH_COMMGD,2,1;K80$,R80,E
+	If Not(E) Goto FoundGrid
+	!
+	! priority #4:
+	!
+	! grid/all order types/all material codes
+	!
+	K80$[4,5] = " 0"
+	Search #CH_COMMGD,2,1;K80$,R80,E
+	If E
+		! build an empty table
+		For CT = 0 To 99
+			If CT < 14 Let CG[CT] = 0
+			For CT1 = 0 To 11 \ CG1[CT,CT1] = 0 \ Next CT1
+		Next CT
+		Goto GridNotFound
+	End If
+	FoundGrid: Mat Read #CH_COMMGD,R80,6;CG;
+	Mat Read #CH_COMMGD,R80,62;CG1;
+	If custom_Customer$="MIDATLANTIC"
+	REM RESET COMM TYPE
+	! Mat Read #CH_CNTRL,19,50;P9$;
+	IF CG[12]=1 LET P9$[14,14]="S"
+	IF CG[12]=2 LET P9$[14,14]="L"
+	End If
+	GridNotFound: ! 
+	!if custom_Customer$<>"HTBERRY" ! no longer custom
+	!	If CG[12] = 1 Let TAMOUNT = MAMOUNT Else Let TAMOUNT = GPAMOUNT
+	!Else
+	if custom_customer$="RUTHERFORD"
+		if p9$[14,14]="L" 
+			LET TAMOUNT=MAMOUNT 
+		else
+			LET TAMOUNT=GPAMOUNT  
+		endif
+	else
+     	IF CG[12]=1 
+			LET TAMOUNT=MAMOUNT 
+			if p61$[79,79]="Y" tamount=adj_merch
+		ELSE  
+			LET TAMOUNT=GPAMOUNT
+		end if
+	Endif ! custom
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub WriteOrderHeader()
+try
+	! L_8000:
+	if hist=2 return ! recalculating for something else don't write out
+	! WRITE COMMIS INFO TO ORDER HEADER
+	w_chn = ch_roh
+	w_rec = h1
+	if doHypo
+		w_chn = ch_invhh
+		w_rec = r_invhh
+	end if
+	Mat Write #w_chn,w_rec,278;SLSM;
+	Mat Write #w_chn,w_rec,318;SCOM;
+	Mat Write #w_chn,w_rec,348;SMER;
+	Mat Write #w_chn,w_rec,378;SCST;
+	Mat Write #w_chn,w_rec,444;HMAT$;
+	Mat Write #w_chn,w_rec,548;CSPLT;
+	!if custom_customer$="HTBERRY" ! no longer custom
+		Mat write #w_chn,w_rec,568;commsrvchg;
+	!Endif
+	SplitFlag = SCType
+	if p9$[21,21] = "Y" SplitFlag = -1
+	Mat Write #w_chn,w_rec,598;SplitFlag;
+	Mat Write #w_chn,w_rec,600;CommBase;
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetHypotheticalLine()
+try
+	! should be called after order line already read
+	tmp$ = " ",tmp$
+	tmp$[1,10] = INVNO using "##########"
+	tmp$[11,13] = l3[2] using "###"
+	search #ch_invlh,2,1;tmp$,r_invlh,e \ if e>1 error 11000
+	if e ! not there, this is normal - create
+		e=2 \ search #ch_invlh,1,0;tmp$,r_invlh,e \ if e error 11000
+		search #ch_invlh,4,1;tmp$,r_invlh,e \ if e error 11000
+	end if
+	! write out key values
+	Mat write #ch_invlh,r_invlh,8;L3
+	Mat write #ch_invlh,r_invlh,518;INVNO;
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetHypotheticalLineOverrides()
+try
+	! after order line is read in, read in the values
+	! that have been updated in the hypothetical for purposes
+	! of new hypothetical commission
+	!
+	! SHOULD BE CALLED AFTER ORDER LINE IS READ IN
+	!
+	tmp$ = " ",tmp$
+	tmp$[1,10] = INVNO using "##########"
+	tmp$[11,13] = l3[2] using "###"
+	! must already exist at this point
+	search #ch_invlh,2,1;tmp$,r_invlh,e \ if e error 11000
+	If P9$[21,21] = "Y" Mat Read #ch_invlh,r_invlh,16;L4; ! multi-salesman
+	Mat Read #ch_invlh,r_invlh,404;OLM;
+	Mat Read #ch_invlh,r_invlh,616;LP1;
+	Mat Read #ch_invlh,r_invlh,622;CommissionSource;
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+
+Sub ReadOrderLine()
+try
+	! L_8040:
+	Mat Read #CH_ROL,R11,8;L3;
+	Mat Read #CH_ROL,R11,16;L4;
+	Mat Read #CH_ROL,R11,32;L5;
+	Mat Read #CH_ROL,R11,140;L2$; \ Mat Read #CH_ROL,R11,256;S2;
+	Mat Read #CH_ROL,R11,260;S3;
+	Mat Read #CH_ROL,R11,368;MT$;
+	Mat Read #CH_ROL,R11,404;OLM;
+	Mat Read #CH_ROL,R11,518;INVNO;
+	Mat Read #CH_ROL,R11,616;LP1;
+	Mat Read #CH_ROL,R11,622;CommissionSource;
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+Sub GetHypotheticalHeader()
+try
+	! should be called after order header already read
+	tmp$ = " ",tmp$
+	tmp$[1,2] = h0[0] using "##"
+	tmp$[3,12] = REFNO using "##########"
+	search #ch_invhh,2,1;tmp$,r_invhh,e \ if e>1 error 11000
+	if e ! not there, this is normal - create
+		e=2 \ search #ch_invhh,1,0;tmp$,r_invhh,e \ if e error 11000
+		search #ch_invhh,4,1;tmp$,r_invhh,e \ if e error 11000
+	end if
+	! write out key values
+	Mat write #ch_invhh,r_invhh,0;H0
+	Mat write #ch_invhh,r_invhh,512;OREF;
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+Sub ReadOrderHeader()
+try
+	! L_8160:
+	Mat Read #CH_ROH,H1,0;H0;
+	Mat Read #CH_ROH,H1,78;H4;
+	Mat Read #CH_ROH,H1,104;H5;
+	Mat Read #CH_ROH,H1,278;SLSM;
+	Mat Read #CH_ROH,H1,318;SCOM;
+	Mat Read #CH_ROH,H1,348;SMER;
+	Mat Read #CH_ROH,H1,378;SCST;
+	Mat Read #CH_ROH,H1,408;H6;
+	Mat Read #CH_ROH,H1,444;HMAT$;
+	MAT  Read #CH_ROH,h1,508;OT19Part;
+	Mat Read #CH_ROH,H1,512;OREF;
+	Mat Read #ch_ROH,H1,548;CSPLT;
+	read Record #Ch_ROH,H1,0;roh.
+	!if custom_customer$="HTBERRY" ! no longer custom
+		Mat Read #CH_ROH,H1,568;commsrvchg;
+	!Endif
+	mat read #ch_roh,h1,600;commbase;
+	call ClearMultiSalesman()
+	WHSE = H4[2] \ If H5[7] = 7 Let WHSE = H5[11]
+	if SCTYPE=1 And X1=0 ! "no splits loaded!
+		If X1[1]=1 Let CSPLT[0]=100 ! "ALL to main slsm as he's the only guy!
+		If X1[1]=0 ! "NO SLSM LOADED - Get them now?
+			call GetSplits()
+		Endif
+	Endif
+	If SCType>1 and x1=0 ! "no types loaded - see if normal to be used
+		If X1[1]=1 Let SCType=0 ! "change to use standard commission?
+		If SCType=0 call ClearMultiSalesman() ! "re-clear for std commissions
+	Endif
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub GetSplits()
+try
+	! "haven't loaded splits yet?
+	If P9$[21,21]="Y" Or SCTYPE=0  Return ! "not turned on
+	Let K5$=H0[4] Using "######"
+	Let X1=CH_Slsm;X1[1]=1   ! CHANNEL AND MODE
+	Call "MXORDSLSM",K5$,ROH.,X1,X1[1]
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub ReadOrderTotal()
+try
+	! READ_ROT:
+	Mat Read #CH_ROT,REC_ROT,8;T2;
+	Mat Read #CH_ROT,REC_ROT,168;MCODE;
+	Mat Read #CH_ROT,REC_ROT,208;MCHARGE;
+	Mat Read #CH_ROT,REC_ROT,328;TOT;
+	if hist=2
+		t2[1]=t2[1]-tdisc! adjust merch for terms disc only if coming from recalc prog
+	end if
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub ClearMultiSalesman()
+try
+	! L_8500: CLEAR MULTI SLSM
+	For X = 0 To 4
+		If SCTYPE=0  LET SLSM[X]=0
+		if EditComm ! customer chgs $/% on inv/cm
+			IF H5[3]=1 GOTO MSL_8530: !in case of H5[3] need com%
+			if h5[3]=2 goto MSl_8535:! $ commission override don't clear
+			if h0[0] =91 goto MSl_8530:
+			if s9[4]<>411 ! not on evap
+			  IF H5[7]<>24 AND (H0[5] OR ORef[2]) GOTO MSL_8530: !"keep orig com% from orig. order or b/o
+			Endif
+			IF SCTYPE<>2 LET SLSM[X+5]=0 ! comm%
+			MSL_8530: LET SCOM[X]=0 ! comm$
+			MSl_8535: LET SMER[X]=0
+			LET SCST[X]=0
+			goto CMSDone:
+		Endif
+		If H5[3]
+			if custom_customer$="PHILLIPS"
+				IF Credit_memo<>0 OR H0[0]=91 GOTO L_8530:
+			else
+				If H6[2] >= 9 And H6[2] <= 11 Or H0[0] = 91 Goto L_8530
+				If H0[0] >= 9 And H0[0] <= 11 Goto L_8530
+			endif
+		End If
+		if s9[4]<>411
+			If H5[7] <> 24 And H5[7]<>19 And (H0[5] Or OREF[2]) Goto L_8530
+		Endif
+		If SCTYPE<>2 LET SLSM[X+5]=0 ! "leave multi-rate
+		CommBase[x] = 0
+		L_8530: SMER[X] = 0
+		SCST[X] = 0
+		SCOM[X] = 0
+		CMSDone: ! 
+		If CSPLT[x] Let X1=X1+1 ! "see how many splits
+		If SLSM[x] Let X1[1]=X1[1]+1 ! "how many slsm loaded
+	Next X
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub CalcOnOrder()
+try
+	! L_8600: Calculate commission on ordered values
+	if ListPriceComm and ListPrice1 <> -1 exit sub ! already calc'd on merch $
+	COMM = FNR(((L5[0] - S3[13]) - L5[0] * (CFIN[8] / 100)) * PCOM / 100)
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub CalcOnShip()
+try
+	! L_8650: Calculate commission on shipped values
+	if ListPriceComm and ListPrice1 <> -1 exit sub ! already calc'd on merch $ 
+	If custom_Customer$="MIDATLANTIC"
+	IF CG[12]=1 RETURN
+	End If
+	COMM = FNR(((L5[3] - S3[12]) - L5[3] * (CFIN[8] / 100)) * PCOM / 100)
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetCustInfo()
+try
+	! CHK_CUST_COMM: get commission grid out of customer file
+	K5$ = " ",K5$
+	K5$ = H0[4] Using "######"
+	Search #CH_CUST,2,1;K5$,R5,E \ If E error 11000
+	if doHypo read #ch_cust,r5,544;CFIN;
+	!if custom_customer$="HTBERRY" ! no longer custom
+	read #ch_cust,r5,592;COMMSRVCHG;
+	!Endif
+	Read #CH_CUST,R5,664;CUSTCOMGRID;
+	MAT  READ #ch_cust,R5,798;combycat;
+	if combycat < 0 or combycat > 1 let combycat = 0
+	if combycat and not(ListPriceComm)
+		SCType = 0
+		p9$[21,21] = "Y"
+	end if
+	! bonus related stuff
+	bonus = 0 ! new business or re-activated account bonus
+	MAT  READ #CH_CUST,R5,200;custC3;
+	MAT  READ #ch_cust,R5,794;bonusend;
+	if bonusend < tim(6) 
+		let bonusend=0
+	endif
+	if not(bonusend)
+		if not(custc3[0])
+			LET BONUSEND=TIM(6)+bonusdays
+		ELSE
+			jlastinv=0
+			if custc3[0]
+				DATE1$=" ",DATE1$
+				DATE1$=CUSTC3[0] USING "&&&&&&"
+				CALL DATETOJULIAN(1,DATE1$,DATE2$)
+				JLASTINV=DATE2$
+			end if
+			IF JLASTINV
+				IF TIM(6)-JLASTINV >365
+					LET BONUSEND =TIM(6)+bonusdays
+				ENDIF
+			ENDIF
+		ENDIF
+	endif
+	if not(doHypo) MAT write #ch_cust,R5,794;bonusend;   
+	if bonusend
+		if tim(6)<=bonusend
+			let bonus=1
+		endif
+	endif	
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub GetCommissionRateFromHist()
+try
+	! L_10000:
+	if s9[4]=411 exit sub  ! 411 already uses history!
+	! get comm% from history
+	Dim 1%,HL3[3],3%,HOLM[6]
+	Dim 2%,HL4[3],K34$[50],K35$[50],G$[50]
+	Dim 3%,R35,R34,HLP1
+	if h5[7]=19 exit sub ! 
+	K34$ = " ",K34$;K35$ = " ",K35$
+	K34$ = OREF[1] Using "30##########"
+	Search #ch_invh,2,1;K34$,R34,E \ If E > 2 error 11000
+	If E exit sub
+	K35$ = K34$[3,12]
+	do
+		Search #ch_invl,3,1;K35$,R35,E \ If E > 2 error 11000
+		If E exit do
+		If K35$[1,10] <> K34$[3,12] exit do
+		Mat Read #ch_invl,R35,8;HL3;
+		Mat Read #ch_invl,R35,16;HL4;
+		Mat Read #ch_invl,R35,404;HOLM;
+		Mat Read #ch_invl,R35,616;HLP1;
+		mat read #ch_invl,r35,622;TmpCommissionSource;
+		! if product rec matches AND we don't
+		! already have a SPC PRICE rate
+		If HL4[0] = L4[0] If Not(OLM[4])
+			HCommissionSource = TmpCommissionSource
+			HCP = HOLM[5]
+			! Let OLM[4] = HOLM[5]
+			Let LP1 = HLP1
+		end if
+	loop
+else
+  include "src/callsuberr.inc"
+end try
+end sub
+
+else
+	!
+	include "src/callmainerrnet.inc"
+end try

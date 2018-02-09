@@ -1,0 +1,434 @@
+!"serp123" === description  synergy erp Customer Price Type
+! 
+! loadsave -w -n 100,10 -o prog/dxport/serp123.dl4 src/serp123.src
+!  08/03/2009 started
+!
+include "src/copyright.inc"
+!
+include "src/inc/fileprtypefle.inc" ! cust price type
+
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,JDate$,FormatDate2$
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian, JulianToDate
+
+! internal subs/function
+Declare Sub OpenFiles,UpdateLog,sndsys
+Declare Sub SndCPtp,DelCPtp,SbmCPtp
+Declare function getctrldesc$
+
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],X$[20]
+	dim Message$[200],WebStr$[3000],SessionID$[200]
+	Dim Desc$[24],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],UA2$[50],OT$[20]
+	Dim Mask34$[10]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,COMM_LEV,PTC,PT[37]
+	dim 1%,cost_lev[4],Whse,debug,cnvtu[2],2%,Q0[1]
+	Dim 2%,X2[9],UA2[2],PT2
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,TREC
+	Dim 3%,R[99],O1,UB0[16],Amount,CNVTA
+	dim List$[maxcnt,3000] ! for .net (larger size - ZLines)
+	dim slist$[maxcnt,1000] ! second list
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/cpt.log" ! fields for DEBUG
+
+	Dim ptp. as prtypefle		! we use for droplist 
+
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! call dxopen() ! done in fmmenu - for standalone run
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp123"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	Action2$=UCase$(action2$)
+	Action2$=RTrim$(action2$) ! UC and trimmed
+	if debugdetail
+		dmsg$="SERP123 ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$ 
+		if Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	call OpenFiles() ! open all needed files
+	if CHF(300+PTC)<52 ! APPARENTLY THERE ARE SOME FILES W/48W REC
+		Returnstatus=0
+		Message$="PRTYPE RECORD IS TOO SMALL. NEEDS 52 words min"
+		Goto Serp123done
+	Endif
+	call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	! P9$[10,10]="N" ! a test only
+	Mask34$="###.####" ! 3.4 mask
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Let Key1$=UserID$+"          " ! space fill it
+	UCC = OpenFile(-9988, intCo) \ if UCC=-1 Error 42
+	Key1$[11]="" ! cut to length
+	Search #UCC,2,1;Key1$,Rec,E
+	If Not(E)
+	  Let SCR=Rec
+	  Mat Read #ucc,scr,200;UA2;
+	  Mat read #ucc,scr,336;Ua2$;
+	  Read #ucc,scr,394;comm_lev;
+	Else
+	  Let SCR=0;comm_lev=0 ! 
+	  UA2[0]=0;UA2$=" ",UA2$
+	Endif
+	Close #UCC
+	! GET additional user data flags
+	REM UNPACK A2[0] TO B0[]                         
+	FOR X1=0 TO 15                                          
+		LET O1=2^X1 \ LET M1=1
+		! CALL $LOGIC,M1,O1,A2[0],B0[X1] ! ub
+		Call Logic(m1,O1,UA2[0],UB0[X1])
+		LET UB0[X1]=SGN(UB0[X1])
+	NEXT X1   
+	! call dxsave(0,"tmp/cptpsv.txt!") ! save web send data
+	ReturnStatus=0
+	Message$="Action 1 not found"
+  select case action1$
+
+    Case "SYSDATA" ! sys flags,droplists					doc=CPTP-GetSysData.doc
+		returnstatus=1
+		message$="OK"
+		Call Sndsys()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent flags & droplists" \ Call updatelog(debug)
+		Endif
+		! end of sysdata
+	Case "GETCPTP" ! table data								doc=CPTP-GetTable.doc
+		returnstatus=1
+		message$="OK"
+		call SndCPtp()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent Table # "+Str$(TRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of GETCPTP
+	Case "DELCPTP" ! table delete							doc=CPTP-DeleteTable.doc
+		returnstatus=1
+		message$="OK"
+		call DelCPtp()
+		if debugdetail
+			dmsg$="Delete Table # "+Str$(TRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of DELCPTP
+	Case "SBMCPTP" ! table changes							doc=CPTP-SubmitTable.doc
+		returnstatus=1
+		message$="OK"
+		Call SbmCPtp()
+		if debugdetail
+			dmsg$="Submit Table # "+Str$(TRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of SBMCPTP
+		! call programdump("tmp/cptlog1!","")
+
+  End Select
+  Serp123Done: ! finished
+  ! status section                                                       
+  Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)                 
+  Call AddToStr(e$,rstr$,WebStr$)                                        
+  Call SetOutPut(e$,rstr$)       
+  if debugdetail
+		dmsg$="End of Program SERP123" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	PTC=OpenFile(752,IntCo) \ if PTC=-1 Error 42
+
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!
+!------------------------------------------------------------------------------------------
+Sub sndsys()
+! send flags & droplists
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	! first existing CPRTyp Tables
+	List$[0]=bsdel$,"CUSTPTP",fdel$
+	List$[1]="TBLNO",fdel$,"DESC",fdel$
+	row=2
+	x2=chf(Ptc)-1
+	if x2<=0 goto noctbl
+	if x2>999 let x2=999
+	for X=1 to x2
+	  Try
+		Read Record #PTC,X,0;ptp.;
+	  Else
+		Clear ptp.
+	  End try
+	  tmp$=RTrim$(ptp.Desc$)
+	  if tmp$<>""
+		list$[row]=Str$(X),fdel$,tmp$,fdel$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Endif
+	Next X
+	NoCtbl: ! cust tax table done
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! send order type desc's
+	Clear List$[]
+	List$[0]=bsdel$,"ORDTYPES",fdel$
+	List$[1]="OTID",fdel$,"DESC",fdel$
+	row=2
+	for x=1 to 38
+		x1=x*20-20
+	  Try
+		READ #ctlc,62,x1;ot$;
+	  Else
+		ot$=blank$
+	  End try
+		tmp$=RTrim$(ot$)
+		if tmp$=""
+			let tmp$="Order Type "+Str$(x)
+		Endif
+		List$[row]=Str$(x),fdel$,tmp$,fdel$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Next X
+	list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! send cost selector's
+	Clear List$[]
+	List$[0]=bsdel$,"COSTSEL",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	Webstr$="0",fdel$,"Sys Default of Load Markup or "
+	IF P60$[29,29]="1" let x2=13
+	IF P60$[29,29]="2" let x2=23
+	IF P60$[29,29]="3" let x2=14
+	IF P60$[29,29]="4" let x2=12
+	tmp$=getctrldesc$(x2)
+	IF P60$[29,29]="5" let tmp$="BASE COST"
+	webstr$=webstr$+RTrim$(tmp$),fdel$
+	list$[2]=webstr$
+	tmp$=getctrldesc$(13)
+	list$[3]="1",fdel$,RTrim$(tmp$),fdel$
+	tmp$=getctrldesc$(23)
+	list$[4]="2",fdel$,RTrim$(tmp$),fdel$
+	tmp$=getctrldesc$(14)
+	list$[5]="3",fdel$,RTrim$(tmp$),fdel$
+	tmp$=getctrldesc$(12)
+	list$[6]="4",fdel$,RTrim$(tmp$),fdel$
+	list$[7]="5",fdel$,"BASE COST",fdel$
+	List$[8]=esdel$
+	! calling rtn to addtostr
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndsys
+!
+!------------------------------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Sub SndCPtp()
+! send Prtype table data
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Price Type Table # Passed"
+		goto GCtpdone
+	Endif
+	TRec=tmp$
+	if trec<1 or trec>999 or fra(trec)
+		returnstatus=0
+		Message$="Invalid Price Type Table "+Str$(trec)+" Passed"
+		goto GCtpdone
+	Endif
+	Try
+		read record #ptc,TREC,0;ptp.;
+		mat read #ptc,trec,0;desc$;
+		mat read #ptc,trec,28;PT;
+	Else
+		clear ptp.
+		desc$=blank$
+		clear PT[]
+	End Try
+	List$[0]=bsdel$,"CUSTPTPDATA",fdel$
+	Webstr$="TBLNO",fdel$,"DESC",fdel$
+	List$[1]=webstr$
+	row=2
+	Webstr$=Str$(TREC),fdel$,RTrim$(ptp.Desc$),fdel$
+	List$[row]=webstr$
+	row=row+1
+	If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	Clear List$[]
+	List$[0]=bsdel$,"OTDATA",fdel$
+	Webstr$="OTID",fdel$,"OTVAL",fdel$
+	List$[1]=webstr$
+	row=2
+	
+	Webstr$="" ! start null
+	for x=1 to 38
+		if pt[x-1]<0 or pt[x-1]>5 let pt[x-1]=0
+		let tmp$=Str$(PT[x-1])
+		webstr$=Str$(X),fdel$,tmp$,fdel$
+		List$[row]=webstr$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Next X
+	
+	List$[row]=esdel$
+	! caller to addtostr
+	GCtpdone: ! done
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndCPtp
+!
+!------------------------------------------------------------------------------------------
+Sub DelCPtp()
+! Delete Price type data
+ Try
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Cust Price Type Table # Passed"
+		goto DCtpdone
+	Endif
+	TRec=tmp$
+	if trec<1 or trec>999 or fra(trec)
+		returnstatus=0
+		Message$="Invalid Cust Price Type Table "+Str$(trec)+" Passed"
+		goto DCtpdone
+	Endif
+	desc$=" ",desc$
+	clear PT[]
+	mat write #ptc,trec,0;desc$;
+	mat write #ptc,trec,28;PT;
+  DCtpDone: ! finished
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DelCPtp
+!
+!------------------------------------------------------------------------------------------
+Sub SbmCPtp()
+! submit cust prtype table
+ Try
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Cust Price Type Table # Passed"
+		goto SBCtpdone
+	Endif
+	TRec=tmp$
+	if trec<1 or trec>999 or fra(trec)
+		returnstatus=0
+		Message$="Invalid Cust Price Type Table "+Str$(trec)+" Passed"
+		goto SBCtpdone
+	Endif
+	Try
+		read record #ptc,TREC,0;ptp.;
+		mat read #ptc,trec,0;desc$;
+		mat read #ptc,trec,28;PT;
+	Else
+		clear ptp.
+	End Try
+	desc$=blank$
+	clear PT[]
+	call dxget("DESC",tmp$)
+	if rtrim$(tmp$)=""
+		returnstatus=0
+		Message$="A Description must be entered!"
+		goto SBCtpdone
+	Endif
+	desc$[1,24]=tmp$+Blank$
+	
+	for x=1 to 38
+		call dxget("OTVAL"+Str$(X),tmp$)
+		x2=tmp$
+		if x2<0 or x2>5 or fra(X2)
+			returnstatus=0
+			Message$="Invalid value for OT # "+Str$(X)
+			goto SBCtpDone
+		Endif
+		let PT[x-1]=x2
+	Next X
+	mat write #ptc,trec,0;desc$;
+	PT2=Trec
+	Write #ptc,trec,24;PT2; ! price type? isn't same as record??
+	mat write #ptc,trec,28;PT;
+  SBCtpDone: ! finished
+ else
+	include "src/callsuberr.inc"
+  end try
+end sub ! SbmCPtp
+!
+!------------------------------------------------------------------------------------------
+function getctrldesc$(x2)
+! get control file desc for passed field
+ Try
+	dim d1$[10]
+	tmp$=blank$
+	LET J2=(x2-1)*10  
+	READ #ctlc,18,J2;D1$;
+	tmp$=RTrim$(D1$)
+ Else
+	include "src/callsuberr.inc"
+  end try
+end function tmp$ ! getctrldesc$
+!
+!------------------------------------------------------------------------------------------

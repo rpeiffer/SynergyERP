@@ -1,0 +1,1429 @@
+! 222b - invoice verification  AKA 464A - margin exception
+!
+! loadsave -w -n 100,10 -o prog/dxport/222b.dl4 src/222b.src
+!
+! MX222B - Order Margin Exception Report
+!
+! NOTE: this can be called from Invoice Verification (blockid 222) or
+! order margin exception (blockid 464A)
+!
+! AUTHOR: per CCT 239691 / task 1134
+! jliu 10/1/03 cct171387 add the sort by entered by number, then by slsm#
+! vst 08/25/16 task59229 - when emailing report to salesperson - the 1st salesman
+!		         never received the email
+!
+
+!???:06/11/03:Converted to Bedit   (mkbedit 1.2b)
+include "src/copyright.inc" ! dx
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Sub ERPCronSuccess
+Declare External Function GetParameter$
+
+External Lib "ubsfunc.dl4"
+Declare External Sub GetCostLevels
+Declare External function buildsort,getuidrec,openfile
+Declare Intrinsic Sub DateToJulian,InpBuf,Time
+Declare Intrinsic function findchannel
+!Option Default Dialect IRIS1
+! parameters from 222 (if coming from there)
+Com 1%,S7,P1
+Com 2%,W1,DIV
+
+If Err 0 Gosub Err_Trap
+Dim K1$[90],K2$[90],K8$[30],k9$[90],J8$[8],T9$[26]
+Dim P9$[50],P60$[50],P0$[20],V0$[12],S1$[118],S2$[20],ENTDBY$[10]
+Dim A$[20],X$[50],SUM$[4],PUM$[4],PS$[2],CS$[2],QMask$[20]
+Dim A1$[142],A2$[30],A0$[68],P$[156],SL_S1$[118],L0$[60],L1$[20]
+Dim STATUS$[12],TYPE$[20],term$[16],TAX$[20],EQU$[130],ULN$[131]
+Dim K15$[50],lp$[12],LP2$[84],cname$[30],SL_S2$[50],EMAILFROM$[48]
+Dim J$[75],J0$[10],J1$[75],J2$[40],J4$[75],J5$[75],J6$[40],J7$[75],J9$[75]
+Dim 1%,H3[1],H4[2],S6[1],C2[2],PFU1[20],L3[3],UN[2],OL_S2[1],EUN[2]
+Dim 1%,J0,J2,J3,J4,J5,J6,J8,jJ8,J9[2],jJ9
+Dim 1%,ARMONTH,CNVTU[2],X1[5],LPC3[4]
+Dim 2%,coid,ODATE,LPC1[2],spc1[5],rb1[5],cf_custgrp
+Dim 2%,h0[12],H5[16],H6[8],S5,C1[12],C3[1],B[24],L4[3],L6[5],L9[1],LCO[1]
+Dim 2%,Q0[1]
+Dim 3%,r[99],RECS[10],TTLPRICE,TTLCOST,TTLPRFT,price,PRFT
+Dim 3%,SRN[4],T2[25],C4[6],C9,S1[12,2],S2[12,2],A[33],A1[7]
+Dim 3%,PFU2[6],L5[3],L7[12],S3[17],OLM[6],UNF[6],CNVTA,AMOUNT
+Dim 3%,LPC2[2],curcost,lastprice,lastcost,lastPRFT,PHUP,cn3[2],rcn3[3]
+Dim msg$[100],custom_customer$[30],K21$[60],M1$[40],H0$[20]
+Dim Z$[9],PMASK$[10],EMask$[15],p61$[256],SLSEMAIL$[50],SYS$[500]
+Dim E$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp$[800],tmp1$[200],nextblockid$[8],Message$[600],WebStr$[600],blockid$[100]
+Dim action$[30],options$[30],userid$[8],b$[200],3%,fdel$[10],rstr$[1000],bsdel$[10],esdel$[10],rdel$[10]
+Dim 1%,mctxbl[9],2%,mcode[9],3%,mcharge[9,1],suggestsell,MS$[60]
+Dim 1%,shipaddr
+dim 3%
+Def FNH(X) = Sgn(X) * (Int(Abs(X) * 10 + .5) / 10)
+Def FNT(X) = Sgn(X) * (Int(Abs(X) * 100) / 100) ! "truncate
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) / 100) ! "normal
+Def FNV(X) = Sgn(X) * (Int(Abs(X) * 100 + .9) / 100) ! "round up
+Def FNI(X) = Sgn(X) * (Int(Abs(X) + .5))
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+COID=IntCo
+blockid$=ucase$(rtrim$(GetParameter$("BLOCKID")))
+if erpCron blockid$ = action$
+! custom_customer$ = GetParameter$("u_custom_customer")
+! Call dxsave(0,"tmp/222ain.txt!")
+! OPEN FILES
+For J = 2 To 21
+	Read J1 \ If J1 = -1 Goto L_830
+	! if we are coming from 222b, some channels are already
+	! open, if so, we don't need to open the file
+	try
+		chnlfree = 0
+		e = chf(j)
+	else
+		chnlfree=spc(8)
+	end try
+	if not(chnlfree) goto L_830
+	Read #1,88,ABS(J1);J$[1,16];
+	if (J1) < 0
+		Ropen #J,J$
+	else
+		open #j,j$
+	end if
+L_830: Next J
+Data "1840","-1856","-1872","-1888","-1808","-1792","-2064","-1","-1728","-720"
+Data "-1824","-1664","-2176","-1376","-2880","-1936","-304","-320","-2032", "-1968"
+ch_roh = 2
+ch_ros = 3
+ch_rot = 4
+ch_rol = 5
+ch_cust = 6
+ch_prod = 7
+ch_custsls = 8
+ch_ccodes = 10
+ch_custcrednote = 11
+ch_slsmn = 12
+ch_entby = 13
+ch_slstax = 14
+ch_lastprice = 15
+ch_conth = 16
+ch_contdet = 17
+ch_rbth = 18
+ch_rbtd = 19
+ch_mschg=20
+CH_ROM = 21
+J$ = coid Using "2/ARTERMCODE#" \ Ropen #50,J$
+if erpCron ! no sort file open - so build it
+	ch_sort = buildsort(e$,25, 0, 9)
+else
+	ch_sort = 9
+end if
+Mat Read #1,0,100;J8$;
+Read #1,0,120;ARMONTH;
+Mat Read #1,3,0;cname$;
+Mat Read #1,19,50;P9$;
+Mat Read #1,60,50;P60$;
+Mat Read #1,61,0;p61$;
+mat read #1,115,60;custom_customer$;
+custom_customer$=UCASE$(TRIM$(custom_customer$))
+! let custom_customer$="BUTLER" ! TESTing ONLY
+Mat Read #1,115,40;Q0; \ If Not(Q0[1]) Let Q0[1] = 3 ! "# of decimals
+Z$="#########"
+PMASK$ = Z$[1,9-Q0[1]],".",Z$[1,Q0[1]] ! "mask for prices
+QMask$="------#.##"
+EMask$="-------#.##"
+If Err 0 Let jJ8 = Spc(8)
+jJ8 = 0 \ J1 = Chf(0)
+If Err 0 Gosub Err_Trap
+jJ9 = 62 \ If jJ8 Let jJ9 = 22
+! L_900: ! SORT TYPE
+! PRINT 'CS';@0,0;"MX464B";@30,0;" ORDER MARGIN EXCEPTION REPORT";
+! PRINT @0,2;'CE';"SORT OPTIONS:   ";
+! 1 Order Number
+! 2 Salesrep Number
+! 3 Customer / Shiplist
+! 4 Entered By Number
+! 5 Order Number With Page Break
+! 6 Customer Group
+! L_930: PRINT @10,8;"ENTER SORT OPTION:  ";
+! INPUT ""J$ \ IF J$="E" GOTO OutEnd:
+! LET X2=J$[1,2] \ IF X2>0 IF X2<6 IF NOT FRA(X2) GOTO L_950:
+! PRINT @0,7;'RBCE'; \ GOTO L_930:
+! L_950: LET SORT=X2
+BDVERS=0
+if blockid$="464A" and custom_customer$="BUTLER"
+	let BDVERS=1 ! task 54846 - custom version of 464a ALWAYS
+Endif
+let shipaddr=0
+tmp$ = GetParameter$("SHIPADDR")
+if rtrim$(tmp$)<>"" let shipaddr=99
+if blockid$ = "464A"
+	sort = GetParameter$("SORTORDER")
+	if sort < 1 or sort > 6
+		e$ = "Invalid sort order!"
+		error 10000
+	end if
+else ! must be 222
+	sort = 6 ! customer group / order #
+end if
+! SELECT RANGES
+! L_960: PRINT @0,8;'CE';"ENTER STARTING ORDER, ";
+! Print "<CR>:ALL, OR E:EXIT   ";
+! INPUT ""J$ \ IF J$="E" GOTO OutEnd:
+if blockid$ = "464A"
+	ord[1] = GetParameter$("SORD")
+else
+	let ord[1] = 0
+end if
+! J$ = ""
+! If J$ = "" Let ORD[1] = 0;ORD[2] = 999999 ! \ GOTO L_1000:
+! LET ORD[1]=J$
+! PRINT @0,9;"  ENTER ENDING ORDER, ";
+! PRINT "<CR>:LAST, OR E:EXIT  ";
+! INPUT ""J$ \ IF J$="E" GOTO OutEnd:
+! IF J$="" LET J$="999999"
+! LET ORD[2]=J$
+if blockid$ = "464A"
+	tmp$ = GetParameter$("EORD")
+	if tmp$ = ""
+		let ord[2] = 999999
+		if bdvers let ord[2]=799999 ! exclude Auto BO
+	else
+		let ord[2] = tmp$
+	end if
+else ! it's the 222 version
+	let ord[2] = 999999
+end if
+
+IF ORD[1] > ORD[2]
+	e$ = "Invalid order range entered!"
+	error 10000
+end if
+! L_1000: IF ORD[1]<=ORD[2] GOTO L_1020:
+! PRINT @0,22;'RBCE';"INVALID RANGE ENTERED!"; \ SIGNAL 3,20
+! GOTO L_960:
+! L_1020: PRINT @0,10;'CE';"ENTER STARTING SALESPERSON, <CR>:ALL,  OR E:EXIT  ";
+! INPUT ""J$ \ IF J$="E" GOTO OutEnd:
+if blockid$ = "464A"
+	SLM[1] = GetParameter$("SREP")
+else
+	let SLM[1] = 0
+end if
+! J$ = ""
+! If J$ = "" Let SLM[1] = 0;SLM[2] = 9999 ! \ GOTO L_1080:
+! LET SLM[1]=J$
+! PRINT @0,11;"  ENTER ENDING SALESPERSON, <CR>:LAST, OR E:EXIT  ";
+! INPUT ""J$ \ IF J$="E" GOTO OutEnd:
+! IF J$="" LET J$="9999"
+! LET SLM[2]=J$
+if blockid$ = "464A"
+	tmp$ = GetParameter$("EREP")
+	if tmp$ = ""
+		let slm[2] = 9999
+	else
+		let slm[2] = tmp$
+	end if
+else
+	let slm[2] = 9999
+end if
+IF slm[1] > slm[2]
+	e$ = "Invalid salesrep range entered!"
+	error 10000
+end if
+! L_1080: IF SLM[1]<=SLM[2] GOTO L_1100:
+! PRINT @0,22;'RBCE';"INVALID RANGE ENTERED!"; \ SIGNAL 3,20
+! GOTO L_1020:
+! L_1100: ! CUSTOMER
+! PRINT @0,12;'CE';"ENTER STARTING CUST #, <CR>:ALL,  OR E:EXIT  ";
+! INPUT ""J$ \ IF J$="E" GOTO OutEnd:
+if blockid$ = "464A"
+	cust[1] = GetParameter$("SCUST")
+else
+	let cust[1] = 0
+end if
+! J$ = ""
+! If J$ = "" Let CUST[1] = 0;CUST[2] = 999999 ! \ GOTO L_1180:
+! LET CUST[1]=J$
+! PRINT @0,13;"  ENTER ENDING CUST #, <CR>:LAST, OR E:EXIT  ";
+! INPUT ""J$ \ IF J$="E" GOTO OutEnd:
+! IF J$="" LET J$="999999"
+! LET CUST[2]=J$
+if blockid$ = "464A"
+	tmp$ = GetParameter$("ECUST")
+	if tmp$ = ""
+		let cust[2] = 999999
+	else
+		let cust[2] = tmp$
+	end if
+else
+	let cust[2] = 999999
+end if
+IF cust[1] > cust[2]
+	e$ = "Invalid customer range entered!"
+	error 10000
+end if
+! L_1180: IF CUST[1]<=CUST[2] GOTO edt_entby:
+! PRINT @0,22;'RBCE';"INVALID RANGE ENTERED!"; \ SIGNAL 3,20
+! GOTO L_1100:
+! EDT_ENTBY: ! entered by number                                        
+!PRINT @0,14;'CE';"ENTER STARTING ENTERED BY#, <CR>:ALL,  OR E:EXIT  ";     
+!INPUT ""J$ \ IF J$="E" GOTO OutEnd:                                   
+!IF J$="" LET sentby=0;endentby=999 \ GOTO end_entby:                  
+!LET sentby=J$                                                        
+!PRINT @0,15;"  ENTER ENDING ENTERED BY#, <CR>:LAST, OR E:EXIT  ";          
+!INPUT ""J$ \ IF J$="E" GOTO OutEnd:                                   
+!IF J$="" LET J$="999"                                              
+!LET endentby=J$                                                        
+!end_entby: IF sentby<=endentby GOTO L_1200:                              
+!PRINT @0,22;'RBCE';"INVALID RANGE ENTERED!"; \ SIGNAL 3,20            
+!goto edt_entby:                                                          
+! L_1200: ! WHSE,TYPE,DIVISION
+! PRINT @0,14;"ENTER WHSE NUMBER, <CR>:ALL, E:EXIT   ";
+! INPUT ""J$ \ IF J$="E" GOTO OutEnd:
+! IF J$="" LET J$="00"
+if blockid$ = "464A"
+	WHSE = GetParameter$("WH")
+else
+	WHSE = W1 ! COM variable from invoice verification
+end if
+IF WHSE < 0 OR WHSE > 99 OR FRA(WHSE)
+	e$ = "Invalid warehouse entered!"
+	error 10000
+end if
+! LET WHSE=J$ \ IF WHSE>=0 IF WHSE<=99 IF NOT FRA(WHSE) GOTO L_1250:
+! PRINT @0,14;'RBCE';
+! GOTO L_1200:
+! L_1250: PRINT @0,15;"ENTER ORDER TYPE, <CR>:ALL, E:EXIT  ";
+! INPUT ""J$ \ IF J$="E" GOTO OutEnd:
+! J$ = ""
+! If J$ = "" Let J$ = "00"
+! LET OTYP=J$
+if blockid$ = "464A"
+	OTYP = GetParameter$("OTYPE")
+else
+	OTYP=0
+end if
+if OTYP < 0 OR OTYP > 40 OR FRA(OTYP)
+	e$ = "Invalid order type entered!"
+	error 10000
+end if
+! IF OTYP>=0 IF OTYP<=40 IF NOT FRA(OTYP) GOTO L_1300:
+! PRINT @0,15;'RBCE';
+! GOTO L_1250:
+! L_1300: !
+! PRINT @0,16;"ENTER DIVISION, <CR>:ALL, E:EXIT   ";
+! INPUT ""J$ \ IF J$="E" GOTO OutEnd:
+! IF J$="" LET J$="00"
+! LET DIV=J$[1,2]
+if blockid$ = "464A"
+	DIV = GetParameter$("DIV")
+else
+	! DIV already set via COM variable
+end if
+if DIV < 0 OR DIV > 99 OR FRA(DIV)
+	e$ = "Invalid division entered!"
+	error 10000
+end if
+! IF DIV>=0 IF DIV<=99 IF NOT FRA(DIV) GOTO L_1350:
+! PRINT @0,16;'RBCE';
+! GOTO L_1300:
+! L_1350: ! THIS SPACE AVAILABLE
+! ask_shipdate: REM ============= ENTER SHIPPING DATE                          
+! let chkshipdateflag=1
+! ship_prompt: PRINT @0,17;"ENTER SHIPPING DATE: ";'CE';                          
+! LET J0$="5000062117"
+! J1 = 0
+! LET J5$="ENTER SHIPPING DATE OR <CR> FOR ALL"
+! GOSUB isinput:  
+if blockid$ = "464A"
+	tmp$ = GetParameter$("SHIPDATE")
+	if tmp$ = ""
+		J1=0
+	else ! comes in as MMDDYY
+		tmp1$ = tmp$[5,6],tmp$[1,2],tmp$[3,4]
+		J1 = tmp1$ ! now as yymmdd
+	end if
+else
+	J1=0
+end if
+If Not(J1)
+  !    print @21,17;"ALL                          ";
+  CHKSHIPDATEFLAG = 0
+  goto L_1400:
+End If
+e$=""
+Let X2=J1 \ GOSUB YMD2JUL: \ e$="Invalid ship date entered!"
+if e$ <> "" error 10000
+LET JDDATE=X2;chkshipdateflag=1
+! LET X2=J1 \ GOSUB L_7700:
+! GOSUB L_6900:
+! LET D8=J1
+! PRINT @36,17;X$;                                                           
+! LET F=Z9+1 \ IF F<1 GOTO msg_errdate:                                           
+! IF F>7 GOTO msg_errdate:                                                        
+! ask_date: PRINT @0,18;'CE';"DATE OKAY? (Y/N/E) "; \ INPUT ""J$                
+! IF J$="E" GOTO OUTEND:                                                    
+! IF J$="Y" GOTO L_1400:                                                     
+! IF J$<>"N" GOTO ask_date:                                                    
+! GOTO ask_shipdate:                                                           
+! msg_errdate: !
+! PRINT @0,23;"INVALID DATE ! ";'CE'; \ SIGNAL 3,15 \ GOTO ask_shipdate:
+L_1400: !
+! PRINT @0,19;'CE';"PRINT THE NEW ORDERS ONLY? (Y/<CR>:ALL/E)  ";'CL'; 
+! INPUT ""J$ \ IF J$="E" GOTO OutEnd:    
+if blockid$ = "464A"
+	if erpCron
+		prntnewflag = 0
+		if (GetParameter$("PRINTNEW")) = "Y" prntnewflag=1
+	else
+		prntnewflag = GetParameter$("PRINTNEW")
+	end if
+else
+	prntnewflag=0
+end if
+! J$ = ""
+! If J$ = "" Let prntnewflag = 0
+! if J$="Y" let prntnewflag=1
+! if j$<>"" and j$<>"Y" goto L_1400:
+if blockid$ = "464A"
+	if erpCron
+		auditflag = 0
+		tmp$ = GetParameter$("AUDITONLY")
+		if ucase$(tmp$) = "Y" auditflag = 1
+	else
+		auditflag = GetParameter$("AUDITONLY")
+	end if
+else
+	auditflag=0
+end if
+! added on task 27804 - email slsm
+emslsm=0;emch=-1;EMAILREP=0
+if blockid$="464A"
+  if sort=2 ! only on slsm sort
+	tmp$ = GetParameter$("SEMAIL")
+	emslsm=0 \ if RTrim$(UCase$(tmp$))="Y" let emslsm=1
+	if emslsm gosub EMAILSALESCOPY ! see if possible
+  endif
+Endif
+
+! L_1500: ! DONE
+! PRINT @0,22;'CE';"ENTER  R:reselect, P:print, E:exit   ";
+! INPUT ""J$ \ IF J$="E" GOTO OutEnd:
+! IF J$="R" GOTO L_900:
+! IF J$<>"P" GOTO L_1500:
+if blockid$="464A" ! don't wait to end to show report in process!
+	If JJ8 = 0 !if pdf or print, new method, after edits,setouput,dxclose
+	  Call setoutput(e$,rstr$,2) !2 flag puts 0 status section in w/print in process msg, puts </page> in
+	  try call dxclose() else rem
+	End If 
+Endif
+!
+!Print @0,22;'CE';"CLEARING SORT FILE, PLEASE WAIT . ." \ Signal 3,0
+K1$ = " ",K1$
+L_1620: Search #ch_sort,3,1;K1$,R9,E \ If E = 2 Goto L_1650
+If E Gosub ERR_SEARCH
+Search #ch_sort,5,1;K1$,R9,E \ If E Gosub ERR_SEARCH
+Goto L_1620
+
+L_1650: ! THRU ORDER HEADER
+!Print @0,22;'CE';"SORTING FILE, PLEASE WAIT . ." \ Signal 3,0
+K1$ = " ",K1$
+checkForInEditOrder=0
+if blockid$ <> "464A"
+	K1$[1,2] = S7 Using "##" ! status we need to search on from mx222a
+else
+	! result of a blockid call.  Edmar has option in place to
+	! call this block from order hold screen.  If this is the
+	! case, starting and ending order will be the same.  we will
+	! need to possibly check for a status 95 order.
+	if custom_customer$ = "EDMAR" and ord[1] = ord[2]
+		checkForInEditOrder=1
+	end if
+end if
+
+checkingInEdit=0
+L_1660: Search #ch_roh,3,1;K1$,R1,E
+	If E = 2
+		if checkingInEdit checkForInEditOrder=0 ! not found
+		Goto L_1900
+	end if
+	If E Gosub ERR_SEARCH
+	!IF K1$[1,2]>"10" GOTO L_1900:
+	!IF K1$[1,2]>" 6" IF K1$[1,2]<" 9" LET K1$=" 9    " \ GOTO L_1660:
+	if blockid$ = "464A"
+		if checkForInEditOrder and checkingInEdit
+			checkForInEditOrder=0 ! we are doing it now
+			if k1$[1,2] <> "95" or val(k1$[3,8]) <> ord[1] goto L_1900:
+		else
+			IF K1$[1,2]>" 6" goto L_1900:
+		end if
+	else
+		If Val(K1$[1,2]) <> S7 Goto L_1900
+	end if
+	Mat Read #ch_roh,R1,0;h0;
+	Mat Read #ch_roh,R1,66;v0$;
+	Mat Read #ch_roh,R1,78;H4;
+	Mat Read #ch_roh,R1,104;H5;
+	Read #ch_roh,R1,586;PHUP;
+	Mat Read #ch_rot,h0[3],8;T2;
+	! PARSE THRU OPTIONS
+	If h0[7] < ORD[1] Goto L_1660
+	If h0[7] > ORD[2] Goto L_1660
+	If h0[11] < SLM[1] Goto L_1660
+	If h0[11] > SLM[2] Goto L_1660
+	If h0[4] < CUST[1] Goto L_1660
+	If h0[4] > CUST[2] Goto L_1660
+	!IF H5[0]<sentby goto L_1660:
+	!IF H5[0]>endentby goto L_1660:
+	If WHSE If H4[2] <> WHSE Goto L_1660
+	If OTYP If H5[7] <> OTYP Goto L_1660
+	If DIV If H5[8] <> DIV Goto L_1660
+	If CHKSHIPDATEFLAG
+		X2 = h0[10] \ If X2 And X2 <> 999999 Gosub YMD2JUL \ X2 = 999999
+		If X2 <> JDDATE Goto L_1660
+	End If
+	If prntnewflag And PHUP Goto L_1660 !"print new orders only
+	if blockid$ <> "464A"
+		If P1 ! from mx222a - if we want orders or cash orders only....
+			If P1 = 1 If T2[10] = 0 Goto L_1660 ! "only cash
+			If P1 = 2 If T2[10] <> 0 Goto L_1660 ! "only orders
+		End If
+	end if
+	Mat Read #ch_ros,h0[2],154;SRN;
+	SHIPTO = 0 ! "ship to code
+	If SRN[3] = 0 Let SHIPTO = h0[4] ! "none used - use customer
+	If SRN[3] = 2 Let SHIPTO = SRN[1] ! "used a ship to #
+	If SRN[3] = 4 Let SHIPTO = SRN[2] ! "customer
+	If SRN[3] = 5 Let SHIPTO = 999999 ! "manual
+	k9$ = " ",k9$
+	If sort = 1 or sort = 5 Let k9$[1,6] = h0[7] Using "######"
+	If sort = 2 Or sort = 5 Let k9$[3,6] = h0[11] Using "####"
+	If sort = 3 Let k9$[1,6] = h0[4] Using "######"
+	If sort = 3 Let k9$[7,12] = SHIPTO Using "######"
+	If sort = 4
+		k9$[1,3] = H5[0] Using "###"
+		k9$[4,7] = h0[11] Using "####"
+	End If
+	If sort = 5
+		k9$[7,12] = h0[4] Using "######"
+	End If
+	if sort = 6 ! customer group - need to get it
+			cf_custgrp = 0
+			K2$ = " ",K2$;K2$ = h0[4] Using "######"
+			Search #ch_cust,2,1;K2$,r[ch_cust],E \ If E > 1 Gosub ERR_SEARCH
+			If not(e)
+				mat read #ch_cust,r[ch_cust],714;cf_custgrp;
+			end if
+			k9$[1,6] = cf_custgrp using "######"
+	end if
+	k9$[13,20] = K1$[1,8] ! "STATUS & ORDER (SORDFLEH KEY)
+	! got a hit, no more checking for in edit as we have
+	! either found the in edit order, or found an order not in
+	! edit (which means that we must not have been called from
+	! the hold screen)
+	checkForInEditOrder=0
+	E = 0;R9 = R1
+	Search #ch_sort,4,1;k9$,R9,E \ If E Gosub ERR_SEARCH
+!
+Goto L_1660
+
+L_1900: ! START PRINT
+! one last order to possibly check
+if checkForInEditOrder
+	checkingInEdit=1
+	k1$ = "  ",k1$
+	k1$[1,2] = "95"
+	k1$[3,8] = ord[1] - 1 using "######"
+	goto L_1660:
+end if
+k9$ = " ",k9$
+K2$ = " ",K2$
+If Sort<>2 let emch=-1;emailrep=0;needopenemch=0
+If J2 Print #0;"\14\"; ! "SECOND RUN THRU?
+J1 = 90;J2 = 0
+holdslsm = -1
+holdord = -1
+EQU$ = "=",EQU$;ULN$ = "-",ULN$
+L_2000: Search #ch_sort,3,1;k9$,R1,E \ If E = 2 Goto OutEnd
+If E Gosub ERR_SEARCH
+If K1$[1,3] = "   " Let K1$ = k9$
+! IF K1$[1,12]<>K9$[1,12] GOSUB L_4500: ! "CUSTOMER CHANGE?
+if sort=5
+   if holdord=-1 let holdord=k9$[1,6]
+   let ordnum=k9$[1,6]
+   if holdord<>ordnum
+	  let j1=90
+	  let holdord=ordnum
+   endif
+endif
+If sort = 2 ! sort by slsm
+  !!task59229 - remmed out the next line - first slsm processed(holdslsm=-1) it ALWAYS
+  !!      set holdslsmn = k9$[3,6] so the next line of code was never true for the 1st slsmn
+  !       being processed - resulting in no email being sent  
+  !!If holdslsm = -1 Let holdslsm = k9$[3,6] 
+  slsm = k9$[3,6]
+  If holdslsm <> slsm ! slsm change
+	If EMAILREP And EMCH <> -1 ! close/send email
+	  Close #EMCH
+	  EMCH = -1
+	End If 
+	If SORT = 2 And EMAILREP ! need to check/open on next slsm
+	  NEEDOPENEMCH = 1 ! slsm chgd - need to open for next
+	End If 
+    J1 = 90
+    ! Gosub L_5800 ! wait to see if we print something (as needs to read slsm for email)
+    holdslsm = slsm
+  End If 
+End If 
+r[ch_roh] = R1 \ Gosub L_6000
+If prntnewflag And PHUP Goto L_2000 !"print new orders only   
+Gosub L_3000 ! "get customer info
+If h0[1] If h0[1] <> h0[4] Gosub L_3100 ! "bill to
+! move slsm/misc read to AFTER THE LINE CHECK!
+! CHK FOR LINES
+K8$ = " ",K8$;K8$ = h0[7] Using "######"
+Search #ch_rol,2,1;K8$,R8,E \ If E = 1 Goto L_2000 ! "NO LINES
+If E Gosub ERR_SEARCH
+Gosub L_3200 ! "salesman ! chk/open email chan
+Gosub L_3300 ! "misc reads
+let NEEDOPENEMCH = 0 ! it's either opened or not in L_3200 - only on chg of slsm do it again.
+Gosub L_5800
+Gosub L_5500 ! "print header
+PHUP = Tim(6)
+if not(auditflag) Write #ch_roh,r[ch_roh],586;PHUP;
+K8$ = " ",K8$;K8$[1,6] = h0[7] Using "######"
+L_2100: Search #ch_rol,3,1;K8$,r[ch_rol],E \ If E = 2 Goto L_2200
+If E Gosub ERR_SEARCH
+X2 = K8$[1,6] \ If X2 <> h0[7] Goto L_2200
+If K8$[7,9] = "   " Goto L_2100 ! "repair info?
+Gosub L_6400 ! "read line
+If OL_S2[0] = 3 Goto JstPrnt ! " Z-Line print ! "was  L_2100:
+If Not(L3[0])
+  r[ch_prod] = L4[0] \ Gosub L_6200
+Else 
+  Gosub L_2500
+End If 
+If h0[0] >= 9 ! "switch sign for c/m per cct 82878
+  For X = 2 To 4 \ L7[X] = L7[X] * (-1) \ Next X
+  L5[3] = L5[3] * (-1) \ S3[12] = S3[12] * (-1)
+End If 
+Gosub L_3400 ! "convert / total
+JstPrnt: ! "Print Line
+! if l3[2]>1     
+!    let j1=j1+3
+! else
+!    LET J1=J1+2 
+! endif
+J1 = J1 + 2
+if bdvers let j1=j1+2 ! they add two blank line
+Gosub L_5800
+Gosub GET_LASTPRICE
+Gosub L_5000
+Goto L_2100
+L_2200: ! DONE WITH LINES
+Gosub L_Totals: ! make this If custom_customer$ = "CARTER" if necessary
+Print #0;EQU$
+if emch<>-1 print #EMCH;EQU$
+J1 = J1 + 1
+if bdvers let j1=99 ! ONE ORDER PER PAGE!
+if bdvers let ttlprice=0;ttlcost=0;ttlprft=0 
+Goto L_2000
+L_2500: ! ===== set units for conversions (nonstock version)
+A[6] = L6[4];A[5] = UNF[5] \ If Not(A[5]) Let A[5] = 1;UNF[5] = 1
+B[23] = L6[2];A1[3] = UNF[4] \ If Not(A1[3]) Let A1[3] = 1;UNF[4] = 1
+PFU1[0] = EUN[0];PFU1[1] = UN[0] ! "base and selling units
+PFU1[2] = UN[1];PFU1[3] = UN[2] ! "pricing and costing
+PFU1[4] = EUN[1] ! "purchasing
+PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+PFU1[8] = UN[0];PFU1[9] = UN[0];PFU1[10] = EUN[1] ! "stock,sell,purch dflt
+PFU1[11] = UN[2];PFU1[12] = UN[1] ! "cost,price dflt
+PFU1[13] = UN[0];PFU1[16] = EUN[0];PFU1[17] = EUN[0] ! "prod,up,bkn dflt
+PFU1[18] = UN[0];PFU1[19] = UN[0] ! "pack,size dflt
+PFU2[0] = UNF[0];PFU2[1] = UNF[1] ! "selling and pricing factor
+PFU2[2] = UNF[2];PFU2[3] = UNF[3] ! "costing and purchasing
+PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+For X1 = 1 To 4
+  For X2 = 0 To X1 - 1
+    If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+  Next X2
+Next X1
+Return 
+L_3000: ! GET CUSTOMER
+K2$ = " ",K2$;K2$ = h0[4] Using "######"
+Search #ch_cust,2,1;K2$,r[ch_cust],E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Return 
+!
+Gosub L_6100
+Search #ch_custcrednote,2,1;K2$,r[ch_custcrednote],E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Goto L_3080
+Mat Read #ch_custcrednote,r[ch_custcrednote],100;A0$;
+Mat Read #ch_custcrednote,r[ch_custcrednote],168;ODATE;
+Return 
+L_3080: ! NO NOTES
+A0$ = " ",A0$
+ODATE = 0
+Return 
+L_3100: ! GET BILL TO A/R
+K2$ = " ",K2$;K2$ = h0[1] Using "######"
+Search #ch_cust,2,1;K2$,R3,E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Return ! "not valid - use customer
+Read #ch_cust,R3,182;C1[10];
+Mat Read #ch_cust,R3,200;C3;
+Mat Read #ch_cust,R3,210;C4;
+Return 
+L_3200: ! SALESMAN NAME
+K2$ = " ",K2$;K2$[1,3] = h0[11] Using "###"
+Search #ch_slsmn,2,1;K2$,r[ch_slsmn],E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 ! Goto L_3270
+	SL_S1$ = " ",SL_S1$
+	SL_S1$ = "SALESPERSON NOT ON FILE!"
+	clear SL_S2$
+Else
+	Gosub L_6300
+Endif
+If NEEDOPENEMCH Gosub OPENEMAILCHAN ! will return with emch<>-1 if successful
+Return 
+
+L_3300: ! MISC OTHER FILES READ
+STATUS$ = " ",STATUS$
+If h0 = 1 Let STATUS$ = "ORD ENTERED"
+If h0 = 2 Let STATUS$ = "ORD PRINTED"
+If h0 = 3 Let STATUS$ = "ORD REG'D"
+If h0 = 4 Let STATUS$ = "RDY TO SHIP"
+If h0 = 5 Let STATUS$ = "INV ENTERED"
+If h0 = 6 Let STATUS$ = "INV PRINTED"
+If h0 = 9 Let STATUS$ = "C/M ENTERED"
+If h0 = 10 Let STATUS$ = "C/M PRINTED"
+If h0 > 80 Let STATUS$ = "IN PROCESS"
+TYPE$ = " ",TYPE$ \ If H5[7] < 1 Goto L_3340
+Read #1,62,(H5[7] * 20 - 20);TYPE$;
+L_3340: term$ = " ",term$
+If h0[12] = 0
+  term$ = "CASH SALE"
+Else 
+  If h0[12] > 0 And h0[12] <= 99
+    Read #50,h0[12],0;term$;
+  End If 
+End If 
+L_3350: TAX$ = " ",TAX$
+Read #ch_slstax,H4[0],0;TAX$;
+ENTDBY$ = " ",ENTDBY$
+Mat Read #ch_entby,H5[0],0;ENTDBY$;
+Return 
+L_3400: ! CONVERSION OF UNITS
+CNVTU[0] = 0;CNVTU[1] = UN[0];CNVTU[2] = 1
+CNVTA = L7[2] \ Gosub L_20000
+QORD = AMOUNT
+CNVTA = L7[4] \ Gosub L_20000
+QSHIP = AMOUNT
+CNVTA = L7[3] \ Gosub L_20000
+QBO = AMOUNT
+SUM$ = "    "
+If UN[0] > 0 Read #ch_ccodes,UN[0],10;SUM$;
+CNVTU[0] = 0;CNVTU[1] = UN[0];CNVTU[2] = 2
+IF BDVERS LET CNVTU[1] = UN[1] ! WANT PRICE UM
+CNVTA = OLM[3] \ Gosub L_20000
+price = AMOUNT
+CNVTU[0] = 0;CNVTU[1] = UN[0];CNVTU[2] = 2
+IF BDVERS LET CNVTU[1] = UN[1] ! WANT PRICE UM
+CNVTA = L5[1] \ Gosub L_20000
+curcost = AMOUNT
+PUM$ = "    "
+If UN[1] = -1 Let PUM$ = "CWT "
+If UN[1] = -2 Let PUM$ = "LOT "
+If UN[1] > 0 Read #ch_ccodes,UN[1],10;PUM$;
+! 54846 - order totals of ordered but print shipped?
+IF BDVERS ! WANTS TOTALS OF ORDERED - NOT SHIPPED
+	TTLPRICE = TTLPRICE + L5[0];TTLCOST = TTLCOST + S3[13];OPRFT = FNR(L5[0] - S3[13])
+	TTLPRFT = TTLPRFT + OPRFT;PRFT = FNR(L5[3] - S3[12])
+ELSE
+	TTLPRICE = TTLPRICE + L5[3];TTLCOST = TTLCOST + S3[12];PRFT = FNR(L5[3] - S3[12])
+	TTLPRFT = TTLPRFT + PRFT
+ENDIF
+Return 
+L_5000: ! LINE ITEM DETAIL
+! if l3[2]>1
+!    print #0;""
+! endif
+PRTCH=0
+LITEM_Loop1: ! 
+Print #PRTCH; Using "###"; Tab 1;L3[2];
+If OL_S2[0] <> 3 ! "not a Z-Line
+  Print #PRTCH; Tab 8;L1$[1,12];
+  iF BDVERS Print #PRTCH; Tab 22;"PRC UM ";RTRIM$(PUM$); ! SHOW PRICE UM
+  Print #PRTCH; Tab 38;SUM$;
+  if bdvers
+	Print #PRTCH; Using QMASK$; Tab 42;QORD; ! want ordered not shipped
+	Print #PRTCH; Using QMASK$; Tab 54;QSHIP; ! add back QShip!
+  Else
+	Print #PRTCH; Using QMASK$; Tab 42;QSHIP;
+  Endif
+  tabpos=54 \ if bdvers let tabpos=69
+  Print #PRTCH; Using PMASK$; Tab tabpos;price;
+    tabpos=66 \ if bdvers let tabpos=81
+  Print #PRTCH; Using PMASK$; Tab tabpos;curcost;
+  gp = 0
+  IF BDVERS
+	If L5[0] Let gp = OPRFT * 100 / L5[0]
+  ELSE
+	If L5[3] Let gp = PRFT * 100 / L5[3]
+  ENDIF
+  tabpos=78 \ if bdvers let tabpos=93
+  Print #PRTCH; Using "---#.####%"; Tab tabpos;gp;
+  If foundlp
+	tabpos=92 \ if bdvers let tabpos=104
+    If price > lastprice Print #PRTCH; Tab tabpos;" U";
+    If price < lastprice Print #PRTCH; Tab tabpos;" D";
+    If price = lastprice Print #PRTCH; Tab tabpos;" *";
+	tabpos=98 \ if bdvers let tabpos=109
+    If curcost > lastcost Print #PRTCH; Tab tabpos;" U";
+    If curcost < lastcost Print #PRTCH; Tab tabpos;" D";
+    If curcost = lastcost Print #PRTCH; Tab tabpos;" *";
+	tabpos=104 \ if bdvers let tabpos=114
+    If gp > lastGP Print #PRTCH; Tab tabpos;" U";
+    If gp < lastGP Print #PRTCH; Tab tabpos;" D";
+    If gp = lastGP Print #PRTCH; Tab tabpos;" *";
+  End If 
+  If L9[0] > 1 And L9[0] < 14 And L9[0] <> 5 And L9[0] <> 9 And L9[0] <> 10
+    gosub GetPriceExpiration:
+	tabpos=110 \ if bdvers let tabpos=114
+	if not(BDVers)
+		If OLM[2]
+		Print #PRTCH; Using "######"; Tab tabpos;OLM[2];
+		ELSE
+		PRINT #PRTCH; Tab tabpos; "S/P";
+		End If
+	Endif
+  end if
+  IF LCO[1]
+	gosub GetRebateExpiration:
+	tabpos=120 \ if bdvers let tabpos=121
+	print #PRTCH; using "######"; Tab tabpos; lcO[1];
+  end if
+  If L6[5]
+    Print #PRTCH; Tab 129;"Y";
+  Else 
+    Print #PRTCH; Tab 129;"N";
+  End If 
+End If 
+Print #PRTCH;""
+if prtch=0 and emch<>-1 let prtch=emch \ goto LITEM_Loop1
+PRTCH=0
+LITEM_Loop2: ! 
+!"2nd line
+if not(bdvers) Print #PRTCH; Tab 8;L0$[1,45];
+if bdvers Print #PRTCH; Tab 8;L0$[1,60]; ! want 2 FULL Lines of desc
+If OL_S2[0] <> 3 ! "not a Z-Line
+	Tabpos=54 \ if bdvers let tabpos=69
+	If foundlp
+		Print #PRTCH; Using PMASK$; Tab tabpos;lastprice;
+		Tabpos=66 \ if bdvers let tabpos=81
+		Print #PRTCH; Using PMASK$; Tab tabpos;lastcost;
+		Tabpos=78 \ if bdvers let tabpos=93
+		Print #PRTCH; Using "---#.####%"; Tab tabpos;lastGP;
+		LET X2=LPC1[2] \ GOSUB L_7700:   \ IF NOT(LPC1[2]) LET X$="  NONE  "
+        suggestsell = 0
+        If LPC2[2] <> 0 Let suggestsell = L5[1] + (L5[1] * ((LPC2[1] - LPC2[2]) / LPC2[2]))
+        ! suggestsell = FNR(suggestsell) ! THIS IS BASE - NEEDS TO BE QTY OR SELL UM!!
+		CNVTU[0] = 0;CNVTU[1] = UN[0];CNVTU[2] = 2
+		IF BDVERS LET CNVTU[1] = UN[1] ! WANT PRICE UM!
+		CNVTA = suggestsell \ Gosub L_20000
+		suggestsell = AMOUNT
+		if not(BDVers) ! standard - sugg sell - Butler doesn't want anymore
+			Tabpos=88 \ if bdvers let tabpos=103
+			If suggestsell<>0 Print #PRTCH; Using PMASK$; Tab tabpos;suggestsell;
+		endif
+		Rem PRINT #PRTCH;TAB 90;"LS DATE: ";X$;
+		Tabpos=99 \ if bdvers let tabpos=104 ! as bdvers no suggsell!
+        Print #PRTCH; Tab tabpos;X$; ! LAST SOLD DATE
+	Else
+		Print #PRTCH; Tab 54;"     -----";
+		Tabpos=66 \ if bdvers let tabpos=81
+		Print #PRTCH; Tab tabpos;"     -----";
+	End If
+	if not(BDVers) ! Butler doesn't want
+		IF L9[0]>1 AND L9[0]<14 AND L9[0]<>5 AND L9[0]<>9 AND L9[0]<>10
+			tabpos=110 \ if bdvers let tabpos=114
+			if spc1[4] ! price contract expiration
+				tmp$ = spc1[4] using "&&&&&&"
+				print #PRTCH;tab tabpos;tmp$[3,4];"/";tmp$[5,6];"/";tmp$[1,2];
+			else
+				print #PRTCH;tab tabpos;"NONE";
+			end if
+		ENDIF
+	Endif
+	if lco[1]
+		tabpos=120 \ if bdvers let tabpos=120 ! as bd no suggsell or date
+		if rb1[4] ! rebate contract expiration
+			tmp$ = rb1[4] using "&&&&&&"
+			print #PRTCH;tab tabpos;tmp$[3,4];"/";tmp$[5,6];"/";tmp$[1,2];
+		else
+			print #PRTCH;tab tabpos;"NONE";
+		end if
+	end if
+End If
+Print #PRTCH;""
+if bdvers Print #PRTCH;"\15\" ! add 2 blank line between
+if prtch=0 and emch<>-1 let prtch=emch \ goto LITEM_Loop2
+Return 
+
+L_5500: ! ORDER HEADER INFO
+	linesNeeded = 4
+	if custom_customer$ = "EDMAR" linesNeeded = 5
+	J1 = J1 + linesNeeded \ Gosub L_5800
+	Prtch=0
+	OHEAD_Loop1: ! loop for email too
+	Print #PRTCH; Using "######"; Tab 0;"CUST:";h0[4];
+	if shipaddr<>0
+		if sort <> 6
+			Print #PRTCH;tab 12;A1$[31,58];
+		ELSE
+			Print #PRTCH;tab 12; A1$[31,47];" GR:";k9$[1,6];
+		end if
+		print #PRTCH;TAB 40;rtrim$(s1$[31,52]);" ";
+		print #PRTCH;tab 62;rtrim$(s1$[91,101]);",";RTRIM$(s1$[106,107]);
+		Print #PRTCH; Tab 77;"SLS:";SL_S1$[1,24];
+		Print #PRTCH; Tab 105;"ORD:";
+		Print #PRTCH; Using "######";h0[7];
+		X2 = h0[9] \ Gosub L_7700
+		Print #PRTCH; Tab 116;"DATE:";X$[1,8]
+	else
+		if sort <> 6
+			Print #PRTCH;tAB 12;A1$[31,60];
+		ELSE
+			Print #PRTCH;tAB 12;A1$[31,49];" GRP: ";k9$[1,6];
+		end if
+		Print #PRTCH; Using "###"; Tab 44;"SLSM:";SL_S1$[1,26];
+		Print #PRTCH; Tab 76;"ORD: ";
+		Print #PRTCH; Using "######";h0[7];
+		X2 = h0[9] \ Gosub L_7700
+		Print #PRTCH; Tab 88;"DATE:";X$[1,8];
+		Print #PRTCH; Tab 102;"TAX EXP#:";
+		Print #PRTCH;A2$[11,28];
+		Print #PRTCH;""
+	endif
+	if custom_customer$ = "EDMAR"
+		print #PRTCH; "SHIP: ";srn[2] using "######";
+		if srn[3] = 1 or srn[3] = 2 ! shipto
+			print #PRTCH; "."; srn[1] using "&&&&&&";
+		end if
+		print #PRTCH;"  ";rtrim$(s1$[1,23]);"  ";
+		print #PRTCH;rtrim$(s1$[31,53]);"  ";
+		print #PRTCH;rtrim$(s1$[91,105]);", ";s1$[106,107];"  ";
+		print #PRTCH;rtrim$(s1$[108,112]);"  ";
+		print #PRTCH;"TAX: ";H4[0];" - ";rtrim$(TAX$);
+		print #PRTCH;""
+	end if
+	if bdvers ! wants add'l fields
+		Print #PRTCH;"OTYPE: ";h5[7];"  ";
+		print #PRTCH;"SHIP VIA: ";v0$;"  ";
+		print #PRTCH;"TAX: ";H4[0];" - ";rtrim$(TAX$);"  ";
+		print #PRTCH;"EBY: ";h5[0];" - ";RTrim$(entdby$);
+		PRINT #PRTCH;" ATTN: ";RTRIM$(H0$);
+		PRINT #PRTCH;" PO: ";RTRIM$(P0$);
+		print #PRTCH;""
+	Endif
+	!    LINE ITEM HEADINGS GO HERE!!!
+	If BDVers ! Butler Deardon now completely diff header
+		Print #PRTCH; Tab 1;"LINE";
+		Print #PRTCH; Tab 8;"ITEM NO."; Tab 38;"U/M"; Tab 48;"QTY"; Tab 60;"QTY";
+		Print #PRTCH; Tab 69;"CUR PRICE"; Tab 81;"CUR COST"; Tab 93;"CUR PROF";
+		Print #PRTCH; Tab 104;"PRC"; Tab 109;"COST"; Tab 114;"MARGIN";
+		Print #PRTCH; Tab 121;"REBATE";
+		Print #PRTCH; Tab 129;"T"
+		Print #PRTCH; Tab 8;"DESCRIPTION"; Tab 48;"ORD"; tab 59;"SHIP";
+		Print #PRTCH; Tab 69;"LAST PRICE"; Tab 81;"LAST COST"; Tab 93;"LAST PROF";
+		Print #PRTCH; tab 104;"U*D"; Tab 109;"U*D"; Tab 114;"U*D";
+		Print #PRTCH; Tab 121;"STATUS";
+		Print #PRTCH; Tab 129;"X"
+	Else ! Standard
+		Print #PRTCH; Tab 1;"LINE";
+		Print #PRTCH; Tab 8;"ITEM NO."; Tab 38;"U/M"; Tab 48;"QTY";
+		Print #PRTCH; Tab 54;"CUR PRICE"; Tab 66;"CUR COST"; Tab 78;"CUR PROF";
+		Print #PRTCH; Tab 89;"SUGGEST"; Tab 98;"COST"; Tab 104;"MARGIN";
+		Print #PRTCH; Tab 111;"PRICE";
+		Print #PRTCH; Tab 120;"REBATE";
+		Print #PRTCH; Tab 129;"T"
+		Print #PRTCH; Tab 8;"DESCRIPTION"; tab 47;"SHIP";
+		Print #PRTCH; Tab 54;"LAST PRICE"; Tab 66;"LAST COST"; Tab 78;"LAST PROF";
+		Print #PRTCH; Tab 92;"SELL"; Tab 98;"U*D"; Tab 104;"U*D";
+		Print #PRTCH; Tab 111;"STATUS";
+		Print #PRTCH; Tab 120;"STATUS";
+		Print #PRTCH; Tab 129;"X"
+	Endif
+	Print #PRTCH;EQU$
+	If PRTCH = 0 And EMCH <> -1 Let PRTCH = EMCH \ Goto OHEAD_Loop1
+Return
+
+L_5800: ! PRINT HEADER
+	If J1 < jJ9 Return ! "lines incremented in rouutines
+	! If J2 If jJ8 Input @0,23;"PRESS <CR> TO CONTINUE "J$ \ Print 'CS';
+	If J2 If Not(jJ8) Print #0;"\14\";
+	If J2 And EMCH <> -1 Print #EMCH;"\14\";
+	J2 = J2 + 1 \ J1 = 4
+	If Not(jJ8) Print #0;"\15\";
+	If EMCH <> -1 Print #EMCH;"\15\";
+	PRTCH = 0
+HEADINGLOOP_1: Rem* do it twice if we are also emailing report
+	Print #PRTCH; Tab 10;J8$; Tab (64 - Len(cname$) / 2);cname$; Tab 120;"PAGE";J2
+	T9$ = "" \ Call Time(T9$)
+	tmp1$="222B" \ if blockid$ = "464A" let tmp1$="464A"
+	Print #PRTCH;" -";tmp1$;"- ";T9$;
+	Print #PRTCH; Tab 45;"O R D E R    M A R G I N    E X C E P T I O N    R E P O R T";
+	Print #PRTCH;"\15\"
+	Print #PRTCH;EQU$
+	If PRTCH = 0 And EMCH <> -1 Let PRTCH = EMCH \ Goto HEADINGLOOP_1
+Return
+
+L_6000: ! READ HEADER,SHIPLIST,TOTALS
+	Mat Read #ch_roh,r[ch_roh],0;h0;
+	Mat Read #ch_roh,r[ch_roh],52;H3;
+	Mat Read #ch_roh,r[ch_roh],66;V0$;
+	Mat Read #ch_roh,r[ch_roh],78;H4;
+	MAT READ #CH_ROH,R[CH_ROH],84;H0$;
+	Mat Read #ch_roh,r[ch_roh],104;H5;
+	Mat Read #ch_roh,r[ch_roh],408;H6;
+	Mat Read #ch_roh,r[ch_roh],446;P0$;
+	Read #ch_roh,r[ch_roh],586;PHUP;
+	Mat Read #ch_ros,h0[2],8;S1$;
+	Mat Read #ch_ros,h0[2],126;S2$;
+	Mat Read #ch_ros,h0[2],146;S5;
+	Mat Read #ch_ros,h0[2],150;S6;
+	Mat Read #ch_ros,h0[2],154;SRN;
+	Mat Read #ch_rot,h0[3],8;T2;
+Return
+
+L_6100: ! READ CUSTOMER
+	Mat Read #ch_cust,r[ch_cust],0;A1$;
+	Mat Read #ch_cust,r[ch_cust],142;C1;
+	Mat Read #ch_cust,r[ch_cust],194;C2;
+	Mat Read #ch_cust,r[ch_cust],200;C3;
+	Mat Read #ch_cust,r[ch_cust],210;C4;
+	Mat Read #ch_cust,r[ch_cust],348;A2$;
+	Read #ch_cust,r[ch_cust],412;C9;
+	Mat Read #ch_custsls,r[ch_cust],4;S1;
+	Mat Read #ch_custsls,r[ch_cust],238;S2;
+Return
+
+L_6200: ! READ PRODUCT
+	Mat Read #ch_prod,r[ch_prod],0;P$;
+	Mat Read #ch_prod,r[ch_prod],156;B;
+	Mat Read #ch_prod,r[ch_prod],256;A;
+	Mat Read #ch_prod,r[ch_prod],460;A1;
+	Mat Read #ch_prod,r[ch_prod],512;PFU1;
+	Mat Read #ch_prod,r[ch_prod],554;PFU2;
+Return
+
+L_6300: ! SALESMAN NAME
+	Mat Read #ch_slsmn,r[ch_slsmn],0;SL_S1$;
+	MAT READ #CH_SLSMN,R[CH_SLSMN],922;SL_S2$;
+Return 
+
+L_6400: ! READ LINE
+	Mat Read #ch_rol,r[ch_rol],8;L3;
+	Mat Read #ch_rol,r[ch_rol],16;L4;
+	Mat Read #ch_rol,r[ch_rol],32;L5;
+	Mat Read #ch_rol,r[ch_rol],56;L6;
+	Mat Read #ch_rol,r[ch_rol],80;L0$;
+	Mat Read #ch_rol,r[ch_rol],140;L1$;
+	Mat Read #ch_rol,r[ch_rol],168;L7;
+	Mat Read #ch_rol,r[ch_rol],160;L9;
+	Mat Read #ch_rol,r[ch_rol],250;UN;
+	Mat Read #ch_rol,r[ch_rol],256;OL_S2;
+	Mat Read #ch_rol,r[ch_rol],260;S3;
+	Mat Read #ch_rol,r[ch_rol],404;OLM;
+	Mat Read #ch_rol,r[ch_rol],446;EUN;
+	Mat Read #ch_rol,r[ch_rol],452;UNF;
+	Mat Read #ch_rol,r[ch_rol],494;LCO;
+	Gosub L_6500
+Return
+
+L_6500: ! SET PRICE ORIG AND COST ORIG
+	PS$ = "  "
+	If L9[0] = 1 Or L9[0] = 5 Or L9[0] = 9 Let PS$ = "S"
+	If L9[0] >= 2 And L9[0] <= 4 Or L9[0] >= 6 And L9[0] <= 8 Or L9[0] >= 11 And L9[0] <= 13
+		If OLM[2]
+			PS$ = "C"
+		Else
+			PS$ = "*"
+		End If
+	End If
+	CS$ = "  "
+	If LCO[0] = 10 Let CS$ = "R"
+Return
+
+L_7700: !  *UNPACK DATE  X2 TO X$      V1.0  4/04/84  G.DOSCHER
+	X$ = " ",X$ \ X$[10] = ""
+	X$[1,3] = Int(X2 / 10 ^ 2 - Int(X2 / 10 ^ 4) * 10 ^ 2) + 10 ^ 2 Using "###"
+	X$[4,6] = Fra(X2 / 10 ^ 2) * 10 ^ 2 + 10 ^ 2 Using "###"
+	X$[7,9] = Int(X2 / 10 ^ 4) + 10 ^ 2 Using "###"
+	X$[4,4] = "/" \ X$[7,7] = "/" \ X$ = X$[2]
+	If Not(X2) Let X$ = "        "
+Return
+
+
+! L_9100: ! DONE
+! Goto L_900
+! Stop 
+L_20000: ! UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992) 
+If CNVTU[2] = 3 Goto L_20030 ! "um window
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20055 ! "going to same units
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20055 ! "lot
+If CNVTU[2] = 0 Goto L_20030 !!THIS TESTS IF VALID CONVERSION  
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20055 ! "none there
+L_20030: Gosub L_20060
+If CNVTU[2] = 3 Goto L_20055 ! "um window
+If CNVTU[2] = 0 Goto L_20055 !!TEST IF VALID CONVERSION
+If FLAG Let E = FLAG \ Gosub ERR_SEARCH
+!
+L_20055: Return 
+L_20060: !   MXPRCONV    PRODUCT FILE UNITS CONVERT (INTERNAL VERSION)
+!   AUTHOR:  GEORGE DOSCHER  JAN-1991
+!          BILL OF MATERIALS DO NOT ALLOCATE - LET CNVTU[2]=5 
+!             SINCE UNTIL WO, BOM DOES NOT AFFECT INVENTORY
+!
+CONVFLAG = 0
+If CNVTU[2] <> 5 Goto L_20115
+CONVFLAG = 1 ! "do not round flag
+CNVTU[2] = 1 ! "switch back to quantity
+Goto L_20120
+L_20115: CONVFLAG = 0
+L_20120: SR = 8
+SC = 12
+!
+On CNVTU[2] + 1 Goto L_20145,L_20195,L_20195,L_20340
+E = 0 \ Gosub ERR_SEARCH
+L_20145: ! CHECK IF VALID CONVERSION
+For X1[1] = 0 To 1
+  If CNVTU[X1[1]] = 0 Goto L_20185
+  If CNVTU[X1[1]] = -1 Goto L_20185
+  For X1[2] = 0 To 7
+    If CNVTU[X1[1]] = PFU1[X1[2]] Goto L_20185
+  Next X1[2]
+  FLAG = 1 \ Goto L_20435 ! INVALID CONVERSION
+L_20185: Next X1[1]
+FLAG = 0 \ Goto L_20435 ! OKAY
+L_20195: ! CONVERT COST/PRICE/QTY
+AMOUNT = CNVTA
+For X1[1] = 0 To 1
+  CMODE = 1 \ If X1[1] Let CMODE = -1
+  If CNVTU[X1[1]] = 0 Goto L_20285 ! ALREADY BASE UNITS
+  If CNVTU[X1[1]] = -1 Goto L_20250
+  For CUNIT = 0 To 7
+    If PFU1[CUNIT] = CNVTU[X1[1]] Goto L_20245
+  Next CUNIT
+  FLAG = 0 \ Goto L_20435 ! INVALID UNIT
+L_20245: If CUNIT = 0 Goto L_20285 ! ALREADY BASE
+L_20250: If CNVTU[2] = 2 Let CMODE = - CMODE
+  If CNVTU[X1[1]] <> -1 Goto L_20275 ! NOT CWT
+  If A[5] If CMODE < 0 Let AMOUNT = (AMOUNT * (A[6] / A[5])) / 100
+  If A[6] If A[5] If CMODE > 0 Let AMOUNT = AMOUNT * 100 / (A[6] / A[5])
+  Goto L_20285
+L_20275: If CMODE > 0 Let AMOUNT = AMOUNT * PFU2[CUNIT - 1]
+  If PFU2[CUNIT - 1] If CMODE < 0 Let AMOUNT = AMOUNT / PFU2[CUNIT - 1]
+L_20285: Next X1[1]
+If CNVTU[2] <> 1 Or CONVFLAG Goto L_20310 ! "not doing qty's
+!
+If CNVTU[1] If CNVTU[1] <> PFU1[0] Let AMOUNT = FNR(AMOUNT) ! "round qty if not going to base units
+If Fra(AMOUNT) If Not(CNVTU[1]) Or CNVTU[1] = PFU1[0] Let AMOUNT = FNI(AMOUNT) ! "be sure base is not a fraction
+L_20310: If CNVTU[2] <> 2 Goto L_20335 ! "not doing costs/prices
+If Not(CNVTU[1]) Goto L_20335 ! "going to base
+If P9$[42,42] = "N" Let AMOUNT = FNR(AMOUNT) ! "normal round   
+If P9$[42,42] = "T" Let AMOUNT = FNT(AMOUNT) ! "truncate
+If P9$[42,42] = "U" Let AMOUNT = FNV(AMOUNT) ! "round up
+L_20335: FLAG = 0 \ Goto L_20435
+L_20340: ! DISPLAY VALID UNITS
+Window Open @SC,SR; Size 32,11; Using " VALID UNITS "
+X1[1] = 1
+For X1 = 0 To 7
+  RECS[X1[1]] = 0 \ If Not(PFU1[X1]) Goto L_20385
+  Read #26,PFU1[X1];A$;
+  Print Using "#. ";X1[1];A$[11,14];" ";A$[1,10];
+  If X1 Print Using "##########";PFU2[X1 - 1] Else Print ;'BR BD';"     BASE ";'ER ED'
+  RECS[X1[1]] = PFU1[X1] \ X1[1] = X1[1] + 1
+L_20385: Next X1
+L_20390: Print Using "#";@0,9;"SELECT 1-";X1[1] - 1;" : ";'CL';
+Input (-2,ILEN);""J4$ \ If J4$ = "" Goto L_20420
+X1 = J4$ \ If X1 > 0 If X1 < X1[1] Goto L_20410
+Print 'RB'; \ Goto L_20390
+L_20410: Read #26,RECS[X1];A$;
+J4$ = A$[11],"\15\"
+L_20420: Window Close 
+Call InpBuf(J4$)
+FLAG = 0 \ Goto L_20435
+L_20435: Return 
+GET_LASTPRICE: !                                   
+foundlp = 0
+K15$ = " ",K15$
+K15$[1,6] = h0[4] Using "######"
+LAST_LOOP: Rem                                     
+Search #ch_lastprice,3,1;K15$,r[ch_lastprice],E
+If E > 2 Gosub ERR_SEARCH
+If E Goto end_lastloop
+TMPNUM = K15$[1,6]
+If h0[4] <> TMPNUM Goto end_lastloop
+Mat Read #ch_lastprice,r[ch_lastprice],0;lp$;
+If lp$[1,12] <> L1$[1,12] Goto LAST_LOOP
+Mat Read #ch_lastprice,r[ch_lastprice],16;LPC1;
+Mat Read #ch_lastprice,r[ch_lastprice],28;LPC2;
+Mat Read #ch_lastprice,r[ch_lastprice],46;LPC3;
+Mat Read #ch_lastprice,r[ch_lastprice],56;LP2$;
+CNVTU[0] = 0;CNVTU[1] = UN[0];CNVTU[2] = 2
+IF BDVERS LET CNVTU[1] = UN[1] ! WANT PRICE UM!
+CNVTA = LPC2[1] \ Gosub L_20000
+lastprice = AMOUNT
+CNVTU[0] = 0;CNVTU[1] = UN[0];CNVTU[2] = 2
+IF BDVERS LET CNVTU[1] = UN[1] ! WANT PRICE UM!
+CNVTA = LPC2[2] \ Gosub L_20000
+lastcost = AMOUNT
+lastPRFT = lastprice - lastcost
+lastGP = 0
+If lastprice
+  lastGP = lastPRFT * 100 / lastprice
+End If 
+foundlp = 1
+end_lastloop: !                           
+Return 
+L_6900: Rem ========================== Day Of Week                        
+Z1 = X$[7,8] \ Z2 = X$[1,2] \ Z3 = X$[4,5]
+If Z1 < 85 Let Z1 = Z1 + 100
+Z4 = Z2 + 1 \ Z5 = Int(1 / Z4 + .7) \ Z6 = Z1 - Z5 \ Z7 = Z4 + 12 * Z5
+Z8 = Int(Z7 * 30.6001) + Int(Z6 * 365.25) + Z3 \ Z9 = Z8 - 7 * (Int(Z8 / 7))
+J4$ = "SUNDAY   MONDAY   TUESDAY  WEDNESDAYTHURSDAY FRIDAY   SATURDAY "
+X$[9] = " ",J4$[Z9 * 9 + 1,Z9 * 9 + 9],"" \ Return 
+
+YMD2JUL: Rem "word statement                                        
+	X$ = X2 Using "&&&&&&"
+	Call DateToJulian(1,X$,X$,E) \ If E Return
+	X2 = X$[1,5]
+Return 1
+	DT3[0] = X2;DT3[1] = X2;FLAG = 0
+	Call "JULIANUTIL",DT3[],X$,FLAG
+Return
+
+GetPriceExpiration: !
+	spc1[4] = 0 ! default no expiration
+	if OLM[2] ! if not special price (128)
+		! get default from the header if not special price
+		tmp$ = olm[2] using "######"
+		search #ch_conth,2,1;tmp$,r[ch_conth],e \ if e>1 gosub Err_Search:
+		if not(E)
+			mat read #ch_conth,r[ch_conth];cn3;
+		end if
+		spc1[4] = cn3[2] ! default to header expiration date
+		tmp$ = l1$[1,12],"C",olm[2] using "#####"
+		search #ch_contdet,2,2;tmp$,r[ch_contdet],e \ if e>1 gosub err_search:
+		if not(e)
+			mat read #ch_contdet,r[ch_contdet],12;spc1;
+			if not(spc1[4]) let spc1[4] = cn3[2]
+		end if
+	else ! this did come from 128
+		r[ch_contdet] = -1 ! not found yet
+		! try most specific level first (product)
+		tmp$ = h0[4] using "######",l1$[1,12]
+		search #ch_contdet,2,1;tmp$,r[ch_contdet],e \ if e>1 gosub err_search:
+		if e
+			! try commodity level
+			tmp$ = H0[4] using "######","*",l1$[17,20]
+			search #ch_contdet,2,1;tmp$,r[ch_contdet],e \ if e>1 gosub err_search:
+			if e
+				! try global level
+				tmp$ = H0[4] using "######","#"
+				search #ch_contdet,2,1;tmp$,r[ch_contdet],e \ if e>1 gosub err_search:
+			end if
+		end if
+		if not(e) ! got a record somewhere
+			mat read #ch_contdet,r[ch_contdet],12;spc1;
+		end if
+	end if
+Return
+
+GetRebateExpiration: !
+	rcn3[2] = 0 ! default no expiration
+	rb1[4] = 0
+	tmp$ = lco[1] using "######"
+	search #ch_rbth,2,1;tmp$,r[ch_rbth],e \ if e>1 gosub err_search:
+	if not(e)
+		mat read #ch_rbth,r[ch_rbth];rcn3;
+	end if
+	r[ch_rbtd] = -1 ! not found yet
+	! try most specific levels first
+	tmp$ = lco[1] using "######",l1$[1,12]
+	search #ch_rbtd,2,1;tmp$,r[ch_rbtd],e \ if e>1 gosub err_search:
+	if e
+		! try commodity level
+		tmp$ = lco[1] using "######","*",l1$[17,20]
+		search #ch_rbtd,2,1;tmp$,r[ch_rbtd],e \ if e>1 gosub err_search:
+		if e
+			! try all products level
+			tmp$ = lco[1] using "######","#"
+			search #ch_rbtd,2,1;tmp$,r[ch_rbtd],e \ if e>1 gosub err_search:
+		end if
+	end if
+	if not(e) ! got a record somewhere
+		mat read #ch_rbtd,r[ch_rbtd],12;rb1;
+	end if
+	if not(rb1[4]) let rb1[4] = rcn3[2]
+Return
+
+
+L_Totals: Rem Total misc charge for order
+if bdvers ! wants order totals (of ordered not shipped!!)
+	totalflag = 0 
+	PRICE=TTLPRICE;CURCOST=TTLCOST;GP=TTLPRFT
+	GP = 0                                                          
+	IF PRICE > 0 Let GP = ((PRICE - CURCOST) / PRICE) * 100
+	If PRICE<> 0 Or CURCOST <> 0
+	  Gosub L_5800
+	  Print #0;"TOTAL"; \ let totalflag = 1
+	  Print #0; Tab 8;"ORDERED";  
+	  If EMCH <> -1 Print #EMCH;"TOTAL"; tab 8;"ORDERED";
+	  Gosub L_Totallines
+	End If
+endif
+totalflag = 0                                                       
+PRICE = T2[5]                                                             
+CURCOST = T2[20]
+GP = 0                                                          
+IF T2[5] > 0 Let GP = ((T2[5] - T2[20]) / T2[5]) * 100
+If T2[5]<> 0 Or T2[20] <> 0
+  Gosub L_5800
+  Print #0;"TOTAL"; \ let totalflag = 1
+  Print #0; Tab 8;"FREIGHT";  
+  If EMCH <> -1 Print #EMCH;"TOTAL"; tab 8;"FREIGHT";
+  Gosub L_Totallines
+End If
+R[4] = H0[3]
+Mat Read #4,R[4],168;MCODE;                                                             
+Mat Read #4,R[4],208;MCHARGE;
+Mat Read #4,R[4],358;MCTXBL;
+For INP=1 to 10
+  If MCODE[INP-1] ! "there is a charge
+     Let REC_MISCCHRG = Int(MCODE[INP - 1])
+     Mat Read #20,REC_MISCCHRG,6;MS$;
+     Gosub L_5800
+	 PRTCH=0
+	 MCP_Loop: ! 
+     If totalflag = 0 Print #PRTCH;"TOTAL"; \ Let totalflag = 1
+     Print #PRTCH; Tab 8;MS$[1,20];                          
+     For Y9 = 0 To 1   
+		tabpos=53 \ if bdvers let tabpos=68
+       Print #PRTCH; Using eMASK$; Tab tabpos + (12 * Y9);MCHARGE[INP-1,Y9];      
+     Next Y9
+     GP = 0                                                                 
+     If MCHARGE[INP-1,0] > 0 Let GP = ((MCHARGE[INP-1,0] - MCHARGE[INP-1,1]) / MCHARGE[INP-1,0]) * 100 
+	 tabpos=78 \ if bdvers let tabpos=93
+     Print #PRTCH; Using "---#.####%"; Tab tabpos;GP;
+     If MCTXBL[INP-1] PRINT #PRTCH; TAB 129;"Y";                                
+     Print #PRTCH;""
+	 If PRTCH = 0 And EMCH <> -1 Let PRTCH = EMCH \ Goto MCP_Loop
+     Let J1 = J1 + 1
+     End If                                                             
+Next INP                                                                   
+PRICE = T2[6]                                                             
+CURCOST = 0                                                               
+GP = 0
+If PRICE <> 0 Or CURCOST <> 0
+  Gosub L_5800
+  If totalflag = 0 
+	Print #0;"TOTAL"; \ Let totalflag = 1
+	If EMCH <> -1 Print #EMCH;"TOTAL";
+  Endif
+  Print #0;Tab 8;"OTHER";
+  If EMCH <> -1 Print #EMCH;tab 8;"OTHER";
+  Gosub L_Totallines
+End If
+If BDVers ! wants internal messages
+	K21$=" ",k21$;k21$=h0[7] Using "######"
+	k21$[7]="800" ! internals start @ 801 - 999
+	ROMLoop: ! loop
+	Search #ch_rom,3,1;k21$,r[21],e \ if e goto romdone
+	x2=k21$[1,6] \ if x2<>h0[7] goto romdone
+	Mat read #ch_rom,r[21],0;m1$;
+	GOSUB L_5800 ! CHECK TOF
+	print #0;Tab 2;K21$[7];" ";m1$ ! message line # and message
+	if EMCH<>-1 Print #EMCH;Tab 2;K21$[7];" ";m1$
+	let j1=j1+1
+	goto ROMLoop
+ROMDone: ! finito
+Endif
+Return                                                                    
+L_Totallines: Rem print total line
+Prtch=0
+TTLS_Loop: ! loop for email if used
+tabpos=53 \ if bdvers let tabpos=68
+Print #PRTCH; Using EMASK$; Tab tabpos;PRICE; 
+tabpos=65 \ if bdvers let tabpos=80
+Print #PRTCH; Using EMASK$; Tab tabpos;CURCOST; 
+tabpos=78 \ if bdvers let tabpos=93
+Print #PRTCH; Using "---#.####%"; Tab tabpos;GP;                                  
+Print #PRTCH;""
+If PRTCH = 0 And EMCH <> -1 Let PRTCH = EMCH \ Goto TTLS_Loop
+J1 = J1 + 1
+Return 
+! 
+EMAILSALESCOPY: Rem* check / get the "from" address
+	EMAILREP = 0
+	EMCH = -1
+	
+	If P61$[30,30] <> "Y" Return ! no emailing of reports
+	If SORT <> 2 Return  ! only slsm sort
+	If JJ8 Return  ! can't if to browser
+	
+	J5$ = "Email each sales rep their portion of this report?"
+	
+	CHAN = Findchannel() 
+	URec=GetUIDRec(e$,IntCo,Userid$)
+	uc_ch = openfile(-9988, intCo) \ if uc_ch = -1 error 42
+	Read #uc_ch,uRec,212;EMAILFROM$; ! get the from
+	Close #uc_ch
+	Call "mxvaleaddr.dl4",EMAILFROM$,X1,e$
+	If Not(X1) Or EMAILFROM$ = ""
+		! no email from in user's id - abort emailing
+		emailrep = 0
+		emch = -1
+		return
+	End If 
+	EMAILREP = 1 ! only if passes all tests - we can email
+Return 
+OPENEMAILCHAN: Rem ! if emch<>-1 a report is in process - close & send it - open for next slsm
+SLSEMAIL$=LCase$(RTrim$(SL_S2$))
+	If EMCH <> -1
+		Close #EMCH
+		EMCH = -1
+	End If 
+	If SORT <> 2 Or Not(EMAILREP) Return 
+	Call "mxvaleaddr.dl4",SLSEMAIL$,X1,e$
+	If Not(X1) Or SLSEMAIL$ = "" Return 
+	SYS$ = "$/usr/ub/sys/email.report -f ''",EMAILFROM$,"''"," -t ''",SLSEMAIL$,"''"," -s ''","Order Margin (464)","''"
+	SYS$ = SYS$," -c ''","Attached is your Order Margin Exceptions.","''"
+	CHAN = Findchannel() 
+	EMCH = CHAN
+	Open #EMCH,SYS$
+Return 
+
+
+OutEnd: ! EXIT
+	call setoutput(e$,rstr$,1,"Report Complete")
+	call ERPCronSuccess()
+end
+
+ERR_SEARCH: Rem
+ENUM = E;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "
+E$ = msg$
+Call programdump("dump/iv222bse!","")
+Goto ERR_MSG ! Error 10000
+Return ! End
+ERR_MSG: ! send message
+ReturnStatus = 1 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)
+Message$ = E$
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call AddToStr(e$,rstr$,WebStr$)
+call SetOutPut(e$,rstr$)
+End 
+Rem {begin rtn.error.s}
+Err_Trap: ! pm
+!
+include "src/callmainerrnet.inc"
+End 
+!
+Rem {end rtn.error.s}

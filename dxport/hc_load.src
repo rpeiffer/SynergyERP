@@ -1,0 +1,688 @@
+! --- hc_load.dl4
+!
+! Hypothetical Commission Load
+!
+!
+! loadsave -w -n 100,10 -o prog/dxport/hc_load.dl4 src/hc_load.src
+!
+!
+! This program will roll through a range of invoice history and calculate a
+! new commission for all the lines involved.  This is for purposes of the
+! hypothetical commission report which will then compare the original
+! to the new
+!
+! KNOWN SHORTCOMINGS
+!
+! List Price Commission - will give error message - no hypothetical list price commission grids
+! EVAP Orders - based on history to begin with, probably won't work right
+! Customer Based Bonus rates for new orders - based on state of customer file which the
+!                commission routine updates - can't do this with hypothetical commission
+! Release from back orders (not the original order) use the rate stored with the order, so
+! these (per specification) are skipped
+!
+
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+Declare Intrinsic Function findchannel
+Declare Intrinsic Sub DateToJulian,FindF
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,GetUIDRec
+
+! internal subroutines
+Declare Sub OpenFilesAndGetControlInfo,OpenFilesAndGetControlInfo
+Declare Sub GetParameters,BuildHypotheticalHistory,ClearHypotheticalHistory
+Declare Sub RecalcCommission
+Declare Sub ClearHypotheticalCommission,CreateHypotheticalCommissions
+Declare Sub ReadHistoryHeader,ReadHypoHistoryHeader,ReadHistoryTotals
+Declare Sub CreateCommissionRecord,ReadHypoCommRec,WriteHypoCommRec
+Declare Sub CreateAdjustments,AdjustCommission
+Declare Sub ReadCommAuditRec,WriteHypoCommAuditRec,TransferCommissionRec
+Declare Sub ReadCommissionRec,CopyAdjustments
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+
+try
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[300],tmp2$[300],b$[200],List$[50,200],3%
+b$=" ",b$
+dim message$[150],webstr$[200],custom_customer$[30]
+
+dim ahypo$[1],invh_key$[100],p9$[50],comm_key$[100],comma_key$[100]
+dim lineIn$[100]
+dim 1%,comm_ch[20],ARMONTH
+dim 2%,h0[12]
+dim 3%,invh_rec,invhh_rec,invl_rec,invlh_rec,s9[9],cfin[8]
+
+! invoice header variables needed
+dim hmat$[2],smat$[2]
+dim 1%,SplitFlag
+dim 2%,SLSM[9],CSPLT[4],CommBase[4],h5[16],h0[12]
+dim 3%,SCOM[4],SMER[4],SCST[4],commsrvchg,oref[5]
+
+! invoice total variables needed
+dim 3%,t2[25],tot[4]
+
+! commission record variables needed
+dim 1%,s4[1],SplitType
+dim 2%,s1[3],s3[1]
+dim 3%,s2[1],s6[1],cs7[2],cs9[3],ocs1[3]
+
+! commission audit record variables needed
+Dim 1%,AS1[3],AS4[1],USER
+Dim 2%,AS2[1]
+Dim 3%,AS3[5],AS_$[60],SOURCE$[10],AS5[6],AORIGCOMM
+
+dim 3%
+
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+call OpenFilesAndGetControlInfo()
+call GetParameters()
+call ClearHypotheticalHistory()
+call ClearHypotheticalCommission()
+call BuildHypotheticalHistory()
+call CreateHypotheticalCommissions()
+Call setoutput(e$,rstr$,1,"Hypothetical Commission Records Created!") !1 flag puts 0 status section in, puts </page> in
+
+else ! main try
+	include "src/callmainerrnet.inc"
+end try
+
+! ***********************************************************************
+! Nobody but us subroutines down here
+! ***********************************************************************
+
+Sub OpenFilesAndGetControlInfo()
+Try
+	comm_ch[1] = CTLC
+	! control file open - load needed flags and configuration
+	! information
+	mat read #ctlc,115,60;custom_customer$;
+	Read #ctlc,0,120;ARMONTH;
+	Mat Read #ctlc,19,50;P9$;
+	let custom_customer$=UCase$(trim$(custom_customer$))
+	usrctl_ch = openfile(-9988, intco)
+	USER=GetUIDRec(e$,IntCo,Userid$)
+	read #usrctl_ch,user,338;ahypo$;
+	close #usrctl_ch
+	if ahypo$<>"Y"
+		e$ = "You do not have access to hypothetical commissions!"
+		error 10000
+	end if
+	ListPriceComm = 0
+	if custom_customer$ = "CSS"
+		ListPriceComm = 1
+	end if
+	if ListPriceComm
+		e$ = "List price commission is not supported for hypothetical comissions!"
+		error 10000
+	end if
+	comm_ch[3] = openfile(-1792, intCO) \ if comm_ch[3] = -1 error 42
+	comm_ch[4] = openfile(-2288, intCO) \ if comm_ch[4] = -1 error 42
+	comm_ch[5] = openfile(-1808, intCO) \ if comm_ch[5] = -1 error 42
+	comm_ch[6] = openfile(-1744, intCO) \ if comm_ch[6] = -1 error 42
+	! invh
+	comm_ch[8] = openfile(-1136, intCO) \ if comm_ch[8] = -1 error 42
+	! invt
+	comm_ch[9] = openfile(-1168, intCO) \ if comm_ch[9] = -1 error 42
+	! invl
+	comm_ch[10] = openfile(-1184, intCO) \ if comm_ch[10] = -1 error 42
+	comm_ch[13] = openfile(-1824, intCO) \ if comm_ch[13] = -1 error 42
+	comm_ch[14] = comm_ch[8]
+	comm_ch[15] = comm_ch[10]
+	! hypothetical commission grid
+	comm_ch[16] = openfile(-9906, intCO) \ if comm_ch[16] = -1 error 42
+	! hypothetical invoice header file
+	comm_ch[17] = openfile(9908, intCO) \ if comm_ch[17] = -1 error 42
+	! hypothetical invoice line file
+	comm_ch[18] = openfile(9907, intCO) \ if comm_ch[18] = -1 error 42
+	invhk_ch = openfile(-9994, intCO) \ if invhk_ch = -1 error 42
+	commhypo_ch = openfile(9905, intCO) \ if commhypo_ch = -1 error 42
+	commahypo_ch = openfile(9904, intCO) \ if commahypo_ch = -1 error 42
+	commopen_ch = openfile(-2240, intCO) \ if commopen_ch = -1 error 42
+	commhist_ch = openfile(-9932, intCO) \ if commhist_ch = -1 error 42
+	comma_ch = openfile(-9931, intCO) \ if comma_ch = -1 error 42
+	commahist_ch = openfile(-9930, intCO) \ if comma_ch = -1 error 42
+	! used if hypothetical driven off of last commission run
+	tmp$ = "6/COMMPAIDHYPO"+str$(intCO)
+	call findf(tmp$, e)
+	if not(e)
+		ch_commlog = -1
+	else
+		ch_commlog = findchannel()
+		ropen #ch_commlog,tmp$
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! OpenFilesAndGetControlInfo
+
+Sub GetParameters()
+Try
+	useLastCommRun = 0
+	call dxget("USELASTCOMMRUN",tmp$)
+	if tmp$ = "Y"
+		let useLastCommRun = 1
+		if ch_commlog = -1
+			e$ = "Could not locate data from last commission run!"
+			error 10000
+		end if
+	else
+		call dxget("BEGDATE", tmp$) \ begDate = tmp$
+		tmp$ = begDate using "&&&&&&" \ begDate = tmp$[5,6],tmp$[1,4]
+		tmp$ = begDate using "&&&&&&"
+		call DateToJulian(1,tmp$,tmp$,e) \ if e error 11000
+		begDateJul = tmp$[1,5]
+		call dxget("ENDDATE",tmp$) \ endDate = tmp$
+		tmp$ = endDate using "&&&&&&" \ endDate = tmp$[5,6],tmp$[1,4]
+		tmp$ = endDate using "&&&&&&"
+		call DateToJulian(1,tmp$,tmp$,e) \ if e error 11000
+		endDateJul = tmp$[1,5]
+		call dxget("BEGREP", tmp$) \ begRep = tmp$
+		if tmp$ = "" endRep = 1
+		call dxget("ENDREP", tmp$) \ endRep = tmp$
+		if tmp$ = "" endRep = 999
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! GetParameters
+
+Sub BuildHypotheticalHistory()
+Try
+	if not(useLastCommRun)
+		invh_key$ = " ",invh_key$
+		let invh_key$[1,6] = begDateJul using "######"
+		do
+			search #invhk_ch,3,2;invh_key$,invh_rec,e
+			if e>2 error 11000
+			if e exit do
+			if val(invh_key$[1,6]) > endDateJul exit do
+			call ReadHistoryHeader()
+			! check to see if this is a backorder release - if so
+			! skip it is it will not recalc a new hypothetical rate
+			If H5[7] <> 24 And H5[7] <> 4 And H5[7]<>19 And (OREF[2] Or H0[5]) goto SkipBORelease:
+			if h0[11] >= begRep and h0[11] <= endRep
+				call RecalcCommission()
+			end if
+			SkipBORelease: ! yup, like the label says
+		loop
+	else ! using last commission run
+		do
+			! 1-3 = salesrep
+			! 4-13 = invoice / cm #
+			! 14-14 = type
+			! 15-16 = blank
+			READ #ch_commlog;lineIn$
+			if lineIn$="" exit do
+			LET lineIn$=lineIn$ TO "\15\"
+			! verify commission record exists, if not
+			! this is the end (purge possibly run)
+			search #commopen_ch,2,1;lineIn$,r_comm,e \ if e>1 error 11000
+			if e
+				e$ = "Couldn't locate all commission records from last run - purge run?"
+				error 10000
+			end if
+			commType = lineIn$[14,14]
+			! problem flag set to 1 at the end
+			! means that either we couldn't calculate
+			! a hypothetical commission (backorder release, etc.)
+			! or this is not a commission record that has invoice
+			! credit memo history
+			problemFlag = 0
+			if commType = 1 or commType = 6
+				invh_key$ = " ",invh_key$
+				invh_key$[1,2] = "30"
+				if commType = 6 invh_key$[1,2] = "31"
+				invh_key$[3,12] = lineIn$[4,13]
+				search #comm_ch[8],2,1;invh_key$,invh_rec,e
+				if e error 11000
+			else
+				problemFlag = 1 ! no inv/cm history
+			end if
+			if not(problemFlag)
+				call ReadHistoryHeader()
+				If H5[7] <> 24 And H5[7] <> 4 And H5[7]<>19
+					! for problem records, skip
+					! and with no hypothetical history for the
+					! record, this will be an indicator we couldn't
+					! calc a new commission
+					if commType = 1 and (OREF[2] Or H0[5]) problemFlag = 1
+					if commType = 6 and (H0[5]) problemFlag = 1
+				end if
+				if not(problemFlag)
+					! actual hypothetical commission records
+					! will be created later
+					call RecalcCommission()
+				end if
+			end if
+			if problemFlag ! not in inv/cm history or couldn't calc
+				! just transfer the commission record to
+				! hypothetical "as is"
+				call TransferCommissionRec()
+			end if
+		loop
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! BuildHypotheticalHistory
+
+sub ClearHypotheticalHistory()
+Try
+	tmp$ = " ",tmp$
+	do
+		! loop through hypo header
+		search #comm_ch[17],3,1;tmp$,r,e \ if e>2 error 11000
+		if e exit do
+		tmp2$ = " ",tmp2$
+		let tmp2$[1,10] = tmp$[3,12]
+		do
+			! loop through lines
+			search #comm_ch[18],3,1;tmp2$,r2,e \ if e>2 error 11000
+			if e exit do
+			if tmp2$[1,10] <> tmp$[3,12] exit do
+			! delete
+			search #comm_ch[18],5,1;tmp2$,r2,e \ if e error 11000
+			e=3 \ search #comm_ch[18],1,0;tmp2$,r2,e \ if e error 11000
+		loop
+		! delete
+		search #comm_ch[17],5,1;tmp$,r,e \ if e error 11000
+		e=3 \ search #comm_ch[17],1,0;tmp$,r,e \ if e error 11000
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ClearHypotheticalHistory
+
+Sub RecalcCommission()
+Try
+	clear s9[]
+	clear r5 ! doesn't need to be set in new commission routine
+	clear cfin[] ! will be read in in hypothical routine
+	H1 = invh_rec
+	if h0[0] = 31 let s9[4] = 241 ! credit memo
+	! let's find the salesrep
+	tmp$ = h0[11] using "###"
+	search #comm_ch[13],2,1;tmp$,v1,e \ if e>1 error 11000
+	if e exit sub ! can't find rep
+	!
+	! call "mxslscom5h",s9[],comm_ch[],r5,h1,v1,cfin[],1
+	call "mxslscom5",s9[],comm_ch[],r5,h1,v1,cfin[],1
+	
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! RecalcCommission
+
+sub ClearHypotheticalCommission()
+Try
+	tmp$ = " ",tmp$
+	do
+		! loop through hypo commission
+		search #commhypo_ch,3,1;tmp$,r,e \ if e>2 error 11000
+		if e exit do
+		! delete
+		search #commhypo_ch,5,1;tmp$,r,e \ if e error 11000
+		e=3 \ search #commhypo_ch,1,0;tmp$,r,e \ if e error 11000
+	loop
+	tmp$ = " ",tmp$
+	do
+		! loop through hypo commission audit
+		search #commahypo_ch,3,1;tmp$,r,e \ if e>2 error 11000
+		if e exit do
+		! delete
+		search #commahypo_ch,5,1;tmp$,r,e \ if e error 11000
+		e=3 \ search #commahypo_ch,1,0;tmp$,r,e \ if e error 11000
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ClearHypotheticalCommission
+
+Sub CreateHypotheticalCommissions()
+Try
+	! loop through newly created history
+	invh_key$ = " ",invh_key$
+	do
+		search #comm_ch[17],3,1;invh_key$,invhh_rec,e \ if e>2 error 11000
+		if e exit do
+		search #comm_ch[8],2,1;invh_key$,invh_rec,e \ if e error 11000
+		call ReadHistoryHeader()
+		call ReadHypoHistoryHeader()
+		call ReadHistoryTotals()
+		call CreateCommissionRecord()
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CreateHypotheticalCommissions
+
+
+Sub ReadHistoryHeader()
+Try
+	Mat Read #comm_ch[8],invh_rec,0;H0;
+	Mat Read #comm_ch[8],invh_rec,104;H5;
+	Mat Read #comm_ch[8],invh_rec,512;OREF;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadHistoryHeader
+
+Sub ReadHypoHistoryHeader()
+Try
+	Mat Read #comm_ch[17],invhh_rec,278;SLSM;
+	Mat Read #comm_ch[17],invhh_rec,318;SCOM;
+	Mat Read #comm_ch[17],invhh_rec,348;SMER;
+	Mat Read #comm_ch[17],invhh_rec,378;SCST;
+	Mat Read #comm_ch[17],invhh_rec,444;HMAT$;
+	Mat Read #comm_ch[17],invhh_rec,548;CSPLT;
+	Mat Read #comm_ch[17],invhh_rec,568;commsrvchg;
+	Mat Read #comm_ch[17],invhh_rec,598;SplitFlag;
+	Mat Read #comm_ch[17],invhh_rec,600;CommBase;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadHypoHistoryHeader
+
+Sub ReadHistoryTotals()
+Try
+	Mat Read #comm_ch[9],OREF[5],8;T2;
+	Mat Read #comm_ch[9],OREF[5],328;TOT;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadHistoryTotals
+
+Sub CreateCommissionRecord()
+try
+	If H5[7] = 6 exit sub ! order type 6
+	IF H5[7]=36 OR H5[7]=37 exit sub ! "EVAP - No Update
+	REFNO=OREF[1]
+	if h0[0] = 31 REFNO=h0[7]
+	For X5 = 0 To 4 ! run through for mult-slsm splits
+		IF SplitFlag=0 AND X5>0 exit sub ! done if no splits
+		If SLSM[X5] = 0 exit sub ! no rep # - no commission
+		clear s1[]
+		clear s2[]
+		clear s3[]
+		clear s4[]
+		clear  s6[]
+		clear cs7[]
+		clear cs9[]
+		clear ocs1[]
+		clear commsrvchg
+		comm_key$ = " ",comm_key$
+		comm_key$[1,3] = SLSM[X5] Using "###"
+		comm_key$[4,13] = REFNO Using "##########"
+		comm_key$[14,14] = "1"
+		if h0[0] = 31 comm_key$[14,14] = "6"
+		E = 2 \ Search #commhypo_ch,1,0;comm_key$,commhypo_rec,E \ If E error 11000
+		Search #commhypo_ch,4,1;comm_key$,commhypo_rec,E \ If E error 11000
+		SMAT$ = " ",SMAT$
+		CS7[1] = REFNO;cs7[2]=csplt[x5]
+		if h0[0] = 31 cs7[0] = OREF[1]
+		S1[0] = SLSM[X5];S1[1] = H0[7];S1[2] = SLSM[X5 + 5];S1[3] = H0[8]
+		If SplitFlag=1 ! " was P61$[72,72]="Y" ! "commission Split
+			If X5>0 Let S1[2]=Slsm[5] ! "comm % is only on main slsm
+		Else ! "not splitting one comm $
+			if SplitFlag=0 Let CSPLT[x5]=100 ! "split always 100 to the guy
+		Endif
+		S2[0] = 0;S2[1] = 0
+		S6[0] = 0;S6[1] = 0
+		CS7 = 0 \ if h0[0] = 31 cs7[0] = OREF[1]
+
+		if SplitFlag <> 2
+			LET cs7[2]=csplt[x5] ! commission split %
+			LET SplitType = 0
+		else
+			let cs7[2] = SLSM[x5+5]
+			Let SplitType = csplt[x5]
+		end if
+		If SplitFlag = -1 Goto L_2762
+		! "on splits - record ttl inv$ in each slsm
+		S2[0] = S2[0] + T2[1];S6[0] = S6[0] + T2[17] ! tot sales / cost $
+		If P9$[35,35] = "Y" Let S2[0] = S2[0] + T2[5] ! inc freight
+		If P9$[36,36] = "Y" Let S2[0] = S2[0] - T2[3] ! inc ord discount
+		S6[1] = S6[1] + T2[18] ! tot average cost
+		If P9$[37,37] = "Y" Let S6[0] = S6[0] + T2[20] ! inc freight cost
+		S6[0] = S6[0] + TOT[2] ! add misc charge cost for profit
+		If P9$[38,38] = "Y" Let S2[0] = S2[0] + T2[6] ! inc other charges
+		S2[0] = S2[0] + TOT[1] ! add misc charge for profit
+		L_2762: SMAT$[1,2] = HMAT$[1,2]
+		! for category splits - sales and costs are only the
+		! amounts specifically for that rep
+		if SplitFlag = -1
+			Let S2[0] = S2[0] + SMER[X5]
+			Let S6[0] = S6[0] + SCST[X5]
+			Let S6[1] = 0
+		end if
+		S2[1] = S2[1] + SCOM[X5] ! commisson rate
+		If H5[7] = 10 Let S1[2] = 0 \ S2[1] = 0 \ S2[0] = 0
+		S3[0] = H5[7]
+		S3[1] = H0[1]
+		S4[0] = ARMONTH
+		ocs1[0] = s2[1]
+		ocs1[1] = s1[2]
+		ocs1[2] = s2[0]
+		ocs1[3] = s6[0]
+		call WriteHypoCommRec()
+		call CreateAdjustments()
+	Next X5
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CreateCommissionRecord
+
+sub TransferCommissionRec()
+try
+	call ReadCommissionRec()
+	comm_key$ = " ",comm_key$
+	comm_key$[1,16] = lineIn$[1,16]
+	E = 2 \ Search #commhypo_ch,1,0;comm_key$,commhypo_rec,E \ If E error 11000
+	Search #commhypo_ch,4,1;comm_key$,commhypo_rec,E \ If E error 11000
+	call WriteHypoCommRec()
+	call CopyAdjustments()
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! TransferCommissionRec
+
+sub CopyAdjustments()
+try
+	! found either in open or in history
+	! search the appropriate file for adjustments
+	! and do them....
+	commarec_ch = comma_ch
+	comma_key$ = " ",comma_key$
+	comma_key$[1,3] = S1[0] Using "###"
+	comma_key$[4,13] = CS7[1] Using "##########"
+	do
+		search #commarec_ch,3,1;comma_key$,comma_rec,e \ if e>2 error 11000
+		if e exit do
+		if val(comma_key$[1,3]) <> s1[0] or val(comma_key$[4,13]) <> cs7[1] exit do
+		if comma_key$[26,26] <> comm_key$[14,14] goto skipAuditRec: ! different type
+		! got one
+		call ReadCommAuditRec()
+		call WriteHypoCommAuditRec()
+		skipAuditRec: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CopyAdjustments
+
+sub ReadCommissionRec()
+try
+	Mat Read #commopen_ch,r_comm,0;S1
+	Mat Read #commopen_ch,r_comm,16;S2
+	Mat Read #commopen_ch,r_comm,28;S3
+	Mat Read #commopen_ch,r_comm,36;S4
+	Mat Read #commopen_ch,r_comm,40;S6
+	Mat Read #commopen_ch,r_comm,52;SMAT$
+	Mat Read #commopen_ch,r_comm,54;CS7
+	Mat Read #commopen_ch,r_comm,72;CS9
+	mat Read #commopen_ch,r_comm,112;ocs1
+	MAT Read #commopen_ch,r_comm,100;COMMSRVCHG
+	mat Read #commopen_ch,r_comm,136;SplitFlag
+	mat Read #commopen_ch,r_comm,138;SplitType
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadCommissionRec
+
+sub ReadHypoCommRec()
+try
+	Mat Read #commhypo_ch,commhypo_rec,0;S1
+	Mat Read #commhypo_ch,commhypo_rec,16;S2
+	Mat Read #commhypo_ch,commhypo_rec,28;S3
+	Mat Read #commhypo_ch,commhypo_rec,36;S4
+	Mat Read #commhypo_ch,commhypo_rec,40;S6
+	Mat Read #commhypo_ch,commhypo_rec,52;SMAT$
+	Mat Read #commhypo_ch,commhypo_rec,54;CS7
+	Mat Read #commhypo_ch,commhypo_rec,72;CS9
+	mat Read #commhypo_ch,commhypo_rec,112;ocs1
+	MAT Read #commhypo_ch,commhypo_rec,100;COMMSRVCHG
+	mat Read #commhypo_ch,commhypo_rec,136;SplitFlag
+	mat Read #commhypo_ch,commhypo_rec,138;SplitType
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadHypoCommRec
+
+sub WriteHypoCommRec()
+try
+	Mat Write #commhypo_ch,commhypo_rec,0;S1
+	Mat Write #commhypo_ch,commhypo_rec,16;S2
+	Mat Write #commhypo_ch,commhypo_rec,28;S3
+	Mat Write #commhypo_ch,commhypo_rec,36;S4
+	Mat Write #commhypo_ch,commhypo_rec,40;S6
+	Mat Write #commhypo_ch,commhypo_rec,52;SMAT$
+	Mat Write #commhypo_ch,commhypo_rec,54;CS7
+	Mat Write #commhypo_ch,commhypo_rec,72;CS9
+	mat write #commhypo_ch,commhypo_rec,112;ocs1
+	MAT WRITE #commhypo_ch,commhypo_rec,100;COMMSRVCHG
+	mat write #commhypo_ch,commhypo_rec,136;SplitFlag
+	mat write #commhypo_ch,commhypo_rec,138;SplitType;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! WriteHypoCommRec
+
+sub CreateAdjustments()
+try
+	! locate the original transaction if possible
+	commrec_ch = commopen_ch
+	commarec_ch = comma_ch
+	search #commopen_ch,2,1;comm_key$,comm_rec,e \ if e>1 error 11000
+	if e ! not in open commission file
+		commrec_ch = commhist_ch
+		commarec_ch = commahist_ch
+		search #commhist_ch,2,1;comm_key$,comm_rec,e \ if e>1 error 11000
+		if e exit sub ! can't find it, I guess no adjustments....
+	end if
+	! found either in open or in history
+	! search the appropriate file for adjustments
+	! and do them....
+	comma_key$ = " ",comma_key$
+	comma_key$[1,3] = S1[0] Using "###"
+	comma_key$[4,13] = CS7[1] Using "##########"
+	do
+		search #commarec_ch,3,1;comma_key$,comma_rec,e \ if e>2 error 11000
+		if e exit do
+		if val(comma_key$[1,3]) <> s1[0] or val(comma_key$[4,13]) <> cs7[1] exit do
+		if comma_key$[26,26] = comma_key$[14,14] ! make sure type is correct!
+			! got one
+			call AdjustCommission()
+		end if
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CreateAdjustments
+
+sub AdjustCommission()
+try
+	call ReadCommAuditRec()
+	call ReadHypoCommRec()
+	! do the bulk of the processing here
+	commAdjust = AS3[0] - AS3[1] ! before - after
+	resaleAdjust = AS5[2] - AS5[3] ! before - after
+	costAdjust = AS5[4] - AS5[5] ! before - after
+	if as4[0] = 4 or as4[0] = 8 or as4[0] = 7 ! cash receipts / credit card adjustment / high burden
+		! these adjustment are a reduction
+		! of gross profit multiplied by the original
+		! rate - so do the same here
+		!
+		! commission adjustment = old comm amount less
+		! new calculated commission amount based on current
+		! rate and adjusted gross profit
+		newGP = (s2[0] - resaleAdjust) - (s6[0] - costAdjust)
+		! comm adjustment = old commission less new commission
+		if as4[0] <> 7 ! not high burden
+			commAdjust = s2[1] - (newGP * (s1[2] / 100))
+		else
+			SplitPercent = 1 ! defualt to this dude gets the whole thing
+			if SplitFlag = 1 or SplitFlag = 3 ! commission or GP$ split
+				SplitPercent = cs7[2] / 100
+			end if
+			commAdjust = s2[1] - ((newGP * (s1[2] / 100)) * SplitPercent)
+		end if
+	end if
+	as3[0] = s2[1] ! commission before adjustment
+	as3[1] = s2[1] - commAdjust ! new after amount
+	s2[1] = as3[1]
+	as5[2] = s2[0] ! resale before adjustment
+	as5[3] = s2[0] - resaleAdjust ! new after amount
+	s2[0] = as5[3]
+	as5[4] = s6[0] ! cost before adjustment
+	as5[5] = s6[0] - costAdjust ! new after amount
+	s6[0] = as5[5]
+	as5[0] = s1[2] ! old commission rate
+	as5[1] = s1[2] ! new commission rate
+	call WriteHypoCommRec()
+	call WriteHypoCommAuditRec()
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! AdjustCommission
+
+Sub ReadCommAuditRec()
+try
+	Mat Read #commarec_ch,comma_rec;AS1
+	Mat Read #commarec_ch,comma_rec,8;AS2
+	Mat Read #commarec_ch,comma_rec,16;AS3
+	Mat Read #commarec_ch,comma_rec,52;SOURCE$
+	Mat Read #commarec_ch,comma_rec,62;AS_$
+	Read #commarec_ch,comma_rec,122;AORIGCOMM
+	Mat Read #commarec_ch,comma_rec,128;AS4
+	Mat Read #commarec_ch,comma_rec,132;AS5;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadCommAuditRec
+
+Sub WriteHypoCommAuditRec()
+try
+	! assume it's not there as we've cleared the file first
+	E = 2 \ Search #commahypo_ch,1,0;comma_key$,commahypo_rec,E \ If E error 11000
+	Search #commahypo_ch,4,1;comma_key$,commahypo_rec,E \ If E error 11000
+	Mat Write #commahypo_ch,commahypo_rec;AS1
+	Mat Write #commahypo_ch,commahypo_rec,8;AS2
+	Mat Write #commahypo_ch,commahypo_rec,16;AS3
+	Mat Write #commahypo_ch,commahypo_rec,52;SOURCE$
+	Mat Write #commahypo_ch,commahypo_rec,62;AS_$
+	Write #commahypo_ch,commahypo_rec,122;AORIGCOMM
+	Mat Write #commahypo_ch,commahypo_rec,128;AS4
+	Mat Write #commahypo_ch,commahypo_rec,132;AS5;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadCommAuditRec
+
+

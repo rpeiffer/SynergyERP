@@ -1,0 +1,409 @@
+!Program Name: ubslpdet
+! loadsave -w -n 100,10 -o prog/dxport/ubslpdet.dl4 src/ubslpdet.src
+!
+!Last Updated:                                     
+!rce 10/10/05  salesgroup
+!rce 02/22/07 R9 changes
+
+!
+!
+
+Declare External Sub LPDet
+Declare Sub updatelog,errTrap
+
+! Include "src/invars.inc"
+Include "src/lpRec.inc"
+Dim lps.[600] as lpInfo                                                       
+Dim 2%,ii,ss                                                            
+Call LPDet(1,35,1,"files/6/dx.log","1041","109.3002",lps.[],ii,ss,600, arrSales[])
+stop                                                                    
+
+
+External Sub LPDet(intCo,intSalesMan,debug,dlog$,cust$,prod$,lps.[] as lpInfo,ii, ss,iLimit, arrSales[],keynext$,...)
+!optionally pass channel #'s to avoid open/close
+Try enter chans[] else chans=-1
+Try
+
+Declare Intrinsic Function FindChannel,Trim$
+Declare Intrinsic Sub JulianToDate,DateToJulian
+Declare External Function FDate$,PDate$,BaseName$,FMTPhone$,Xunit$,OpenFile  
+Declare External Function XAmount,WareHouse,ReplaceChar$                     
+
+External Lib "ubsfunc.dl4","ubsprconv.dl4"                                   
+
+! Include "src/ubsorder.inc"
+Include "src/ubslastprice.inc"
+Include "src/ubsprod.inc"
+Include "src/ubscustomer.inc"
+
+DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01) 
+
+Dim LPK$[50],PRK$[20],CMK$[12],CUK$[12],SMK$[20]
+Dim P9$[50],P60$[50],P61$[256]
+
+Dim PR. As Prod
+Dim CM. As CommCode
+Dim CU. As Customer
+Dim LP. As Lastprice 
+
+Dim 1%,debugDetail
+! Variables for Channel#'s
+Dim 2%,LPC,PRC,CMC,CUC,SMC,CTLC,CCC
+! Variables for Search Record#
+Dim 2%,LPR,PRR,CMR,CUR,SMR
+! Variables for Search Error
+Dim 2%,LPE,PRE,CME,CUE,SME
+
+Dim Sales$[35], Temp$[100], DT1$[10],DT2$[10]
+Dim SLS$[3],CO$[2]
+Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5]
+Dim Msg$[256],pgmName$[20]
+Dim PriceTypeDesc$[50,50]
+
+Dim 1%,factor
+Dim 2%,JToday 
+Dim 2%,t2,LastInvDate, X1,X2
+Dim 2%,Q0[1] 
+Dim 2%,jsdate,jedate,jinvdate
+Dim 3%,gp,gpp,sprice
+
+debugDetail=1
+pgmName$="ubslpdet"
+msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+ii=0
+SLS$=intSalesMan Using "###" ! Passed Salesman
+CO$=Str$(intCo)              ! Company
+
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+If debugDetail
+   msg$="doing...cust-"+CUST$ \ Call updatelog(debug) 
+   msg$="doing...prod-"+PROD$ \ Call updatelog(debug) 
+Endif
+
+if chans=-1
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42    !cntrl
+LPC= OpenFile(-1376,intCo)  \ If LPC=-1  Error 42    !lastprice
+PRC= OpenFile(-1792,intCo)  \ If PRC=-1  Error 42    !product
+CMC= OpenFile(-2288,intCo)  \ If CMC=-1  Error 42    !commcode
+CUC= OpenFile(-1808,intCo)  \ If CUC=-1  Error 42    !cust
+SMC= OpenFile(-1824,intCo)  \ If SMC=-1  Error 42    !salesman 
+CCC= OpenFile(-1728,intCo)  \ If CCC=-1  Error 42    !ccodes
+else 
+ctlc=chans[0]\lpc=chans[1]\prc=chans[2]\cmc=chans[3]\cuc=chans[4]
+smc=chans[5]\ccc=chans[6]
+end if
+
+
+Mat Read #CTLC,19,50;P9$; 
+Mat Read #CTLC,60,50;P60$;
+Mat Read #CTLC,115,40;Q0; 
+
+If not(Q0[1]) let Q0[1]=2                                                 
+Let Dec$="#",Dec$;Qmask$="---,---,--#"                                    
+If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask        
+If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask      
+Let Emask$="----,---,---,---.##"                         !ext. price mask
+
+
+
+Let PriceTypeDesc$[1]="MATRIX PRICE"
+Let PriceTypeDesc$[2]="CUSTOMER/SINGLE PRODUCT CONTRACT"
+Let PriceTypeDesc$[3]="SINGLE PRODUCT PROMOTION"
+Let PriceTypeDesc$[4]="CUSTOMER/COMMODITY CONTRACT"
+Let PriceTypeDesc$[5]="TEN BRACKET PRICE" 
+Let PriceTypeDesc$[6]="CUSTOMER/ALL PRODUCT CONTRACT"
+Let PriceTypeDesc$[7]="COMMODITY PROMOTION"
+Let PriceTypeDesc$[8]="ALL PRODUCT PROMOTION"
+Let PriceTypeDesc$[9]="QUANTITY BREAK DISCOUNT"
+Let PriceTypeDesc$[10]="MANUAL PERCENT DISCOUNT"
+Let PriceTypeDesc$[11]="SIZE (U/M) PROMOTION"
+Let PriceTypeDesc$[12]="CUSTOMER/SIZE (U/M) CONTRACT"
+Let PriceTypeDesc$[13]="FIXED PRICE CONTRACT"
+Let PriceTypeDesc$[14]="MANUAL GTM % PRICE"
+!
+Let PriceTypeDesc$[33]="MANUAL PRICE BRACKET 9"
+Let PriceTypeDesc$[34]="MANUAL PRICE BRACKET 8"
+Let PriceTypeDesc$[35]="MANUAL PRICE BRACKET 7"
+Let PriceTypeDesc$[36]="MANUAL PRICE BRACKET 6"
+Let PriceTypeDesc$[37]="MANUAL PRICE BRACKET 5"
+Let PriceTypeDesc$[38]="MANUAL PRICE BRACKET 4"
+Let PriceTypeDesc$[39]="MANUAL PRICE BRACKET 3"
+Let PriceTypeDesc$[40]="MANUAL PRICE BRACKET 2"
+Let PriceTypeDesc$[41]="MANUAL PRICE BRACKET 1"
+Let PriceTypeDesc$[42]="MANUAL PRICE BRACKET 0"
+Let PriceTypeDesc$[43]="MANUAL PRICE ENTRY"
+Let PriceTypeDesc$[44]="MANUAL LIST PRICE 6"
+Let PriceTypeDesc$[45]="MANUAL LIST PRICE 5"
+Let PriceTypeDesc$[46]="MANUAL LIST PRICE 4"
+Let PriceTypeDesc$[47]="MANUAL LIST PRICE 3"
+Let PriceTypeDesc$[48]="MANUAL LIST PRICE 2"
+Let PriceTypeDesc$[49]="MANUAL LIST PRICE 1"
+
+dept=lps.[0].dept  ! passed from sfdash
+
+Let ss=10000
+If len(cust$)<=1 goto Outend:
+If len(prod$)<=1 let list=1 else let list=0
+
+Let LPK$=" ",LPK$
+Let LPK$[1,6]=val(cust$) using "######"
+Let LPK$[7,10]=DEPT using "####"
+Let LPK$[11,30]=prod$
+If keynext$ Let LPK$ = keynext$
+Main: !==============================================================
+Search #LPC,3,1;LPK$,LPR,LPE
+If Len(cust$)>1 and Trim$(LPK$[1,6])<>Trim$(cust$) let LPE=22
+If Len(prod$)>1 and Trim$(LPK$[11,30])<>Trim$(prod$) let LPE=22
+If LPE goto OutEnd:  
+
+If debugDetail
+   msg$="doing...Main: LPK$="+LPK$+" LPR="+LPR \ Call updatelog(debug)
+   If LPE msg$="error...Search error "+LPE  \ Call updatelog(debug) 
+Endif
+
+Read Record #LPC,LPR; LP.;
+
+
+!=========================Get Customer Info.
+Let ss=10001
+Let CUK$=LP.LPC1[0] USING "######"
+Let Temp$=" ",Temp$;Temp$=CUK$
+
+Search #CUC,2,1;CUK$,CUR,CUE
+If CUK$[1,6]<>Temp$ Let CUE=22
+
+If CUE=0 Then
+   Read Record #CUC,CUR;CU.;
+Else
+   Clear CU.
+   CU.A1$[31,60]="-NOF-"
+End If
+
+goto slspassed ! disable check dur to shipto price list (check if we really need here anyway)
+If intSalesMan=999 goto SLSPassed ! all reps
+If arrSales
+	for counter=0 to 999
+		if arrSales[counter]=CU.C1[2] goto SLSPassed:
+		if not(arrSales[counter]) counter=999 ! skip to end
+	next counter
+Endif
+If intSalesMan=CU.C1[2] goto SLSPassed:
+
+goto outend:  !Security.
+
+SLSPassed: !
+!==========================Get SalesMan                                         
+SMK$=CU.C1[2] Using "### "                                                     
+Temp$=SMK$                                                                      
+Search #SMC,2,1;SMK$,SMR,SME                                                    
+If SMK$[1,4] <> Temp$ Let SME=22                                                
+If SME=0 Then                                                                   
+	Mat Read #SMC,SMR;Sales$[1,30];                                             
+Else                                                                            
+	Sales$="-NF-"                                                               
+End If              
+
+
+getProd: !============================================================  
+PRK$=" ",PRK$;PRK$[1,12]=Trim$(LP.LP$)                                   
+Search #PRC,2,1;PRK$,PRR,PRE                                            
+If Trim$(PRK$[1,12])<>Trim$(LP.LP$) Let PRE=22                           
+! If PRE Goto OutEnd:                                                    
+if pre goto main:  ! skip non-stks
+
+If debugDetail                                                                
+   msg$="doing...Search #PRC: PRK$="+PRK$+" PRR="+PRR \ Call updatelog(debug) 
+   If PRE msg$="error...Search error "+PRE  \ Call updatelog(debug)           
+Endif                                                                         
+
+If PRE                      
+   Clear PR.                
+Else                        
+   Read Record #PRC,PRR;PR.;
+Endif                       
+
+
+!gpp                                     
+  Let GP=ABS(LP.LPC2[1]-LP.LPC2[2])      
+  If LP.LPC2[1] Then                     
+	Let GPP=FNR((GP/LP.LPC2[1])*100)     
+  Else                                   
+    Let GPP=0                            
+  Endif                                  
+
+!mtd                                                                       
+Let CNVTA=LP.LPR[3]             !cost/price/qty                          
+Let CNVTU[0]=0                  !current unit                            
+Let CNVTU[1]=LP.LPC3[2]         !desired unit                            
+Let CNVTU[2]=1                  !mode 1=qty 2=cost/price                 
+Let LP.LPR[3]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+!ytd                                                                     
+Let CNVTA=LP.LPR[4]             !cost/price/qty                          
+Let CNVTU[0]=0                  !current unit                            
+Let CNVTU[1]=LP.LPC3[2]         !desired unit                            
+Let CNVTU[2]=1                  !mode 1=qty 2=cost/price                 
+Let LP.LPR[4]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+!lyr                                                                     
+Let CNVTA=LP.LPUNF[6]           !cost/price/qty                          
+Let CNVTU[0]=0                  !current unit                            
+Let CNVTU[1]=LP.LPC3[2]         !desired unit                            
+Let CNVTU[2]=1                  !mode 1=qty 2=cost/price                 
+Let LP.LPUNF[6]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+!qty                                                                       
+Let CNVTA=LP.LPC2[0]            !cost/price/qty                            
+Let CNVTU[0]=0                  !current unit                              
+Let CNVTU[1]=LP.LPC3[2]         !desired unit                              
+Let CNVTU[2]=1                  !mode 1=qty 2=cost/price                   
+Let LP.LPC2[0]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+!net price  w/upcharge                                                     
+Let CNVTA=LP.LPC2[1]            !cost/price/qty                           
+Let CNVTU[0]=0                  !current unit                             
+Let CNVTU[1]=LP.LPC3[3]         !desired unit                             
+Let CNVTU[2]=2                  !mode 1=qty 2=cost/price                  
+Let LP.LPC2[1]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG) 
+
+! net cost w/upcharge
+Let CNVTA=LP.LPC2[2]            !cost/price/qty                           
+Let CNVTU[0]=0                  !current unit                             
+Let CNVTU[1]=LP.LPC3[4]         !desired unit                             
+Let CNVTU[2]=2                  !mode 1=qty 2=cost/price                  
+Let LP.LPC2[2]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+!unit price  w/o upcharge
+if lp.lpunit[0]>0
+	Let CNVTA=LP.LPUNIT[0]            !cost/price/qty                           
+	Let CNVTU[0]=0                  !current unit                             
+	Let CNVTU[1]=LP.LPC3[3]         !desired unit                             
+	Let CNVTU[2]=2                  !mode 1=qty 2=cost/price                  
+	Let LP.LPUNIT[0]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG) 
+ELSE
+	LET LP.lpUNIT[0]=LP.LPC2[1]
+ENDIF
+! unit  cost w/o upcharge
+IF lp.lpunit[1]>0
+	Let CNVTA=LP.LPunit[1]            !cost/price/qty                           
+	Let CNVTU[0]=0                  !current unit                             
+	Let CNVTU[1]=LP.LPC3[4]         !desired unit                             
+	Let CNVTU[2]=2                  !mode 1=qty 2=cost/price                  
+	Let LP.lpunit[1]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+else
+	let lp.lpunit[1]=lp.lpc2[2]
+endif
+!permprice
+Let CNVTA=LP.PERM[0]            !cost/price/qty                            
+Let CNVTU[0]=0                  !current unit                              
+Let CNVTU[1]=LP.LPC3[3]         !desired unit                              
+Let CNVTU[2]=2                  !mode 1=qty 2=cost/price                   
+Let LP.PERM[0]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG) 
+
+!permcost                                                                     
+Let CNVTA=LP.PERM[1]            !cost/price/qty                            
+Let CNVTU[0]=0                  !current unit                              
+Let CNVTU[1]=LP.LPC3[4]         !desired unit                              
+Let CNVTU[2]=2                  !mode 1=qty 2=cost/price                   
+Let LP.PERM[1]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG) 
+
+! currprice
+cnvta = lp.lpcurr[0]                                                      
+cnvtu[0] = 0                                                              
+cnvtu[1] = lp.lpc3[3]                                                     
+cnvtu[2] = 2                                                              
+lp.lpcurr[0] = xamount(cnvtu[],cnvta,pr.pfu1[],pr.pfu2[],pr.a[],ctlc,flag)
+! currcost                                                                         
+cnvta = lp.lpcurr[1]                                                      
+cnvtu[0] = 0                                                              
+cnvtu[1] = lp.lpc3[4]                                                     
+cnvtu[2] = 2                                                              
+lp.lpcurr[1] = xamount(cnvtu[],cnvta,pr.pfu1[],pr.pfu2[],pr.a[],ctlc,flag)
+
+If ii<iLimit then
+  lps.[ii].slsid$      = CU.C1[2] using "####"
+  lps.[ii].slsname$    = SALES$
+  lps.[ii].custid$     = LP.LPC1[0] using "######" 
+  lps.[ii].custname$   = rtrim$(CU.A1$[31,60])
+  lps.[ii].prodid$     = LP.LP$
+  lps.[ii].desc1$      = rtrim$(PR.A$[9,38])
+  lps.[ii].desc2$      = rtrim$(PR.A$[63,92])
+  lps.[ii].price$      = LP.LPC2[1] using Emask$+"/"+XUNIT$(LP.LPC3[3],CCC)
+  lps.[ii].cost$       = LP.LPC2[2] using Emask$+"/"+XUNIT$(LP.LPC3[4],CCC)
+  lps.[ii].unitprice$  = LP.LPunit[0] using Emask$+"/"+XUNIT$(LP.LPC3[3],CCC)
+  lps.[ii].unitcost$   = LP.LPunit[1] using Emask$+"/"+XUNIT$(LP.LPC3[4],CCC)
+  lps.[ii].gpp$        = gpp using "----#.##%"
+  lps.[ii].qty$        = LP.LPC2[0] using Qmask$+" "+XUNIT$(LP.LPC3[2],CCC)
+  lps.[ii].orderdate$  = Pdate$(LP.LPC1[2])
+  lps.[ii].order$      = LP.LPC1[1] using "######"
+  If LP.LPC3[0]>0   lps.[ii].pricetype$  = PriceTypeDesc$[LP.LPC3[0]]
+  If LP.LPC3[0]<0   lps.[ii].pricetype$  = PriceTypeDesc$[(50-ABS(LP.LPC3[0]))]
+  If LP.LPR[1]                                                         
+	lps.[ii].pricetype$ = lps.[ii].pricetype$ + " # " + Str$(LP.LPR[1])
+  End If                                                               
+  lps.[ii].freq$       = LP.LPR1[2] using "######"
+  lps.[ii].whse$       = LP.LPWH using "##"
+  lps.[ii].permtype$   = LP.LPEUN[2] using "######"
+  lps.[ii].permfactor$ = LP.PERM[0] using Emask$+" "+XUNIT$(LP.LPC3[3],CCC)
+  lps.[ii].permfactorum$ = XUNIT$(LP.LPC3[3],CCC)
+  lps.[ii].permcost$   = LP.PERM[1] using Emask$+" "+XUNIT$(LP.LPC3[4],CCC)
+  lps.[ii].permcostum$ = XUNIT$(LP.LPC3[4],CCC)
+  If LP.LPFPERM[0]                                            
+	lps.[ii].fppermfactor$ = Trim$(LP.LPFPERM[0] Using Pmask$)
+	lps.[ii].fppermfactorum$ = XUNIT$(LP.LPC3[3],CCC)          
+  Else                                                         
+	lps.[ii].fppermfactor$ = " "                               
+	lps.[ii].fppermfactorum$ = " "                             
+  End If                                                       
+  If LP.LPFPERM[1]                                            
+	lps.[ii].fppermdate$ = Pdate$(LP.LPFPERM[1])              
+  Else                                                         
+	lps.[ii].fppermdate$ = " "                                 
+  End If                                                       
+  lps.[ii].mtd$        = LP.LPR[3] using Qmask$+"/"+XUNIT$(LP.LPC3[2],CCC)
+  lps.[ii].ytd$        = LP.LPR[4] using Qmask$+" "+XUNIT$(LP.LPC3[2],CCC)
+  lps.[ii].lyr$        = LP.LPUNF[6] using Qmask$+" "+XUNIT$(LP.LPC3[2],CCC)
+  lps.[ii].taxcode     = LP.LPC5[3]
+  lps.[ii].dept        = LP.LPDEPT
+  lps.[ii].lprec$      = LPR using  "##########"  ! last price record 
+  lps.[ii].sellum$     = lp.lpc3[2] using "---#"
+  lps.[ii].priceum$    = lp.lpc3[3] using "---#"
+  lps.[ii].costum$     = lp.lpc3[4] using "---#"
+  lps.[ii].curprice$   = lp.lpcurr[0] using emask$ + "/" + xunit$(lp.lpc3[3],ccc)
+  lps.[ii].curcost$    = lp.lpcurr[1] using emask$ + "/" + xunit$(lp.lpc3[4],ccc)
+  
+  ii=ii+1
+Else
+	keynext$ = LPK$
+Endif
+ss=0
+
+If List goto Main:
+
+
+OutEnd: !=============================================================
+if chans=-1 Close #CTLC,#LPC,#PRC,#CMC,#CUC,#SMC,#CCC
+msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+If List then let ss=0
+Exit Sub
+Else
+  Temp$=""
+  Call errTrap(pgmName$)
+End Try
+
+Sub updatelog(debug)                                        
+  If not(debug) Exit Sub                                    
+  System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub       
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+
+ss=0
+!ss=spc(10)
+End Sub
+

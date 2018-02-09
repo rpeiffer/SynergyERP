@@ -1,0 +1,949 @@
+! --- serp236
+! description Order Hold release
+!
+! 1.0 mm/dd/yyyy change??
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp236.dl4 src/serp236.src
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+Include "src/inc/filecust.inc" ! custome
+include "src/inc/fileordhead.inc" ! combined ros,rot,roh
+include "src/inc/fileprod.inc" ! product file
+include "src/inc/filerolz.inc" ! order lines
+include "src/inc/filewhinfoz.inc" ! warehouse
+include "src/inc/filedivifle.inc" ! division file
+include "src/inc/fileedittrack.inc" ! edit tracking
+include "src/inc/fileentdby.inc" ! enterby file 
+!
+!
+! *declare additional dl4 intrinsic subs & functions
+!
+Declare Intrinsic sub programdump,env
+!
+! *declare additional external libs & subs & functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,JDate$,PDate$,buildsort
+External Lib "getordtypd.lib"
+Declare External Function Getordtypd$
+External Lib "libedittrack.lib"
+Declare External Sub MakeEdittrack
+!
+!
+!
+! **main procedure
+Declare Sub OpenFiles,getcust,OrderList,submitorderlist,chkupthld
+Declare Sub SndSys,OrdSum,EdtTrkDo
+!
+!
+! dim variables used by program
+!
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+	Option String Redim is legal ! in case subs dim/use same names
+	OPTION GOSUB NESTING 12  ! Default is 8
+
+	dim action$[30],options$[30],userid$[8],b$[200],3%
+	dim action1$[30],action2$[30],action3$[30] ! actions for programs
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1000] ! .net delimiters
+	Dim WebStr$[1000],Message$[200],dblog$[50],tmp$[200],blank$[100]
+	Dim Cust$[60],p9$[50],p60$[50],p61$[256],K$[60],field$[1,30]
+	Dim HCDesc$[16],KOHC$[60],QMask$[20],custom_customer$[30]
+	Dim K3$[60],CN$[10]
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2],UCA5[10]
+	Dim 2%,Q0[1],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size
+	dim 1%,X1[9],Chans[20],HRList[15],FChan[9]
+	Dim 2%,CustNo,x2[9],sysdate
+	Dim 1%,ttlords,schn[2]
+	Dim 2%,ORDNo,s9[9]
+	Dim 3%,OHR,t9[15]
+	Dim 3%,CFin[8]
+	Dim 3%,CNVTA,Amount,X3[9],R[99]
+	dim 3%,tmp3
+
+ blank$=" ",blank$
+ Dim cust. as cust ! customer
+ dim roh. as roh ! order header
+ dim ros. as ros ! order ship to file
+ dim rot. as rot ! order total file
+ DIM PR. as prod ! prodfile
+ dim rol. as rolnew ! order lines
+  dim wh. as whinfo ! warehouse file
+  dim div. as divifle ! division file
+  Dim ETR. as edittrack ! EDITTRACKING
+  dim et. as entdby ! entered by file
+ !
+ ! call dxopen() ! - DONE IN OEMENU! which uses option & action
+ !
+ call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+ !
+ ! open files - may add a check to see if user can run an action/program
+ !
+ Action1$=UCase$(action1$)
+ action1$=RTrim$(action1$) ! UPPERCASE & TRIMMED
+ !etc for all files needed
+ 
+ Call OpenFiles() ! open any/all files 
+ mat read #ctlc,19,50;p9$;
+ mat read #ctlc,60,50;p60$;
+ mat read #ctlc,61,0;p61$;
+ mat read #ctlc,115,60;custom_customer$; ! ALT
+ custom_customer$=UCase$(Trim$(custom_customer$))
+ SCHN[0]=OHC;SCHN[1]=OSC;SCHN[2]=OTC
+ QMask$="---------#.##"
+ ReturnStatus=0
+ debugdetail=0
+ Message$="ACTION1 NOT FOUND"  ! action is used for menu routing
+ ! other calls used: CustSpecNotes-GetCustSpecN.doc - to get support notes
+ !   a call to open the order in edit mode... OrdH.GetOrderHdr.doc?
+ select case action1$ ! go to various programs based on action
+   case "SYSDATA" ! System data								doc=OHR-GetSysData.doc
+		!
+		Let ReturnStatus=1
+		Message$="OK"
+		Call SndSys()
+		call AddToStr(e$,rstr$,List$[])
+		!
+		! end of SysData
+	case "GETORDLIST" ! list of orders for MGr/HLD			doc=OHR-GetOrderList.doc
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		tmpcnt=maxcnt
+		List$[0]=bsdel$,"ORDERLIST",fdel$
+		WebStr$="ORDERID",fdel$,"ORDDATE",fdel$,"SHIPDATE",fdel$
+		WebStr$=WebStr$,"CUSTID",fdel$,"NAME",fdel$,"CUSTPO",fdel$,"STATUS",fdel$
+		webstr$=webstr$,"HOLDS",FDEL$,"SHIPQTY",FDEL$,"ORDTTL",FDEL$
+		WEBSTR$=WEBSTR$,"OPENORDS",FDEL$,"OPENAR",FDEL$,"ORDTYPE",fdel$
+		webstr$=webstr$,"ACTMGR",fdel$,"ENTDBY",fdel$,"PREMIERCUST",fdel$
+		List$[1]=webStr$
+		Row=2
+		Call DXGet("ACMGR",tmp$)
+		AMgr=tmp$
+		If AMgr<0 Or AMgr>999
+			Message$="INVALID ACCT MANAGER"
+			ReturnStatus=0
+			Goto ORLDone
+		Endif
+		Call Dxget("HLDRLST",tmp$)
+		! passing all 13 comma sep, 0=override & 1-12
+		Clear HRList[]
+		if tmp$[1,1]="1" let HRList[0]=1
+		for x=1 to 12
+			x1=(x*2)+1 ! 3,5,7, etc
+			if tmp$[x1,x1]="1" let hrlist[x]=1
+		Next X
+		Call DXGet("ZSHPQTY",tmp$)
+		NSQFLAG=0 \ if UCase$(RTRim$(tmp$))="Y" let NSQFLAG=1
+		Call dxget("DIVNO",tmp$)
+		Divno=tmp$
+		Call DXGet("ENTDBY",tmp$) \ if ucase$(tmp$[1,1])="A" let tmp$=" " ! use 0 for ALL
+		SEBy=tmp$ ! selected entered by
+		if SEBy<1 or SEBy>9999 or fra(SEBy) let SEBy=0 ! check range
+		! ok - start the list
+		Call OrderList()
+		
+		ORLDone: ! finished
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+
+	! end of getordlist
+	case "SUBMITORDLST" ! submit orders(NOT USED)			doc=OHR-SubmitOrderList.doc
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		tmpcnt=maxcnt
+		List$[0]=bsdel$,"SUBMORDLIST",fdel$
+		WebStr$="ORDERID",fdel$,"CUSTID",fdel$,"STATUS",fdel$
+		List$[1]=webStr$
+		Row=2
+		Call DXGet("ACMGR",tmp$)
+		AMgr=tmp$
+		If AMgr<0 Or AMgr>999
+			Message$="INVALID ACCT MANAGER"
+			ReturnStatus=0
+			Goto SOLDone
+		Endif
+		Call Dxget("HLDRLST",tmp$)
+		! passing all 13 comma sep, 0=override & 1-12
+		Clear HRList[]
+		if tmp$[1,1]="1" let HRList[0]=1
+		for x=1 to 12
+			x1=(x*2)+1 ! 3,5,7, etc
+			if tmp$[x1,x1]="1" let hrlist[x]=1
+		Next X
+		! ok - start the list
+		Call SubmitOrderList()
+		SOLDone: ! finished
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+	! end of submitordlist
+	case "SUBMITORDER" ! Single order submit				doc=OHR-SubmitOrder.doc
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		tmpcnt=maxcnt
+		List$[0]=bsdel$,"SUBMITORDER",fdel$
+		WebStr$="ORDERID",fdel$,"CUSTID",fdel$,"STATUS",fdel$
+		List$[1]=webStr$
+		Row=2
+		Call dxget("ORDERID",tmp$)
+		let x2=tmp$
+		If x2<=0 or x2>999999 or fra(x2) 
+			ReturnStatus=0
+			Message$="INVALID ORDER NUMBER"
+			goto soidng
+		Endif
+		OrdNo=X2
+		Call DXGet("ACMGR",tmp$)
+		AMgr=tmp$
+		If AMgr<0 Or AMgr>999
+			Message$="INVALID ACCT MANAGER"
+			ReturnStatus=0
+			Goto SOLDone
+		Endif
+		Call Dxget("HLDRLST",tmp$)
+		! passing all 13 comma sep, 0=override & 1-12
+		Clear HRList[]
+		if tmp$[1,1]="1" let HRList[0]=1
+		for x=1 to 12
+			x1=(x*2)+1 ! 3,5,7, etc
+			if tmp$[x1,x1]="1" let hrlist[x]=1
+		Next X
+		K$=" ",K$;mos=4
+		if custom_customer$="ACME" Let mos=5
+		for x=1 to mos ! check all status?
+			k$[1,2]=X Using "##"
+			K$[3]=OrdNo Using "######"
+			OHR=filegetrohz(e$,SCHN[],"=",1,k$,roh.,ros., rot.)
+			If OHR>0 ! found
+				Cust$=roh.CustNum using "######"
+				call getcust()
+				if cur<0
+					Message$="INVALID CUSTOMER NUMBER ON ORDER"
+					ReturnStatus=0
+					Goto SOidng
+				Endif
+				if amgr and cust.CollectionAgent<>amgr
+					Message$="ACCT MANAGER IS DIFFERENT"
+					returnstatus=0
+					goto soidng
+				Endif
+				CustNo=cust$
+				Call chkupthld() ! all processing done here
+				Goto soidng
+			Endif
+		Next X
+		ReturnStatus=0
+		Message$="INVALID" ! "ORDER NUMBER NOT ON FILE OR AVAILABLE TO EDIT"
+			
+	  sOIDNG: ! bad number or found order
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+	
+	! end of submitorder
+	Case "SHOWSUM" ! order summary screen					doc=OHR-ShowOrder.doc
+		ReturnStatus=1
+		Message$="OK"
+		Call OrdSum()
+		call AddToStr(e$,rstr$,List$[])
+	! end of showsum
+ end select  !action options
+ 
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+ 
+ !call dxclose()
+else
+ include "src/callmainerrnet.inc"
+end try
+end ! of main program
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	! CTLC=OpenFile(9999,IntCo) \ if ctlc=-1 Error 42 ! control file read/write
+	CUC=OpenFile(-1808,IntCo) \ If CUC=-1 Error 42 ! customer
+	PRC=OpenFile(-1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(-1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	OHC=OpenFile(1840,IntCo) \ if OHC=-1 Error 42 ! order header
+	OSC=OpenFile(1856,IntCo) \ if OSC=-1 Error 42 ! order shipto
+	OTC=OpenFile(1872,IntCo) \ if OTC=-1 Error 42 ! order Totals
+	OLC=OpenFile(1888,IntCo) \ if OLC=-1 Error 42 ! order lines
+	CCC=OpenFile(-1728,IntCo) \ if CCC=-1 Error 42 ! U/M file
+	AMC=OpenFile(-3040,IntCo) \ if AMC=-1 Error 42 ! acct manager
+	Ch_Wh = OpenFile(-2768,intCo) \ If Ch_Wh = -1 Error 42  !" warehouse file
+	Ch_Div=OpenFile(-688,intCo) \ If Ch_div = -1 Error 42 !DIVISION 
+	Ch_Et=OpenFile(-1664,intCo) \ If Ch_et = -1 Error 42 !ENTERBY
+	CNC = OpenFile(-720,intCo) \ If CNC = -1 Error 42 !custnotes
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub GetCust()
+! get Customer data - 
+! PASS IN CUST$
+  Try
+	Dim Ckey$[60]
+	Dim 2%,PRTYPE
+	Dim 3%,CUR
+	ckey$=" ",cKey$
+	cKey$=Cust$
+	ckey$[7]="" ! cut to length
+		CUR=filegetcust(e$,CUC,"=",1,CKey$,cust.)
+		If CUR<0
+			clear cust.
+			cust.Name$="CUSTOMER NOT FOUND"+Blank$
+		Endif
+
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetCust
+! 
+!--------------------------------------------------------------------
+Sub SndSys()
+! send droplists
+  Try
+	dim AMDesc$[30],HCPswd$[16],HOPswd$[30]
+	DIM DVName$[24]
+	Dim 3%
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"ACCTMGR",fdel$
+	List$[1]="ID",fdel$,"NAME",fdel$
+	List$[2]="0",fdel$,"ALL Managers",FDEL$
+	Row=3
+	x2=chf(AMC)-1
+	for R=1 to X2
+		TRY
+			Mat Read #AMC,R,0;AMDesc$;
+		Else
+			AMDesc$=Blank$
+		End Try
+		tmp$=RTrim$(AMDesc$)
+		If tmp$<>""
+			List$[row]=Str$(R),fdel$,tmp$,fdel$
+			row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next R
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	Clear List$[]
+	! send hold codes & Passwords
+	List$[0]=bsdel$,"HOLDCDS",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$,"PSWRD",fdel$
+	HXC=OpenFile(-1760,IntCo) \ if hxc=-1 error 42
+	Mat Read #HXC,0,0;HOPswd$;
+	Close #HXC
+	tmp$=Rtrim$(HOPswd$)
+	List$[2]="0",fdel$,"HOLD OVERRIDE",fdel$,tmp$,fdel$
+	row=3
+	for ctr=1 to 12
+		tmp$=blank$
+		read #ctlc,65,((ctr*16)-16);hcdesc$;
+		read #ctlc,66,((ctr*16)-16);HCPswd$;
+		tmp$=Trim$(HCDesc$)
+		if tmp$="" let tmp$="HOLD CODE "+Str$(ctr)+Blank$
+		List$[row]=Str$(ctr),fdel$,RTrim$(tmp$),fdel$,RTrim$(HCPswd$),fdel$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	next ctr
+	list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	Clear List$[]
+	! send divisions
+	DVC=OpenFile(-688,IntCo) \ if dvc=-1 error 42
+	X2=chf(DVC)-1
+	if x2>99 let x2=99
+	List$[0]=bsdel$,"DIVISIONS",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	List$[2]="0",fdel$,"ALL DIVISIONS",fdel$
+	row=3
+	for x=1 to x2
+		mat read #DVC,x,0;dvname$;
+		tmp$=Trim$(dvname$)
+		if tmp$<>""
+			list$[row]=Str$(X),fdel$,tmp$,fdel$
+			row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next X
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	Clear List$[]
+	! add entered by 56427
+	call FileDropListEntdby(e$,List$[],1000,ch_et,"",field$[],"A") ! ENTBY A=ALL
+	! last list$ added in case "
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndSys
+! 
+!--------------------------------------------------------------------
+Sub OrderList()
+! generate a list of orders for a Manager & Hold code
+! Use CustNo as customer
+  Try
+	Dim hokey$[60]
+	
+	STC=buildsort(e$,15,0)
+	IF STC<0 Error 42
+	KOHC$=" ",KOHC$
+	hokey$=" 4"
+	If custom_customer$="ACME" 
+		IF AMgr=998 OR AMgr=997 LET KOHC$[1,2]=" 5";hokey$=" 5" ! " cct169499 custom for acme
+	Endif
+	Do
+		OHR=filegetrohz(e$,SCHN[],">",1,kohc$,roh.,ros., rot.)
+		If custom_customer$="ACME"
+			IF AMgr<997 IF kohc$[1,2]>" 5" Exit Do ! GOTO OutEnd: ! "cct169499 custom for acme
+			IF AMgr>996 IF kohc$[1,2]>" 5" Exit Do ! GOTO OutEnd: ! "cct169499 custom for acme
+		Endif
+		If OHR<0 or kohc$[1,2]>hokey$ Exit do ! not in range
+		if custom_customer$="ACME"
+			IF kohc$[1,2]>" 5"  Exit do !GOTO L_9010:	! "cct169499 custom for acme
+		Else
+			If roh.status>4 Goto NVOrd ! Exit do ! ONLY UP to STATUS 4!!(use key to end loop)
+		Endif
+		IF NOT(NSQFLAG) ! does not want zero ship qty
+			IF NOT(roh.TotSellUnits) AND NOT(rot.Subtot) GOTO NVORD ! no qty (was t2[0])
+		Endif
+		If not(rot.HoldCode) goto NVOrd ! not hold
+		if roh.HoldOver=1 goto NVOrd ! hold override
+		if roh.CustNum<=0 goto NVOrd
+		if divno and divno<>roh.Div goto NVOrd ! diff div
+		if SEBy and SEBy<>roh.EntBy goto NVOrd ! diff entered by
+		if custom_customer$="ACME" ! misc custom changes
+			IF H0[0]>5 GOTO NVORD ! L_1045: !FOR STATUS 90'S&91'S, BUT WILL ALSO SKIP 6'S
+			IF (AMgr=998 OR AMgr=997) IF rot.CashSaleFlag=0 GOTO NVORD ! L_1040: ! POS ONLY
+			IF (AMgr=998 OR AMgr=997) IF rot.OrdTot=rot.AmtRcvd ! 
+				OrigHld=rot.holdcode;rot.HoldCode=0
+				write record #OTC,roh.TotRec,0;rot.;
+				call edttrkdo()
+				goto NVORD ! LET T2[21]=0 \ GOSUB L_7300: \ GOTO L_1040:
+			Endif
+			IF AMgr=999 AND (roh.OrdType=2 OR roh.OrdType=3)
+				Orighld=rot.holdcode
+				IF roh.Status<5 LET rot.HoldCode=0 ! "was H0[0]
+				IF roh.Status=5 ! "was H0[0] (and is again - not inproc on erp!)
+					!GOSUB L_5110: ! 
+					LET X3=rot.HoldCode
+					FOR K=0 TO 11
+					  LET T9[K]=SGN(FRA(X3/2)) \ LET X3=INT(X3/2)
+					NEXT K
+					LET T9[0]=0
+					!GOSUB L_5150:
+					LET X3=0
+					FOR K=0 TO 11
+					  IF T9[K] LET X3=X3+2^K
+					NEXT K
+					rot.HoldCode=x3
+				ENDIF 
+				!GOSUB L_7300: \ GOTO L_1040:
+				write record #OTC,roh.TotRec,0;rot.;
+				call edttrkdo()
+				goto NVORD
+			ENDIF 
+		Endif
+		cust$=roh.CustNum using "######"
+		call getcust()
+		if CUR<0 goto NVOrd ! no cust
+		if custom_Customer$="ACME"
+			IF AMgr<>998 IF AMgr IF AMgr<>cust.CollectionAgent GOTO NVORD ! L_1040:
+		Else
+			IF AMgr and cust.CollectionAgent<>AMgr Goto NVORD ! diff agent
+		Endif
+		if custom_customer$="MORRISETTE"
+			IF AMgr<>998 IF AMgr<>997 IF roh.ordtype<>1 IF roh.ordtype<>8 IF roh.ordtype<>25 
+			   GOTO NVORD ! L_1040:          !" cct 90717 & cct#160171
+			ENDIF
+		Endif
+		LET X3=rot.HoldCode
+		FOR K=0 TO 11
+		  LET T9[K]=SGN(FRA(X3/2)) \ LET X3=INT(X3/2)
+		NEXT K
+		if not(HRList[0]) ! not override - check individual
+			X=0 ! no match
+			for K=1 to 12
+				if t9[k-1] and HRList[k]=1 let x=1 ! match
+			Next K
+			If Not(X) goto NVORD ! no match - no order!
+		Endif
+		Tmp$=Kohc$[3,8] ! list in order # order
+		Search #STC,4,1;tmp$,OHR,E
+	 NVOrd: ! not in range or 
+	Loop
+	! done adding to sort, now print
+	Kohc$=" ",Kohc$
+	Do
+		Search #STC,3,1;Kohc$,OHR,E
+		if e exit do
+		if kohc$[1,6]="      " goto sorng
+		Read record #OHC,OHR,0;roh.;
+		OTR=roh.TotRec
+		read record #OTC,OTR,0;rot.;
+		cust$=roh.CustNum using "######"
+		call getcust()
+		! added 08/2017 - 62459 premier customer highlight
+		k3$=Cust$ ! same key as customer file
+		Search #cnc,2,1;k3$,r[9],E
+		if not(e) ! found custnotes index - try reading
+			try
+				mat read #cnc,r[9],436;cn$;
+			Else
+				cn$=" ",cn$
+			End try
+		Else
+			cn$=" ",cn$
+		Endif
+		!WebStr$="ORDERID",fdel$,"ORDDATE",fdel$,"SHIPDATE",fdel$
+		!WebStr$=WebStr$,"CUSTID",fdel$,"NAME",fdel$,"CUSTPO",fdel$,"STATUS",fdel$
+		!added more
+		!webstr$=webstr$,"HOLDS",FDEL$,"SHIPQTY",FDEL$,"ORDTTL",FDEL$
+		!WEBSTR$=WEBSTR$,"OPNORDS",FDEL$,"OPNAR",FDEL$,ORDTYPE
+		WebStr$=Str$(roh.OrdNum),fdel$ ! order #
+		tmp$=""
+		tmp$=PDate$(roh.OrdDate)
+		WebStr$=WebStr$,tmp$,fdel$ ! ord date
+		tmp$=PDate$(roh.ShipDate)
+		WebStr$=WebStr$,tmp$,fdel$ ! ship date
+		Webstr$=webstr$,Cust$,fdel$,RTrim$(Cust.Name$),fdel$
+		webStr$=WebStr$,RTrim$(roh.CustPO$),fdel$ ! PO
+		WebStr$=WebStr$,Str$(roh.status),fdel$ ! status
+		LET X3=rot.HoldCode
+		FOR K=0 TO 11
+		  LET T9[K]=SGN(FRA(X3/2)) \ LET X3=INT(X3/2)
+		NEXT K
+		tmp$="" ! send holds as space separated #'s
+		for k=0 to 11
+		  if T9[K] ! set - get desc
+			tmp$=tmp$,Str$(K+1)," "
+		  Endif
+		Next K
+		webstr$=webstr$,RTrim$(tmp$),fdel$ ! holds
+		webstr$=webstr$,LTrim$(roh.TotSellUnits using QMask$),fdel$
+		IF NSQFLAG<>1
+			webstr$=webstr$,LTrim$(rot.OrdTot using QMask$),fdel$
+		ELSE
+			let tmp3=rot.MdseOrdAmt
+			let tmp3=tmp3-rot.OrdDisc+rot.MiscChrg+rot.FrgtChrg+rot.OthChrg+rot.TaxAmt
+			webstr$=webstr$,LTrim$(tmp3 using QMask$),fdel$
+		ENDIF
+		if roh.BillTo if roh.custnum<>roh.BillTo
+			cust$=roh.BillTo
+			call getcust()
+			if cur<=0 ! billto not found
+				cust$=roh.custnum ! use ordcust
+				call getcust()
+			Endif
+		Endif
+		Webstr$=webstr$,LTrim$(cust.OpenOrder using QMask$),fdel$
+		x3=cust.CurrentArAgeBal+cust.AgeArAmt1+cust.AgeArAmt2+cust.AgeArAmt3+cust.AgeArAmt4-cust.UnappliedCredit
+		webstr$=webstr$,LTrim$(x3 using QMask$),fdel$
+		let tmp$=getordtypd$(ctlc,roh.ordtype,intco)
+		Webstr$=webstr$,Str$(roh.Ordtype)," ",RTrim$(tmp$),fdel$
+		! header = webstr$,"ACTMGR",fdel$,"ENTDBY",fdel$,"PREMIERCUST",fdel$
+		webstr$=webstr$,Str$(cust.CollectionAgent),fdel$ ! acct mgr #
+		clear et.
+		if roh.entby>0 and roh.entby<=999
+			Read Record #ch_et,roh.entby;et.;
+		endif
+		webstr$=webstr$,Str$(roh.EntBy)," ",rtrim$(et.desc$),fdel$ ! entdby & name
+		clear tmp$
+		tmp$="N" \ if cn$[1,1]="A" or CN$[1,1]="S" let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$ ! premier customer Y or N - 62459
+		! that's all folks
+		List$[row]=WebStr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	 SORNG: ! 
+	Loop
+	! add the esdel$ upon return
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! orderlist
+! 
+!--------------------------------------------------------------------
+
+Sub SubmitOrderList()
+! release orders from a list of orders for a Manager
+! Use CustNo as customer
+  Try
+	Dim KOHC$[60]
+	Dim 1%,ttlords
+	Dim 3%
+	
+	Call dxget("TTLORDS",tmp$)
+	x2=tmp$
+	if x2<=0 or x2>7000 or fra(X2) goto olsdone
+	ttlords=x2
+	For X1=1 to ttlords
+		Call dxget("ORDID"+Str$(X1),tmp$)
+		let x2=tmp$
+		If x2<=0 or x2>999999 or fra(x2) goto oidng
+		OrdNo=X2
+		Call dxget("CUSTID"+Str$(X1),tmp$)
+		Custno=tmp$
+		Cust$=CustNo Using "######"
+		call getCust()
+		
+		KOHC$=" ",KOHC$
+		KOHC$=CustNo Using "######"
+		KOHC$[7]=OrdNo Using "######"
+		OHR=filegetrohz(e$,SCHN[],"=",2,kohc$,roh.,ros., rot.)
+		Call chkupthld() ! all processing done here
+	  OIDNG: ! bad number
+	Next X1
+	OLSDone: ! no more orders
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SubmitOrderList
+! 
+!--------------------------------------------------------------------
+sub chkupthld()
+! a routine used by list & single orders
+  Try
+	Dim KBOW$[60],KBT$[60]
+	Dim 3%
+	
+		If OHR<0 ! no good
+			WebStr$=Str$(ORDNO),fdel$
+			WebStr$=WebStr$,Str$(CustNo),fdel$ ! NO INVOICE
+			WebStr$=WebStr$,"ORDER NOT FOUND",fdel$
+			Goto ONINV
+		Endif
+		if cur<0
+			WebStr$=Str$(ORDNO),fdel$
+			WebStr$=WebStr$,Str$(CustNo),fdel$ ! NO INVOICE
+			WebStr$=WebStr$,"CUSTOMER NOT FOUND",fdel$
+			Goto ONINV
+		Endif
+		if amgr and cust.CollectionAgent<>AMgr
+			WebStr$=Str$(ORDNO),fdel$
+			WebStr$=WebStr$,Str$(CustNo),fdel$ ! NO INVOICE
+			WebStr$=WebStr$,"MANAGER NOT SELECTED",fdel$
+			Goto ONINV
+		Endif
+		If roh.status<1 or roh.status>4 ! ONLY STATUS 4!!
+			WebStr$=Str$(ORDNO),fdel$
+			WebStr$=WebStr$,Str$(CustNo),fdel$ ! NO INVOICE
+			WebStr$=WebStr$,"ORDER WRONG STATUS",fdel$
+			Goto ONINV
+		Endif
+		LET EtAction=12
+		OrigHld=rot.Holdcode
+		if hrlist[0] let roh.HoldOver=1;rot.HoldCode=0
+		If rot.HoldCode ! on hold
+			LET X3=rot.HoldCode
+			FOR K=0 TO 11
+			  LET T9[K]=SGN(FRA(X3/2)) \ LET X3=INT(X3/2)
+			NEXT K
+			for k=1 to 12
+				if hrlist[k] let t9[k-1]=0
+			Next K
+			LET X3=0
+			FOR K=0 TO 11
+			  IF T9[K] LET X3=X3+2^K
+			NEXT K
+			rot.HoldCode=x3
+		Else
+			if not(roh.HoldOver) ! want override
+				WebStr$=Str$(ORDNO),fdel$
+				WebStr$=WebStr$,Str$(CustNo),fdel$ ! NO INVOICE
+				WebStr$=WebStr$,"ORDER is NOT ON HOLD",fdel$
+				Goto ONINV
+			Endif
+		Endif
+		KBT$=" ",KBT$
+		KBT$=cust.CustomerBillTo using "######"
+		Search #cuc,2,1;KBT$,r[1],E
+		If E
+			WebStr$=Str$(ORDNO),fdel$
+			WebStr$=WebStr$,Str$(CustNo),fdel$ ! NO INVOICE
+			WebStr$=WebStr$,"BILL TO CUSTOMER NOT FOUND",fdel$
+			Goto ONINV
+		Endif
+		Write record #OHC,OHR,0;roh.;
+		Write record #OTC,roh.TotRec,0;rot.;
+		WebStr$=Str$(roh.ordnum),fdel$
+		WebStr$=WebStr$,Str$(CUSTNO),fdel$
+		WebStr$=WebStr$,"OK - HOLD RELEASED",fdel$
+		if orighld<>rot.holdcode call edttrkdo()
+	  ONINV: ! not invoiced
+	    ETACTION=0
+		List$[row]=WebStr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+else
+    include "src/callsuberr.inc"
+  end try
+end sub ! chkupthld
+! 
+!--------------------------------------------------------------------
+Sub OrdSum()
+! the summary screen like PM
+ Try
+	dim kohc$[60],TDesc$[16],AGEBUCKH$[40]
+	DIM 1%,AGEBUCK[3],DDay
+	Dim 3%
+	call dxget("ORDERID",tmp$)
+	let x2=tmp$
+	If x2<=0 or x2>999999 or fra(x2) 
+		ReturnStatus=0
+		Message$="INVALID ORDER NUMBER"
+		goto shoidng
+	Endif
+	OrdNo=X2
+	Call dxget("CUSTID",tmp$)
+	if tmp$=""
+		returnstatus=0
+		Message$="NO CUSTOMER ID PASSED"
+		goto shoidng
+	Endif
+	Custno=tmp$
+	Cust$=CustNo Using "######"
+	call getCust()
+	if cur<=0
+		returnstatus=0
+		Message$="INVALID CUSTOMER ID PASSED"
+		goto shoidng
+	Endif
+	KOHC$=" ",KOHC$
+	KOHC$=CustNo Using "######"
+	KOHC$[7]=OrdNo Using "######"
+	OHR=filegetrohz(e$,SCHN[],"=",2,kohc$,roh.,ros., rot.)
+	if ohr<=0
+		returnstatus=0
+		Message$="ORDER NOT FOUND"
+		goto shoidng
+	Endif
+	!start the info building
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"ORDERINFO",fdel$
+	webstr$="ORDERID",FDEL$,"STATUS",fdel$,"ORDERTOTAL",fdel$
+	webstr$=webstr$,"ORDAMOUNT",FDEL$,"ORDQTY",FDEL$,"SHIPQTY",fdel$
+	webstr$=webstr$,"TERMS",fdel$,"SHIPDATE",fdel$
+	webstr$=webstr$,"WH",fdel$,"WHNAME",fdel$
+	webstr$=webstr$,"DIV",fdel$,"DIVNAME",fdel$,"ORDTYPE",fdel$
+	webstr$=webstr$,"ENTDBY",fdel$
+	List$[1]=webstr$
+	row=2
+	webstr$=Str$(roh.OrdNum),fdel$
+	tmp$="1 - ENTERED"
+	IF roh.Status=2 let tmp$="2 - PRINTED"
+	IF roh.Status=3 let tmp$="3 - REGISTERED"
+	IF ROH.Status=4 LET TMP$="4 - RDY TO INV"
+	webstr$=webstr$,tmp$,fdel$
+	webstr$=webstr$,LTrim$(rot.OrdTot using QMask$),fdel$
+	webstr$=webstr$,LTrim$(rot.MdseOrdAmt using QMask$),fdel$
+	webstr$=webstr$,LTrim$(rot.TotOrdQty using QMask$),fdel$
+	webstr$=webstr$,LTrim$(roh.TotSellUnits using QMask$),fdel$
+	ARTC=OpenFile(-9981,IntCo) ! arterms
+	TDesc$="CASH SALES"
+	if roh.Terms
+		read #ARTC,roh.terms,0;TDesc$;
+	Endif
+	Try Close #ARTC  Else Rem
+	tmp$=Str$(roh.terms)," - ",tdesc$
+	webstr$=webstr$,RTrim$(tmp$),fdel$
+	tmp$=PDate$(roh.ShipDate)
+	webstr$=webstr$,tmp$,fdel$
+	clear wh.
+	if roh.wh>0 and roh.wh<=99
+		Read Record #ch_wh,((roh.wh)-1);wh.;
+	endif
+	webstr$=webstr$,str$(roh.wh),fdel$
+	webstr$=webstr$,rtrim$(wh.WhName$),fdel$
+	if roh.div>0 and roh.div<=99
+			read record #ch_div,roh.div;div.;
+	endif
+	webstr$=webstr$,str$(roh.div),fdel$
+	webstr$=webstr$,rtrim$(div.desc$),fdel$
+	let tmp$=getordtypd$(ctlc,roh.ordtype,intco)
+	Webstr$=webstr$,Str$(roh.Ordtype)," ",RTrim$(tmp$),fdel$
+	clear et.
+	if roh.entby>0 and roh.entby<=999
+		Read Record #ch_et,roh.entby;et.;
+	endif
+	webstr$=webstr$,Str$(roh.EntBy)," ",rtrim$(et.desc$),fdel$ ! entdby & name
+	List$[row]=webstr$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	! send holds
+	Clear List$[]
+	List$[0]=bsdel$,"HOLDSET",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	row=2
+	LET X3=rot.HoldCode
+	FOR K=0 TO 11
+	  LET T9[K]=SGN(FRA(X3/2)) \ LET X3=INT(X3/2)
+	NEXT K
+	for k=0 to 11
+	  if T9[K] ! set - get desc
+		ctr=k+1
+		read #ctlc,65,((ctr*16)-16);hcdesc$;
+		tmp$=RTrim$(HCDesc$)
+		if tmp$="" let tmp$="HOLD CODE "+Str$(ctr)
+		List$[row]=Str$(ctr),fdel$,tmp$,fdel$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Endif
+	Next K
+	list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	! now shipto
+	Clear List$[]
+	List$[0]=bsdel$,"SHIPTO",fdel$
+	List$[1]="NAME",fdel$,"ADDR1",FDEL$,"ADDR2",FDEL$,"CITY",FDEL$,"ST",FDEL$,"ZIP",FDEL$,"COUNTRY",FDEL$
+	row=2
+	webstr$=RTrim$(ros.Name$),fdel$,RTrim$(ros.Address$),fdel$
+	webstr$=webstr$,RTrim$(ros.Address2$),fdel$,RTriM$(ros.City$),fdel$
+	webstr$=webstr$,RTrim$(ros.State$),fdel$
+	tmp$=ros.ZipCode$+ros.Zip4$
+	webstr$=webstr$,RTrim$(tmp$),fdel$,RTrim$(ros.Country$),fdel$
+	List$[row]=webstr$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	! now billto
+	Clear list$[]
+	List$[0]=bsdel$,"BILLTO",fdel$
+	webstr$="ID",fdel$,"NAME",fdel$,"ADDR1",fdel$,"ADDR2",fdel$
+	webstr$=webstr$,"CITY",fdel$,"STATE",fdel$,"ZIP",fdel$
+	Webstr$=webstr$,"CRDCHK",fdel$
+	List$[1]=webstr$
+	row=2
+	if roh.BillTo if roh.custnum<>roh.BillTo
+		cust$=roh.BillTo
+		call getcust()
+		if cur<=0
+			cust$=roh.custnum
+			call getcust()
+		Endif
+	Endif
+	webstr$=Cust$,fdel$,RTRim$(cust.Name$),fdel$
+	webstr$=webstr$,RTrim$(cust.Addr1$),fdel$
+	webstr$=webstr$,RTrim$(cust.Addr2$),fdel$
+	webstr$=webstr$,RTrim$(cust.City$),fdel$
+	webstr$=webstr$,RTrim$(cust.State$),fdel$
+	webstr$=webstr$,RTrim$(cust.Zip4$),fdel$
+	tmp$=""
+	if cust.CreditCheckDays<>999
+		tmp$=cust.CreditCheckDays USING "PAST DUE ### DAYS"
+	Else
+		tmp$="ORDER TO ORDER"
+	Endif
+	webstr$=webstr$,tmp$,fdel$
+	list$[row]=webstr$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	! finally a/r
+	Clear List$[]
+	List$[0]=bsdel$,"ARTTLS",fdel$
+	List$[1]="FIELD",fdel$,"VALUE",fdel$
+	List$[2]="OPEN ORDERS",fdel$,LTrim$(cust.OpenOrder using QMask$),fdel$
+	x3=cust.CurrentArAgeBal+cust.AgeArAmt1+cust.AgeArAmt2+cust.AgeArAmt3+cust.AgeArAmt4-cust.UnappliedCredit
+	lIST$[3]="TOTAL A/R",fdel$,LTrim$(x3 using QMask$),fdel$
+	row=4
+	 MAT  READ #CTLC,20,130;AGEBUCK;
+	 LET AGEBUCKH$[1,8]=" CURRENT"
+	 IF P9$[50,50]="M" ! age by month
+	   IF P9$[25,25]="Y" ! age by due date
+		 LET AGEBUCKH$[9,16]="PAST DUE"
+		 LET AGEBUCKH$[17,24]="OVER 1MO"
+		 LET AGEBUCKH$[25,32]="OVER 2MO"
+		 LET AGEBUCKH$[33,40]="OVER 3MO"
+	   ELSE
+		 LET AGEBUCKH$[9,16]="OVER 1MO"
+		 LET AGEBUCKH$[17,24]="OVER 2MO"
+		 LET AGEBUCKH$[25,32]="OVER 3MO"
+		 LET AGEBUCKH$[33,40]="OVER 4MO"
+	   ENDIF
+	 ELSE
+	   FOR X=0 TO 3
+		 LET AGEBUCKH$[((X*8)+9),((X*8)+16)]=AGEBUCK[X] USING "OVER ###"
+	   NEXT X
+	   IF P9$[25,25]="Y" AND AGEBUCK[0]=0
+		 LET AGEBUCKH$[9,16]="PAST DUE"
+	   ENDIF
+	 ENDIF
+	IF P9$[50,50]<>"M" AND P61$[67,67]="Y" ! not by month/by term code 
+	  MAT  READ #ctlc,20,130;AGEBUCK;
+	  IF CUST.Terms>0 AND CUST.Terms<=99 
+		ARTC=OpenFile(-9981,IntCo) ! arterms
+		READ #ARTC,(CUST.Terms),30;DDAY;
+		TRY CLOSE #ARTC  Else  Rem
+		IF DDAY=0 LET DDAY=1
+		IF DDAY>0
+		  LET AGEBUCK[0]=DDAY
+		  LET AGEBUCK[1]=DDAY*2
+		  LET AGEBUCK[2]=DDAY*3
+		  LET AGEBUCK[3]=DDAY*4
+		ENDIF
+	  ENDIF
+	  FOR X=0 TO 3
+		LET AGEBUCKH$[((X*8)+9),((X*8)+16)]=AGEBUCK[X] USING "OVER ###"
+	  NEXT X
+	  IF P9$[25,25]="Y" AND AGEBUCK[0]=0
+		LET AGEBUCKH$[9,16]="PAST DUE"
+	  ENDIF
+	ENDIF
+	List$[4]=AGEBUCKH$[33,40],fdel$,LTrim$(cust.AgeArAmt4 using QMask$),fdel$
+	List$[5]=AGEBUCKH$[25,32],fdel$,LTrim$(cust.AgeArAmt3 using QMask$),fdel$
+	List$[6]=AGEBUCKH$[17,24],fdel$,LTrim$(cust.AgeArAmt2 using QMask$),fdel$
+	List$[7]=AGEBUCKH$[9,16],fdel$,LTrim$(cust.AgeArAmt1 using QMask$),fdel$
+	List$[8]=AGEBUCKH$[1,8],fdel$,LTrim$(cust.CurrentArAgeBal using QMask$),fdel$   
+	List$[9]="UNAPPLIED",fdel$,LTrim$(cust.UnappliedCredit using QMask$),fdel$
+	List$[10]=esdel$
+	! let callee addtostr
+	Shoidng: ! finito
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! OrdSum
+! 
+!--------------------------------------------------------------------
+Sub Edttrkdo()
+! record edit tracking
+  Try
+	if P60$[44,44]<>"Y" GOTO etddone
+	if Orighld=rot.holdcode goto etddone ! not changed!
+	clear etr.
+	etr.etaction=etaction
+	etr.OrgQtyOrd=Orighld
+	etr.NewQtyOrd=rot.holdcode
+	etr.Printer=0   !* not a print action                                         
+	etr.OrdNum=roh.OrdNum ! H0[7]                                                             
+	etr.Status=roh.Status ! H6[2]   (not inproc on erp)                                                           
+	etr.InvNum=roh.InvNum ! ORef[1]  ! " H0[6]                                              
+	etr.CustNum=roh.CustNum ! H0[4]                                                              
+	etr.OrgOrdTot=rot.OrdTot ! T2[0]                                                           
+	IF etr.ETACTION<>12 LET etr.ETACTION=13 ! \ SIGNAL 3,10
+	for i=0 to 2 \ fchan[i]=-1 \ next i                                       
+	etr.LineNum=0                    
+	etr.ProdCode$="236"+Blank$ ! s9[4] using "###"               
+	etr.UMSell=0;etr.NstkFlag=0  
+	Call MakeEdittrack(e$,IntCo,fchan[],etr.)
+	Etddone: ! get out
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Edttrkdo
+! 
+!--------------------------------------------------------------------

@@ -1,0 +1,313 @@
+! ubscredck ! customer credit checks
+! custom_customer$="PHILLIPS"
+! task#14104/cct116872 - if customer has a credit code=5, do not allow order
+!                          to be entered.
+!
+!
+!Program name: ubscredck                                  
+!
+!loadsave -w -n 100,10 -o prog/dxport/ubscredck.dl4 src/ubscredck.src 
+include "src/copyright.inc"
+Option Base Year 1980
+Declare Intrinsic Sub InpBuf,Time
+Declare External Sub String
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,PDate$
+!External Lib "OLDCALLS.LIB"
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,CreateNetStatus
+Declare Intrinsic Sub DateToJulian,JulianToDate,VerifyDate,CheckNumber
+! chan[1] =cntrl file
+! chan[2] =customer file
+! chan[3] =saract file
+! chan[4] = ch_credck
+! chan[5] = roh
+! chan[6] = rot
+! chan[7] = ros
+include "src/inc/fileordhead.inc"
+include "src/inc/filecust.inc"
+include "src/inc/filesaract.inc"
+include "src/inc/filecrdchk.inc"
+
+! Enter CHAN[],SHIPTO,BILLTO,ORDAMT,ORDNUM,CCSTATUS,CCTEXT$,DEBUG,DLOG$,PROBLEM
+External Sub getcredck(chan[],shipto,billto,ordrec,ordamt,intCo,ReturnStatus,Message$,ccstatus,cctext$)
+Try
+
+Declare Intrinsic Function FindChannel,Trim$ 
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! error handling variables
+dim custom_customer$[30]
+dim roh. as roh
+dim ros. as ros
+dim rot. as rot
+dim cu. as cust
+dim ar. as saract
+dim cred. as crdchk
+Dim 1%,MAXCHAN,PASS,chan[7]
+Dim 2%,X2,CL,ARDATE,D3[1]
+Dim 3%,SCR,credchk_amt
+Dim WORK$[90],P9$[50],SCRATCH$[80],FILENAME$[50],x$[10]
+Dim A3$[22],BT$[20],U2$[60],A2$[30],A1$[142],J4$[50],P60$[50]
+Dim Msg$[256],pgmName$[20],tmp$[50],CCTEXT0$[15]
+
+Dim 2%,A0[3],C1[12],REC,C3[1]
+Dim 1%,S0[20],SUB_,SZN,C7[4],C0,C2[2],C8,C11[2]
+Dim 3%,C4[6],C10[5],CFIN[8],U1,C9,C5[5],C6[9],C12[1]
+Dim 3%,CC9
+Dim 2%,A2[5],A4[8],3%,A3[13]
+Dim 2%,CCHK[5],CCHK1$[30],CCTEXT0$[15]
+Dim 1%,CHNL,CHNLFREE,C2
+Dim 3%
+
+   
+
+! openfiles !
+If CHAN[1]
+	Let CH_CNTRL = CHAN[1]
+else
+	Ch_Cntrl = OpenFile(-9999,intCo) \ If Ch_Cntrl = -1 Error 42  ! control
+endif
+If CHAN[2]
+	Let CH_CUST = CHAN[2]
+else
+	Ch_Cust = OpenFile(-1808,intCo) \ If Ch_Cust = -1 Error 42  ! cust
+endif
+If CHAN[3]
+	Let CH_ARACT = CHAN[3] 
+else
+	Ch_Aract = OpenFile(-1504,intCo) \ If Ch_aract= -1 Error 42  ! ar file
+endif
+If CHAN[4]
+	Let CH_CREDCK = CHAN[4] 
+else
+	Ch_Credck = OpenFile(992,intCo) \ If Ch_credck= -1 Error 42  ! credit check file
+endif
+if ordrec<>0
+	if chan[5]
+		let ch_roh=chan[5]
+	else
+		Ch_Roh = OpenFile(1840,intCo) \ If Ch_roh= -1 Error 42  ! order header file
+	endif
+	if chan[6]
+		let ch_rot=chan[6]
+	else
+		Ch_Rot= OpenFile(1872,intCo) \ If Ch_roh= -1 Error 42  ! order total file
+	endif
+	if chan[7]
+		let ch_ros=chan[7]
+	else
+		Ch_RoS= OpenFile(1856,intCo) \ If Ch_roS= -1 Error 42  ! order ship to  file
+	endif
+endif
+CCMODE = CCSTATUS;CCSTATUS = 0;WORK$ = " ",WORK$;CCTEXT0$=" ",CCTEXT0$
+cctext$=""
+Read #CH_CNTRL,19,50;P9$;
+Read #CH_CNTRL,0,108;ARDATE;
+mat read #ch_cntrl,115,60;custom_customer$;
+ Custom_customer$=UCase$(Trim$(custom_customer$))
+x$ = ardate Using "&&&&&&"                                          
+Call DateToJulian(1,x$,x$,E)                                        
+If Not(E)                                                           
+     jardate = x$[1,5]                                                 
+Else                                                                
+     j4$ = "" \ Call Time(j4$)                                         
+     j4$[13] = "" \ Call VerifyDate(j4$,x$,E)
+     if e<>0
+	 let returnstatus=0
+	 let message$="Error in A/R Aging Date"
+         goto outend:
+     endif
+     Call DateToJulian(1,x$,x$,E)
+     if e<>0
+	 let returnstatus=0
+	 let message$="Error in A/R Aging Date"
+         goto outend:
+     endif            
+     jardate = x$[1,5]                                               
+End If                                                              
+returnstatus=1
+message$="OK"
+let prevordamt=0
+if ordrec<>0
+	 Read Record #ch_roh,ordrec;roh.; 
+	 Read Record #ch_rot,roh.totrec;rot.;
+	 Read Record #ch_ros,roh.shiprec;ros.;
+	 let ordnum=roh.ordnum
+	 prevordamt=rot.ordtot
+	 if p60$[40,40]="O" and (rot.MdseOrdAmt-Rot.MdsePrevShip)>0
+		let prevordamt=rot.MdseOrdAmt-Rot.MdsePrevShip
+	 else
+		let prevordamt=rot.ordtot
+	 endif
+ else
+	let prevordamt=0
+	let ordnum=0
+	let work$=billto using "######"
+	search #ch_cust,2,1;work$,rec_billto,e
+	if e
+		let returnstatus=0
+		let message$="Customer Not On File"
+		goto outend:
+	endif
+	read record #ch_cust,rec_billto;cu.;
+	let billto=cu.customerbillto
+	if not (shipto)
+		let shipto=billto
+	endif
+	 if not (billto)
+		let billto=custno
+	 endif
+ endif
+ WORK$ = BILLTO Using "######"
+ Search #CH_CUST,2,1;WORK$,REC_BILLTO,E
+ if e
+	let returnstatus=0
+	let message$="Customer Not On File"
+	goto outend:
+ endif
+ Mat Read #CH_CUST,REC_BILLTO;A1$                 
+ Mat Read #CH_CUST,REC_BILLTO,142;C1              
+ Mat Read #CH_CUST,REC_BILLTO,210;C4              
+ Read #CH_CUST,REC_BILLTO,412;C9                  
+ Mat Read #CH_CUST,REC_BILLTO,668;C12             
+ If ORDAMT                        
+	C9 = C9 + (OrdAmt-Prevordamt)                                                                                                           
+	If SHIPTO <> BILLTO                                                         
+		WORK$ = SHIPTO Using "######"                                             
+		Search #CH_CUST,2,1;WORK$,REC_SHIPTO,E 
+		if e
+			let returnstatus=0
+			let message$="Ship To Customer Not On File"
+			goto outend:
+		endif
+		Read #CH_CUST,REC_SHIPTO,412;CC9                                          
+		CC9 = CC9 + (Ordamt - prevordamt)                                                       
+  	 End If                                                                      
+  End If                                                                        
+  Unlock #CH_CUST 
+  
+  if custom_customer$="PHILLIPS" !task#14104/cct116872
+	IF C1=5 
+		LET CCSTATUS=6
+		CCTEXT$=CCTEXT$+" CREDIT CODE: 5"
+		GOTO ALWAYSFAIL:
+	ENDIF 
+  endif
+
+  If C9 < 0 Let C9 = 0 
+  x3 = C4[0] + C4[2] + C4[3] + C4[4] + C4[5] + C9 - C4[1]  
+  IF C1[3]<>0
+	If C12[0] < x3 
+		Let CCSTATUS = 2   
+		CCTEXT$=CCTEXT$,"ACCOUNT IS OVER CREDIT LIMIT BY "
+		let tmp$=x3-C12[0] USING "-$$$$,$$$,$$#.##"
+		LET CCTEXT$=CCTEXT$+LTRIM$( TMP$)+".  "
+	 endif
+  endif
+  Mat Read #CH_CNTRL,115,48;CL;                                                 
+  !                                                                             
+  If C1[3] <>0                                                                     
+	If C1[3] = 999 Goto alwaysfail                                              
+	x3 = C4[0] - C4[1] + C4[2] + C4[3] + C4[4] + C4[5]                          
+	If x3 <= 0 Goto alwaysfail                                                  
+	x3 = 0;i3 = C4[1]                                                           
+	WORK$ = " ",WORK$;WORK$ = BILLTO Using "######"                             
+	AGELOOP: Search #CH_ARACT,3,2;WORK$,REC_ARACT,E 
+	If E = 2 Goto ENDARCHK
+	if e<>0
+		let returnstatus=0
+		let message$="Error In A/R File"
+		goto outend:
+	endif
+	If Val(WORK$[1,6]) <> BILLTO Goto ENDARCHK                                  
+	type = WORK$[23,23]                                                         
+	If p9$[19,19] <> "Y" And type > 5 Goto AGELOOP                              
+	Mat Read #CH_ARACT,REC_ARACT,0;a2;                                          
+	tdate = a2[4]                                                               
+	If (jardate - tdate) <= C1[3] Goto ENDARCHK                                 
+    !                                                                           
+	If p9$[25,25] = "Y"                                                         
+		Mat Read #CH_ARACT,REC_ARACT,154;a4;                                      
+		If a4[3]                                                                  
+			 x$ = a4[3] Using "######"    
+			Call DateToJulian(1,x$,x$,E)                       
+			If Not(E)                                          
+				tdate = x$[1,5]                                  
+				If (jardate - tdate) <= C1[3] Goto ENDARCHK      
+			End If                                             
+		End If                                               
+	 End If                                                 
+	Mat Read #CH_ARACT,REC_ARACT,24;a3;                    
+	If Not(a3[0] - a3[1] - a3[2]) Goto AGELOOP             
+	If type > 5    ! CREDITS                                        
+		i3 = i3 + (a3[0] - a3[1] - a3[2])                    
+		 x3 = x3 - (a3[0] - a3[1] - a3[2])                    
+	Else                                                   
+		i3 = i3 - (a3[0] - a3[1] - a3[2])                    
+		x3 = x3 + (a3[0] - a3[1] - a3[2])                    
+	End If                                                 
+	Goto AGELOOP                                           
+	ENDARCHK: !                                                
+	If i3 >= 0                                             
+		x3 = 0                                               
+	End If                                                 
+	If x3 > 0                                              
+		CCSTATUS = 3  
+		LET CCTEXT$=CCTEXT$+"ACCOUNT HAS A PAST DUE AMOUNT OF "
+		LET TMP$=X3 USING "-$$$$,$$$,$$#.##" 
+		LET CCTEXT$=CCTEXT$+LTRIM$(TMP$)+".  "
+	End If                                                                  
+	alwaysfail: ! CUSTOMER IS SET TO ORDER TO ORDER
+	If C1[3] = 999
+		Let CCSTATUS = 6  
+		LET CCTEXT$=CCTEXT$+" Order To Order "
+	endif
+ End If                                                                    
+L_4410: If CCSTATUS And Not(CCMODE)                                         
+    CCTEXT0$ = " ",CCTEXT0$                                                   
+    X2 = Tim(6)                                                             
+    CCHK[0] = C1[3];CCHK[1] = C1[0];CCHK[2] = C1[1]                         
+    CCHK[3] = X2;CCHK[4] = 0;CCHK[5] = Spc(6);CCHK[4] = 99                  
+    If CCSTATUS = 1 Let CCTEXT0$ = "CREDIT TYPE"                             
+    If CCSTATUS = 2 Let CCTEXT0$ = "CREDIT LIMIT"                            
+    If CCSTATUS = 3 Let CCTEXT0$ = C1[3] Using "OVER ### DAYS"               
+    If CCSTATUS = 6 Let CCTEXT0$ = "ORDER TO ORDER"                          
+    CCHK1$[1,30] = A1$[31,60] 
+    
+    E = 2 \ Search #CH_CREDCK,1,0;WORK$,REC_CREDCK,E 
+    if e
+	let message$="Error in Credit Check File"
+	let returnstatus=0
+    else
+	 WORK$[1,6] = C1[1] Using "######"                                       
+	 WORK$[7,12] = CCHK[3] Using "######"                                    
+	 WORK$[13] = REC_CREDCK Using "######"                                   
+	Search #CH_CREDCK,4,1;WORK$,REC_CREDCK,E
+	 if e
+		let returnstatus=0
+		let message$="Error in Adding Key to Credit Check File"
+	else   	                                                          
+		Mat Write #CH_CREDCK,REC_CREDCK;CCHK                                  
+		Mat Write #CH_CREDCK,REC_CREDCK,24;CCHK1$                             
+		Mat Write #CH_CREDCK,REC_CREDCK,54;CCTEXT0$                           
+		X2 = ORDNUM \ Write #CH_CREDCK,REC_CREDCK,70;X2 
+		credchk_amt = ORDAMT \ Write #CH_CREDCK,REC_CREDCK,74;credchk_amt;    
+	End If                                                                  
+  End If 
+ ENDIF
+  Goto OUTEND                                                               
+Else                                                                        
+   include "src/callsuberr.inc"
+End try           
+
+OUTEND: Rem
+If not(CHAN[1]) Close #CH_CNTRL
+If not(CHAN[2]) Close #CH_CUST
+If not(CHAN[3]) Close #CH_ARACT
+If not(CHAN[4]) Close #CH_CREDCK
+if not(Chan[5]) close #ch_roh
+If not (chan[6]) close #ch_rot
+if not (chan[7]) close #ch_ros
+
+
+End  Sub  
+!

@@ -1,0 +1,577 @@
+! >>> Program 374
+!
+! description Purchase Order Receipts Accept 
+! loadsave -w -n 100,10 -o prog/dxport/374.dl4 src/374.src
+!
+! ERPScheduler Enabled (primarily for access from Classic RF progs)
+!
+include "src/copyright.inc"
+! --------------  notes for upgrade to rev10 for Walter E Nelson task#27544/27646----------------
+!! 1/15/02 rce  cct141900 remove SalesOrder's holdforpo flag p61$[74,74] suflag 34> Hld B/O til PO rcvd  Y
+! ------------------------------------------------------------------------------
+
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: DEC 10, 2008  12:30:36
+Rem /w2/papermaster/r2005//usr/acct/mary/work/custom/xrev9/po374.src (univ2) [mary] {37760}
+Rem  Copyright (c) 2008 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+Declare Intrinsic Sub DateToJulian,FindF,InpBuf,String,VerifyDate,Time,Logic
+Declare Intrinsic Sub dxopen,dxget,dxset,dxclose,dxsave,getglobals
+!Option Default Dialect IRIS1
+Declare Intrinsic Sub DateToJulian
+Declare Intrinsic sub programdump,env
+Declare Intrinsic function findchannel
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Function getmsg$,expandarray
+Declare External Sub ERPCronSuccess
+External Lib "ubsfunc.dl4"
+Declare External Function getuidrec,getuidinfo$
+OPTION GOSUB NESTING 16  ! Default is 8
+! Option Default Dialect IRIS1
+Rem PO374   P.O. RECEIPTS TO STOCK ACCEPT
+Rem  AUTHOR: G.DOSCHER   2/19/81
+Rem  LAST UPDATE:  G.DOSCHER  3/22/91 - REWRITTEN FOR XINDIST
+try
+Com 1%,PFU1[20],CNVTU[9],COST_LEV[3]
+Com 3%,PFU2[6],CNVTA[4],A[33],POHR,SOURCERF
+Com 1%,WAREHOUSE,SOURCE
+!If Err 0 Gosub ERR_TRAP
+! If Spc(13) = 11 Print @80,24;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTIN.hsf\177\";
+Dim 1%,POGLFLAG,GLCKEY$[50],3%,REC_GLC
+Dim 1%,PD1[2],2%,D3[1],SCRATCH$[80]
+Dim 2%,S9,R[30],P60$[50]
+Dim 1%,TRUE,FALSE,Z9,OPENLINE,X0,FLAG,P0[1023]
+Dim 1%,RASL[5],I,X,K,CPRT,SPO,PO1[9],H4[3],2%,DSP,DSP1,X1,E,chan[5]
+Dim 1%,WHSE,2%,D9[5]
+Dim 2%,B[24],DATE,H0[5],S,PO,CURJDATE,COMP,J,X2
+Dim 2%,MINLEADTIME,PH[4],FCHAN[25]
+Dim 3%,TMPREC,CMD$[100],I$[50]
+Dim 3%,R1[15],V1[2],A4,FLAGRF[1],urec
+Dim A1$[20],F$[20],U5$[50],J$[90],J1$[90],P9$[50],P61$[256],DATE$[20]
+Dim 1%,WPF[1024],3%,R31,WHREC,UIDREC[1]
+Dim X$[20],DFLTRCVLOC$[6],K$[20],KL$[20],K31$[50],USR$[40]
+dim groupid$[1]
+Dim DEV$[20],HM$[30],nextblockid$[8],Message$[600],WebStr$[600]
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp$[800],tmp1$[200],blockid$[100],msg$[100]
+Dim action$[30],options$[30],userid$[8],3%,fdel$[10],rstr$[1000],bsdel$[10],esdel$[10],rdel$[10]
+! call dxopen() ! needed?
+
+call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+if erpCron
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+	! RF programs can use the Scheduler interface to do
+	! pronto accepts.  Normally POHR is a com variable, but this
+	! would never be set if running through Scheduler interface. This
+	! is a way for the RF programs to do pronto accept of a single
+	! PO
+	tmp$ = GetParameter$("POHR")
+	if tmp$ <> "" and tmp$ <> "0" POHR = tmp$
+else
+	Call getglobals("blockx",0,blockid$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+end if
+
+Comp=IntCo ! E = Spc(5) \ COID = Int((E - Int(E / 16384) * 16384) / 64)
+Close #1 ! getsession open cntrl# as READONLY
+J$="cntrl/cntrl"+Str$(Comp)
+Open #1,J$
+! X2 = Spc(5)
+COMP = Intco
+let urec=getuidrec(e$,IntCo,Userid$)
+Def FNR(X) = Sgn(X) * (Abs(Int((Abs(X) + .005) * 100) / 100))
+Mat Read #1,69,52;DFLTRCVLOC$;
+Mat Read #1,60,50;P60$;
+Mat Read #1,61,0;P61$;
+Mat Read #1,51,76;SPO;
+Mat Read #1,51,88;POGLFLAG;
+let poglflag=0 ! not active, will need to check fchan[22] for gl file now being used by rol file
+try Close #9 else Rem ! blockid open #9 for a sort file
+For X1 = 0 To 25
+  FCHAN[X1] = -1
+Next X1
+For X1 = 2 To 22
+  Read J \ If J = -1 Goto L_840
+  Read #1,88,J;F$; \ Open #X1,F$
+L_840: Next X1
+Data "-1","1792","1728","2400","2976","416","2416","2432","1744","-1","-1","1568","2448"
+Data "2512","2336","2528","1088","-1","-1","-1","1888"
+FCHAN[0] = 3;FCHAN[1] = 5;FCHAN[2] = 6;FCHAN[3] = 7;FCHAN[4] = 8;FCHAN[5] = 9
+FCHAN[6] = 10;FCHAN[7] = 13;FCHAN[8] = 14;FCHAN[9] = 16;FCHAN[10] = 17;FCHAN[11] = 18
+FCHAN[17] = 15;fchan[22]=22
+Read #1,88,2768;F$; \ Open #29,F$
+FCHAN[18] = 29
+If P60$[9,9] = "F" Or P60$[9,9] = "L"
+  Mat Read #1,88,3008;F$; \ Open #19,F$
+  Mat Read #1,88,3024;F$; \ Open #20,F$
+  FCHAN[13] = 19;FCHAN[14] = 20
+  If P61$[60,60] = "Y"
+    F$ = COMP Using "4/FIFOSPC#" \ Ropen #21,F$
+    FCHAN[19] = 21
+  End If 
+End If 
+If SPO
+  F$ = COMP Using "2/POCTFLE#" \ Open #30,F$
+  FCHAN[15] = 30
+End If 
+F$ = COMP Using "4/NSINVTRANS#" \ Open #35,F$
+FCHAN[23]=35
+FLAGRF = 0
+If P61$[22,22] = "Y" Or P61$[22,22] = "L" Let FLAGRF = 1
+If FLAGRF = 1
+  F$ = "3/PORFLINE" + Str$(COMP)
+  Open #31,F$
+  FCHAN[16] = 31
+End If 
+FLAGRF[1] = 0
+if p61$[104,104]="Y"
+	rem roll inventory files                       
+	LET F$=COMP USING "2/PRODROLL#" \ OPEN #43,F$  
+	LET FCHAN[25]=43                               
+	LET F$=COMP USING "3/SPOROLL#" \ OPEN #44,F$   
+	LET FCHAN[24]=44                               
+endif
+DATE$ = Tim(8) Using "&&",Tim(9) Using "&&",Tim(10) Using "&&"
+DATE = DATE$
+Z9 = 0
+X2 = DATE \ Gosub L_17820 \ X2 = 0
+If X2 Let CURJDATE = X2 Else Gosub L_17600
+TRUE = 1 \ FALSE = 0
+Mat Read #1,19,50;P9$;
+Mat Read #1,182;MINLEADTIME;
+RASL = 0 \ If P9$[41,41] = "Y" Or P9$[41,41] = "W" Let RASL = 9
+If Not(RASL) Or DFLTRCVLOC$ = "      " Let DFLTRCVLOC$ = "STOCK "
+Mat Read #1,115;D9;
+!Open #77,"cntrl/PRTDFLT" \ Open #78,"Cntrl/USERPORT"
+!Mat Read #78,Spc(6),10;A4; \ If Not(A4) Let A4 = Spc(6)
+!Mat Read #77,A4,0;PD1;
+!Close #77,#78
+If P60$[9,9] = "L" ! if lifo, can't run while 226 or 227 running
+  Gosub CHECK_INVOICES
+End If 
+Rem open gl files
+If POGLFLAG <> 0 And P9$[17,17] = "Y" And SPO <> 0
+  F$ = "6/GLPOCNTRL" + Str$(COMP) \ Open #51,F$
+  FCHAN[21] = 51
+  GLCKEY$ = " ",GLCKEY$;GLCKEY$[1,6] = "DFAULT"
+  Search #51,2,1;GLCKEY$,REC_GLC,E \ If E > 1 error 11000
+  If E
+	eflg=eflg+1
+	Message$=Message$+"G/L - P/O INTERFACE CONTROL NOT SETUP PROPERLY. No Update Performed."
+	Goto OUTEND
+  End If 
+  F$ = "4/GLPODETL" + Str$(COMP) \ Open #52,F$
+  FCHAN[22] = 52
+End If 
+If POHR ! purchase order header rec passed... process single po!
+  R1[8] = POHR
+  If POGLFLAG<>0 And P9$[17,17] = "Y" And SPO <> 0
+    F$ = "files/"+"6/GLPOPRONTO" + Str$(COMP)
+    Call FindF(F$,A9)
+    If Not(A9)
+      If (RESTART)
+        eflg=eflg+1
+	Message$=Message$+"G/L PO Pronto Interface is not found. No Update Performed." 
+        Goto Outend
+      Else 
+        CMD$ = "[1:10] ",F$,"!"
+        Build #50,CMD$
+        TMPREC = 9 \ Search #50,0,1;I$,TMPREC,E \ If E error 11000
+        TMPREC = 1 \ Search #50,0,0;I$,TMPREC,E \ If E error 11000
+        Close #50
+      End If 
+    End If 
+    Open #50,F$
+    FCHAN[20] = 50
+  End If 
+  WAREHOUSE = 0;SOURCE = 374
+  WHSE = 0
+  Goto PROCESS_PO
+End If 
+L_1010: ! Print @0,21;"DO YOU WANT TO ACCEPT PO RECEIPTS TO STOCK?  (Y/N) ";'CE';
+!Input ""U5$
+! Call String(1,U5$)
+!If U5$ = "N" Goto L_9010
+!If U5$ <> "Y" Print 'RB'; \ Goto L_1010
+! Gosub L_8300 ! check warehouse
+tmp$ = GetParameter$("WHSE")
+LET whse=tmp$
+if not(whse) and rtrim$(tmp$)<>"0"
+	eflg=eflg+1
+	Message$=Message$+"Invalid Warehouse Number Entered"
+	goto outend:
+endif
+if whse<0 or whse>99
+	eflg=eflg+1
+	Message$=Message$+"Invalid Warehouse Number Entered"
+	goto outend:
+endif
+Gosub L_8200
+WAREHOUSE = WHSE;SOURCE = 374
+if poglflag<>0 and p9$[17,17]="Y" and spo<>0 
+	F$ = "6/GLPOTEMP" + Str$(WHSE) + Str$(COMP)
+	Call FindF(F$,A9)
+	If A9 And Not(RESTART)
+		eflg=eflg+1
+		Message$=Message$+"G/L PO Pronto Interface In Use Elsewhere. No Update Performed."
+		!Print @0,23;'CL RB';"G/L Po Interface in use elsewhere...";
+		! Signal 3,30
+		Goto OUTEND
+	End If 
+	If RESTART And Not(A9)
+		eflg=eflg+1
+		Message$=Message$+"G/L PO Interface File not found. No Update Performed."
+		!Print @0,23;"G/L - PO Interface Not Found "; \ Signal 3,30
+		!error 11000
+		goto outend:
+	End If 
+	If Not(A9)
+		CMD$ = "[1:10] ",F$,"!"
+		Build #50,CMD$
+		TMPREC = 9 \ Search #50,0,1;I$,TMPREC,E \ If E error 11000
+		TMPREC = 1 \ Search #50,0,0;I$,TMPREC,E \ If E error 11000
+		Close #50
+	End If 
+	Open #50,F$
+	FCHAN[20] = 50
+endif
+TMP$="doing a lock"
+call "proglock.dl4","374-"+(whse using "&&"),1,TMP$
+!Print @0,23;"ACCEPTING PO RECEIPTS.   PLEASE WAIT . . .  ";'CL';
+! Signal 3,0
+A1$ = " 6"
+L_2020: Search #8,3,1;A1$,R1[8],E \ If E > 2 error 11000
+If A1$[1,2] <> " 6" Let E = 2
+If Not(E) And Not(POHR)
+PROCESS_PO: Rem
+  OPENLINE = FALSE
+  Mat Read #8,R1[8];H0
+  Mat Read #8,R1[8],242;H4
+  If WHSE If WHSE <> H4[1] Goto L_2020
+  If POHR Let A1$[1,2] = H0[0] Using "##" \ A1$[3] = H0[2] Using "######"
+  If Not(POHR) And H0[0] <> 6 
+	eflg=eflg+1
+	Message$=Message$+"Bypass PO# "+str$(H0[2])+" Status Error. "
+	GOTO l_2020
+  ENDIF
+  Z9 = Z9 + 1
+  !FCHAN[0]   =    3    2/SPROD1                 
+!FCHAN[1]   =    5    2/A80VM10                
+!FCHAN[2]   =    6    3/SPOFLEN1               
+!FCHAN[3]   =    7    2/PSERLNO1               
+!FCHAN[4]   =    8    3/SPOFLEH1               
+!FCHAN[5]   =    9    3/SPOFLEL1               
+!FCHAN[6]   =  10    2/SPRODWHSE1              
+!FCHAN[7]   =  13    2/ALTVEND1                
+!FCHAN[8]   =  14    3/SNSTKDESC1              
+!FCHAN[9]   =  16    2/VDPRHIST1               
+!FCHAN[10] =  17    3/SPRODLOT1                
+!FCHAN[11] =  18    3/SPOLOT1                  
+!FCHAN[12] =  -1     *****                     
+!FCHAN[13] =  19    4/FIFOLOT1                 
+!FCHAN[14] =  20    4/FIFOTRANS1               
+!FCHAN[15] =  30    2/POCTFLE1                 
+!FCHAN[16] =  31    3/PORFLINE1                
+!FCHAN[17] =  15    4/INVTRANS1                
+!FCHAN[18] =  29    2/WHINFO1                  
+!FCHAN[19] =  21    4/FIFOSPC1                 
+!FCHAN[20] =  50    6/GLPOPRONTO or 6/GLPOTEMP 
+!FCHAN[21] =  51    6/GLPOCNTRL1               
+!FCHAN[22] =  52    4/GLPODETL1 
+!FCHAN[23] =  35    4/NSINVTRANS1
+  If POHR Let POHEADREC = POHR Else Let POHEADREC = R1[8]
+  Call "PO374A.DL4",FCHAN[],POHEADREC,POHR,WHSE,urec,e$,IntCo,rstr$
+  If POHR Goto L_8000
+L_2590: Goto L_2020
+End If 
+Goto L_8000
+L_8000: Rem ALL DONE
+IF POHR GOTO L_9010
+! If POHR Print @0,10;'CL';"DONE ";Z9;"ACCEPTED"; \ Signal 3,15 \ Goto L_9010
+Gosub CHECKRF
+! Print @0,23;"COMPLETE!  ";Z9;"PURCHASE ORDERS ACCEPTED  ";'CL';
+! Input Len 1;"PRESS <CR> TO EXIT "U5$
+Rem take tmp file and postit
+If P9$[17,17] = "Y" And POGLFLAG <> 0 And SPO <> 0
+	For X = 2 To 99 
+		Try  Close #X Else Rem
+	Next X
+	groupid$ = GetParameter$("u_group")
+	Call "po374c.dl4",WAREHOUSE,SOURCE,e$,IntCo,rstr$,message$,eflag,groupid$
+End If 
+Goto OUTEND
+L_8200: Rem CHECK/SET WHSE PROC FLAGS
+! If Err 0 Rem
+Try Close #90 Else Rem
+!If Err 0 Gosub ERR_TRAP
+Read #1,88,2768;X$[1,16]; \ Open #90,X$
+! Print @0,23;'CL';"CHECKING WHSE FLAGS, PLEASE WAIT"; \ Signal 3,0
+If WHSE Let WHREC = WHSE - 1 Else Let WHREC = 99
+L_8225: Mat Read #90,WHREC,900;WPF;
+! Call "getuidrec",UIDREC[1]
+UIDRec[1] = GetUIDRec(e$,IntCo,Userid$)
+If WPF[374] and WHREC <> 99
+	E=3  ! CHECK with time check
+	TMP$=" "
+	call "proglock.dl4","374-"+(whse using "&&"),e,TMP$  !! no special flag for delete
+	if e  !! found entry
+		Let UIDREC = WPF[374] \ Goto L_8280
+	else
+		e=whse  ! pass in warehouse selected
+		call "flagreset","374.DL4",e
+	endif
+endif
+Mat Read #90,WHREC,900;WPF;
+If WPF[374] <> 0 Let UIDREC = WPF[374] \ Goto L_8280
+If WPF[373] <> 0 Let UIDREC = WPF[373] \ Goto L_8281
+WPF[374] = UIDREC[1]
+If WHSE If WHREC = 99 Let WPF[374] = 0 - WHSE
+Mat Write #90,WHREC,900;WPF;
+If WHSE If WHREC <> 99 Let WHREC = 99 \ Goto L_8225
+If WHSE If WHREC = 99 Goto L_8277
+For WHREC = 0 To 98
+  Mat Read #90,WHREC,900;WPF;
+  If WPF[374] <> 0 Let UIDREC = WPF[374] \ Goto L_8280
+  If WPF[373] <> 0 Let UIDREC = WPF[373] \ Goto L_8281
+L_8275: Next WHREC
+L_8277: Close #90
+Return 
+L_8280: Rem aip ! IF WPF[CPRT]=374
+USR$ = " ",USR$
+!If UIDREC > 0 Call "getuidinfo",UIDREC,USR$
+!Print @0,23;'RB CL';"ACCEPT IN PROCESS USER ";USR$[21];
+!	Print " -- PLEASE TRY LATER."; \ Signal 3,30
+If UIDREC > 0
+	!Call "getuidinfo",UIDREC,USR$
+	 USR$ = GetUIDInfo$(e$,IntCo,UIDRec)
+	eflg=eflg+1
+	message$=message$+"Accept In Process By User "+rtrim$(usr$[21])
+	message$=message$+" - Please Try Again In 5 Minutes. "
+	Goto L_9010
+endif
+L_8281: Rem jip
+USR$ = " ",USR$
+!If UIDREC > 0 Call "getuidinfo",UIDREC,USR$
+!Print @0,23;'RB CL';"JOURNAL IN PROCESS USER ";USR$[21];
+!Print " -- PLEASE TRY LATER."; \ Signal 3,30
+!Goto L_9010
+If UIDREC > 0
+	!Call "getuidinfo",UIDREC,USR$
+	 USR$ = GetUIDInfo$(e$,IntCo,UIDRec)
+	eflg=eflg+1
+	message$=message$+"Journal In Process By User "+rtrim$(usr$[21])
+	message$=message$+" - Please Try Later. "
+	Goto L_9010
+endif
+L_8300: Rem CHECK WAREHOUSE
+!If PD1[2] Print Using "##";@0,19;'CE';"Your default warehouse is ";PD1[2]
+!L_8310: WHSE = 0 \ If D9[5] = 1 Goto L_8365
+!Print @0,21;"Enter warehouse to use (1-";
+!Print Using "##";D9[5];"), <CR> for all or  E: to exit ";'CE';
+!Input Len 16386;""X$
+!Call String(1,X$)
+!If X$ = "E" Goto L_9010
+!WHSE = X$
+!If (Not(WHSE) And X$ <> "") Or WHSE < 0 Or WHSE > D9[5] Print 'RB'; \ Goto L_8310
+!If PD1[2] And PD1[2] <> WHSE
+ ! If WHSE Print Using "##";@0,22;"You have requested to accept RTS  for whse ";WHSE;" is this correct YES / <CR> ";
+ ! If Not(WHSE) Print Using "##";@0,22;"You have requested to accept RTS for all whses is this correct YES / <CR> ";
+ ! Input ""X$
+ ! If X$ <> "YES" Goto L_8300
+! End If 
+L_8365: Return 
+CHECK_INVOICES: Rem^^^^^^^^^^^^^^^^^^^^^^^^^^
+Mat Read #1,120;P0;
+If P0[226] <> 0 Goto JPMSG
+If P0[227] <> 0 Goto IAMSG
+Mat Read #1,88,1840;F$;
+Open #77,F$
+K$ = " ",K$ \ K$[1,2] = " 7"
+CHECK_NEXT: Search #77,3,1;K$,R,E \ If E > 2 error 11000
+If E <> 2
+	If K$[1,2] = " 7" Or K$[1,2] = "92"
+		let eflg=eflg+1
+		 ! Print 'RB CR';" *INVOICE JOURNAL OR ACCEPT BEING RUN ... PLEASE TRY AGAIN LATER ";
+		If K$[1,2] = "92"
+			message$=message$+"THE INVOICE JOURNAL(226) IS BEING IN PROCESS. "
+			message$=message$+"IT MUST FINISH BEFORE YOU CAN RUN PROGRAM 374."
+			! Signal 3,30
+		End If 
+		If K$[1,2] = " 7"
+			message$=message$+"THE INVOICE JOURNAL(226) HAS BEEN RUN BUT THE 227 INVOICE ACCEPT"
+			message$=message$+"HAS NOT BEEN RUN. "
+			message$=message$+"YOU MUST RUN PROGRAM 227 BEFORE YOU CAN RUN PROGRAM 374."
+			!Signal 3,50
+			message$=message$+" - Please Try Later. No Update Performed "
+		endif
+		Goto CHECK_DONE
+	End If 
+	If K$[1,2] > " 7" and k$[1,2]<"92"
+		Let K$[1,2] = "92" \ Goto CHECK_NEXT
+	endif
+End If 
+Try Close #77 Else Rem
+Return 
+
+CHECKRF: Rem THIS WILL GO THRU THE PORFLINE FILE & DELETE CLOSED PO'S-GARBAGE COLL.
+If FLAGRF[0] = 0 Return 
+K31$ = " ",K31$
+CHECKRF3: Search #31,3,1;K31$,R31,E
+If E = 2 Return 
+If E error 11000
+U5$ = " ",U5$
+For X = 1 To 9
+  X0 = X
+  If X >= 8 Let X0 = X + 82
+  U5$[1,2] = X0 Using "##"
+  U5$[3] = K31$[1,6]
+  Search #8,2,1;U5$,V1,E
+  If E > 1 error 11000
+  If E Goto CHECKRF3A
+  If X0 = 7 Goto CHECKRF4
+  Goto CHECKRF3
+CHECKRF3A: Next X
+Goto CHECKRF3
+CHECKRF4: Search #31,5,1;K31$,R31,E
+If E error 11000
+E = 3
+Search #31,1,0;K31$,R31,E
+If E error 11000
+Goto CHECKRF3
+Return 
+JPMSG: Rem jip
+UIDREC = P0[226]
+Usr$=" ",usr$
+If UIDREC > 0
+	!Call "getuidinfo",UIDREC,USR$
+	 USR$ = GetUIDInfo$(e$,IntCo,UIDRec)
+endif
+ eflg=eflg+1
+message$=message$+" *INVOICE JOURNAL BEING RUN BY USER "+rtrim$(USR$[21])+"... PLEASE TRY LATER."
+! Call "getuidinfo",UIDREC,USR$
+! Print 'RB CR';" *INVOICE JOURNAL BEING RUN BY USER ";USR$[21];"... PLEASE TRY LATER."
+
+Goto CHECK_DONE
+IAMSG: Rem aip
+UIDREC = P0[227]
+!Call "getuidinfo",UIDREC,USR$
+!Print 'RB CR';" *INVOICES BEING ACCEPTED BY USER ";USR$[21];"... PLEASE TRY LATER."
+Usr$=" ",usr$
+If UIDREC > 0
+	!Call "getuidinfo",UIDREC,USR$
+	 USR$ = GetUIDInfo$(e$,IntCo,UIDRec)
+endif
+eflg=eflg+1
+message$=message$+" *INVOICES BEING ACCEPTED BY USER "+rtrim$(USR$[21])+"... PLEASE TRY LATER."
+CHECK_DONE: Rem OUT
+message$=message$+"Purchase Order Accept Aborted."
+Print 'CR';"PURCHASE ORDER ACCEPT ABORTED -- RETURNING TO MENU"
+! Signal 3,40
+If POHR Let R1[8] = POHR \ Gosub RESET_STATUS
+Goto L_9010
+WPFRESET: Rem reset wpf flags
+try Close #90 Else Rem
+
+Read #1,88,2768;X$[1,16]; \ Open #90,X$
+If WHSE Let WHREC = WHSE - 1 Else Let WHREC = 99
+WP8225: Mat Read #90,WHREC,900;WPF;
+WPF[374] = 0
+If WHSE If WHREC = 99 Let WPF[374] = 0
+Mat Write #90,WHREC,900;WPF;
+If WHSE If WHREC <> 99 Let WHREC = 99 \ Goto WP8225
+If WHSE If WHREC = 99 Goto WP8277
+WP8277: Rem finito
+Try Close #90 Else Rem
+Return 
+L_17600: Rem GET JULIAN DATE
+SCRATCH$ = "" \ Call Time(SCRATCH$)
+SCRATCH$[13] = "" \ Call VerifyDate(SCRATCH$,X$,E) \ If E error 11000
+DATE = X$
+Call DateToJulian(1,X$,X$,E) \ If E error 11000
+X2 = X$[1,5]
+CURJDATE = X2
+Return 
+X$ = " ",X$ \ X$[10] = ""
+X$[1,3] = Int(X2 / 10 ^ 2 - Int(X2 / 10 ^ 4) * 10 ^ 2) + 10 ^ 2 Using "###"
+X$[4,6] = Fra(X2 / 10 ^ 2) * 10 ^ 2 + 10 ^ 2 Using "###"
+X$[7,9] = Int(X2 / 10 ^ 4) + 10 ^ 2 Using "###"
+X$[4,4] = "/" \ X$[7,7] = "/" \ X$ = X$[2]
+Return 
+D3[0] = X2;FLAG = 1;X$ = " "
+Call "JULIANUTIL",D3[],X$,FLAG
+Return 
+Call VerifyDate(X$,X$,E) \ If E Let X$ = "    "
+X2 = X$[1,6] \ Return 
+L_17820: Rem  CONVERT YYMMDD TO JULIAN (RETURN=NOGOOD, +1=OKAY)
+X$ = X2 Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Return 
+X2 = X$[1,5] \ Return 1
+D3[0] = X2;D3[1] = X2;FLAG = 0
+Call "JULIANUTIL",D3[],X$,FLAG
+Return 
+X$ = X2 Using "&&&&"
+D3[0] = X$[1,2];D3[1] = X$[3,4]
+If D3[0] > 67 Let D3[0] = 1900 + D3[0]
+If D3[0] < 68 Let D3[0] = 2000 + D3[0]
+X$[1,4] = D3[0] Using "&&&&";X$[5,6] = D3[1] Using "&&"
+X2 = X$[1,6] \ Return 
+RESET_STATUS: Rem  SET STATUS 91 BACK TO ORIGINAL
+Mat Read #8,R1[8];H0;
+If H0 < 90 Return 
+KL$ = " ",KL$
+KL$[1,2] = H0[0] Using "##"
+KL$[3,8] = H0[2] Using "######";KL$[9] = ""
+Search #8,5,1;KL$,R1[8],E
+Mat Read #8,R1[8],310;PH
+Mat Read #8,R1[8],330;PO1
+If Not(PH[4]) Let PH[4] = 1
+H0[0] = PH[4]
+KL$[1,2] = H0[0] Using "##"
+KL$[3,8] = H0[2] Using "######";KL$[9] = ""
+Search #8,4,1;KL$,R1[8],E \ If E error 11000
+PH[4] = 0;PO1[8] = 0
+Mat Write #8,R1[8];H0
+Mat Write #8,R1[8],310;PH
+Mat Write #8,R1[8],330;PO1;
+Return
+
+OUTEND: Rem EXIT PROGRAM
+Gosub WPFRESET
+TMP$="do an unlock"
+call "proglock.dl4","374-"+(whse using "&&"),0,tmp$
+L_9010: !Print 'CS' 
+Close 
+! Chain "MX000"
+! Stop 
+Call addtostr(e$,rstr$,esdel$) !end section -- DXBLOCK 
+returnstatus=0
+If Eflg>0
+	ReturnStatus=1 ! ALWAYS - OTHERWISE NO DISPLAY 1=issues
+	! tmp$=""
+Endif
+if not(z9)
+	returnstatus=1
+	let message$=message$+"There are no received purchase orders available to accept"
+	if whse<>0
+		let message$=message$+" for warehouse "+str$(whse)
+	endif
+	message$=message$+"."
+else
+	Let message$=message$+" "+str$(Z9)+" Purchase Order(s) Receipt Accepted"
+	tmp$="";tmp=0
+	if p61$[91,91]="Y"
+		Call "264ns.dl4",tmp$,tmp,tmp$
+		if tmp$ let message$=message$+" "+tmp$
+	end if
+endif
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call AddToStr(e$,rstr$,WebStr$)
+call SetOutPut(e$,rstr$)
+try Call dxclose() else rem
+if not(Eflg) call ERPCronSuccess()
+ELSE
+!
+include "src/callmainerrnet.inc"
+end try
+End ! the whole program

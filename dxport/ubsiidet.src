@@ -1,0 +1,731 @@
+!Program Name: ubsiidet 
+!
+! loadsave -w -n 100,10 -o prog/dxport/ubsiidet.dl4 src/ubsiidet.src
+!                                                  
+!Last Updated:                                     
+!zyc 09/22/04 cct182799 daily invoice drill down
+!zyc 09/24/04 cct182799 using smart mask
+!zyc 09/27/04 cct182799 rounding 
+!zyc 09/27/04 cct182799 Zline
+! add images
+!rce 10/10/05  salesgroup
+!rce 02/22/07 R9 changes
+!
+
+Declare External Sub IIDet
+Declare Sub updatelog,errTrap
+External Lib "getartermd.lib"
+
+Include "src/iivars.inc"
+Dim i1. as iInfo
+Dim ils.[5000] as iItem
+Dim arrSales[999]
+
+!Call IIdet(1,999,"218112",i1., ils.[],i,s, arrSales[])
+!Print i,s
+!Stop
+
+External Sub IIDet(intCo, intSalesMan, debug, dlog$, Invoice$, Cust$, i1. as iInfo, ils.[] as iItem, ii ,ss, iLimit, cost_lev[], arrSales[])
+
+Try
+
+Declare Intrinsic Function FindChannel,Trim$
+Declare Intrinsic Sub FormatDate,DXSet,String,FindF
+Declare External Function FDate$,PDate$,BaseName$,XAmount,xunit$,OpenFile
+Declare External Function ReplaceChar$
+
+Declare External Function getartermd$
+
+External Lib "ubsfunc.dl4","ubsprconv.dl4"
+
+Include "src/ubsinvoice.inc"
+Include "src/ubscustomer.inc"
+Include "src/ubsprod.inc"
+Include "src/ubspo.inc"
+Include "src/ubswhse.inc"
+
+!DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01)
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)                       
+Def FNN(H) = Int(Abs(H) * 10 ^ Q0[1] + .5) * 10 ^ - Q0[1] * Sgn(H)       
+Def FNT(H) = Int(Abs(H) * 10 ^ Q0[1]) * 10 ^ - Q0[1] * Sgn(H)            
+Def FNV(H) = Int(Abs(H) * 10 ^ Q0[1] + .9999999) * 10 ^ - Q0[1] * Sgn(H) 
+Def FNU(H) = Int(Abs(H) + Sgn(Fra(Abs(H)))) * Sgn(H)                     
+
+Dim IDK$[16],IHK$[16],CUK$[12],SMK$[20],POK$[50],WHK$[20]
+
+Dim IH. As InvH
+Dim ID. As InvD
+Dim I2. As InvS2
+Dim IT. As InvT
+Dim CU. As Customer
+Dim PR. As Prod
+
+Dim 1%,debugDetail,Zline,NonStock
+! Variables for Channel#'s
+Dim 2%,IHC,IDC,ISC,ITC,CUC,CTLC,ENC,SMC,PRC,CCC
+! Variables for Search Record#
+Dim 4%,IHR,IDR,ISR,ITR,CUR,CTLR,SMR,PRC
+! Variables for Search Error
+Dim 2%,IHE,IDE,ISE,ITE,CUE,CTLE,SME,PRE
+
+! Line Buffer for Output XML
+Dim Output$[1024]
+
+Dim Msg$[256],pgmName$[20]
+Dim EN$[10], Status$[10], Sales$[35], Temp$[100],Space$[100]
+Dim SLS$[3],CO$[2], InvNo$[10], OrgL1$[16], CCD$[14], POSTR$[30]
+Dim PUNIT1$[10],PUNIT2$[10],P9$[50],P60$[50],SPOInfo$[300],HLD$[100],U5$[50]
+Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5]
+Dim SHIPADDR1$[50],SHIPADDR3$[30],SHIPADDR4$[30]
+Dim SOLDADDR3$[30],SOLDADDR4$[30]
+Dim TERM$[16],tmp$[100],custom_customer$[30]
+dim shiptyped$[16]
+
+! imaging dims
+Dim SCANDIR$[20],dosimage$[255],image$[255],ikey$[40],DR$[1],WORK$[255]
+Dim numpages$[4],ikeysav$[40]
+Dim IMI$[66]
+Dim 3%,IMI1,1%,imi2[3],2%,IMI3[2]
+Dim IMSTO$[44]
+Dim 3%,IMSTO[4]
+
+
+Dim 1%, ii,pp,factor
+Dim 2%, Q0[1]
+Dim 3%, Z1, R[99]
+
+If pdfflag  ! for burke
+! print invoice to pdf for later use           
+	image$ = "/u/slspro/invoicepdf"                
+	! this is a special profile that launches the program callmxinvo.sp
+	! that creates the image in /usr/lib/apache/htdocs/irm/invoices
+	Open #1,image$ As "Bidirectional pipe command" 
+	Print #1;Invoice$                              
+	Print #1;""                                    
+	For x = 1 To 50                                
+  		!ignal 3,.5                                  
+		Read #1,-1,-1,100;work$ ! 10 second timeout
+	  	If work$[1,8] = "thanks!!" Let x = 100       
+	Next x                                         
+	Close #1                                       
+! now finish normal prog                       
+!                                              
+End If
+
+!
+image$ = ""                                    
+
+
+! cost_lev now passed from sfdash.dl4  5/3/05rce
+! Cost_Lev[0]=2
+! Cost_Lev[1]=2
+! Cost_Lev[2]=2
+! Cost_Lev[3]=2
+
+debugDetail=1
+pgmName$="ubsiidet"
+msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+ii=0 ! Item Counter
+
+Dim 1%,t9[11],2%, t2, N2[5], ErrStat, X1, X2, 3%,tDRM
+
+N2[2]=3 ! 1=Stock, 2=NonStock, 3=Both (order)
+N2[3]=3 ! UM Conv 1=stock, 2=selling, 3=as Entered
+Space$=" ",Space$
+ErrStat = 0
+SLS$=intSalesMan Using "###" ! Passed Salesman
+CO$=Str$(intCo) ! Company
+InvNo$=Val(Invoice$) Using "##########" ! Passed Inv Number
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+
+
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42   ! Control 
+IHC= OpenFile(-1136,intCo)  \ If IHC=-1 Error 42    ! Invh
+IDC= OpenFile(-1184,intCo)  \ If IDC=-1 Error 42    ! Invl 
+ITC= OpenFile(-1168,intCo)  \ If ITC=-1 Error 42    ! Invt
+ISC= OpenFile(-1152,intCo)  \ If ISC=-1 Error 42    ! Invs
+CUC= OpenFile(-1808,intCo)  \ If CUC=-1 Error 42    ! Customer master
+ENC= OpenFile(-9995,intCo)  \ If ENC=-1 Error 42    ! Entered By
+SMC= OpenFile(-1824,intCo)  \ If SMC=-1 Error 42    ! SalesMan
+PRC= OpenFile(-1792,intCo)  \ If PRC=-1 Error 42    ! Product
+CCC= OpenFile(-1728,intCo)  \ If CCC=-1 Error 42    ! CCodes
+IMI= OpenFile(-9987,intCo)  \ If IMI=-1 Error 42    ! ImageIndex
+IMS= OpenFile(-9986,intCo)  \ If IMS=-1 Error 42    ! ImageStore
+PHC=OpenFile(-2416,INTCO) \ if phc=-1 Error 42 ! po head
+
+Mat Read #CTLC,19,50;P9$;
+Mat Read #CTLC,60,50;P60$;
+MAT READ #CTLC,115,60;CUSTOM_CUSTOMER$;
+CUSTOM_CUSTOMER$=UCASE$(TRIM$(CUSTOM_CUSTOMER$))
+Mat Read #CTLC,115,40;Q0; 
+
+
+If not(Q0[1]) let Q0[1]=2                                                       
+Let Dec$="#",Dec$;Qmask$="---,---,--#"                                          
+If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask      
+If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask        
+Let Emask$="-$$$,$$$,$$$,$$$.##"                         !ext. price mask       
+
+
+Cst=Val(Cust$)
+IHK$=Cst using "######",InvNo$
+FDir=2
+Temp$=IHK$
+
+
+IITOP: Rem===================================Loop Through Ord Header
+Search #IHC,2,FDir;IHK$,IHR,IHE
+If IHK$<>Temp$ Let IHE=22
+If IHE ! under a billto?
+	let tmp$=" ",tmp$
+	for x=30 to 31
+		let tmp$[1,3]=x using "##"
+		let tmp$[3]=invno$
+		search #IHC,2,1;tmp$,IHR,E
+		if not(e) ! found it!
+			Read Record #IHC,IHR; IH.;
+			cst=ih.H0[4]
+			IHK$=Cst using "######",InvNo$
+			temp$=ihk$
+			goto fndinv
+		Endif
+	Next x
+	Goto IIEND:
+Endif
+fndinv: ! found number - go with it!
+If debugDetail
+   msg$="doing...Search #IHC: IHK$="+IHK$+" IHR="+IHR \ Call updatelog(debug)
+   If IHE msg$="error...Search error "+IHE  \ Call updatelog(debug)
+Endif
+Read Record #IHC,IHR; IH.;
+ 
+
+If intSalesMan=999 goto SLSPassed ! all reps      
+
+If arrSales                                       
+	for counter=0 to 999                          
+		if arrSales[counter]=IH.H0[11] goto SLSPassed:
+		if not(arrSales[counter]) counter=999 ! skip to end 
+	next counter
+Endif                                             
+
+If intSalesMan=IH.H0[11] goto SLSPassed:          
+
+goto IIEnd:  !Security.                               
+
+SLSPassed: !
+
+! Determine Status
+t2 = IH.H0[0]
+Status$="";Status$="ERROR**"
+If t2=30 Let Status$="INV  ";Factor=1
+If t2=31 Let Status$="C/M  ";Factor=-1
+
+
+! Read invt
+ITR = IH.ORef[5] ! Record Number To Ord Total record.
+Read Record #ITC,ITR; IT.;
+
+
+! Read invs
+ISR = IH.ORef[4] ! Record Number For Ship to
+Read Record #ISC,ISR; I2.;
+
+!address
+Let shipAddr1$=""                                                               
+Let shipAddr1$=I2.S1$[1,30]+"-"                                                 
+Let shipAddr1$=shipAddr1$+(I2.SRN[2]+(I2.SRN[1]/1000000)) using "######.######" 
+Let shipAddr3$=""                                               
+If len(I2.S1$[61,90])>1 and I2.S1$[61,65]<>"     " Then         
+	Let shipAddr3$=Trim$(I2.S1$[61,90])                         
+Endif                                                           
+Let shipAddr4$=""                                               
+Let shipAddr4$=Trim$(I2.S1$[91,105])+", "+I2.S1$[106,107]+"  "  
+Let shipAddr4$=shipAddr4$+Trim$(I2.S1$[108,112])                
+If len(I2.S1$[113,117])>1 and I2.S1$[113,117]<>"     " Then     
+   Let shipAddr4$=shipAddr4$+"-"+Trim$(I2.S1$[113,117])         
+Endif                                                           
+If shipAddr3$="" then let shipAddr3$=shipAddr4$;shipAddr4$=""   
+
+!term
+! Let Z1=IH.H0[12]*16-16 \ If Z1<0 let Z1=0
+! Mat  Read #CTLC,25,Z1;TERM$;            
+TERM$=getartermd$(0 , IH.H0[12], intCo)
+
+! Get Customer Info.
+CUK$=IH.H0[4] USING "######"
+Temp$=CUK$
+Search #CUC,2,1;CUK$,CUR,CUE
+If CUK$[1,6]<>Temp$ Let CUE=22
+IF CUE Then
+  ErrStat = 93 ! No Customer?
+  Goto IIEND:
+End If
+Read Record #CUC,CUR;CU.;
+
+Let soldAddr3$=""                                              
+If len(CU.A1$[91,120])>1 and CU.A1$[91,95]<>"     " Then       
+	Let soldAddr3$=Trim$(CU.A1$[91,120])                       
+Endif                                                          
+Let soldAddr4$=""                                              
+Let soldAddr4$=Trim$(CU.A1$[121,135])+", "+CU.A1$[136,137]+"  "
+Let soldAddr4$=soldAddr4$+Trim$(CU.A2$[1,10])                  
+If soldAddr3$="" then let soldAddr3$=soldAddr4$;soldAddr4$=""  
+
+
+! Get SalesMan
+SMK$=IH.H0[11] Using "### "
+Temp$=SMK$
+Search #SMC,2,1;SMK$,SMR,SME
+If SMK$[1,4] <> Temp$ Let SME=22
+If SME=0 Then
+	Mat Read #SMC,SMR;Sales$[1,30];
+Else
+	Sales$="-NF-"
+End If
+Temp$=Sales$
+Sales$=""
+For X1=1 to Len(Temp$)
+	If Temp$[X1,X1]="'" Then
+           Sales$=Sales$,"\\"
+        End If
+	Sales$=Sales$,Temp$[X1,X1]
+Next X1
+
+
+! Get Entered By
+Mat Read #ENC,IH.H5[0],0;EN$;
+If Trim$(EN$)="" Let EN$="-null-"
+
+! Get Images
+ikey$ = " ",ikey$
+ikey$[1,8] = IH.h0[7] Using "DR######"
+ikey$[9] = space$
+ikey$[9,14] = IH.h0[4] Using "######"
+ikeysav$ = ikey$[1,14]
+!
+Search #IMI,3,1;ikey$,REC_IMIDX,E
+If ikey$[1,14] <> ikeysav$[1,14] Let E = 1
+If Not(E)
+	dr = 1
+	Rem
+	Mat Read #IMI,REC_IMIDX,0;IMI$
+	Mat Read #IMI,REC_IMIDX,66;IMI1
+	Mat Read #IMI,REC_IMIDX,72;imi2
+	Mat Read #IMI,REC_IMIDX,80;IMI3
+	Rem
+	REC_IMSTO = imi2[0]
+	Rem
+	Mat Read #IMS,REC_IMSTO,0;IMSTO$
+	Mat Read #IMS,REC_IMSTO,44;IMSTO
+	Rem
+	numpages$ = imi2[1] Using "&&&&"
+	WORK$ = RTrim$(IMSTO$[21,40])
+	SCANDIR$ = WORK$
+	!dosimage$ = LCase$(SCANDIR$ + "/" + IMI$[1,2] + "/" + Str$(IMI1) + "01.txt"
+	image$ = LCase$(SCANDIR$ + "/" + IMI$[1,2] + "/" + Str$(IMI1))
+	!
+	Call String(2,image$)
+	Call FindF(image$ + "01.imd",E)
+Else
+	dr = 0
+	image$ = "no"
+	numpages$ = "00"
+End If
+DR$ = dr Using "&"
+
+! Build the returned header structure
+i1.CustNumber$=Str$(IH.H0[4])
+i1.CustName$=CU.A1$[31,60]
+i1.SoldAddr1$=CU.A1$[31,60] 
+i1.SoldAddr2$=CU.A1$[61,90] 
+i1.SoldAddr3$=soldaddr3$    
+i1.SoldAddr4$=soldaddr4$    
+i1.S2Addr1$=shipaddr1$    
+i1.S2Addr2$=I2.S1$[31,60]   
+i1.S2Addr3$=shipaddr3$      
+i1.S2Addr4$=shipaddr4$      
+i1.SLSNo$=str$(IH.H0[11])
+i1.SLSName$=Sales$
+i1.Invoice$=Str$(IH.ORef[1])
+i1.Order$=Str$(IH.H0[7])
+i1.EnteredBy$=EN$
+i1.CustPO$=IH.PO$
+i1.Term$=Term$
+i1.WHSE$=Str$(IH.H4[2])
+i1.Division$=Str$(IH.H5[8])
+i1.OrderDate$=PDate$(IH.H0[9])
+i1.ShipDate$=PDate$(IH.H0[10])
+i1.Stp$=Str$(IH.H4[1])
+i1.Zne$=I2.S2$[19,20]
+i1.Type$=str$(IH.H5[7])
+i1.SP$=Str$(IH.H0[11])
+i1.Status$=Trim$(Status$)
+i1.BillToId$=Str$(IH.H0[1])
+i1.Routing$= Trim$(IH.V0$)
+i1.ShipCMType$=""
+let shiptyped$=""
+If IH.H0[0]=30! invoice
+	if ih.h3[1]>0 and h3[1]<=16
+		read #ctlc,107,((iH.H3[1]*16)-16);shiptyped$;
+		i1.ShipCMType$=STR$(IH.H3[1])+" "+trim$(SHIPTYPED$)
+	endif
+endif
+If IH.H0[0]=31! credit memo
+	Try		
+		CMTChan=Findchannel()
+		ROpen #CMTChan,"2/cmtype" + Str$(Intco) ! sep cmtype file
+		if  IH.H3[1]>0 and IH.H3[1]<=CHF(CMTCHAN)-1
+			Read #CMTChan,iH.H3[1],0;shiptyped$;  ! only 16 chars
+		Endif
+		Close #CMTChan
+		i1.ShipCMType$="CM: "+trim$(shiptyped$) ! STR$(IH.H3[1])
+	Else
+		if IH.H3[1]>0 and IH.H3[1]<=16
+			read #ctlc,48,((IH.H3[1]*16)-16);shiptyped$;
+			i1.ShipCMType$="CM: "+trim$(shiptyped$) ! STR$(IH.H3[1])
+		Endif
+	End try		
+endif
+		 
+ 
+
+! i1.TCost$=IT.T2[14]*factor Using Emask$  
+! i1.TResale$=IT.T2[1]*factor Using Emask$ 
+! i1.GTM$=(IH.H5[13]-IH.H5[14])*factor Using Emask$
+! If IH.H5[13] Then                                    
+  ! GPP=FNR((ABS(IH.H5[13]-IH.H5[14])/IH.H5[13])*100)
+! Else                                                 
+  ! GPP=0                                              
+! End IF                                               
+! i1.TGPP$=GPP*factor Using "----#.##%"                       
+
+! i1.TCost$=IT.T2[17]*factor Using Emask$
+i1.TCost$ = (IT.T2[17] + IT.T2[20] + IT.tot[0]) * factor Using Emask$
+i1.TResale$=IT.T2[1]*factor Using Emask$ 
+
+i1.gtm$ = (ih.h5[13] - ih.h5[14]) * factor using emask$
+if ih.h5[13]                                           
+  gpp = ((ih.h5[13] - ih.h5[14]) / ih.h5[13]) * 100    
+Else                                                 
+  GPP=0                                              
+End IF                                               
+i1.TGPP$=GPP*factor Using "----#.##%"                       
+if cost_lev[1]=0 ! no cost - even totals
+	let i1.TCost$ = " "
+	let i1.gtm$ = " "
+	let i1.TGPP$= " "
+Endif
+i1.attn$=IH.H0$[1,20]                
+i1.invdate$=Pdate$(IH.H0[8])         
+i1.truck$=I2.S5 Using "######"       
+i1.totweight$=IT.T2[16] Using QMask$ 
+i1.totcube$=IT.T2[15]   Using Qmask$ 
+i1.tax$=IT.T2[7]           Using Emask$ 
+i1.freight$=IT.T2[5]       Using Emask$ 
+i1.misc$=IT.T2[4]          Using Emask$ 
+If IT.T2[3] then i1.discount$=IT.T2[3]*-1 Using Emask$ else i1.discount$="0"
+i1.grandtotal$=IT.T2[0]*factor    Using Emask$ 
+i1.image$ = image$
+i1.numpages$ = numpages$
+i1.other$=IT.T2[6] USING Emask$
+
+Let IDK$=InvNo$
+IIDetLoop: Rem=======================================loop invl
+Search #IDC,3,1;IDK$,IDR,IDE
+If IDK$[1,10]<>InvNo$ LET IDE=22
+If IDE Goto IIEnd: ! All Done 
+
+If debugDetail                                                                
+   msg$="doing...Search #IDC: IDK$="+IDK$+" IDR="+IDR \ Call updatelog(debug) 
+   If IDE msg$="error...Search error "+IDE  \ Call updatelog(debug)          
+Endif                                                                         
+Read Record #IDC,IDR,0;ID.;
+tDRM=ID.OLM[3]
+If (IH.H5[7]=21 or IH.H5[7]=22) And IDK$[11,14]="   " Let ID.S2[0]=3
+!If ID.S2[0]=3 Goto IIDetLoop:
+If ID.L3[2]>900 Goto IIDetLoop:
+
+
+! Validate UM Selections??
+If N2[2]=3 Goto IIDetOK:
+If N2[2]=2 IF ID.L3[0] Goto IIDetOK:
+If N2[2]=1 If NOT(ID.L3[0]) Goto IIDetOK:
+Goto IIDetLoop:
+
+
+IIDetOK: Rem===========continue
+If ID.L3[0] and ID.S2[0]=3 let Zline=1 else let Zline=0
+If Zline Goto LoadMe:
+If ID.L3[0] let NonStock=1 else NonStock=0
+Clear PR.
+
+If ID.L3[0] Then
+  Let OrgL1$[1,16]=ID.L1$[1,16]
+  If trim$(ID.S3$[1,16])<>"" Let ID.L1$[1,16]=ID.S3$[1,16]
+Else
+  if custom_customer$<>"ZEPHYR" Read Record #PRC,ID.L4[0];PR.; ! Zephyr can delete invhist products!!
+End If
+! Get/Check PO (if on line
+PONUM=ID.L4[2]
+! if PONUM=0 AND OH.H5[2]>0 LET PONUM=OH.H5[2]
+If ponum>0 ! or is it OH.H5[2]?
+	POk$=" ",POK$
+	For X=1 to 9 ! exclude DM's? YES lets
+		pok$[1,2]=X using "##"
+		POK$[3]=ponum using "######"
+		search #PHC,2,1;pok$,R[PHC],E
+		if not(E) goto GOTAPO
+	Next X
+	PONUM=0-ponum
+	goto PODone
+	GOTAPO: ! found - do your thing (NO THING - If found, use it)
+	!read record #PHC,R[PHC],0;poh.;
+	!if poh.po1[6] ! has buyer
+	!	read #ch_buy,poh.po1[6],0;BName$;
+	!Endif
+PODone: ! finished
+Endif
+  rem The old Gosub L_30000:
+  REM ===== set units for conversions (stock/nonstock version)
+
+   LET PR.A[6]=ID.L6[4]
+   LET PR.A[5]=ID.UNF[5]
+   IF NOT(PR.A[5]) THEN
+     LET PR.A[5]=1
+     LET ID.UNF[5]=1
+   END IF
+
+   LET PR.PFU1[0]=ID.EUN[0]
+   LET PR.PFU1[1]=ID.UN[0]
+   LET PR.PFU1[2]=ID.UN[1]
+   LET PR.PFU1[3]=ID.UN[2]
+   LET PR.PFU1[4]=ID.EUN[1]
+   LET PR.PFU1[5]=0
+   LET PR.PFU1[6]=0
+   LET PR.PFU1[7]=0
+   LET PR.PFU1[8]=ID.UN[0]
+   LET PR.PFU1[9]=ID.UN[0]
+   LET PR.PFU1[10]=ID.EUN[1]
+   LET PR.PFU1[11]=ID.UN[2]
+   LET PR.PFU1[12]=ID.UN[1]
+   IF ID.L3[0]=0
+     LET PR.PFU1[13]=ID.UN[0]
+     LET PR.PFU1[16]=ID.EUN[0]
+     LET PR.PFU1[17]=ID.EUN[0]
+     LET PR.PFU1[15]=ID.CTWT
+     LET PR.PFU1[18]=ID.UN[0]
+     LET PR.PFU1[19]=ID.UN[0]
+   END IF
+
+   LET PR.PFU2[0]=ID.UNF[0]
+   LET PR.PFU2[1]=ID.UNF[1]
+   LET PR.PFU2[2]=ID.UNF[2]
+   LET PR.PFU2[3]=ID.UNF[3]
+   LET PR.PFU2[4]=0
+   LET PR.PFU2[5]=0
+   LET PR.PFU2[6]=0
+
+   FOR X1=1 TO 4
+     FOR X2=0 TO X1-1
+       IF PR.PFU1[X1]=PR.PFU1[X2] THEN
+         LET PR.PFU1[X1]=0
+         PR.PFU2[X1-1]=0
+       END IF
+     NEXT X2
+   NEXT X1
+
+  
+
+If ID.L5[3] Then 
+  Let GPP=FNR(((ID.L5[3]-ID.S3[12])/ID.L5[3])*100)
+Else
+  Let GPP=0
+End If
+
+CVTFIG: REM "==== OLD L_3500: ======================== convert figures
+LET CNVTA=ID.L7[2]
+LET CNVTU[0]=0
+IF ID.S2[1] LET CNVTA=CNVTA*ID.S2[1]
+IF N2[3]=1 LET CNVTU[1]=PR.PFU1[8]
+IF N2[3]=2 LET CNVTU[1]=PR.PFU1[9]
+IF N2[3]=3 LET CNVTU[1]=ID.UN[0]
+LET CNVTU[2]=1
+LET QORD=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+LET CNVTA=ID.L7[4]            !+ ID.L7[0] ! Was just shipped/
+IF ID.S2[1] LET CNVTA=CNVTA*ID.S2[1]
+LET QSHP=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+LET CNVTA=ID.L7[3]
+IF ID.S2[1] LET CNVTA=CNVTA*ID.S2[1]
+LET QBOR=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+LET CCD$[11,14]="BASE"
+
+IF N2[3]=1 THEN 
+  IF PR.PFU1[8]=-1 LET CCD$[11,14]="CWT "
+  IF PR.PFU1[8]=-2 LET CCD$[11,14]="LOT "
+  IF PR.PFU1[8]=-3 LET CCD$[11,14]="LB  "
+  IF PR.PFU1[8]>0 MAT  READ #ccc,PR.PFU1[8],0;CCD$;
+END IF 
+
+IF N2[3]=2 THEN 
+  IF PR.PFU1[9]=-1 LET CCD$[11,14]="CWT "
+  IF PR.PFU1[9]=-2 LET CCD$[11,14]="LOT "
+  IF PR.PFU1[9]=-3 LET CCD$[11,14]="LB  "
+  IF PR.PFU1[9]>0 MAT  READ #ccc,PR.PFU1[9],0;CCD$;
+END IF 
+
+IF N2[3]=3 THEN
+  IF ID.UN[0]>0 MAT  READ #ccc,ID.UN[0],0;CCD$;
+  IF ID.UN[0]=-1 LET CCD$[11,14]="CWT "
+  IF ID.UN[0]=-2 LET CCD$[11,14]="LOT "
+  IF ID.UN[0]=-3 LET CCD$[11,14]="LB  "
+END IF 
+
+
+Rem=====Now do some other UM Conversion for the unit cost/unit resale
+IF ID.UN[1]=-1 Then
+  Let PR.A[6]=ID.L6[4]
+  Let PR.A[5]=ID.UNF[5]
+End if
+Let CHBase=0
+If ID.S3[8]=-3 THEN
+  LET CHBase=(ID.S3[0]/ID.L7[2])
+Else
+  LET CHBase=ID.S3[0]
+End If
+If ID.UN[1]>0 AND ID.S2[1] Then
+  Let CNVTA=((ID.L5[2]-ID.L6[1])/ID.S2[1]) + (CHBase/ID.S2[1])
+Else
+  Let CNVTA=ID.L5[2]-ID.L6[1] + CHBase
+End If
+
+Let CNVTA=CNVTA-(CNVTA*(ID.L6[0]/100))
+Let CNVTA=CNVTA+(CNVTA*(ID.L7[8]/100))
+Let CNVTU[0]=0
+Let CNVTU[1]=ID.UN[1]
+Let CNVTU[2]=2
+LET ID.OLM[3]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+LET PUNIT1$=XUNIT$(ID.UN[1],CCC)
+
+IF Cost_Lev[1] Then
+  
+  IF ID.S2[1]=0 OR ID.S3[1]=0 THEN
+    LET Temp$=""
+  ELSE
+    ChBase=0
+    IF ID.S3[11]=-3 AND ID.L7[2] THEN
+      CHBase=(ID.S3[1]/ID.L7[2])
+    ELSE
+      CHBase=ID.S3[1]
+    END IF
+    IF CHBASE AND ID.S2[1] THEN
+      LET CNVTA=CHBase/ID.S2[1]
+    ELSE
+      LET CNVTA=0
+    END IF
+    IF ID.S3[11]=-1 AND ID.UN[2]=-1 AND CHBase LET CNVTA=CHBase
+    IF CHBase AND ID.UN[2]<0 LET CNVTA=CHBase
+    !LET CNVTU[0]=0
+    !LET CNVTU[1]=ID.UN[2]
+   ! LET CNVTU[2]=2
+    ! LET ID.L5[1]=ID.L5[1] + CHBASE ! XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+  END IF
+  LET CNVTU[0]=0
+  LET CNVTU[1]=ID.UN[2]
+  LET CNVTU[2]=2
+  LET CNVTA=ID.L5[1]
+  LET ID.L5[1]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+  LET PUNIT2$=XUNIT$(ID.UN[2],CCC)
+Else
+	let ID.L5[1]=0
+END IF
+
+
+LoadMe: !=================================================
+
+If ii < iLimit Then
+  Rem Now Put together the Line Item returned Structure
+  ils.[ii].Li$=Str$(ID.L3[2])
+  ils.[ii].Item$=ID.L1$[1,16]
+  ils.[ii].Desc$=ReplaceChar$(ID.L6$[1,30])+" | "+ReplaceChar$(ID.L6$[31,60])
+  ils.[ii].Desc1$=ReplaceChar$(ID.L6$[1,30]) 
+  ils.[ii].Desc2$=ReplaceChar$(ID.L6$[31,60])
+  ils.[ii].QtyOrd$=QORD Using Qmask$         !"###,###.##"
+  ils.[ii].QtyShp$=QSHP Using Qmask$         !"###,###.##"
+  let bord=1
+  ils.[ii].QtyBOrd$=QBOR Using Qmask$        !"###,###"
+  if zline then 
+	 ils.[ii].UoM$=" " 
+  else 
+	 ils.[ii].UoM$=CCD$[11,14]
+  endif
+  ils.[ii].UnitPrice$=ID.OLM[3] Using Pmask$ !"###,###.##"
+  ils.[ii].UPUoM$=PUnit1$
+  IF COST_LEV[1]>0
+	ils.[ii].UnitCost$=ID.L5[1] Using Pmask$   !"###,###.##"
+  else
+	ils.[ii].UnitCost$=" "
+  endif
+  ils.[ii].extweight$=ID.S3[4] Using Qmask$
+  if cost_lev[1]>0
+	ils.[ii].UCUom$=Punit2$
+  else
+	ils.[ii].UCUom$=" "
+  endif
+  ils.[ii].BOExt$=FNR(QBOR*tDRM)*factor Using Emask$ 
+  ils.[ii].Extended$=ID.L5[3]*factor Using Emask$
+  if cost_lev[1]>0
+	ils.[ii].LGP$ = (ID.L5[3] - ID.S3[12]) Using Pmask$
+	 ils.[ii].GPP$=GPP*factor Using "----#.##%"
+  else
+	ils.[ii].LGP$ = " "
+	ils.[ii].GPP$=" "
+  endif
+  If Int(ID.S3[16])=1 Then
+     ils.[ii].Substitute$="Y"
+  Else
+     ils.[ii].Substitute$="N"
+  End If
+  ils.[ii].LineType$ = "ST"                 
+  If Zline then ils.[ii].LineType$ = "ZL"   
+  If NonStock then ils.[ii].LineType$ = "NS"
+  tmp$=" " \ if PONUM>0 let tmp$=Str$(PONUM)
+  ils.[ii].INVPO$=tmp$ ! po
+  Let ii=ii+1
+  ss=22
+  CCD$=" ",CCD$
+  Goto IIDetLoop:
+Endif
+
+IIEnd: Rem============================================End it all 
+
+Close #IHC,#IDC,#ISC,#ITC,#CUC,#CTLC,#ENC,#SMC,#PRC,#CCC,#PHC
+msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+ss=ErrStat
+Exit Sub
+
+Else
+  ss=Spc(10)
+  Call errTrap(pgmName$)
+  Exit Sub
+End Try
+
+Sub updatelog(debug)                                        
+	If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub     
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+
+ss=ErrStat
+
+End Sub
+

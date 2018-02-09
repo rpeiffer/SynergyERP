@@ -1,0 +1,3327 @@
+!
+! libalertproc.lib
+!
+! supporting library of alert send routines for browser
+!
+! loadsave -w -n 100,10 -o prog/dxport/libalertproc.lib src/libalertproc.src
+!
+! ERPScheduler Enabled
+!
+! 1.0 06/01/2011 - start on this
+!  CALLED FROM a program
+!  Notes: each alert type will open it's own files
+!      to send alert to web
+!		1. file generated using standard field names
+!		2. web will make periodic call to get all data
+!
+! As there could be msec's!? between time file checked to see if it's there
+! and the actual add to file call (Addtofle) - did get be42 (file not found) @ mayfield
+! do a fndfle in addtofle() and build new file if not there
+! and change sndafle() to always create new one after sent/killed
+!
+include "src/copyright.inc"
+include "src/utilcopyright.inc"
+Declare external function GetSessionParameter$
+!
+! Passinfo[0] = ALERT NUMBER - ALWAYS SENT!!
+! Passinfo[] = rest are alert specific
+!
+! CH[1]=Control file channel - ALWAYS SENT!!
+! CH[] = rest are alert specific
+!
+! Msg$=if message already created - send it
+!
+! OPTIONAL
+! FromBatch=if sent, the alert is coming from a batch process (meaning not
+! hooked to DynamicXSession).  This is usually a cron job doing the work.
+! PassinfoStr$[]=if sent additional alert specific string data
+!
+! ALERTS LIST  (1-10 cust/ord) (11-20 prod/whse) (21-30 NStk) (31-40 PO's)
+!              (41-50 Cost/Price) (51-60 CPI)
+!   1		New Customer added
+!   2		New Order for Customer - first time order
+!   3		Order on Credit Hold
+!   4		Customer - Salesperson Changed
+!   5		Shiplist - Salesperson Changed
+!   6		Customer fields changed (only 3 monitored!) (should use audit in dxadmin!)
+!  11		Low stock alert
+!  12		Unusual (exceptional) Sale
+!  21		NonStock Added to Order
+!  22		NonStock received on PO - accept
+!  31		PO Past Due
+!  41		Cost / Price Change Notifications to Salesrep (can be just cpi as well)
+!
+!  51		CPI Sales Order Alert
+!  52		CPI Low Stock Alert (called only from sndalrt11)
+!  53		CPI Contract expired Alert
+!  54		CPI Contract Quantity Limit ALert
+!  55		CPI Minimum Amount Change
+!  56		CPI Customer Credit Hold
+!  57		CPI Low Stock Acknowlegement
+!
+! 999		Send the alerts file
+!1000		Send the Usercntrl Data needed
+
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile
+Declare External Function GetUIDRec,pdate$
+Declare External Sub GetPortDefault
+
+!
+! for some newer alerts, using MySQL
+Declare External Function OpenMySQLChan
+Declare External Function UtilOpenMySQLChan
+include "src/inc/SQL_alerttype.inc"
+include "src/inc/SQL_alertheader.inc"
+include "src/inc/SQL_alertdata.inc"
+include "src/inc/SQL_alerttrailer.inc"
+dim alerttype. as SQL_alerttype
+dim alertheader. as SQL_alertheader
+dim alertdata. as SQL_alertdata
+dim alerttrailer. as SQL_alerttrailer
+
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! product file
+Include "src/inc/filecpihead.inc" ! cpi header file
+include "src/inc/filecpidet.inc" ! cpi detail
+include "src/inc/filespecprice.inc" ! cpi detail
+
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "libcpi.lib"
+Declare External Function CPIFindHighestPriority,CPIFindPrimaryCust
+
+Declare Intrinsic Sub Env,FormatDate,programdump,Stringsearch
+Declare Intrinsic Sub FindF,Logic
+Declare Intrinsic Function Findchannel
+
+Enter Passinfo[],ch[],msg$,...
+try enter FromBatch,... else FromBatch = 0
+try enter PassinfoStr$[],... else dim PassinfoStr$[1,1]
+
+Declare Sub sndalrt1,sndalrt2,sndalrt11,sndalrt12,addtofle
+Declare Sub sndalrt3,sndalrt21,sndalrt22,sndalrt31,sndalrt41
+Declare Sub sndalrt51,sndalrt52,sndalrt53,sndalrt54,sndalrt55,sndalrt56
+Declare Sub sndalrt57,sndalrt4,sndalrt5,sndalrt6
+Declare Sub NewAFle,Sndafle,SndUsers,AddtoMySQL,InitAlertType
+Declare Function CPIBuildProductAlert
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+OPTION GOSUB NESTING 12  ! Default is 8
+try
+	Option String Redim is legal ! in case subs dim/use same names
+	dim action$[30],options$[30],userid$[10],sql_passwd$[20],b$[200],Action1$[30],Action2$[30],3%
+	dim Message$[200],WebStr$[3000],P9$[50],P60$[50],p61$[256]
+	dim sessionid$[200],ALog$[120]
+	Dim 1%,maxcnt \ maxcnt=1000
+	dim FFld$[60,maxcnt] ! for .net - maxfld size (notes=25@30=750)
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[1200],tmp$[1200]
+	dim tmp2$[100],tmp3$[100],Flname$[64],HMDir$[64]
+	Dim Dirto$[128],CMD$[256]
+	Dim 1%,X1[9],2%,X2[9],3%,X3[9],xch[99],MTHDAYS
+	Dim 3%,R[99],tmpcnt,row
+
+	b$=" ",b$
+	DEF FNR(X)=SGN(X)*(INT(ABS(X)*100)*.01)
+	DEF FNI(X)=SGN(X)*(INT(ABS(X)+.5))
+	Dim PR. as prod ! product file - conversions
+	!
+	! call dxopen() ! here for standalone
+	!
+	! call dxsave(0,"tmp/salertin.txt!")
+	!
+	!Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+	! do not call as it may reset things - just dxget what's needed
+	! copy code from getsession call
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$) ! for web file
+	if FromBatch ! not directly attached to DynamicX
+		intco = GetSessionParameter$("COMPANYID")
+		userid$ = "BatchUser"
+		sql_passwd$ = "!BaTcHuSeR8899"
+	else
+		sessionid$ = GetParameter$("SESSION")
+		tmp$ = GetParameter$("S_USER.AppID") !company #
+		try let intCo=Val(tmp$) else let intCo=1 !company #
+		userid$ = GetParameter$("S_USER.ID") \ userid$ = Ucase$(userid$) !user id
+		if userid$="ADMIN" let userid$="S35" !for live block demos
+		if userid$="" let userid$="S35" !for testing low security live blocks.....remove later
+	end if
+	userid$=userid$,"        "
+	rstr$="LibAlert" ! so if error doesn't BOMB in mx000 (callmainerr) 
+	Alertid=passinfo[0]
+	CTLC=ch[1]
+	Mat read #CTLC,19,50;P9$;
+	Mat read #CTLC,60,50;P60$;
+	Mat read #CTLC,61,0;P61$;
+	! initialize webfile string for .net
+	if sessionid$<>"" ! in case it's needed - set up .net file header
+		!rstr$='fx',"<page>SESSION=",sessionid$,fdel$
+		!rstr$=rstr$,"ALERT=",Str$(Alertid)
+		!rstr$=rstr$,fdel$,rdel$ ! initialize return string
+	end if
+	tmp$="HOME" \ System 28,tmp$
+	if tmp$[1,4]<>"HOME" and tmp$<>"" ! got it?
+		HMDir$=tmp$+"/" ! add trailing /
+	Endif
+	Dirto$=HMDir$+"alerts/"  ! where alert file is stored
+	tmp2$=Dirto$;found=0
+	call findf(tmp2$,found)
+	if not(found) ! missing directory - no more can be done
+		returnstatus=0
+		message$="alerts directory not defined"
+		goto CLSDone
+	Endif
+	Maxfld=52 ! ***** SET / CHANGE HERE AS FIELDS ARE ADDED! **********
+	FLName$=Dirto$+"alrtfle" ! one ba file 
+	call findf(FLNAME$,found)
+	if not(found) ! new/sent
+		call newafle()
+	Endif
+	cmd$="chmod go+rw "+flname$
+	system cmd$
+	ALog$=Dirto$+"alertlog" ! to record alerts generated!
+	returnstatus=0
+	message$="Alert number not found"
+	Select case alertid
+		Case 1 ! new customer
+			returnstatus=1
+			message$="OK"
+			call sndalrt1()
+			! end of alert 1
+		case 2 ! new order/new cust
+			returnstatus=1
+			message$="OK"
+			call sndalrt2()
+			! end of alert 2
+		case 3 ! order on credit hold (6328)
+			returnstatus=1
+			message$="OK"
+			call sndalrt3()
+			! end of alert 3
+		case 4 ! customer - slsm change
+			returnstatus=1
+			message$="OK"
+			call sndalrt4()
+			! end of alert 4
+		case 5 ! shiplist - slsm change
+			returnstatus=1
+			message$="OK"
+			call sndalrt5()
+			! end of alert 5
+		case 6 ! customer - flds changed
+			returnstatus=1
+			message$="OK"
+			call sndalrt6()
+			! end of alert 6
+		case 11 ! low stock alert
+			! let's use subroutines
+			returnstatus=1
+			Message$="OK"
+			call Sndalrt11()
+			! end of alert 11
+		Case 12 ! unusual sale
+			! sub
+			returnstatus=1
+			message$="OK"
+			call sndalrt12()
+			! end of alert 12
+		Case 21 ! nonstk added to order
+			returnstatus=1
+			Message$="OK"
+			call Sndalrt21()
+			! end of alert 21
+		Case 22 ! nonstk received on po
+			returnstatus=1
+			Message$="OK"
+			call Sndalrt22()
+			! end of alert 22
+		Case 31 ! PO past due date
+			returnstatus=1
+			Message$="OK"
+			call Sndalrt31()
+			! end of alert 31
+		Case 41 ! Cost / Price Alert
+			returnstatus=1
+			Message$="OK"
+			call Sndalrt41()
+			! end of alert 41
+		Case 51 ! CPI Sales Order ALerts
+			returnstatus=1
+			Message$="OK"
+			call Sndalrt51()
+			! end of alert 51
+		! 52 called from 11
+		Case 53 ! CPI Contract Expired
+			returnstatus=1
+			Message$="OK"
+			call Sndalrt53()
+			! end of alert 53
+		Case 54 ! CPI Quantity Limit
+			returnstatus=1
+			Message$="OK"
+			call Sndalrt54()
+			! end of alert 54
+		Case 55 ! CPI Minimum Changed
+			returnstatus=1
+			Message$="OK"
+			call Sndalrt55()
+			! end of alert 55
+		Case 56 ! CPI Credit Hold
+			returnstatus=1
+			Message$="OK"
+			call Sndalrt56()
+			! end of alert 56
+		Case 57 ! CPI Low Stock Acknowlegement
+			returnstatus=1
+			Message$="OK"
+			call Sndalrt57()
+			! end of alert 57
+		Case 999 ! send the file! Alertid from fmmenu
+			! sub
+			returnstatus=1
+			message$="OK"
+			call sndafle()
+			! end of 999
+		Case 1000 ! wants a list of user data
+			! 
+			returnstatus=1
+			message$="OK"
+			call sndusers()
+			! end of 1000
+	End select
+	CLSDone: ! finished
+	if returnstatus=0
+		! OK - I need to actually send some sort of usable
+		! information back to the calling program
+		! for certain alerts
+		if alertid = 57
+			msg$="ERROR SENDING ALERT: "+message$
+		else
+			msg$="Problem with alert send"
+		end if
+	Else
+		msg$=Message$ ! "OK - alert sent"
+		! send web a "wake up" - give user and filename
+		! CMD$=HMDir$+"alerts/synergyalert.pl "+RTRIM$(user$)+" "+FLName$+" &" ! run in background
+		!system CMD$
+	Endif
+	! status section - DO NOT SEND NETSTATUS!!
+	!call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	!call AddToStr(e$,rstr$,WebStr$)
+	!
+	!Call SetOutput(e$,rstr$)
+	! end of main
+else
+ if FromBatch
+	include "src/utilcallmainerr.inc"
+ else
+	include "src/callmainerrnet_call.inc"
+ end if
+end try
+End ! end of program
+
+! ---------------------------------------------------------------------
+Sub NewAfle()
+! set up file header - new file
+! see addtofle() for layout
+Try
+	! whee! - set up/send file labels
+	! SET MAXFLD IN PROGRAM BEGINNING
+	clear ffld$[]
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$) ! for web file
+	! section start
+	Webstr$=bsdel$,"ALERT",fdel$,rdel$
+	System "echo ''"+webstr$+"'' > " + flname$ ! + " &" ! set beginning
+	ffld$[0]="ALERTID"
+	ffld$[1]="USERID"
+	ffld$[2]="CUSTID"
+	fFLD$[3]="CUSTNAME"
+	fFLD$[4]="SLSPID"
+	fFLD$[5]="SLSPNAME"
+	fFLD$[6]="PRODID"
+	fFLD$[7]="PRODDESC1"
+	fFLD$[8]="PRODDESC2"
+	fFLD$[9]="WHSEID"
+	fFLD$[10]="BUYERID"
+	fFLD$[11]="CUSTCTGY"
+	fFLD$[12]="DIV"
+	fFLD$[13]="PRICETYPE"
+	fFLD$[14]="CONTACT"
+	fFLD$[15]="NOTES"
+	fFLD$[16]="ACCTMGR"
+	fFLD$[17]="ORDERID"
+	fFLD$[18]="ORDERDATE"
+	fFLD$[19]="SHIPDATE"
+	fFLD$[20]="DUEDATE"
+	fFLD$[21]="SHIPTONAME"
+	fFLD$[22]="QTYORD"
+	fFLD$[23]="QTYSHIP"
+	fFLD$[24]="QTYBO"
+	fFLD$[25]="USG/DMND"
+	fFLD$[26]="MIN/LP"
+	fFLD$[27]="VENDID"
+	fFLD$[28]="VENDNAME"
+	fFLD$[29]="PRODCTGY"
+	fFLD$[30]="COMMODITY"
+	fFLD$[31]="MATCODE"
+	fFLD$[32]="VENDITEM"
+	ffld$[33]="ORDHOLD"
+	fFLD$[34]="ORDTOTL"
+	fFld$[35]="ORDLINE"
+	ffld$[36]="ONHAND"
+	ffld$[37]="AVAIL"
+	ffld$[38]="ONORDER"
+	ffld$[39]="ONPO"
+	ffld$[40]="LEADTIME"
+	ffld$[41]="ORDTYPE"
+	ffld$[42]="PONUM"
+	ffld$[43]="POLINE"
+	ffld$[44]="POQTYREC"
+	ffld$[45]="POTYPE"
+	ffld$[46]="INVOICE"
+	ffld$[47]="ORGCCDAY"
+	ffld$[48]="CURCCDAY"
+	ffld$[49]="ORGTERMS"
+	ffld$[50]="CURTERMS"
+	ffld$[51]="ORGCLIMIT"
+	ffld$[52]="CURCLIMIT"
+
+	! DO NOT USE ANY SPECIAL CHARS IN FIELD NAMES (other than / )
+	! the "echo" command does not like a few of them
+	! maxfld=52 ! from above
+	webstr$=" ",webstr$
+	webstr$="" ! clear & set at pos 1
+	for x=0 to maxfld
+		if x=0
+			let webstr$=ffld$[x],fdel$
+		Else
+			let webstr$=webstr$,ffld$[x],fdel$
+		Endif
+	Next x
+	webstr$=webstr$,rdel$ ! end of row
+	System "echo ''"+webstr$+"'' >> " + flname$ ! + " &" ! append heading
+	
+else
+	if FromBatch
+		include "src/utilcallsuberr.inc"
+	else
+		include "src/callsuberr.inc"
+	end if
+end try
+end sub ! NewAfle
+!----------------------------------------------------------------------------
+Sub AddtoFle()
+! per group - a standard alert layout with all possible fields
+Try
+	! PLEASE TRY TO USE WHAT IS HERE!! - Only add new ones if needed!
+	! as of 06/01/11 - the layout is:
+	! using ffld$[200,1000]
+	! 0=alert #,1=userid,2=custid,3=custname,4=slsmid,5=slsmname,6=prodid,7=proddesc1,
+	! 8=proddesc2,9=whse,10=buyerid,11=custctgy,12=div,13=prctype,14=contact,
+	! 15=notes,16=acctmgrid,17=orderid,18=orddate,19=shipdate,20=duedate,
+	! 21=shipname,22=qtyord,23=qtyship,24=qtybo,25=demand,26=min/lp,27=vendorid
+	! 28=vendname,29=psctgy,30=commod,31=matcode,32=venditem,33=ordhold,34=ordtotl
+	! 35=ordline,36=onhand,37=avail,38=onorder,39=onpo,40=Leadtime,41=ordtype
+	! 42=POnum,43=POLine,44=POQtyRecv,45=POType,46=Invoice,47=OCCDays,48=cCCDays
+	! 49=OTerms,50=CTerms,51=OCLimit,52=CCLimit
+	! 
+	! Maxfld=52 ! also on heading!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$) ! for web file
+	! see if file there 1st
+	call findf(FLNAME$,found)
+	if not(found) ! new/sent
+			call newafle()
+			cmd$="chmod go+rw "+flname$
+			system cmd$
+	Endif
+	Afle=findchannel()
+	Try  ! NEVER GENERATE ERROR - Causes issues in caller program?
+		Open #AFle,FLName$ ! open the text file!
+	Else
+		Exit sub ! can't open what isn't there!? so can't add alert
+	End try
+	geof: ! get to endoffile?
+	read #afle;tmp$;
+	if Trim$(tmp$)<>"" goto geof
+	webstr$=" ",webstr$
+	webstr$="" ! clear and set to starting pos
+	for x=0 to maxfld
+		if ffld$[x]
+			let webstr$=webstr$,ffld$[x] ! ,fdel$
+		Endif
+		webstr$=webstr$,fdel$ ! allow for blank/null
+	Next X
+	webstr$=webstr$,rdel$ ! ,"\15\" ! end of row
+	! System "echo ''"+webstr$+"'' >> " + flname$ ! + " &" ! append data
+	print #afle;webstr$ ! as special chars (") cause issues with echo?
+	close #afle
+	! call programdump("tmp/lalt.txt!","")
+else
+	if FromBatch
+		include "src/utilcallsuberr.inc"
+	else
+		include "src/callsuberr.inc"
+	end if
+end try
+end sub ! AddtoFle
+!----------------------------------------------------------------------------
+Sub AddtoMySQL(ch_sql,...)
+try enter purgeDate# else purgeDate# = SQLNULL#()
+! per group - a standard alert layout with all possible fields, see addtofle() for documentation
+Try
+	dim %2,NewAlertID
+	dim 3%
+	! OK - create the header first
+	clear alertheader.
+	alertheader.AddedWhen# = SQLNULL#()
+	alertheader.ProcessedWhen# = SQLNULL#()
+	alertheader.PurgeAfterDate# = purgeDate#
+	alertheader.AlertType = ffld$[0]
+	e = alertheader_SQLInsert(e$, ch_sql, alertheader.)
+	if not(e) exit sub ! fatal errors not allowed as this is an old style call?
+	search #ch_sql;"SELECT LAST_INSERT_ID()"
+	read #ch_sql;NewAlertID
+	! OK - lets do the data section
+	clear alertdata.
+	alertdata.AlertID = NewAlertID
+	alertdata.BuyerUserID$ = ffld$[1]
+	alertdata.CustID = ffld$[2]
+	alertdata.CustName$ = ffld$[3]
+	alertdata.SlspID = ffld$[4]
+	alertdata.SlspName$ = ffld$[5]
+	alertdata.ProdID$ = ffld$[6]
+	alertdata.ProdDesc1$ = ffld$[7]
+	alertdata.ProdDesc2$ = ffld$[8]
+	alertdata.WhseID = ffld$[9]
+	alertdata.BuyerID = ffld$[10]
+	alertdata.CustCtgy = ffld$[11]
+	alertdata.Div = ffld$[12]
+	alertdata.PriceType = ffld$[13]
+	alertdata.Contact$ = ffld$[14]
+	alertdata.Notes$ = ffld$[15]
+	alertdata.AcctMgr = ffld$[16]
+	alertdata.OrderID = ffld$[17]
+	try alertdata.OrderDate# = ffld$[18] else clear alertdata.OrderDate#
+	try alertdata.ShipDate# = ffld$[19] else clear alertdata.ShipDate#
+	try alertdata.DueDate# = ffld$[20] else clear alertdata.DueDate#
+	alertdata.ShipToName$ = ffld$[21]
+	alertdata.QtyOrd = ffld$[22]
+	alertdata.QtyShip = ffld$[23]
+	alertdata.QtyBO = ffld$[24]
+	alertdata.Usg_Dmnd = ffld$[25]
+	alertdata.Min_LP = ffld$[26]
+	alertdata.VendID = ffld$[27]
+	alertdata.VendName$ = ffld$[28]
+	alertdata.ProdCtgy = ffld$[29]
+	alertdata.Commodity$ = ffld$[30]
+	alertdata.MatCode$ = ffld$[31]
+	alertdata.VendItem$ = ffld$[32]
+	alertdata.OrdHold$ = ffld$[33]
+	alertdata.OrdTotl = ffld$[34]
+	alertdata.OrdLine = ffld$[35]
+	alertdata.OnHand = ffld$[36]
+	alertdata.Avail = ffld$[37]
+	alertdata.OnOrder = ffld$[38]
+	alertdata.OnPO = ffld$[39]
+	alertdata.LeadTime = ffld$[40]
+	alertdata.OrdType = ffld$[41]
+	alertdata.PONum = ffld$[42]
+	alertdata.POLine = ffld$[43]
+	alertdata.POQtyRec = ffld$[44]
+	alertdata.POType$ = ffld$[45]
+	alertdata.Invoice = ffld$[46]
+	e = alertdata_SQLInsert(e$, ch_sql, alertdata.)
+	if not(e) exit sub ! fatal errors not allowed as this is an old style call?
+	! OK - trailer section - assumed to be initialized with proper data
+	! already - just add it
+	alerttrailer.AlertID = NewAlertID
+	e = alerttrailer_SQLInsert(e$, ch_sql, alerttrailer.)
+	if not(e) exit sub ! fatal errors not allowed as this is an old style call?
+else
+	if FromBatch
+		include "src/utilcallsuberr.inc"
+	else
+		include "src/callsuberr.inc"
+	end if
+end try
+end sub ! AddtoFle
+
+sub InitAlertType(AlertNumber, AlertDescription$)
+try
+	clear alerttype.
+	alerttype.ID = AlertNumber
+	alerttype.Description$ = AlertDescription$
+	alerttype.TrailerChar1$ = SQLNULL$()
+	alerttype.TrailerChar2$ = SQLNULL$()
+	alerttype.TrailerChar3$ = SQLNULL$()
+	alerttype.TrailerChar4$ = SQLNULL$()
+	alerttype.TrailerChar5$ = SQLNULL$()
+	alerttype.TrailerChar6$ = SQLNULL$()
+	alerttype.TrailerChar7$ = SQLNULL$()
+	alerttype.TrailerChar8$ = SQLNULL$()
+	alerttype.TrailerChar9$ = SQLNULL$()
+	alerttype.TrailerChar10$ = SQLNULL$()
+	alerttype.TrailerDec1$ = SQLNULL$()
+	alerttype.TrailerDec2$ = SQLNULL$()
+	alerttype.TrailerDec3$ = SQLNULL$()
+	alerttype.TrailerDec4$ = SQLNULL$()
+	alerttype.TrailerDec5$ = SQLNULL$()
+	alerttype.TrailerDec6$ = SQLNULL$()
+	alerttype.TrailerDec7$ = SQLNULL$()
+	alerttype.TrailerDec8$ = SQLNULL$()
+	alerttype.TrailerDec9$ = SQLNULL$()
+	alerttype.TrailerDec10$ = SQLNULL$()
+	alerttype.TrailerInt1$ = SQLNULL$()
+	alerttype.TrailerInt2$ = SQLNULL$()
+	alerttype.TrailerInt3$ = SQLNULL$()
+	alerttype.TrailerInt4$ = SQLNULL$()
+	alerttype.TrailerInt5$ = SQLNULL$()
+	alerttype.TrailerInt6$ = SQLNULL$()
+	alerttype.TrailerInt7$ = SQLNULL$()
+	alerttype.TrailerInt8$ = SQLNULL$()
+	alerttype.TrailerInt9$ = SQLNULL$()
+	alerttype.TrailerInt10$ = SQLNULL$()
+	alerttype.TrailerDate1$ = SQLNULL$()
+	alerttype.TrailerDate2$ = SQLNULL$()
+	alerttype.TrailerDate3$ = SQLNULL$()
+	alerttype.TrailerDate4$ = SQLNULL$()
+	alerttype.TrailerDate5$ = SQLNULL$()
+	alerttype.TrailerDate6$ = SQLNULL$()
+	alerttype.TrailerDate7$ = SQLNULL$()
+	alerttype.TrailerDate8$ = SQLNULL$()
+	alerttype.TrailerDate9$ = SQLNULL$()
+	alerttype.TrailerDate10$ = SQLNULL$()
+else
+ if FromBatch
+	include "src/utilcallsuberr.inc"
+ else
+	include "src/callsuberr.inc"
+ end if
+end try
+end sub
+
+!----------------------------------------------------------------------------
+Sub SndAlrt1()
+! send new customer created
+Try
+	! how do we know what userid the salesperson is?
+	Dim k1$[50],a1$[142]
+	dim k2$[40],m1$[30],s1$[30]
+	dim 2%,c1[12]
+	dim 3%,cfin[8]
+	clear ffld$[] ! clear data
+	CFC=ch[2] ! customer
+	SFC=ch[3] ! sslsm
+	CSC=ch[4] ! suppt notes
+	if cfc<=0 
+		CFC=openfile(-1808,Intco)
+		if cfc=-1 
+			returnstatus=0
+			message$="Customer file"
+			goto SA1Done
+		Endif
+	Endif
+	If SFC<=0
+		SFC=openfile(-1824,Intco)
+		if sfc=-1
+			returnstatus=0
+			message$="Salesperson file"
+			goto SA1Done
+		Endif
+	Endif
+	if csc<=0
+		csc=openfile(-1680,Intco)
+		if csc=-1
+			returnstatus=0
+			message$="Cust Suppt Notes"
+			goto sa1done
+		Endif
+	Endif
+	let CFR=passinfo[1] ! cust record
+	CUST=passinfo[2] ! custid
+	if CFR<=0 ! 
+		if cust<=0 ! both rec & id missing
+			returnstatus=0
+			message$="No Data passed"
+			goto SA1Done
+		Endif
+		let k1$=" ",k1$
+		k1$=Cust using "######"
+		Search #cfc,2,1;k1$,cfr,e
+		if e
+			returnstatus=0
+			message$="Customer not found"
+			goto sa1done
+		Endif
+	Endif
+	! read data
+	MAT READ #CFC,CFR,0;A1$;
+	MAT READ #CFC,CFR,142;c1;
+	mat read #cfc,cfr,544;cfin;
+	cust=c1[1]
+	k2$=" ",k2$;k2$=c1[2] using "###"
+	search #sfc,2,1;k2$,R[2],E
+	if not(e)
+		mat read #sfc,r[2],0;s1$;
+	Else
+		s1$="Salesperson "+Str$(C1[2])+" missing"
+	Endif
+	! start the load
+	fFld$[0]=1 ! alert # 1 - new customer
+	ffld$[2]=Str$(cust) ! custid
+	ffld$[3]=RTrim$(A1$[31,60]) ! name
+	ffld$[4]=Str$(C1[2]) ! slsm
+	fFld$[5]=RTrim$(S1$[1,30]) ! slsmname
+	fFld$[11]=Str$(C1[9]) ! ctgy
+	fFld$[12]=Str$(CFin[4]) ! div
+	fFld$[13]=Str$(C1[7]) ! prc type
+	fFld$[14]=RTrim$(A1$[1,20]) ! contact
+	fFld$[16]=Str$(CFin[6]) ! acctmgr
+	! now suppt notes
+	K2$=" ",k2$
+	K2$[1,6]=Cust Using "######"
+	Ncscloop: ! spnotes loop
+	Search #csc,3,1;k2$,R[3],E
+	x2=k2$[1,6] \ if x2<>cust let e=2
+	X2=k2$[8,10] \ if x2>25 let e=2 ! max 25 notes!!
+	if not(e)
+		mat read #csc,r[3],12;m1$;
+		fFld$[15]=ffld$[15]+RTrim$(M1$)+"  " ! into 1 big field!
+		goto ncscloop
+	Endif	! use cspec notes
+	If RTrim$(ffld$[15])="" ! no notes - use sent message
+		ffld$[15]=RTrim$(msg$)
+	Endif
+	
+	call addtofle() ! add data to file
+	
+	SA1done: ! fin
+	Webstr$=msc$(0)+" - Alert 1 - "+Str$(Cust)+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	If ch[2]<=0 try close #CFC Else Rem
+	if ch[3]<=0 try close #SFC Else Rem
+	if ch[4]<=0 try close #CSC Else Rem
+	! +"</page>" ! if std .net header - include final
+else
+ include "src/callsuberr.inc"
+end try
+end sub ! Sndalrt1
+!----------------------------------------------------------------------------
+Sub SndAlrt2()
+! send new order on new customer created
+ Try
+	! how do we know what userid the salesperson is?
+	clear ffld$[]
+	Dim k1$[50],a1$[142],os1$[118]
+	dim k2$[40],m1$[30],s1$[30],H0$[20]
+	dim 1%,h4[2]
+	dim 2%,c1[12],h0[12],h5[16],h6[8]
+	dim 3%,cfin[8],t2[25]
+	clear ffld$[] ! clear data
+	CFC=ch[2] ! customer
+	SFC=ch[3] ! sslsm
+	ROH=ch[4] ! order header
+	ROS=ch[5] ! order shipto
+	ROT=ch[6] ! order totals
+	if cfc<=0 
+		CFC=openfile(-1808,Intco)
+		if cfc=-1 
+			returnstatus=0
+			message$="Customer file"
+			goto SA2Done
+		Endif
+	Endif
+	If SFC<=0
+		SFC=openfile(-1824,Intco)
+		if sfc=-1
+			returnstatus=0
+			message$="Salesperson file"
+			goto SA2Done
+		Endif
+	Endif
+	if roh<=0
+		roh=openfile(-1840,Intco)
+		if csc=-1
+			returnstatus=0
+			message$="Order Header file"
+			goto sa2done
+		Endif
+	Endif
+	
+	let CFR=passinfo[1] ! cust record
+	CUST=passinfo[2] ! custid
+	if CFR<=0 ! 
+		if cust<=0 ! both rec & id missing
+			returnstatus=0
+			message$="No Data passed"
+			goto SA2Done
+		Endif
+		let k1$=" ",k1$
+		k1$=Cust using "######"
+		Search #cfc,2,1;k1$,cfr,e
+		if e
+			returnstatus=0
+			message$="Customer not found"
+			goto sa2done
+		Endif
+	Endif
+	! read data
+	MAT READ #CFC,CFR,0;A1$;
+	MAT READ #CFC,CFR,142;c1;
+	mat read #cfc,cfr,544;cfin;
+	cust=c1[1]
+	slsm=passinfo[3] \ if slsm<=0 let slsm=c1[2]
+	k2$=" ",k2$;k2$=slsm using "###"
+	search #sfc,2,1;k2$,R[2],E
+	if not(e)
+		mat read #sfc,r[2],0;s1$;
+	Else
+		s1$="Salesperson "+Str$(slsm)+" missing"
+	Endif
+	r[2]=passinfo[4]
+	mat read #roh,r[2],0;h0;
+	mat read #roh,r[2],78;h4;
+	mat read #roh,r[2],84;h0$;
+	mat read #roh,r[2],104;h5;
+	mat read #roh,r[2],408;h6;
+	r[3]=h0[2]
+	mat read #ros,r[3],8;os1$;
+	r[4]=h0[3]
+	mat read #rot,r[4],8;t2;
+	! start the load
+	fFld$[0]=2 ! alert # 2 - new order / new customer
+	ffld$[2]=Str$(cust) ! custid
+	ffld$[3]=RTrim$(A1$[31,60]) ! name
+	ffld$[4]=Str$(slsm) ! slsm
+	fFld$[5]=RTrim$(S1$[1,30]) ! slsmname
+	fFLD$[9]=Str$(H4[2]) ! whse
+	fFld$[11]=Str$(C1[9]) ! ctgy
+	div=h5[8] \ if div<=0 let div=cfin[4]
+	fFld$[12]=Str$(div) ! div
+	x2=h6[0] \ if x2<=0 let x2=c1[7]
+	fFld$[13]=Str$(X2) ! prc type
+	fFld$[14]=RTrim$(H0$[1,20]) ! contact
+	Tmp$="New Order "+Str$(H0[7])+" for Customer "+Str$(Cust)
+	fFLD$[15]=rtrim$(tmp$) ! "NOTES"
+	fFld$[16]=Str$(CFin[6]) ! acctmgr
+	fFLD$[17]=Str$(H0[7]) ! "ORDERID"
+	tmp$="" \ if h0[9] let tmp$=pdate$(h0[9])
+	fFLD$[18]=RTrim$(tmp$) ! "ORDERDATE"
+	tmp$="" \ if h0[10] let tmp$=pdate$(h0[10])
+	if h0[10]=999999 let tmp$="None"
+	fFLD$[19]=rtrim$(tmp$) ! "SHIPDATE"
+	tmp$="" \ if h5[1] let tmp$=pdate$(h5[1])
+	fFLD$[20]=rtrim$(tmp$) ! "DUEDATE"
+	fFLD$[21]=Rtrim$(Os1$[1,30]) ! "SHIPTONAME"
+	tmp$="N" \ if t2[25]<>0 let tmp$="Y"
+	ffld$[33]=rtrim$(tmp$) ! "ORDHOLD"
+	ffld$[41]=Str$(H5[7]) ! "ORDTYPE"
+
+	call addtofle()
+	
+	! +"</page>" ! if std .net header - include final
+	SA2Done: ! finished
+	Webstr$=msc$(0)+" - Alert 2 - "+Str$(Cust)+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	If ch[2]<=0 try close #CFC Else Rem
+	if ch[3]<=0 try close #SFC Else Rem
+	if ch[4]<=0 try close #ROH Else Rem
+ else
+ include "src/callsuberr.inc"
+end try
+end sub ! Sndalrt2
+!----------------------------------------------------------------------------
+Sub SndAlrt3()
+! order put on credit hold
+ Try
+	! how do we know what userid the salesperson is?
+	clear ffld$[]
+	Dim k1$[50],a1$[142],os1$[118]
+	dim k2$[40],m1$[30],s1$[30],H0$[20]
+	dim 1%,h4[2]
+	dim 2%,c1[12],h0[12],h5[16],h6[8]
+	dim 3%,cfin[8],t2[25]
+	clear ffld$[] ! clear data
+	CFC=ch[2] ! customer
+	SFC=ch[3] ! sslsm
+	ROH=ch[4] ! order header
+	ROS=ch[5] ! order shipto
+	ROT=ch[6] ! order totals
+	if cfc<=0 
+		CFC=openfile(-1808,Intco)
+		if cfc=-1 
+			returnstatus=0
+			message$="Customer file"
+			goto SA3Done
+		Endif
+	Endif
+	If SFC<=0
+		SFC=openfile(-1824,Intco)
+		if sfc=-1
+			returnstatus=0
+			message$="Salesperson file"
+			goto SA3Done
+		Endif
+	Endif
+	if roh<=0
+		roh=openfile(-1840,Intco)
+		if csc=-1
+			returnstatus=0
+			message$="Order Header file"
+			goto sa3done
+		Endif
+	Endif
+	
+	let CFR=passinfo[1] ! cust record
+	CUST=passinfo[2] ! custid
+	if CFR<=0 ! 
+		if cust<=0 ! both rec & id missing
+			returnstatus=0
+			message$="No Data passed"
+			goto SA3Done
+		Endif
+		let k1$=" ",k1$
+		k1$=Cust using "######"
+		Search #cfc,2,1;k1$,cfr,e
+		if e
+			returnstatus=0
+			message$="Customer not found"
+			goto sa3done
+		Endif
+	Endif
+	! read data
+	MAT READ #CFC,CFR,0;A1$;
+	MAT READ #CFC,CFR,142;c1;
+	mat read #cfc,cfr,544;cfin;
+	cust=c1[1]
+	slsm=passinfo[3] \ if slsm<=0 let slsm=c1[2]
+	k2$=" ",k2$;k2$=slsm using "###"
+	search #sfc,2,1;k2$,R[2],E
+	if not(e)
+		mat read #sfc,r[2],0;s1$;
+	Else
+		s1$="Salesperson "+Str$(slsm)+" missing"
+	Endif
+	r[2]=passinfo[4]
+	mat read #roh,r[2],0;h0;
+	mat read #roh,r[2],78;h4;
+	mat read #roh,r[2],84;h0$;
+	mat read #roh,r[2],104;h5;
+	mat read #roh,r[2],408;h6;
+	r[3]=h0[2]
+	mat read #ros,r[3],8;os1$;
+	r[4]=h0[3]
+	mat read #rot,r[4],8;t2;
+	! start the load
+	fFld$[0]=3 ! alert # 3 - order put on credit hold
+	ffld$[2]=Str$(cust) ! custid
+	ffld$[3]=RTrim$(A1$[31,60]) ! name
+	ffld$[4]=Str$(slsm) ! slsm
+	fFld$[5]=RTrim$(S1$[1,30]) ! slsmname
+	fFLD$[9]=Str$(H4[2]) ! whse
+	fFld$[11]=Str$(C1[9]) ! ctgy
+	div=h5[8] \ if div<=0 let div=cfin[4]
+	fFld$[12]=Str$(div) ! div
+	x2=h6[0] \ if x2<=0 let x2=c1[7]
+	fFld$[13]=Str$(X2) ! prc type
+	fFld$[14]=RTrim$(H0$[1,20]) ! contact
+	Tmp$="Order "+Str$(H0[7])+" for Customer "+Str$(Cust)+" on hold"
+	fFLD$[15]=rtrim$(tmp$) ! "NOTES"
+	fFld$[16]=Str$(CFin[6]) ! acctmgr
+	fFLD$[17]=Str$(H0[7]) ! "ORDERID"
+	tmp$="" \ if h0[9] let tmp$=pdate$(h0[9])
+	fFLD$[18]=RTrim$(tmp$) ! "ORDERDATE"
+	tmp$="" \ if h0[10] let tmp$=pdate$(h0[10])
+	if h0[10]=999999 let tmp$="None"
+	fFLD$[19]=rtrim$(tmp$) ! "SHIPDATE"
+	tmp$="" \ if h5[1] let tmp$=pdate$(h5[1])
+	fFLD$[20]=rtrim$(tmp$) ! "DUEDATE"
+	fFLD$[21]=Rtrim$(Os1$[1,30]) ! "SHIPTONAME"
+	tmp$="N" \ if t2[25]<>0 let tmp$="Y"
+	ffld$[33]=rtrim$(tmp$) ! "ORDHOLD"
+	fFLD$[34]=LTrim$(t2[0] using "##########.##") ! "ORDTOTL"
+	ffld$[41]=Str$(H5[7]) ! "ORDTYPE"
+
+	
+	! +"</page>" ! if std .net header - include final
+	SA3Done: ! finished
+	call addtofle()
+	Webstr$=msc$(0)+" - Alert 3 - "+Str$(H0[7])+" "+message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	If ch[2]<=0 try close #CFC Else Rem
+	if ch[3]<=0 try close #SFC Else Rem
+	if ch[4]<=0 try close #ROH Else Rem
+ else
+ include "src/callsuberr.inc"
+end try
+end sub ! Sndalrt3
+!----------------------------------------------------------------------------
+Sub SndAlrt4()
+! send slsm changed - customer
+Try
+	! how do we know what userid the salesperson is?
+	Dim k1$[50],a1$[142]
+	dim k2$[40],m1$[30],s1$[30]
+	dim 2%,c1[12]
+	dim 3%,cfin[8]
+	clear ffld$[] ! clear data
+	CFC=ch[2] ! customer
+	SFC=ch[3] ! sslsm
+	if cfc<=0 
+		CFC=openfile(-1808,Intco)
+		if cfc=-1 
+			returnstatus=0
+			message$="Customer file"
+			goto SA4Done
+		Endif
+	Endif
+	If SFC<=0
+		SFC=openfile(-1824,Intco)
+		if sfc=-1
+			returnstatus=0
+			message$="Salesperson file"
+			goto SA4Done
+		Endif
+	Endif
+	let CFR=passinfo[1] ! cust record
+	CUST=passinfo[2] ! custid
+	if CFR<=0 ! 
+		if cust<=0 ! both rec & id missing
+			returnstatus=0
+			message$="No Data passed"
+			goto SA4Done
+		Endif
+		let k1$=" ",k1$
+		k1$=Cust using "######"
+		Search #cfc,2,1;k1$,cfr,e
+		if e
+			returnstatus=0
+			message$="Customer not found"
+			goto sa4done
+		Endif
+	Endif
+	! read data
+	MAT READ #CFC,CFR,0;A1$;
+	MAT READ #CFC,CFR,142;c1;
+	mat read #cfc,cfr,544;cfin;
+	cust=c1[1]
+	k2$=" ",k2$;k2$=c1[2] using "###"
+	search #sfc,2,1;k2$,R[2],E
+	if not(e)
+		mat read #sfc,r[2],0;s1$;
+	Else
+		s1$="Salesperson "+Str$(C1[2])+" missing"
+	Endif
+	! start the load
+	fFld$[0]=4 ! alert # 4 - customer - slsm changed
+	! fFld$[1]=userid$ ! ?? no - this is buyer's user id!
+	ffld$[2]=Str$(cust) ! custid
+	ffld$[3]=RTrim$(A1$[31,60]) ! name
+	ffld$[4]=Str$(C1[2]) ! slsm
+	fFld$[5]=RTrim$(S1$[1,30]) ! slsmname
+	fFld$[11]=Str$(C1[9]) ! ctgy
+	fFld$[12]=Str$(CFin[4]) ! div
+	fFld$[13]=Str$(C1[7]) ! prc type
+	fFld$[14]=RTrim$(A1$[1,20]) ! contact
+	fFld$[16]=Str$(CFin[6]) ! acctmgr
+	if passinfo[3] ! sent in info
+		ffld$[15]="Orig Slspsn "+Str$(PassInfo[3])
+	endif
+	ffld$[15]=ffld$[15]+" Chgd by "+RTrim$(Userid$) ! user making chg
+	! original slsm sent in message!!
+	If RTrim$(Msg$)<>"" ! no notes - use sent message
+		ffld$[15]=ffld$[15]+RTrim$(msg$)
+	Endif
+	
+	call addtofle() ! add data to file
+	
+	SA4done: ! fin
+	Webstr$=msc$(0)+" - Alert 4 - "+Str$(Cust)+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	If ch[2]<=0 try close #CFC Else Rem
+	if ch[3]<=0 try close #SFC Else Rem
+	! +"</page>" ! if std .net header - include final
+else
+ include "src/callsuberr.inc"
+end try
+end sub ! Sndalrt4
+!----------------------------------------------------------------------------
+Sub SndAlrt5()
+! send shiplist slsm changed
+Try
+	! how do we know what userid the salesperson is?
+	Dim k1$[50],a1$[142]
+	dim k2$[40],m1$[30],s1$[30]
+	dim 2%,c1[12],slslsm
+	dim 3%,cfin[8]
+	clear ffld$[] ! clear data
+	CFC=ch[2] ! customer
+	SFC=ch[3] ! sslsm
+	CSC=ch[4] ! shiplist
+	if cfc<=0 
+		CFC=openfile(-1808,Intco)
+		if cfc=-1 
+			returnstatus=0
+			message$="Customer file"
+			goto SA5Done
+		Endif
+	Endif
+	If SFC<=0
+		SFC=openfile(-1824,Intco)
+		if sfc=-1
+			returnstatus=0
+			message$="Salesperson file"
+			goto SA5Done
+		Endif
+	Endif
+	if csc<=0
+		csc=openfile(-2112,Intco)
+		if csc=-1
+			returnstatus=0
+			message$="Cust Shiplist"
+			goto sa5done
+		Endif
+	Endif
+	let CFR=passinfo[1] ! cust record
+	CUST=passinfo[2] ! custid
+	ShipID=passinfo[3]
+	if CFR<=0 ! 
+		if cust<=0 ! both rec & id missing
+			returnstatus=0
+			message$="No Data passed"
+			goto SA5Done
+		Endif
+		let k1$=" ",k1$
+		k1$=Cust using "######"
+		Search #cfc,2,1;k1$,cfr,e
+		if e
+			returnstatus=0
+			message$="Customer not found"
+			goto sa5done
+		Endif
+	Endif
+	! read data
+	MAT READ #CFC,CFR,0;A1$;
+	MAT READ #CFC,CFR,142;c1;
+	mat read #cfc,cfr,544;cfin;
+	cust=c1[1]
+	! now get shiplist 
+	k1$=" ",k1$;k1$[1,6]=Cust using "######"
+	k1$[7,7]=".";k1$[8]=shipid using "&&&&&&"
+	search #csc,2,1;k1$,CSR,e
+	if not(e)
+		mat read #csc,csr,0;a1$;
+		read #csc,csr,390;slslsm;
+	else
+		a1$[118]=a1$[1,20] ! use customer contact
+	endif ! use cust if shiplist missing
+	if slslsm let c1[2]=slslsm
+	k2$=" ",k2$;k2$=c1[2] using "###"
+	search #sfc,2,1;k2$,R[2],E
+	if not(e)
+		mat read #sfc,r[2],0;s1$;
+	Else
+		s1$="Salesperson "+Str$(C1[2])+" missing"
+	Endif
+	
+	! start the load
+	fFld$[0]=5 ! alert # 5
+	! fFld$[1]=userid$ ! ?? no - this is buyer userid!
+	ffld$[2]=K1$ ! Str$(cust) ! custid (shiplist id)
+	ffld$[3]=RTrim$(A1$[31,60]) ! name
+	ffld$[4]=Str$(C1[2]) ! slsm
+	fFld$[5]=RTrim$(S1$[1,30]) ! slsmname
+	fFld$[11]=Str$(C1[9]) ! ctgy
+	fFld$[12]=Str$(CFin[4]) ! div
+	fFld$[13]=Str$(C1[7]) ! prc type
+	fFld$[14]=RTrim$(A1$[118,142]) ! contact
+	fFld$[16]=Str$(CFin[6]) ! acctmgr
+	if passinfo[4] ! passed the original
+		ffld$[15]="Orig Slspsn "+Str$(passinfo[4])
+	endif
+	ffld$[15]=ffld$[15]+" Chgd by "+RTrim$(Userid$) ! user making change
+	If RTrim$(Msg$)<>"" ! no notes - use sent message
+		ffld$[15]=ffld$[15]+RTrim$(msg$)
+	Endif
+	
+	call addtofle() ! add data to file
+	
+	SA5done: ! fin
+	Webstr$=msc$(0)+" - Alert 5 - "+K1$+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	If ch[2]<=0 try close #CFC Else Rem
+	if ch[3]<=0 try close #SFC Else Rem
+	if ch[4]<=0 try close #CSC Else Rem
+	! +"</page>" ! if std .net header - include final
+else
+ include "src/callsuberr.inc"
+end try
+end sub ! Sndalrt5
+!----------------------------------------------------------------------------
+Sub SndAlrt6()
+! customer flds changed - send orig in passinfo[3-5]
+Try
+	! how do we know what userid the salesperson is?
+	Dim k1$[50],a1$[142]
+	dim k2$[40],m1$[30],s1$[30]
+	Dim 1%,C2[2]
+	dim 2%,c1[12]
+	dim 3%,cfin[8],C12[3]
+	clear ffld$[] ! clear data
+	CFC=ch[2] ! customer
+	SFC=ch[3] ! sslsm
+	if cfc<=0 
+		CFC=openfile(-1808,Intco)
+		if cfc=-1 
+			returnstatus=0
+			message$="Customer file"
+			goto SA6Done
+		Endif
+	Endif
+	If SFC<=0
+		SFC=openfile(-1824,Intco)
+		if sfc=-1
+			returnstatus=0
+			message$="Salesperson file"
+			goto SA6Done
+		Endif
+	Endif
+
+	let CFR=passinfo[1] ! cust record
+	CUST=passinfo[2] ! custid
+	if CFR<=0 ! 
+		if cust<=0 ! both rec & id missing
+			returnstatus=0
+			message$="No Data passed"
+			goto SA6Done
+		Endif
+		let k1$=" ",k1$
+		k1$=Cust using "######"
+		Search #cfc,2,1;k1$,cfr,e
+		if e
+			returnstatus=0
+			message$="Customer not found"
+			goto sa6done
+		Endif
+	Endif
+	! read data
+	MAT READ #CFC,CFR,0;A1$;
+	MAT READ #CFC,CFR,142;c1;
+	mat read #CFC,CFR,194;c2;
+	mat read #cfc,cfr,544;cfin;
+	mat read #cfc,cfr,668;c12;
+	cust=c1[1]
+	k2$=" ",k2$;k2$=c1[2] using "###"
+	search #sfc,2,1;k2$,R[2],E
+	if not(e)
+		mat read #sfc,r[2],0;s1$;
+	Else
+		s1$="Salesperson "+Str$(C1[2])+" missing"
+	Endif
+	! start the load
+	fFld$[0]=6 ! alert # 6 - customer flds changed
+	ffld$[2]=Str$(cust) ! custid
+	ffld$[3]=RTrim$(A1$[31,60]) ! name
+	ffld$[4]=Str$(C1[2]) ! slsm
+	fFld$[5]=RTrim$(S1$[1,30]) ! slsmname
+	fFld$[11]=Str$(C1[9]) ! ctgy
+	fFld$[12]=Str$(CFin[4]) ! div
+	fFld$[13]=Str$(C1[7]) ! prc type
+	fFld$[14]=RTrim$(A1$[1,20]) ! contact
+	fFld$[16]=Str$(CFin[6]) ! acctmgr
+	FFld$[15]="Changed by "+RTrim$(Userid$)
+	If RTrim$(Msg$)<>"" ! add sent message
+		ffld$[15]=ffld$[15]+"  "+RTrim$(msg$)
+	Endif
+	if passinfo[3] let ffld$[47]=Str$(passinfo[3]) ! "ORGCCDAY"
+	ffld$[48]=str$(c1[3]) ! "CURCCDAY"
+	if passinfo[4] let ffld$[49]=Str$(passinfo[4]) ! "ORGTERMS"
+	ffld$[50]=Str$(C2[0]) ! "CURTERMS"
+	if passinfo[5] let ffld$[51]=Str$(passinfo[5]) ! "ORGCLIMIT"
+	ffld$[52]=Str$(C12[0]) ! "CURCLIMIT"	
+	call addtofle() ! add data to file
+	
+	SA6done: ! fin
+	Webstr$=msc$(0)+" - Alert 6 - "+Str$(Cust)+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	If ch[2]<=0 try close #CFC Else Rem
+	if ch[3]<=0 try close #SFC Else Rem
+	! +"</page>" ! if std .net header - include final
+else
+ include "src/callsuberr.inc"
+end try
+end sub ! Sndalrt6
+!----------------------------------------------------------------------------
+sub Sndalrt11()
+! Low stock warning - already on mxlinept
+! basically - just showing how it's done there or if we standardize that
+! all alerts are generated in here
+  Try
+	Dim user$[10],key1$[30],A$[156]
+	Dim W1$[32],v1$[30],k1$[50],QMask$[24]
+	dim 1%,W1[2],cnvtu[2],ARMTH,ch51[99]
+	Dim 2%,W2[9],b[24],BDays[24]
+	Dim 3%,A[34],w3[24]
+	Dim 3%,prr,pwr,cnvta,amount
+
+	MAT READ #CTLC,0,120;ARMTH;
+	MAT READ #CTLC,11,0;BDAYS;
+	MTHDAYS=BDAYS[ARMTH]
+	IF MTHDAYS<=0 LET MTHDAYS=21
+	clear ffld$[]
+	QMask$="---------------#.##"
+	pfc=ch[2]
+	pwc=ch[3]
+	prr=passinfo[2]
+	pwr=passinfo[3]
+	trigger=passinfo[4]
+	Ch_buyer=Openfile(-9991,Intco)
+	if ch_buyer=-1 
+		Returnstatus=0;Message$="Buyer File"
+		goto SA11Done
+	Endif
+	ch_usercntrl=Openfile(-9988,Intco)
+	if ch_usercntrl=-1 
+		returnstatus=0;message$="User File"
+		goto SA11Done
+	Endif
+	Buyer=passinfo[1]
+	if buyer<=0 
+		returnstatus=0;message$="No Buyer"
+		goto SA11Done
+	Endif
+	if pfc<=0
+		pfc=openfile(-1792,Intco)
+	Endif
+	if pwc<=0
+		pwc=openfile(-1744,Intco)
+	Endif
+	vfc=openfile(-2400,Intco)
+	ch51[0]=pfc
+	ch51[1]=pwc
+	ch51[2]=vfc
+	if prr<=0
+		returnstatus=0
+		message$="NO PRODUCT REC"
+		goto sa11done
+	Endif
+	if pwr<=0
+		returnstatus=0
+		message$="NO PRODWHSE REC"
+		goto sa11done
+	Endif
+	MAT READ #PFC,PRR,0;A$;
+	mat read #PFC,prr,156;b;
+	mat read #pfc,prr,256;a;
+	read record #pfc,prr,0;pr.; ! for conversions
+	mat read #pwc,pwr,0;w1$;
+	mat read #PWC,PWR,32;w1;
+	mat read #pwc,pwr,38;w2;
+	mat read #Pwc,pwr,78;w3;
+	FFLD$[15]=RTrim$(Msg$) ! use passed message?
+	vend=w2[3] \ if vend<=0 let vend=b[24]
+	K1$=" ",k1$
+	k1$=vend using "######"
+	If vfc>=0
+		search #vfc,2,1;k1$,R[3],E
+		if not(e)
+			mat read #vfc,r[3],0;v1$;
+		Else
+			v1$=" ",v1$
+		Endif
+	Else
+		v1$=" ",v1$
+	Endif
+	Mat Read #CH_BUYER,BUYER,30;USER$; ! buyer's access code
+	If USER$[1,1] <> "" And USER$[1,5] <> "     "
+		KEY1$ = " ",KEY1$;KEY1$ = UCase$(USER$[1,10]) ! in case lowercase
+		Search #CH_USERCNTRL,2,1;KEY1$,R1,E ! \ If E > 1 Gosub ERR_SEARCH
+		If Not(E) ! "okay to send - it's a valid User
+			! already generated message - send to a file and done
+			!Webstr$=bsdel$,"ALERT",fdel$,rdel$
+			! Webstr$=rstr$,bsdel$,"ALERT",fdel$,rdel$ ! for session,etc
+			!  webstr$=webstr$,"FRMUSER",fdel$,"TOUSER",fdel$,"BUYER",fdel$,"ALERTID",fdel$
+			!  webstr$=webstr$,"MESSAGE",fdel$,rdel$
+			!  webstr$=webstr$,RTrim$(userid$),fdel$,RTrim$(user$),fdel$,Str$(BUYER),fdel$,"11",fdel$
+			!  webstr$=webstr$,RTrim$(MESSAGE$),fdel$,rdel$,esdel$ ! ,"</page>"
+			! webstr$=webstr$+"</page>" ! if std .net header - include final
+			!cmd$=HmDir$+"alerts/"+rtrim$(keyprod$)+Str$(whse)+RTrim$(USER$)
+			!FLName$=cmd$ ! retain file for web "wakeup" message
+			!System "echo ''"+webstr$+"'' >> " + cmd$ + " &" ! append to file sent (if send files)
+			FFld$[1]=RTrim$(User$) ! buyer userid
+		Endif ! valid user id for buyer
+	Endif ! of userid is on buyer
+	! start the field load
+	ffld$[0]=11 ! alert 11
+	ffld$[6]=RTrim$(A$[140,151]) ! prodid
+	ffld$[7]=RTrim$(A$[9,38]) ! desc 1
+	ffld$[8]=RTrim$(A$[63,92]) ! desc 2
+	ffld$[9]=Str$(W1[0]) ! whse
+	ffld$[10]=Str$(Buyer) ! buyer
+	cnvta=W3[8];cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[25]=LTrim$(Amount using QMask$) ! demand
+	cnvta=trigger;cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[26]=LTrim$(Amount using QMask$) ! Min/LP
+	ffld$[27]=Str$(VEND)
+	ffld$[28]=RTrim$(V1$[1,30]) ! vendname
+	ffld$[29]=Str$(B[11]) ! pctgy
+	ffld$[30]=RTrim$(A$[152,155]) ! commod
+	ffld$[31]=RTrim$(A$[156,156]) ! matcode
+	tmp$=RTrim$(W1$[13,32])
+	if tmp$="" let tmp$=A$[93,112]
+	ffld$[32]=RTrim$(tmp$) ! venditem
+	cnvta=W3[0];cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[36]=LTrim$(Amount using QMask$) ! on hand
+	cnvta=W3[0]-W3[2];cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	fFld$[37]=LTrim$(Amount using QMask$) ! avail
+	cnvta=W3[2];cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[38]=LTrim$(Amount using QMask$) ! on order
+	cnvta=W3[1];cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[39]=LTrim$(Amount using QMask$) ! on po
+	! ADD LEADTIME/DAYS AVL
+	LDTM=FNI(W2[0]*MTHDAYS) ! LDTIME MTHS*#DAYS IN MONTH
+	FFld$[40]=LTrim$(LDTM Using "####") ! leadtime
+
+	call addtofle()
+	if p61$[111,111]="Y"
+		! check to see if we should do a cpi alert as well
+		call Sndalrt52(ch51[],prr,pwr)
+	end if
+	
+	SA11Done: ! finished - close and done
+	Webstr$=msc$(0)+" - Alert 11 - "+RTrim$(A$[140,151])+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	Try Close #ch_buyer Else Rem
+	Try Close #ch_usercntrl Else Rem
+	if ch[2]<=0 try close #PFC Else Rem
+	if ch[3]<=0 try close #PWC Else Rem
+	Try close #VFC Else rem
+  else
+	 include "src/callsuberr.inc"
+  end try
+end sub ! sndalrt11
+!----------------------------------------------------------------------------
+!----------------------------------------------------------------------------
+Sub Sndalrt12()
+! send product unusual sale - AS DETERMINED IN ACCEPT
+! is essentially same as Low Stock
+ Try
+	Dim user$[10],key1$[30],A$[156],C$[30]
+	Dim W1$[32],v1$[30],k1$[50],QMask$[24]
+	dim 1%,W1[2],cnvtu[2],ARMTH
+	Dim 2%,W2[9],b[24],BDays[24],w7[14]
+	Dim 3%,A[34],w3[24],Trigger
+	Dim 3%,prr,pwr,cnvta,amount
+
+	MAT READ #CTLC,0,120;ARMTH;
+	MAT READ #CTLC,11,0;BDAYS;
+	MTHDAYS=BDAYS[ARMTH]
+	IF MTHDAYS<=0 LET MTHDAYS=21
+
+	clear ffld$[]
+	QMask$="---------------#.##"
+	pfc=ch[2]
+	pwc=ch[3]
+	prr=passinfo[2]
+	pwr=passinfo[3]
+	clear ffld$[]
+	Shipped=passinfo[4]
+	! Order#=[5],Inv#=[6],Cust#=[7]
+	Cust=passinfo[7]
+	ch_cust=OpenFile(-1808,Intco)
+	Ch_buyer=Openfile(-9991,Intco)
+	if ch_buyer=-1 
+		Returnstatus=0;Message$="Buyer File"
+		goto SA12Done
+	Endif
+	ch_usercntrl=Openfile(-9988,Intco)
+	if ch_usercntrl=-1 
+		returnstatus=0;message$="User File"
+		goto SA12Done
+	Endif
+	Buyer=passinfo[1]
+	if buyer<=0 
+		returnstatus=0;message$="No Buyer"
+		goto SA12Done
+	Endif
+	if pfc<=0
+		pfc=openfile(-1792,Intco)
+	Endif
+	if pwc<=0
+		pwc=openfile(-1744,Intco)
+	Endif
+	vfc=openfile(-2400,Intco)
+	if prr<=0
+		returnstatus=0
+		message$="NO PRODUCT REC"
+		goto sa12done
+	Endif
+	if pwc<=0
+		returnstatus=0
+		message$="NO PRODWHSE REC"
+		goto sa12done
+	Endif
+	MAT READ #PFC,PRR,0;A$;
+	mat read #PFC,prr,156;b;
+	mat read #pfc,prr,256;a;
+	read record #pfc,prr,0;pr.; ! for conversions
+	mat read #pwc,pwr,0;w1$;
+	mat read #PWC,PWR,32;w1;
+	mat read #pwc,pwr,38;w2;
+	mat read #Pwc,pwr,78;w3;
+	MAT READ #PWC,PWR,696;W7;
+	FFLD$[15]=RTrim$(Msg$) ! use passed message?
+	TRIGGER = 0
+	If W7[12] = 6 Let TRIGGER = W3[3] Else Let TRIGGER = W3[5] ! this is min/linept
+	vend=w2[3] \ if vend<=0 let vend=b[24]
+	K1$=" ",k1$
+	k1$=vend using "######"
+	If vfc>=0
+		search #vfc,2,1;k1$,R[3],E
+		if not(e)
+			mat read #vfc,r[3],0;v1$;
+		Else
+			v1$=" ",v1$
+		Endif
+	Else
+		v1$=" ",v1$
+	Endif
+	k1$=" ",k1$;k1$=Cust Using "######"
+	if ch_cust>0
+		search #ch_cust,2,1;k1$,R[7],e
+		if not(e)
+			mat read #ch_cust,r[7],30;c$;
+		Else
+			c$=""
+		Endif
+	Else
+		let c$=""
+	Endif
+	Mat Read #CH_BUYER,BUYER,30;USER$; ! buyer's access code
+	If USER$[1,1] <> "" And USER$[1,5] <> "     "
+		KEY1$ = " ",KEY1$;KEY1$ = UCase$(USER$[1,10]) ! in case lowercase
+		Search #CH_USERCNTRL,2,1;KEY1$,R1,E ! \ If E >
+		If Not(E)
+			FFld$[1]=RTrim$(User$) ! buyer userid
+		Endif ! valid user id for buyer
+	Endif ! of userid is on buyer
+	! start the field load
+	ffld$[0]=12 ! alert 12
+	ffld$[2]=Str$(Cust) ! "CUSTID"
+	fFLD$[3]=Rtrim$(C$) ! "CUSTNAME"
+	ffld$[6]=RTrim$(A$[140,151]) ! prodid
+	ffld$[7]=RTrim$(A$[9,38]) ! desc 1
+	ffld$[8]=RTrim$(A$[63,92]) ! desc 2
+	ffld$[9]=Str$(W1[0]) ! whse
+	ffld$[10]=Str$(Buyer) ! buyer
+	fFLD$[17]=Str$(Passinfo[5]) ! "ORDERID"
+	cnvta=W3[9];cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[25]=LTrim$(Amount using QMask$) ! usage
+	cnvta=Shipped;cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[23]=LTrim$(Amount using QMask$) ! Shipped
+	cnvta=Trigger;cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[26]=LTrim$(Amount using QMask$) ! Min/LP
+	ffld$[27]=Str$(VEND)
+	ffld$[28]=RTrim$(V1$[1,30]) ! vendname
+	ffld$[29]=Str$(B[11]) ! pctgy
+	ffld$[30]=RTrim$(A$[152,155]) ! commod
+	ffld$[31]=RTrim$(A$[156,156]) ! matcode
+	tmp$=RTrim$(W1$[13,32])
+	if tmp$="" let tmp$=A$[93,112]
+	ffld$[32]=RTrim$(tmp$) ! venditem
+	cnvta=W3[0];cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[36]=LTrim$(Amount using QMask$) ! on hand
+	cnvta=W3[0]-W3[2];cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	fFld$[37]=LTrim$(Amount using QMask$) ! avail
+	cnvta=W3[2];cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[38]=LTrim$(Amount using QMask$) ! on order
+	cnvta=W3[1];cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[39]=LTrim$(Amount using QMask$) ! on po
+	! ADD LEADTIME
+	LDTM=FNI(W2[0]*MTHDAYS) ! LDTIME MTHS*#DAYS IN MONTH
+	FFld$[40]=LTrim$(LDTM Using "####") ! leadtime
+	ffld$[46]=Str$(PassInfo[6]) ! "INVOICE"
+
+	call addtofle() ! add data to file
+	
+	SA12Done: ! finished - close and done
+	Webstr$=msc$(0)+" - Alert 12 - "+RTrim$(A$[140,151])+" "+message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	Try Close #ch_buyer Else Rem
+	Try Close #ch_usercntrl Else Rem
+	if ch[2]<=0 try close #PFC Else Rem
+	if ch[3]<=0 try close #PWC Else Rem
+	Try close #VFC Else rem
+	Try close #ch_cust Else rem
+ else
+ include "src/callsuberr.inc"
+end try
+end sub ! Sndalrt12
+!----------------------------------------------------------------------------
+Sub Sndalrt21()
+! added nonstock line to order
+ Try
+	! need sordfleh,sordflel,vendor,buyer
+	Dim k1$[50],C1$[30],os1$[118],user$[10]
+	dim k2$[40],m1$[30],s1$[30],H0$[20],v1$[30]
+	Dim L6$[60],L1$[20],s3$[34],MT$[2],Key1$[30]
+	dim 1%,h4[2],l3[3],UN[2],EUN[2]
+	dim 2%,c1[12],h0[12],h5[16],h6[8]
+	Dim 2%,L4[3],L6[5]
+	dim 3%,cfin[8],r[99],t2[25]
+	Dim 3%,L7[12],s3[17],UNF[6]
+	clear ffld$[] ! clear data
+	ROL=ch[2] ! order line
+	SFC=ch[3] ! sslsm (not open)
+	ROH=ch[4] ! order header
+	ROS=ch[5] ! order shipto
+	ROT=ch[6] ! order totals
+	CCC=ch[7] ! umcodes
+	CFC=ch[8] ! customer
+	if rol<=0 
+		ROL=openfile(-1888,Intco)
+		if rol=-1 
+			returnstatus=0
+			message$="Order Line file"
+			goto SA21Done
+		Endif
+	Endif
+	If SFC<=0
+		SFC=openfile(-1824,Intco)
+		if sfc=-1
+			returnstatus=0
+			message$="Salesperson file"
+			goto SA21Done
+		Endif
+	Endif
+	if roh<=0
+		roh=openfile(-1840,Intco)
+		if csc=-1
+			returnstatus=0
+			message$="Order Header file"
+			goto sa21done
+		Endif
+	Endif
+	Ch_buyer=Openfile(-9991,Intco)
+	if ch_buyer=-1 
+		Returnstatus=0;Message$="Buyer File"
+		goto SA21Done
+	Endif
+	ch_usercntrl=Openfile(-9988,Intco)
+	if ch_usercntrl=-1 
+		returnstatus=0;message$="User File"
+		goto SA21Done
+	Endif
+	vfc=openfile(-2400,Intco)
+	if vfc=-1
+		returnstatus=0;message$="Vendor File"
+		goto SA21Done
+	Endif
+	Buyer=passinfo[1] ! as it's in sproddesc
+	OLR=passinfo[2]
+	OHR=passinfo[3]
+	if olr<=0
+		returnstatus=0;message$="Order Line Rec"
+		goto SA21Done
+	Endif
+	if ohr<=0
+		returnstatus=0;message$="Order Header Rec"
+		goto SA21Done
+	Endif
+	clear pr. ! needs setup for qty conv
+	! read line & header
+	R[2]=OHR
+	mat read #roh,r[2],0;h0;
+	mat read #roh,r[2],78;h4;
+	mat read #roh,r[2],84;h0$;
+	mat read #roh,r[2],104;h5;
+	mat read #roh,r[2],408;h6;
+	r[3]=h0[2]
+	mat read #ros,r[3],8;os1$;
+	r[4]=h0[3]
+	mat read #rot,r[4],8;t2;
+	mat read #rol,OLR,8;l3;
+	mat read #rol,olr,16;l4;
+	mat read #rol,olr,56;l6;
+	mat read #rol,olr,80;L6$;
+	mat read #rol,olr,140;L1$;
+	mat read #rol,olr,168;L7;
+	mat read #rol,olr,250;UN;
+	mat read #rol,olr,260;S3;
+	mat read #rol,olr,368;Mt$;
+	mat read #rol,olr,370;s3$;
+	mat read #rol,olr,446;EUN;
+	mat read #rol,olr,452;UNF;
+	! other files read
+	k1$=" ",k1$;k1$=h0[4] using "######"
+	If CFC>0
+		search #cfc,2,1;k1$,R[5],E
+		if not(e)
+			mat read #cfc,r[5],30;c1$;
+			mat read #cfc,r[5],142;c1;
+		Else
+			c1$="Customer "+K1$+" not found"
+			clear c1[]
+		Endif
+	Else
+		c1$="Customer file not sent"
+	Endif
+	k2$=" ",k2$;k2$=H0[11] using "###"
+	search #sfc,2,1;k2$,R[6],E
+	if not(e)
+		mat read #sfc,r[6],0;s1$;
+	Else
+		s1$="Salesperson "+Str$(H0[11])+" missing"
+	Endif
+	vend=S3[14]
+	K1$=" ",k1$
+	k1$=vend using "######"
+	If vend>0
+		search #vfc,2,1;k1$,R[7],E
+		if not(e)
+			mat read #vfc,r[7],0;v1$;
+		Else
+			v1$=" ",v1$
+			v1$="Vendor "+Str$(vend)+" not found"
+		Endif
+	Else
+		v1$=" ",v1$
+		V1$="No Vendor Entered"
+	Endif
+	if buyer>0 and buyer<chf(ch_buyer)
+		Mat Read #CH_BUYER,BUYER,30;USER$; ! buyer's access code
+	Else
+		user$=""
+	Endif
+	If USER$[1,1] <> "" And USER$[1,5] <> "     "
+		KEY1$ = " ",KEY1$;KEY1$ = UCase$(USER$[1,10]) ! in case lowercase
+		Search #CH_USERCNTRL,2,1;KEY1$,R1,E ! \ If E > 1 Gosub ERR_SEARCH
+		If Not(E) ! "okay to send - it's a valid User
+			FFld$[1]=RTrim$(User$) ! buyer userid
+		Endif ! valid user id for buyer
+	Endif ! of userid is on buyer
+	! set up data
+	ffld$[0]=21 ! "ALERTID"
+	!ffld$[1]="USERID"
+	ffld$[2]=Str$(H0[4]) ! "CUSTID"
+	fFLD$[3]=RTrim$(C1$) ! "CUSTNAME"
+	fFLD$[4]=Str$(H0[11]) ! "SLSPID"
+	fFLD$[5]=RTrim$(S1$) ! "SLSPNAME"
+	fFLD$[6]=RTrim$(L1$[1,12]) ! "PRODID"
+	fFLD$[7]=RTrim$(L6$[1,30]) ! "PRODDESC1"
+	fFLD$[8]=RTrim$(L6$[31,60]) ! "PRODDESC2"
+	fFLD$[9]=Str$(L4[3]) ! "WHSEID"
+	fFLD$[10]=Str$(Buyer) ! "BUYERID"
+	fFLD$[11]=Str$(C1[9]) ! "CUSTCTGY"
+	fFLD$[12]=Str$(H5[8]) ! "DIV"
+	fFLD$[13]=Str$(H6[0]) ! "PRICETYPE"
+	fFLD$[14]=RTrim$(H0$[1,20]) ! "CONTACT"
+	fFLD$[15]="NonStock Line Added to Order" ! "NOTES"
+	fFLD$[17]=Str$(H0[7]) ! "ORDERID"
+	tmp$="" \ if h0[9] let tmp$=pdate$(h0[9])
+	fFLD$[18]=RTrim$(tmp$) ! "ORDERDATE"
+	tmp$="" \ if h0[10] let tmp$=pdate$(h0[10])
+	if h0[10]=999999 let tmp$="None"
+	fFLD$[19]=rtrim$(tmp$) ! "SHIPDATE"
+	tmp$="" \ if h5[1] let tmp$=pdate$(h5[1])
+	fFLD$[20]=rtrim$(tmp$) ! "DUEDATE"
+	fFLD$[21]=Rtrim$(Os1$[1,30]) ! "SHIPTONAME"
+	! convert qty? - let's try what's sent (as entered) to save programming
+	L7[2]=passinfo[4];L7[3]=passinfo[5];L7[4]=passinfo[6]
+	fFLD$[22]=LTrim$(L7[2] using "###########.##") ! "QTYORD"
+	fFLD$[23]=LTrim$(L7[4] using "###########.##") ! "QTYSHIP"
+	fFLD$[24]=LTrim$(L7[3] using "###########.##") ! "QTYBO"
+	fFLD$[27]=Str$(S3[14]) ! "VENDID"
+	fFLD$[28]=RTrim$(V1$) ! "VENDNAME"
+	fFLD$[29]=Str$(L3[3]) ! "PRODCTGY"
+	fFLD$[30]=L1$[17,20] ! "COMMODITY"
+	fFLD$[31]=MT$[1,1] ! "MATCODE"
+	fFLD$[32]=RTrim$(S3$[1,20]) ! "VENDITEM"
+	tmp$="N" \ if t2[25]<>0 let tmp$="Y"
+	ffld$[33]=rtrim$(tmp$) ! "ORDHOLD"
+	fFLD$[34]=LTrim$(T2[0] using "###########.##") ! "ORDTOTL"
+	fFld$[35]=Str$(L3[2]) ! "ORDLINE"
+	ffld$[41]=Str$(H5[7]) ! "ORDTYPE"
+
+	
+	call addtofle() ! add data to file
+	
+	SA21Done: ! finished
+	Webstr$=msc$(0)+" - Alert 21 - "+RTrim$(L1$[1,12])+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	try close #ch_buyer Else Rem
+	try close #CH_usercntrl Else Rem
+	try close #VFC else Rem
+ else
+ include "src/callsuberr.inc"
+end try
+end sub ! Sndalrt21
+!----------------------------------------------------------------------------
+Sub Sndalrt22()
+! nonstock line received
+ Try
+	Dim k1$[50],C1$[30],os1$[118],user$[10]
+	dim k2$[40],m1$[30],s1$[30],H0$[20],v1$[30]
+	Dim Key1$[30],PH1$[30],PL1$[120],QMask$[24]
+	Dim L6$[60],L1$[20],s3$[34],MT$[2]
+	Dim 1%,PH4[3],PO1[9],PL1[5],l3[3],UN[2],EUN[2]
+	Dim 2%,PH0[5],PH3[4],H0[12],h5[16],L4[3],L6[5],C1[12]
+	Dim 3%,PL3[6],PL4[23],L7[12],s3[17],UNF[6]
+	clear ffld$[] ! clear data
+	QMask$="---------------#.##"
+	POH=ch[2] ! pohead
+	POL=ch[3] ! poline
+	VFC=ch[4] ! vendor
+	! need orders,slsm,buyer
+	BFC=openfile(-9991,Intco)
+	if BFC=-1 
+		returnstatus=0;message$="Buyer File"
+		goto SA22Done
+	Endif
+	ch_usercntrl=Openfile(-9988,Intco)
+	if ch_usercntrl=-1 
+		returnstatus=0;message$="User File"
+		goto SA22Done
+	Endif
+	R[2]=passinfo[1] ! poh rec
+	R[3]=passinfo[2] ! pol rec
+	if r[2]<=0 or r[3]<=0 goto SA22Done ! no recs - no way
+	Mat read #POH,R[2],0;PH0;
+	Mat read #POH,R[2],106;ph1$;
+	mat read #poh,r[2],222;ph3;
+	mat read #poh,r[2],242;ph4;
+	mat read #poh,r[2],330;po1;
+	mat read #POL,R[3],0;pl1;
+	MAT read #POL,R[3],24;pl3;
+	mat read #POL,R[3],66;pl1$;
+	mat read #POL,R[3],232;PL4;
+	!Call Logic(1,2 ^ 0,PL1[3],NONSTOCK)
+	!if not(NonStock) goto SA22Done ! not a nonstock - exit
+	if ph0[1]>0 and ph0[1]<chf(vfc)
+		mat read #VFC,ph0[1],0;v1$; ! vend name
+	Else
+		v1$="Vendor not found"
+	Endif
+	if pl4[10]>0 and pl4[11]>0 ! tied to order
+		Noord=1 ! there but not found yet
+		ofopen=1 ! we're opening order files
+		roh=openfile(-1840,intco) \ if roh=-1 goto SA22Done
+		rol=openfile(-1888,intco) \ if rol=-1 goto SA22Done
+		ros=openfile(-1856,intco) \ if ros=-1 goto SA22Done
+		cfc=openfile(-1808,intco) \ if cfc=-1 goto SA22Done
+		sfc=openfile(-1824,Intco) \ if sfc=-1 goto SA22Done
+		k1$=" ",k1$
+		for x=1 to 99
+			if x<20 or x>29 ! no deletes
+				k1$[1,2]=x using "##"
+				k1$[3]=pl4[10] using "######"
+				search #roh,2,1;k1$,R[5],e
+				if not(e) ! found it
+					K2$=" ",k2$
+					k2$[1,6]=k1$[3,8]
+					k2$[7,9]=PL4[11] using "###"
+					search #rol,2,1;k2$,R[6],e
+					if not(e)
+						noord=0
+					Endif
+					x=100 ! done
+				Endif
+			Endif
+		Next X
+		if not(noord) ! found order/line
+			Mat read #roh,r[5],0;H0;
+			Mat read #roh,r[5],84;h0$;
+			mat read #roh,r[5],104;h5;
+			R[7]=h0[2]
+			mat read #ros,r[7],8;os1$;
+			mat read #rol,R[6],8;l3;
+			mat read #rol,R[6],16;l4;
+			mat read #rol,R[6],56;l6;
+			mat read #rol,R[6],80;L6$;
+			mat read #rol,R[6],140;L1$;
+			mat read #rol,R[6],168;L7;
+			mat read #rol,R[6],250;UN;
+			mat read #rol,R[6],260;S3;
+			mat read #rol,R[6],368;Mt$;
+			mat read #rol,R[6],370;s3$;
+			mat read #rol,R[6],446;EUN;
+			mat read #rol,R[6],452;UNF;
+			If L3[0]=0 let noord=1 ! not nonstock!!
+			! now custom/slsm info
+			Key1$=" ",key1$;key1$=h0[4] using "######"
+			search #cfc,2,1;Key1$,R[8],E
+			if not(e)
+				mat read #cfc,r[8],30;c1$;
+				mat read #cfc,r[8],142;c1;
+			Else
+				c1$=" ",c1$;c1$="Customer not found"
+				clear c1[]
+			Endif
+			x2=h0[11] \ if not(x2) and c1[2] let x2=c1[2]
+			k2$=" ",k2$;k2$=x2 using "###"
+			search #sfc,2,1;k2$,r[9],e
+			if not(e)
+				mat read #sfc,r[9],0;s1$;
+			Else
+				s1$=" ",s1$;s1$="Salesperson not found"
+			Endif
+		Endif ! of order found
+	Else ! no order
+		noord=-1
+	Endif
+	Buyer=PL4[9] \ if buyer=0 let buyer=PO1[6]
+	! only other place is sproddesc(not used)
+	if buyer>0 and buyer<chf(BFC)
+		Mat Read #BFC,BUYER,30;USER$; ! buyer's access code
+	Else
+		user$=""
+	Endif
+	If USER$[1,1] <> "" And USER$[1,5] <> "     "
+		KEY1$ = " ",KEY1$;KEY1$ = UCase$(USER$[1,10]) ! in case lowercase
+		Search #CH_USERCNTRL,2,1;KEY1$,R1,E ! \ If E > 1 Gosub ERR_SEARCH
+		If Not(E) ! "okay to send - it's a valid User
+			FFld$[1]=RTrim$(User$) ! buyer userid
+		Endif ! valid user id for buyer
+	Endif ! of userid is on buyer
+	! ok - load the data (order is main, no link use PO)
+	ffld$[0]=22 ! "ALERTID"
+	! ffld$[1]="USERID" !is above
+	ffld$[2]=Str$(H0[4]) ! "CUSTID"
+	fFLD$[3]=RTrim$(C1$) ! "CUSTNAME"
+	fFLD$[4]=Str$(H0[11]) ! "SLSPID"
+	fFLD$[5]=RTrim$(S1$) ! "SLSPNAME"
+	tmp$=L1$[1,12] \ if noord let tmp$=Pl1$[81,92]
+	fFLD$[6]=RTrim$(tmp$) ! "PRODID"
+	tmp$=L6$[1,30] \ if noord let tmp$=PL1$[1,30]
+	fFLD$[7]=tmp$ ! "PRODDESC1"
+	tmp$=L6$[31,60] \ if noord let tmp$=PL1$[31,60]
+	fFLD$[8]=RTrim$(tmp$) ! "PRODDESC2"
+	x1=L4[3] \ if noord let x1=PL1[1]
+	fFLD$[9]=Str$(x1) ! "WHSEID"
+	fFLD$[10]=Str$(Buyer) ! "BUYERID"
+	fFLD$[14]=RTrim$(H0$) ! "CONTACT"
+	fFLD$[15]="NONSTOCK ITEM PO RECEIVED" ! "NOTES"
+	fFLD$[17]=Str$(H0[7]) ! "ORDERID"
+	x2=h0[9] \ if noord let x2=PH0[3]
+	tmp$="" \ if x2 let tmp$=PDate$(x2)
+	fFLD$[18]=RTrim$(tmp$) ! "ORDERDATE"
+	tmp$="0" \ if h0[10] let tmp$=PDate$(h0[10]) ! no po equiv
+	fFLD$[19]=RTrim$(tmp$) ! "SHIPDATE"
+	x2=h5[1] \ if noord let x2=PH0[4]
+	tmp$="" \ if x2 let tmp$=PDate$(x2)
+	fFLD$[20]=RTrim$(tmp$) ! "DUEDATE"
+	tmp$=OS1$[1,30] \ if noord let tmp$=PH1$[1,30]
+	fFLD$[21]=Rtrim$(tmp$) ! "SHIPTONAME"
+	! as it's nonstk - send base? as normally that way?
+	x3=L7[2] \ if noord let x3=PL3[2]
+	fFLD$[22]=LTrim$(X3 using QMask$) ! "QTYORD"
+	X3=L7[4] \ if noord let x3=PL4[5]
+	fFLD$[23]=LTrim$(X3 using QMask$) ! "QTYSHIP"
+	X3=L7[3] \ if noord let x3=PL4[4]
+	fFLD$[24]=LTrim$(X3 using QMask$) ! "QTYBO"
+	fFLD$[27]=Str$(PH3[3]) ! "VENDID"
+	fFLD$[28]=RTrim$(V1$) ! "VENDNAME"
+	tmp$=S3$[1,20] \ if noord let tmp$=PL1$[61,80]
+	fFLD$[32]=RTrim$(tmp$) ! "VENDITEM"
+	fFld$[35]=Str$(L3[2]) ! "ORDLINE"
+	ffld$[41]=Str$(H5[7]) ! "ORDTYPE"
+	ffld$[42]=Str$(PH0[2]) ! "PONUM"
+	ffld$[43]=Str$(PL1[2]) ! "POLINE"
+	ffld$[44]=LTrim$(PL3[4] using QMask$) ! "POQTYREC"
+	tmp$="W" \ if ph4[0]=1 let tmp$="D"
+	if ph4[0]=2 let tmp$="I"
+	IF PH4[0]=4 LET TMP$="IW"
+	IF PH4[0]=5 LET TMP$="ID"
+	IF PH4[0]=6 LET TMP$="II"
+	ffld$[45]=tmp$ ! "POTYPE"
+
+	call addtofle() ! add data to file
+	
+	SA22Done: ! finished
+	Webstr$=msc$(0)+" - Alert 22 - "+Str$(PH0[2])+"-"+Str$(PL1[2])+" "+message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	Try close #BFC Else Rem
+	Try close #ch_usercntrl Else Rem
+	if ofopen>0 ! opened add'l files (-1=no ord/line ref on po)
+		if roh>0 Try close #roh Else Rem
+		if rol>0 Try close #rol Else Rem
+		if ros>0 Try close #ros Else Rem
+		if cfc>0 Try close #cfc Else Rem
+		if sfc>0 Try close #sfc Else Rem
+	Endif
+ else
+ include "src/callsuberr.inc"
+end try
+end sub ! Sndalrt22
+!----------------------------------------------------------------------------
+Sub Sndalrt31()
+! PO Past Due Date
+ Try
+	Dim k1$[50],C1$[30],os1$[118],user$[10]
+	dim k2$[40],m1$[30],s1$[30],H0$[20],v1$[30]
+	Dim Key1$[30],PH1$[30],PL1$[120],QMask$[24]
+	Dim 1%,PH4[3],PO1[9],PL1[5]
+	Dim 2%,PH0[5],PH3[4]
+	Dim 3%,PL3[6],PL4[23],PH8[9]
+	clear ffld$[] ! clear data
+	QMask$="---------------#.##"
+	POH=ch[2] ! pohead
+	VFC=ch[3] ! vendor
+	BFC=Ch[4] ! buyer
+	ch_usercntrl=ch[5] ! usercntrl
+	! need buyer, Vendor
+	if ch[4]<=0
+	  BFC=openfile(-9991,Intco)
+	  if BFC=-1 
+		returnstatus=0;message$="Buyer File"
+		goto SA31Done
+	  Endif
+	Endif
+	if ch[5]<=0 
+	  ch_usercntrl=Openfile(-9988,Intco)
+	  if ch_usercntrl=-1 
+		returnstatus=0;message$="User File"
+		goto SA31Done
+	  Endif
+	Endif
+	if Ch[3]<=0
+		VFC=OpenFile(-2400,IntCo)
+		If VFC=-1
+			returnstatus=0;message$="Vendor File"
+			goto SA31Done
+		Endif	
+	Endif
+	R[2]=passinfo[1] ! poh rec
+	if r[2]<=0 goto SA31Done ! no recs - no way
+	Mat read #POH,R[2],0;PH0;
+	Mat read #POH,R[2],106;ph1$;
+	mat read #poh,r[2],222;ph3;
+	mat read #poh,r[2],242;ph4;
+	mat read #poh,r[2],250;ph8;
+	mat read #poh,r[2],330;po1;
+	K1$=" ",k1$
+	K1$=PH3[3] Using "######"
+	Search #VFC,2,1;K1$,R[3],E
+	if not(e) 
+		mat read #VFC,R[3],0;V1$;
+	Else
+		v1$=" ",V1$;V1$="Vendor not found"
+	Endif
+	Buyer=PO1[6]
+	if buyer>0 and buyer<chf(BFC)
+		Mat Read #BFC,BUYER,30;USER$; ! buyer's access code
+	Else
+		user$=""
+	Endif
+	If USER$[1,1] <> "" And USER$[1,5] <> "     "
+		KEY1$ = " ",KEY1$;KEY1$ = UCase$(USER$[1,10]) ! in case lowercase
+		Search #CH_USERCNTRL,2,1;KEY1$,R1,E ! \ If E > 1 Gosub ERR_SEARCH
+		If Not(E) ! "okay to send - it's a valid User
+			FFld$[1]=RTrim$(User$) ! buyer userid
+		Endif ! valid user id for buyer
+	Endif ! of userid is on buyer
+	! set up/send data
+	ffld$[0]=31 ! "ALERTID"
+	! ffld$[1]="USERID" done above
+	fFLD$[9]=Str$(Ph4[1]) ! "WHSEID"
+	fFLD$[10]=Str$(Buyer) ! "BUYERID"
+	fFLD$[15]="PO "+Str$(PH0[2])+" Past Due" ! "NOTES"
+	x2=ph0[3]
+	tmp$="" \ if x2 let tmp$=PDate$(x2)
+	fFLD$[18]=RTrim$(tmp$) ! "ORDERDATE"
+	X2=ph0[4];tmp$="" \ if x2 let tmp$=PDate$(x2)
+	fFLD$[20]=RTrim$(tmp$) ! "DUEDATE"
+	fFLD$[21]=RTrim$(PH1$[1,30]) ! "SHIPTONAME"
+	fFLD$[27]=Str$(PH3[3]) ! "VENDID"
+	fFLD$[28]=RTrim$(V1$) ! "VENDNAME"
+	fFLD$[34]=LTrim$(PH8[0] using QMask$) ! "ORDTOTL"
+	ffld$[42]=Str$(Ph0[2]) ! "PONUM"
+	tmp$="W" \ if ph4[0]=1 let tmp$="D"
+	if ph4[0]=2 let tmp$="I"
+	IF PH4[0]=4 LET TMP$="IW"
+	IF PH4[0]=5 LET TMP$="ID"
+	IF PH4[0]=6 LET TMP$="II"
+	ffld$[45]=tmp$ ! "POTYPE"
+
+	call addtofle() ! add data to file
+	
+	SA31Done: ! finished
+	Webstr$=msc$(0)+" - Alert 31 - "+Str$(PH0[2])+" "+message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	If ch[4]<=0 try close #BFC Else Rem
+	If ch[5]<=0 try close #ch_usercntrl Else Rem
+	If CH[3]<=0 try close #vfc else rem
+ else
+ include "src/callsuberr.inc"
+end try
+end sub ! Sndalrt31
+!----------------------------------------------------------------------------
+Sub Sndalrt41()
+ Try
+! Cost / Price changes to Salesrep
+	! passinfo[1] =  salesrep number
+	! passinfo[2] = customer number
+	! passinfo[3] = product record
+	! passinfo[4] = warehouse product record (0 if n/a)
+	! passinfo[5] = effective date
+	! passinfo[6] = old price type
+	! passinfo[7] = new price type
+	! passinfo[8] = old cost
+	! passinfo[9] = new cost
+	! passinfo[10] = old price
+	! passinfo[11] = new price
+	! passinfo[12] = old contract number
+	! passinfo[13] = new contract number
+	! passinfo[14] = old rebate contract number
+	! passinfo[15] = new rebate contract number
+	Dim a1$[142],s1$[30],a$[156]
+	dim 1%,w0[3]
+	dim %3,effectiveDate#
+	Dim 3%
+	clear ffld$[] ! clear data
+
+	ch_slsm = ch[2]
+	ch_cust = ch[3]
+	ch_prod = ch[4]
+	ch_prwh = ch[5]
+	ch_sql = ch[6]
+	if ch[2]<=0
+		ch_slsm=openfile(-1824,Intco)
+		if ch_slsm = -1 
+			returnstatus=0;message$="Salesman File"
+			goto SA41Done
+		Endif
+	Endif
+	if ch[3]<=0 
+		ch_cust=Openfile(-1808,Intco)
+		if ch_cust=-1 
+			returnstatus=0;message$="Customer File"
+			goto SA41Done
+		Endif
+	Endif
+	if Ch[4]<=0
+		ch_prod=OpenFile(-1792,IntCo)
+		If ch_prod=-1
+			returnstatus=0;message$="Product File"
+			goto SA41Done
+		Endif	
+	Endif
+	if Ch[5]<=0
+		ch_prwh=OpenFile(-1744,IntCo)
+		If ch_prod=-1
+			returnstatus=0;message$="Product WH File"
+			goto SA41Done
+		Endif	
+	Endif
+	if Ch[6]<=0
+		if FromBatch
+			ch_sql = UtilOpenMySQLChan(e$, userid$, sql_passwd$, 1)
+		else
+			ch_sql = OpenMySQLChan(e$)
+		end if
+		If ch_sql=-1
+			returnstatus=0;message$="SQL Database"
+			goto SA41Done
+		Endif	
+	Endif
+	! guts of alert here
+	ffld$[0] = str$(passinfo[0])
+	ffld$[2] = str$(passinfo[2])
+	ffld$[4] = str$(passinfo[1])
+	tmp$ = passinfo[2] using "######"
+	search #ch_cust,2,1;tmp$,rec,e
+	if not(e)
+		MAT READ #ch_cust,rec,0;A1$;
+	else
+		A1$[31,60] = "CUSTOMER NOT ON FILE!"
+	end if
+	ffld$[3]=RTrim$(A1$[31,60]) ! customer name
+	tmp$=passinfo[1] using "###"
+	search #ch_slsm,2,1;tmp$,rec,E
+	if not(e)
+		mat read #ch_slsm,rec,0;s1$;
+	Else
+		s1$="Salesperson "+Str$(C1[2])+" missing"
+	Endif
+	fFld$[5]=RTrim$(S1$[1,30]) ! slsmname
+	rec = passinfo[3] ! product rec
+	mat read #ch_prod,rec,0;a$;
+	ffld$[6] = rtrim$(a$[140,151])
+	ffld$[7] = rtrim$(a$[9,38])
+	ffld$[8] = rtrim$(a$[63,92])
+	clear alerttrailer.
+	alerttrailer.AlertInt1 = passinfo[6] ! old price type
+	alerttrailer.AlertInt2 = passinfo[7] ! new price type
+	alerttrailer.AlertInt3 = passinfo[12] ! old contract number
+	alerttrailer.AlertInt4 = passinfo[13] ! new contract number
+	alerttrailer.AlertInt5 = passinfo[14] ! old rebate contract number
+	alerttrailer.AlertInt6 = passinfo[15] ! new rebate contract number
+	alerttrailer.AlertDec1 = passinfo[8] ! old cost
+	alerttrailer.AlertDec2 = passinfo[9] ! new cost
+	alerttrailer.AlertDec3 = passinfo[10] ! old price
+	alerttrailer.AlertDec4 = passinfo[11] ! new price
+	if passinfo[4] ! product wh rec
+		mat read #ch_prwh,passinfo[4],420;W0;
+		select case w0[0]
+			case 0
+				alerttrailer.AlertChar1$ = "N"
+			case 1
+				alerttrailer.AlertChar1$ = "Y"
+			case 2
+				alerttrailer.AlertChar1$ = "O"
+		end select
+	end if
+	effectiveDate# = SQLNULL#()
+	if passinfo[5] let effectiveDate# = PDate$(passinfo[5])+" 23:59:59"
+	
+	! make sure alerttype has been defined, if not, do it
+	! make sure alter type has been defined, otherwise do it
+	clear alerttype.
+	alerttype.ID = ffld$[0]
+	e = alerttype_SQLGet(e$,ch_sql,alerttype.)
+	if not(e) ! alert type not defined
+		call InitAlertType(val(ffld$[0]), "Salesrep Price / Cost Change Notification")
+		alerttype.TrailerInt1$ = "Current Price Type"
+		alerttype.TrailerInt2$ = "New Price Type"
+		alerttype.TrailerInt3$ = "Current Contract #"
+		alerttype.TrailerInt4$ = "New Contract #"
+		alerttype.TrailerInt5$ = "Current Rebate Contract #"
+		alerttype.TrailerInt6$ = "New Rebate Contract #"
+		alerttype.TrailerDec1$ = "Current Cost"
+		alerttype.TrailerDec2$ = "New Cost"
+		alerttype.TrailerDec3$ = "Current Price"
+		alerttype.TrailerDec4$ = "New Price"
+		alerttype.TrailerChar1$ = "Do Not Reorder"
+		e = alerttype_SQLInsert(e$,ch_sql,alerttype.)
+		if not(e) exit sub ! no critical errors
+	end if
+	
+	call AddtoMySQL(ch_sql, effectiveDate#)
+	
+	SA41Done: ! finished
+	Webstr$=msc$(0)+" - Alert 41 - "+Str$(passinfo[2])+"/"+str$(passinfo[3])+" "+message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	If ch[2]<=0 try close #ch_slsm Else Rem
+	If ch[3]<=0 try close #ch_cust Else Rem
+	If CH[4]<=0 try close #ch_prod else rem
+	If CH[5]<=0 try close #ch_prwh else rem
+	If CH[6]<=0 try close #ch_sql else rem
+else
+ if FromBatch
+	include "src/utilcallsuberr.inc"
+ else
+	include "src/callsuberr.inc"
+ end if
+end try
+end sub ! Sndalrt41
+	
+!----------------------------------------------------------------------------
+Sub Sndalrt51()
+ Try
+! CPI sales order alerts
+	! passinfo[1] = order number
+	! passinfo[2] = order qty
+	! passinfo[3] = available qty
+	! passinfo[4] = sold to date
+	! passinfo[5] = Sell limit
+	! passinfo[6] = CPI contract #
+	! passinfo[7] = CPI contract salesrep
+	! passinfo[8] = CPI line start date
+	! passinfo[9] = CPI line expiration date
+	! passinfo[10] = sales order line approved (1=y, 0=n)
+	! passinfo[11] = sales order customer number
+	! passinfo[12] = sales order warehouse number
+	! passinfo[13] = sales order ship date
+	! passinfo[14] = sales order status
+	! passinfo[15] = sales order salesrep #
+	! passinfo[16] = sales order bill customer
+	! passinfo[17] = sales order ship customer
+	! passinfoStr$[1] = product ID
+	! passinfoStr$[2] = product desc1
+	! passinfoStr$[3] = unit of measure
+	! passinfoStr$[4] = cpi exception message
+	! passinfoStr$[5] = sales order entered by
+	
+	Dim a1$[142],s1$[30],a$[156]
+	dim 1%,w0[3]
+	Dim 3%
+	clear ffld$[] ! clear data
+
+	ch_cust = ch[2]
+	ch_slsm = ch[3]
+	if ch[2]<=0 
+		ch_cust=Openfile(-1808,Intco)
+		if ch_cust=-1 
+			returnstatus=0;message$="Customer File"
+			goto SA51Done
+		Endif
+	Endif
+	if ch[3]<=0
+		ch_slsm=openfile(-1824,Intco)
+		if ch_slsm = -1 
+			returnstatus=0;message$="Salesman File"
+			goto SA51Done
+		Endif
+	Endif
+	! this alert requires MySQL
+	if FromBatch
+		ch_sql = UtilOpenMySQLChan(e$, userid$, sql_passwd$, 1)
+	else
+		ch_sql = OpenMySQLChan(e$)
+	end if
+	If ch_sql=-1
+		returnstatus=0;message$="SQL Database"
+		goto SA51Done
+	Endif	
+	
+	ch_prwh = openfile(-1744,IntCo)
+	if ch_prwh=-1
+		returnstatus=0;message$="Product Warehouse File"
+		goto SA51Done
+	end if
+	! guts of alert here
+	ffld$[0] = str$(passinfo[0]) ! alert type
+	ffld$[2]=str$(passinfo[11]) ! cust
+	A1$[31,60] = "CUSTOMER NOT ON FILE!"
+	tmp$ = passinfo[11] using "######"
+	search #ch_cust,2,1;tmp$,rec,e
+	if not(e) MAT READ #ch_cust,rec,0;A1$;
+	ffld$[3]=RTrim$(A1$[31,60]) ! customer name
+	fFLD$[4]=str$(passinfo[7]) ! always rep on CPI contract
+	s1$="Salesperson "+Str$(C1[2])+" missing"
+	tmp$=passinfo[7] using "###"
+	search #ch_slsm,2,1;tmp$,rec,E
+	if not(e) mat read #ch_slsm,rec,0;s1$;
+	fFld$[5]=RTrim$(S1$[1,30]) ! slsmname
+	fFLD$[6]=passinfoStr$[1] ! prod id
+	fFLD$[7]=passinfoStr$[2] ! prod desc 1
+	fFLD$[9]=str$(passinfo[12]) ! wh
+	fFLD$[17]=str$(passinfo[1]) ! order ID
+	fFLD$[19]=RTrim$(pdate$(passinfo[13])) ! ship date
+	fFLD$[22]=str$(passinfo[2]) ! qty ordered
+	fFld$[37]=str$(passinf[3]) ! avail
+
+	clear alerttrailer.
+	alerttrailer.AlertInt1 = passinfo[6] ! CPI contract
+	alerttrailer.AlertInt2 = passinfo[14] ! order status
+	alerttrailer.AlertInt3 = passinfo[15] ! sales order salesrep
+	alerttrailer.AlertInt4 = passinfo[16] ! order billto customer
+	alerttrailer.AlertInt5 = passinfo[17] ! shipto customer
+	
+	alerttrailer.AlertDec1 = passinfo[4] ! sold to date
+	alerttrailer.AlertDec2 = passinfo[5] ! sell limit
+
+	alerttrailer.AlertChar1$ = "N" ! approved by operator
+	if passinfo[10] alerttrailer.AlertChar1$ = "Y"
+	if passinfo[15] = passinfo[7] ! order rep and cpi rep the same
+		alerttrailer.alertChar2$ = ffld$[5] ! order rep
+	else
+		s1$="Salesperson "+Str$(C1[2])+" missing"
+		tmp$=passinfo[15] using "###"
+		search #ch_slsm,2,1;tmp$,rec,E
+		if not(e) mat read #ch_slsm,rec,0;s1$;
+		alerttrailer.alertChar2$ = RTrim$(S1$[1,30]) ! slsmname
+	end if
+	if passinfo[16] = passinfo[11] ! order cust and billto the same
+		alerttrailer.alertChar3$ = ffld$[3] ! billto cust name
+	else
+		A1$[31,60] = "CUSTOMER NOT ON FILE!"
+		tmp$ = passinfo[16] using "######"
+		search #ch_cust,2,1;tmp$,rec,e
+		if not(e) MAT READ #ch_cust,rec,0;A1$;
+		alerttrailer.alertChar3$=RTrim$(A1$[31,60])
+	end if
+	if passinfo[17] = passinfo[11] ! order cust and shipto the same
+		alerttrailer.alertChar4$ = ffld$[3] ! billto cust name
+	else
+		A1$[31,60] = "CUSTOMER NOT ON FILE!"
+		tmp$ = passinfo[17] using "######"
+		search #ch_cust,2,1;tmp$,rec,e
+		if not(e) MAT READ #ch_cust,rec,0;A1$;
+		alerttrailer.alertChar4$=RTrim$(A1$[31,60])
+	end if
+	alerttrailer.AlertChar5$ = rtrim$(passinfoStr$[3]) ! unit of measure
+	alerttrailer.AlertChar6$ = rtrim$(passinfoStr$[4]) ! cpi exception message
+	alerttrailer.AlertChar7$ = rtrim$(passinfoStr$[5]) ! order entered by
+	tmp$ = " ",tmp$
+	tmp$[1,12] = passinfoStr$[1],"            "
+	tmp$[13,14] = passinfo[12] using "##"
+	search #ch_prwh,2,1;tmp$,r,e
+	if not(e) ! found it
+		mat read #ch_prwh,r,420;W0;
+		select case w0[0]
+			case 0
+				alerttrailer.AlertChar8$ = "N"
+			case 1
+				alerttrailer.AlertChar8$ = "Y"
+			case 2
+				alerttrailer.AlertChar8$ = "O"
+		end select
+	end if
+	try alerttrailer.AlertDate1# = pdate$(passinfo[8]) else rem ! start date might be 0=none
+	try alerttrailer.AlertDate2# = pdate$(passinfo[9]) else rem ! end date might be 0=none
+	
+	! make sure alerttype has been defined, if not, do it
+	clear alerttype.
+	alerttype.ID = passinfo[0]
+	e = alerttype_SQLGet(e$,ch_sql,alerttype.)
+	if not(e) ! alert type not defined
+		call InitAlertType(passinfo[0], "CPI Sales Order Exception")
+		alerttype.TrailerInt1$ = "CPI Contract #"
+		alerttype.TrailerInt2$ = "Order Status"
+		alerttype.TrailerInt3$ = "Order Salesrep #"
+		alerttype.TrailerInt4$ = "Billto Cust #"
+		alerttype.TrailerInt5$ = "Shipto Cust #"
+		alerttype.TrailerDec1$ = "CPI Sold To Date"
+		alerttype.TrailerDec2$ = "CPI Sell Limit"
+		alerttype.TrailerChar1$ = "Approved?"
+		alerttype.TrailerChar2$ = "Order Rep Name"
+		alerttype.TrailerChar3$ = "Billto Cust Name"
+		alerttype.TrailerChar4$ = "Shipto Cust Name"
+		alerttype.TrailerChar5$ = "Unit of Measure"
+		alerttype.TrailerChar6$ = "Exception Message"
+		alerttype.TrailerChar7$ = "Order Entered By"
+		alerttype.TrailerChar8$ = "Do Not Reorder"
+		alerttype.TrailerDate1$ = "Contract Start Date"
+		alerttype.TrailerDate2$ = "Contract End Date"
+		e = alerttype_SQLInsert(e$,ch_sql,alerttype.)
+		if not(e) exit sub ! no critical errors
+	end if
+	
+	call AddtoMySQL(ch_sql)
+	
+	SA51Done: ! finished
+	Webstr$=msc$(0)+" - Alert 51 - "+Str$(passinfo[1])+" "+message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	If ch[2]<=0 try close #ch_cust Else Rem
+	If ch[3]<=0 try close #ch_slsm Else Rem
+	try close #ch_sql else rem
+	try close #ch_prwh else rem
+else
+ if FromBatch
+	include "src/utilcallsuberr.inc"
+ else
+	include "src/callsuberr.inc"
+ end if
+end try
+end sub ! Sndalrt51
+!----------------------------------------------------------------------------
+!
+! this particular alert is meant to be tagged onto
+! Sndalrt11 (if alert 11 sends an alert, check for CPI contract
+! and send alert to salesrep if found)
+! cpib_ch[0] = product file channel
+! cpib_ch[1] = product wh file channel
+! cpib_ch[2] = vendor file channel
+! prr = product record
+! pwr = product warehouse record
+!
+sub Sndalrt52(cpib_ch[],prr,pwr)
+try
+	dim prodwhse. as prodwhse
+
+	ch_sql = OpenMySQLChan(e$)
+	If ch_sql=-1
+		returnstatus=0;message$="SQL Database"
+		goto SA52Done:
+	Endif
+	
+	returnstatus = CPIBuildProductAlert(cpib_ch[],prr,pwr)
+	if returnstatus=0 goto SA52Done:
+	! got one - standard fields all fixed up, tweak what's
+	! needed and add additional
+	ffld$[0]="52" ! alert 52
+	! make sure alerttype has been defined, if not, do it
+	alerttype.ID = ffld$[0]
+	e = alerttype_SQLGet(e$,ch_sql,alerttype.)
+	if not(e) ! alert type not defined
+		alerttype.Description$="CPI Stock Below Minimum"
+		e = alerttype_SQLInsert(e$,ch_sql,alerttype.)
+		if not(e)
+			returnstatus=0;Message$="SQL err adding alert type"
+			goto SA52Done:
+		end if
+	end if
+	call AddtoMySQL(ch_sql)
+	!
+	! OK, being this is CPI, we need to get approval before
+	! this thing can be reordered - set do not reorder flag
+	! and wait for approval
+	!
+	pwc_rw=openfile(1744,Intco) \ if pwc_rw = -1 error 42
+	Read Record #pwc_rw,pwr;prodwhse.
+	prodwhse.CPIHoldRevBy$ = " ",prodwhse.CPIHoldRevBy$[10]
+	tmp$ = tim(4) using "&&&&&&"
+	tmp2$ = tmp$[5,6] + tmp$[1,4]
+	prodwhse.CPIHoldDate = tmp2$
+	prodwhse.DNReordFlg = 1 ! do not reorder
+	! disable for now
+	! Write Record #pwc_rw,pwr;prodwhse.;
+	close #pwc_rw
+
+	SA52Done: ! finished - close and done
+	Webstr$=msc$(0)+" - Alert 52 - "+RTrim$(ffld$[6])+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	Try Close #ch_sql Else Rem
+else
+	 include "src/callsuberr.inc"
+end try
+end sub ! sndalrt52
+!----------------------------------------------------------------------------
+!
+sub Sndalrt53()
+! ch[2] = product
+! ch[3] = product wh
+! ch[4] = vendor 
+! ch[5] = contract detail
+! ch[6] = cpi header
+! ch[7] = cpi detail
+! ch[8] = cpi customer
+! ch[9] = salesman
+! ch[10] = customer
+! ch[11] = contract header
+! ch[12] = SQL database
+!
+! passinfo[1] = product record #
+! passinfo[2] = product warehouse record #
+! passinfo[3] = contract detail record #
+! passinfoStr$[1] = purge date ("mm/dd/yyyy")
+try
+	dim %3,purgeDate#
+
+	! channels for CPIBuildProductAlert
+	clear xch[]
+	for i = 2 to 11
+		xch[i-2] = ch[i]
+	next i
+	ch_sql = ch[12]
+	if not(ch_sql)
+		if FromBatch
+			ch_sql = UtilOpenMySQLChan(e$, userid$, sql_passwd$, 1)
+		else
+			ch_sql = OpenMySQLChan(e$)
+		end if
+		If ch_sql=-1
+			returnstatus=0;message$="SQL Database"
+			goto SA53Done
+		Endif	
+	end if
+	
+	returnstatus = CPIBuildProductAlert(xch[],passinfo[1],passinfo[2],passinfo[3])
+	if returnstatus=0 goto SA53Done:
+	! got one - standard fields all fixed up, tweak what's
+	! needed and add additional
+	ffld$[0]=passinfo[0] ! alert 53
+	! make sure alerttype has been defined, if not, do it
+	alerttype.ID = ffld$[0]
+	e = alerttype_SQLGet(e$,ch_sql,alerttype.)
+	if not(e) ! alert type not defined
+		alerttype.Description$="CPI Expired Contract"
+		e = alerttype_SQLInsert(e$,ch_sql,alerttype.)
+		if not(e)
+			returnstatus=0;Message$="SQL err adding alert type"
+			goto SA53Done:
+		end if
+	end if
+	purgeDate# = passinfoStr$[1]+" 23:59:59"
+	call AddtoMySQL(ch_sql,purgeDate#)
+	
+	SA53Done: ! finished - close and done
+	Webstr$=msc$(0)+" - Alert 53 - "+RTrim$(ffld$[6])+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	if not(ch[12]) Try Close #ch_sql Else Rem
+else
+ if FromBatch
+	include "src/utilcallsuberr.inc"
+ else
+	include "src/callsuberr.inc"
+ end if
+end try
+end sub ! sndalrt53
+!----------------------------------------------------------------------------
+!----------------------------------------------------------------------------
+!
+sub Sndalrt54()
+! ch[2] = product
+! ch[3] = product wh
+! ch[4] = vendor 
+! ch[5] = contract detail
+! ch[6] = cpi header
+! ch[7] = cpi detail
+! ch[8] = cpi customer
+! ch[9] = salesman
+! ch[10] = customer
+! ch[11] = contract header
+! ch[12] = SQL database
+!
+! passinfo[1] = product record #
+! passinfo[2] = product warehouse record #
+! passinfo[3] = contract detail record #
+! passinfoStr$[1] = purge date ("mm/dd/yyyy")
+try
+	dim %3,purgeDate#
+
+	! channels for CPIBuildProductAlert
+	clear xch[]
+	for i = 2 to 11
+		xch[i-2] = ch[i]
+	next i
+	ch_sql = ch[12]
+	if not(ch_sql)
+		if FromBatch
+			ch_sql = UtilOpenMySQLChan(e$, userid$, sql_passwd$, 1)
+		else
+			ch_sql = OpenMySQLChan(e$)
+		end if
+		If ch_sql=-1
+			returnstatus=0;message$="SQL Database"
+			goto SA54Done
+		Endif	
+	end if
+	
+	returnstatus = CPIBuildProductAlert(xch[],passinfo[1],passinfo[2],passinfo[3],1)
+	if returnstatus=0 goto SA54Done:
+	! got one - standard fields all fixed up, tweak what's
+	! needed and add additional
+	ffld$[0]=passinfo[0] ! alert 54
+	! make sure alerttype has been defined, if not, do it
+	alerttype.ID = ffld$[0]
+	e = alerttype_SQLGet(e$,ch_sql,alerttype.)
+	if not(e) ! alert type not defined
+		alerttype.Description$="CPI Quantity Limit"
+		e = alerttype_SQLInsert(e$,ch_sql,alerttype.)
+		if not(e)
+			returnstatus=0;Message$="SQL err adding alert type"
+			goto SA54Done:
+		end if
+	end if
+	purgeDate# = passinfoStr$[1]+" 23:59:59"
+	call AddtoMySQL(ch_sql,purgeDate#)
+	
+	SA54Done: ! finished - close and done
+	Webstr$=msc$(0)+" - Alert 54 - "+RTrim$(ffld$[6])+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	if not(ch[12]) Try Close #ch_sql Else Rem
+else
+ if FromBatch
+	include "src/utilcallsuberr.inc"
+ else
+	include "src/callsuberr.inc"
+ end if
+end try
+end sub ! sndalrt54
+!----------------------------------------------------------------------------
+sub Sndalrt55()
+! ch[2] = product file channel
+! ch[3] = product wh file channel
+! ch[4] = vendor file channel
+! ch[5] = contract detail
+! ch[6] = cpi header
+! ch[7] = cpi detail
+! ch[8] = cpi customer
+! ch[9] = salesman
+! ch[10] = customer
+! ch[11] = contract header
+! ch[12] = SQL database
+! passinfo[1] = product record
+! passinfo[2] = product warehouse record
+! passinfo[3] = old minimum
+! passinfo[4] = warehouse
+! passinfo[5] = old minimum days
+! passinfoStr$[1] = product code
+try
+	dim 1%,cnvtu[2]
+	Dim 3%,cnvta,amount
+
+	ch_prod = ch[2]
+	If not(ch_prod)
+		returnstatus=0;message$="Product File"
+		goto SA55Done:
+	Endif
+	ch_sql = ch[12] \ if not(ch_sql) ch_sql = OpenMySQLChan(e$)
+	If ch_sql=-1
+		returnstatus=0;message$="SQL Database"
+		goto SA55Done:
+	Endif
+	! set up channels for call to CPIBuildProductAlert
+	clear xch[]
+	xch[0] = ch_prod
+	for i = 3 to 11
+		xch[i-2] = ch[i]
+	next i
+	returnstatus = CPIBuildProductAlert(xch[],passinfo[1],passinfo[2])
+	if returnstatus=0 goto SA55Done:
+	! got one - standard fields all fixed up, tweak what's
+	! needed and add additional
+	! pr. read in by CPIBuildProductAlert call
+	cnvta=passinfo[3];cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1
+	alerttrailer.AlertDec7=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	if passinfo[5]>=1
+		! convert months to days
+		alerttrailer.AlertInt4 = int((MTHDAYS * passinfo[5]) + .5) ! min days
+	else
+		alerttrailer.AlertInt4 = abs(passinfo[5]) ! min days
+	end if
+	alerttype.TrailerInt4$="Old Minimum Days"
+	alerttype.TrailerDec7$="Old Minimum Amount"
+	ffld$[0]=passinfo[0] ! alert 55
+	! make sure alerttype has been defined, if not, do it
+	alerttype.ID = ffld$[0]
+	e = alerttype_SQLGet(e$,ch_sql,alerttype.)
+	if not(e) ! alert type not defined
+		alerttype.Description$="CPI Product Minimum Changed"
+		e = alerttype_SQLInsert(e$,ch_sql,alerttype.)
+		if not(e)
+			returnstatus=0;Message$="SQL err adding alert type"
+			goto SA55Done:
+		end if
+	end if
+	call AddtoMySQL(ch_sql)
+	
+	SA55Done: ! finished - close and done
+	Webstr$=msc$(0)+" - Alert 55 - "+RTrim$(passinfoStr$[1])+"/"+str$(passinfo[4])+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	if not(ch[2]) try close #ch_prod else rem
+	if not(ch[12]) try close #ch_sql else rem
+else
+	 include "src/callsuberr.inc"
+end try
+end sub ! sndalrt55
+!----------------------------------------------------------------------------
+sub Sndalrt56()
+! ch[2] = customer file channel
+! ch[3] = salesman file channel
+! passinfo[1] = customer number
+try
+	dim 2%,c1[12]
+	dim s1$[30],a1$[142]
+	dim 3%
+	
+	ch_cust = ch[2] \ if not(ch_cust) ch_cust = openfile(-1808,intco)
+	If ch_cust<0
+		returnstatus=0;message$="Customer File"
+		goto SA56Done:
+	Endif
+	ch_slsm = ch[3] \ if not(ch_slsm) ch_slsm = openfile(-1824,intco)
+	If ch_slsm<0
+		returnstatus=0;message$="Salesman File"
+		goto SA56Done:
+	Endif
+	ch_sql = OpenMySQLChan(e$)
+	If ch_sql=-1
+		returnstatus=0;message$="SQL Database"
+		goto SA56Done:
+	Endif
+	tmp$ = passinfo[1] using "######"
+	search #ch_cust,2,1;tmp$,r,e
+	if e
+		returnstatus=0;message$="Couldn't find customer record"
+		goto SA56Done:
+	end if 
+	clear ffld$[]
+	ffld$[0]=passinfo[0] ! alert 56
+	MAT READ #ch_cust,r,0;A1$;
+	MAT READ #ch_cust,r,142;c1;
+	ffld$[2]=str$(c1[1])
+	ffld$[3]=RTrim$(A1$[31,60]) ! primary customer name
+	ffld$[4]=str$(c1[2]) ! sales ID
+	tmp$=c1[2] using "###"
+	s1$="Salesperson "+Str$(c1[2])+" missing"
+	search #ch_slsm,2,1;tmp$,r,E
+	if not(e) mat read #ch_slsm,r,0;s1$;
+	fFld$[5]=RTrim$(S1$[1,30]) ! slsmname
+	! make sure alerttype has been defined, if not, do it
+	alerttype.ID = ffld$[0]
+	e = alerttype_SQLGet(e$,ch_sql,alerttype.)
+	if not(e) ! alert type not defined
+		call InitAlertType(val(ffld$[0]), "CPI Credit Hold")
+		e = alerttype_SQLInsert(e$,ch_sql,alerttype.)
+		if not(e)
+			returnstatus=0;Message$="SQL err adding alert type"
+			goto SA56Done:
+		end if
+	end if
+	call AddtoMySQL(ch_sql)
+	
+	SA56Done: ! finished - close and done
+	Webstr$=msc$(0)+" - Alert 56 - "+str$(passinfo[1])+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	if not(ch[2]) try close #ch_cust else rem
+	if not(ch[3]) try close #ch_slsm else rem
+	Try Close #ch_sql Else Rem
+else
+	 include "src/callsuberr.inc"
+end try
+end sub ! sndalrt56
+!----------------------------------------------------------------------------
+
+!----------------------------------------------------------------------------
+!
+! ch[2] = product file
+! ch[3] = product warehouse file
+! passinfo[1] = product record
+! passinfo[2] = product warehouse record
+! passinfo[3] = approved: 1 = Yes, 0 = No
+!
+sub Sndalrt57()
+try
+	dim prodwhse. as prodwhse
+
+	! channels for CPIBuildProductAlert
+	clear xch[]
+	xch[0] = ch[2]
+	xch[1] = ch[3]
+	ch_sql = OpenMySQLChan(e$)
+	If ch_sql=-1
+		returnstatus=0;message$="SQL Database"
+		goto SA57Done
+	Endif	
+	
+	returnstatus = CPIBuildProductAlert(xch[],passinfo[1],passinfo[2])
+	if returnstatus=0 goto SA57Done:
+	alerttype.TrailerChar3$="Reorder Approved"
+	
+	! got one - standard fields all fixed up, tweak what's
+	! needed and add additional
+	ffld$[0]="57" ! alert 57
+	! make sure alerttype has been defined, if not, do it
+	alerttype.ID = ffld$[0]
+	e = alerttype_SQLGet(e$,ch_sql,alerttype.)
+	if not(e) ! alert type not defined
+		alerttype.Description$="CPI Low Stock Acknowledgement"
+		e = alerttype_SQLInsert(e$,ch_sql,alerttype.)
+		if not(e)
+			returnstatus=0;Message$="SQL err adding alert type"
+			goto SA57Done:
+		end if
+	end if
+	alerttrailer.AlertChar3$ = "Y" \ if not(approved) alerttrailer.AlertChar3$ = "N"
+	call AddtoMySQL(ch_sql)
+	SA57Done: ! finished - close and done
+	Webstr$=msc$(0)+" - Alert 57 - "+RTrim$(ffld$[6])+" "+Message$
+	cmd$="echo ''"+webstr$+"'' >> "+alog$
+	system cmd$
+	Try Close #ch_sql Else Rem
+else
+	 include "src/callsuberr.inc"
+end try
+end sub ! sndalrt57
+!----------------------------------------------------------------------------
+
+
+!----------------------------------------------------------------------------
+Function CPIBuildProductAlert(cpib_ch[],prr,pwr,...)
+! build basic product information and load for
+! CPI product alerts
+!
+! returns 1 on good, 0 on bad - sets "message$" for bad
+!
+! cpib_ch[0] = product channel
+! cpib_ch[1] = product warehouse channel
+! cpib_ch[2] = vendor channel
+! cpib_ch[3] = special price detail
+! cpib_ch[4] = CPI Header
+! cpib_ch[5] = CPI Detail
+! cpib_ch[6] = CPI Customer
+! cpib_ch[7] = Salesman
+! cpib_ch[8] = Customer
+! cpib_ch[9] = contract header
+!
+! prr = product rec #
+! pwr = product warehouse rec #
+!
+! OPTION - sdrec - record number of contract detail record
+!          no need to locate contract
+!
+! OPTION - useSelling (use selling UM instead of STOCKING
+! for conversion)
+!
+! NOTE: CLEARS ffld$ and initializes alerttrailer.
+! loads the following
+! ffld$[1]  ! buyer user id for product / warehouse
+! ffld$[2]  ! CPI Contract Primary Customer #
+! ffld$[3]  ! CPI Contract Primary Customer Name
+! ffld$[4]  ! CPI Contract Salesrep #
+! fFld$[5]  ! CPI Contract Salesrep Name
+! ffld$[6]  ! prodid
+! ffld$[7]  ! prod desc 1
+! ffld$[8]  ! prod desc 2
+! ffld$[9]  ! whse
+! fld$[10]  ! buyer
+! ffld$[25] ! demand (stocking units)
+! ffld$[27] ! vendor id
+! ffld$[28] ! vendor name
+! ffld$[29] ! product category
+! ffld$[30] ! commodity code
+! ffld$[31] ! matcode
+! ffld$[32] ! venditem
+! ffld$[36] ! on hand (stocking units)
+! fFld$[37] ! available (stocking units)
+! ffld$[38] ! on order (stocking units)
+! ffld$[39] ! on po (stocking units)
+! FFld$[40] ! leadtime in days
+! alerttrailer.AlertInt1 ! CPI Contract Number
+! alerttrailer.AlertInt2 ! warehouse minimum days
+! alerttrailer.AlertInt3 ! warehouse maximum days
+! alerttrailer.AlertChar1$ ! CPI AutoRenew Flag (Y/N)
+! alerttrailer.AlertChar2$ ! Prod Warehouse Do Not Reorder Flag
+! alerttrailer.AlertDec1 ! CPI Contract Reserve Stock
+! alerttrailer.AlertDec2 ! CPI Contract ReorderQty
+! alerttrailer.AlertDec3 ! CPI Contract Sell Limit
+! alerttrailer.AlertDec4 ! total sold on contract (stocking units)
+! alerttrailer.AlertDec5 ! warehouse min
+! alerttrailer.AlertDec6 ! warehouse max
+! alerttrailer.AlertDate1# ! contract start date might be 0=none
+! alerttrailer.AlertDate2# ! contact end date might be 0=none
+! alerttrailer.AlertDate3# ! last sold date for wh, might be 0
+! ALSO INITIALIZES NEW ALERTTYPE STRUCTURE FOR alerttrailer FIELDS	
+try enter sdrec,... else dim 3%,sdrec
+try enter useSelling else useSelling=0
+try
+	dim sd. as specprice
+	dim cpih. as cpihead
+	dim cpid. as cpidet
+	Dim user$[10],key1$[30],A$[156]
+	Dim W1$[32],v1$[30],k1$[50],QMask$[24]
+	dim 1%,W1[2],cnvtu[2],ARMTH,w0[3]
+	Dim 2%,W2[9],b[24],BDays[24]
+	Dim 3%,A[34],w3[24]
+	Dim 3%,cnvta,amount
+	dim s1$[30],a1$[142]
+	dim 1%,priCh[99]
+	dim 2%,priCustomer
+	dim 3%,myCPI[4]
+	dim 3%
+
+	returnstatus = 0 ! default bad
+	pfc = cpib_ch[0] \ if not(pfc) pfc=openfile(-1792,intco)
+	if pfc<0
+		message$="Product File"
+		goto CPIBuildProductAlertDone:
+	Endif
+	pwc = cpib_ch[1] \ if not(pwc) pwc=openfile(-1744,intco)
+	if pwc<0
+		message$="Product Warehouse File"
+		goto CPIBuildProductAlertDone:
+	Endif
+	vfc = cpib_ch[2] \ if not(vfc) vfc=openfile(-2400,intco)
+	if vfc<0
+		message$="Vendor File"
+		goto CPIBuildProductAlertDone:
+	Endif
+	ch_cond = cpib_ch[3] \ if not(ch_cond) ch_cond=openfile(-1936,Intco)
+	if ch_cond<0 
+		message$="Special Price Detail File"
+		goto CPIBuildProductAlertDone:
+	Endif
+
+	ch_cpih = cpib_ch[4] \ if not(ch_cpih) ch_cpih=OpenFile(-9929,intco)
+	If ch_cpih<0
+		message$="CPI Contract Header File"
+		goto CPIBuildProductAlertDone:
+	Endif
+	ch_cpid = cpib_ch[5] \ if not(ch_cpid) ch_cpid=OpenFile(-9928,intco)
+	If ch_cpid<0
+		message$="CPI Contract Detail File"
+		goto CPIBuildProductAlertDone:
+	Endif
+	ch_cpic = cpib_ch[6] \ if not(ch_cpic) ch_cpic=OpenFile(-9927,intco)
+	If ch_cpic<0
+		message$="CPI Customer File"
+		goto CPIBuildProductAlertDone:
+	Endif
+	ch_slsm = cpib_ch[7] \ if not(ch_slsm) ch_slsm=OpenFile(-1824,intco)
+	if ch_slsm<0
+		message$="Salesman File"
+		goto CPIBuildProductAlertDone:
+	Endif
+	ch_cust = cpib_ch[8] \ if not(ch_cust) ch_cust=OpenFile(-1808,intco)
+	if ch_cust<0
+		message$="Customer File"
+		goto CPIBuildProductAlertDone:
+	Endif
+	ch_conh = cpib_ch[9] \ if not(ch_conh) ch_conh=OpenFile(-2880,intco)
+	if ch_conh<0
+		message$="Contract Header File"
+		goto CPIBuildProductAlertDone:
+	Endif
+	Ch_buyer=Openfile(-9991,Intco)
+	if ch_buyer=-1 
+		Message$="Buyer File"
+		goto CPIBuildProductAlertDone:
+	Endif
+	ch_usercntrl=Openfile(-9988,Intco)
+	if ch_usercntrl=-1 
+		message$="User File"
+		goto CPIBuildProductAlertDone:
+	Endif
+	MAT READ #CTLC,0,120;ARMTH;
+	MAT READ #CTLC,11,0;BDAYS;
+	MTHDAYS=BDAYS[ARMTH]
+	IF MTHDAYS<=0 LET MTHDAYS=21
+	clear ffld$[]
+	QMask$="---------------#.##"
+	MAT READ #PFC,PRR,0;A$;
+	mat read #PFC,prr,156;b;
+	mat read #pfc,prr,256;a;
+	read record #pfc,prr,0;pr.; ! for conversions
+	um = pr.UMStkDefault
+	if useSelling um = pr.UMSellDefault
+	mat read #pwc,pwr,0;w1$;
+	mat read #PWC,PWR,32;w1;
+	mat read #pwc,pwr,38;w2;
+	mat read #Pwc,pwr,78;w3;
+	mat read #pwc,pwr,420;W0;
+	vend=w2[3] \ if vend<=0 let vend=b[24]
+	K1$=" ",k1$
+	k1$=vend using "######"
+	v1$=" ",v1$
+	search #vfc,2,1;k1$,R[3],E
+	if not(e) mat read #vfc,r[3],0;v1$;
+	ffld$[6]=RTrim$(A$[140,151]) ! prodid
+	ffld$[7]=RTrim$(A$[9,38]) ! desc 1
+	ffld$[8]=RTrim$(A$[63,92]) ! desc 2
+	ffld$[9]=Str$(W1[0]) ! whse
+	ffld$[10]=Str$(W1[2]) ! buyer
+	if w1[2]
+		Mat Read #CH_BUYER,w1[2],30;USER$; ! buyer's access code
+		If USER$[1,1] <> "" And USER$[1,5] <> "     "
+			KEY1$ = " ",KEY1$;KEY1$ = UCase$(USER$[1,10]) ! in case lowercase
+			Search #CH_USERCNTRL,2,1;KEY1$,R1,E ! \ If E > 1 Gosub ERR_SEARCH
+			If Not(E) ! "okay to send - it's a valid User
+				FFld$[1]=RTrim$(User$) ! buyer userid
+			Endif ! valid user id for buyer
+		Endif ! of userid is on buyer
+	end if
+	cnvta=W3[8];cnvtu[0]=0;cnvtu[1]=um;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[25]=LTrim$(Amount using QMask$) ! demand
+! 	cnvta=trigger;cnvtu[0]=0;cnvtu[1]=um;cnvtu[2]=1
+! 	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+! 	ffld$[26]=LTrim$(Amount using QMask$) ! Min/LP
+	ffld$[27]=Str$(VEND)
+	ffld$[28]=RTrim$(V1$[1,30]) ! vendname
+	ffld$[29]=Str$(B[11]) ! pctgy
+	ffld$[30]=RTrim$(A$[152,155]) ! commod
+	ffld$[31]=RTrim$(A$[156,156]) ! matcode
+	tmp$=RTrim$(W1$[13,32])
+	if tmp$="" let tmp$=A$[93,112]
+	ffld$[32]=RTrim$(tmp$) ! venditem
+	cnvta=W3[0];cnvtu[0]=0;cnvtu[1]=um;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[36]=LTrim$(Amount using QMask$) ! on hand
+	cnvta=W3[0]-W3[2];cnvtu[0]=0;cnvtu[1]=um;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	fFld$[37]=LTrim$(Amount using QMask$) ! avail
+	cnvta=W3[2];cnvtu[0]=0;cnvtu[1]=um;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[38]=LTrim$(Amount using QMask$) ! on order
+	cnvta=W3[1];cnvtu[0]=0;cnvtu[1]=um;cnvtu[2]=1
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	ffld$[39]=LTrim$(Amount using QMask$) ! on po
+	! ADD LEADTIME/DAYS AVL
+	LDTM=FNI(W2[0]*MTHDAYS) ! LDTIME MTHS*#DAYS IN MONTH
+	FFld$[40]=LTrim$(LDTM Using "####") ! leadtime
+
+	priCh[0] = ctlc
+	priCh[1] = ch_conh
+	priCh[2] = ch_cond
+	priCh[3] = ch_cpih
+	priCh[4] = ch_cpid
+	priCh[5] = ch_cpic
+	priCh[6] = ch_cust
+	priCh[7] = pfc
+	if not(sdrec)
+		sdrec = CPIFindHighestPriority(e$,intco,priCh[],myCPI[], ffld$[6], W1[0])
+		if not(sdrec)
+			message$="Product not on CPI contract"
+			goto CPIBuildProductAlertDone:
+		end if
+		if myCPI[1] > 1
+			message$="Product on inactive CPI contract"
+			goto CPIBuildProductAlertDone:
+		end if
+		read record #ch_cond,sdrec,0;sd.;
+	else
+		read record #ch_cond,sdrec,0;sd.;
+		myCPI[0] = sd.custnum
+		myCPI[2] = sd.startdate
+		myCPI[3] = sd.canceldate
+	end if
+	! OK - got one - get the cpi header and details
+	let tmp$ = myCPI[0] using "C#####"
+	search #ch_cpih,2,1;tmp$,r,e
+	if e
+		message$="CPI header not found"
+		goto CPIBuildProductAlertDone:
+	end if
+	Read record #ch_cpih,r,0;cpih.;
+	let tmp$[1,6] = myCPI[0] using "C#####"
+	let tmp$[7]=ffld$[6]+"            "
+	search #ch_cpid,2,1;tmp$,r,e
+	if e
+		message$="CPI detail not found"
+		goto CPIBuildProductAlertDone:
+	end if
+	Read record #ch_cpid,r,0;cpid.;
+
+	priCustomer = CPIFindPrimaryCust(e$,intco,ch_cpic,cpih.ContractNumber)
+	ffld$[2] = str$(priCustomer)
+	A1$[31,60] = "CUSTOMER NOT ON FILE!"
+	if priCustomer
+		tmp$ = priCustomer using "######"
+		search #ch_cust,2,1;tmp$,r,e
+		if not(e) MAT READ #ch_cust,r,0;A1$;
+	end if
+	ffld$[3]=RTrim$(A1$[31,60]) ! primary customer name
+	ffld$[4]=str$(cpih.Salesman) ! sales ID
+	tmp$=cpih.Salesman using "###"
+	search #ch_slsm,2,1;tmp$,r,E
+	if not(e)
+		mat read #ch_slsm,r,0;s1$;
+	Else
+		s1$="Salesperson "+Str$(cpih.Salesman)+" missing"
+	Endif
+	fFld$[5]=RTrim$(S1$[1,30]) ! slsmname
+	
+	clear alerttrailer.
+	alerttrailer.AlertInt1 = cpih.ContractNumber ! CPI contract
+
+	if W7[2]>=1
+		! convert months to days
+		alerttrailer.AlertInt2 = int((MTHDAYS * W7[2]) + .5) ! min days
+	else
+		alerttrailer.AlertInt2 = abs(W7[2]) ! min days
+	end if
+	if W7[3]>=1
+		! convert months to days
+		alerttrailer.AlertInt3 = int((MTHDAYS * W7[3]) + .5) ! max days
+	else
+		alerttrailer.AlertInt3 = abs(W7[3]) ! max days
+	end if
+	
+	alerttrailer.AlertChar1$ = "N"
+	if cpid.RenewAuto alerttrailer.AlertChar1$ = "Y"
+	select case w0[0]
+		case 0
+			alerttrailer.AlertChar2$ = "N"
+		case 1
+			alerttrailer.AlertChar2$ = "Y"
+		case 2
+			alerttrailer.AlertChar2$ = "O"
+	end select
+	alerttrailer.AlertDec1 = cpid.ResStock
+	alerttrailer.AlertDec2 = cpid.ReorderQty
+	alerttrailer.AlertDec3 = sd.QtyLimit
+	cnvta=sd.QtySinceStart;cnvtu[0]=0;cnvtu[1]=um;cnvtu[2]=1
+	alerttrailer.AlertDec4=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.) ! total sold on contract
+	cnvta=W3[3];cnvtu[0]=0;cnvtu[1]=um;cnvtu[2]=1
+	alerttrailer.AlertDec5=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.) ! min amount
+	cnvta=W3[4];cnvtu[0]=0;cnvtu[1]=um;cnvtu[2]=1
+	alerttrailer.AlertDec6=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.) ! max amount
+	
+	try alerttrailer.AlertDate1# = pdate$(myCPI[2]) else rem ! start date might be 0=none
+	try alerttrailer.AlertDate2# = pdate$(myCPI[3]) else rem ! end date might be 0=none
+	try alerttrailer.AlertDate3# = pdate$(W2[6]) else rem ! last sold date for wh, might be 0
+	
+	! setup alerttype definition fields in the event the caller needs
+	! to add the alerttype definition.
+	clear alerttype.
+	call InitAlertType(99, "Caller needs to adjust typeID and desc")
+	alerttype.TrailerInt1$ = "CPI Contract #"
+	alerttype.TrailerInt2$ = "Minimum Days"
+	alerttype.TrailerInt3$ = "Maximum Days"
+
+	alerttype.TrailerDec1$ = "CPI Reserve Stock"
+	alerttype.TrailerDec2$ = "CPI Reorder Quantity"
+	alerttype.TrailerDec3$ = "Selling Limit"
+	alerttype.TrailerDec4$ = "Quantity Sold To Date"
+	alerttype.TrailerDec5$ = "Minimum Quantity"
+	alerttype.TrailerDec6$ = "Maximum Quantity"
+
+	alerttype.TrailerChar1$ = "CPI Renew Automatically"
+	alerttype.TrailerChar2$ = "Do Not Reorder"
+
+	alerttype.TrailerDate1$ = "Contract Start Date"
+	alerttype.TrailerDate2$ = "Contract End Date"
+	alerttype.TrailerDate3$ = "Last Sold Date"
+	
+	returnstatus=1
+	CPIBuildProductAlertDone: !
+	if not(cpib_ch[0]) try close #pfc else rem
+	if not(cpib_ch[1]) try close #pwc else rem
+	if not(cpib_ch[2]) try close #vfc else rem
+	if not(cpib_ch[3]) try close #ch_cond else rem
+	if not(cpib_ch[4]) try close #ch_cpih else rem
+	if not(cpib_ch[5]) try close #ch_cpid else rem
+	if not(cpib_ch[6]) try close #ch_cpic else rem
+	if not(cpib_ch[7]) try close #ch_slsm else rem
+	if not(cpib_ch[8]) try close #ch_cust else rem
+	if not(cpib_ch[9]) try close #ch_conh else rem
+	try close #ch_buyer else rem
+	try close #ch_usercntrl else rem
+else
+	 include "src/callsuberr.inc"
+end try
+end Function returnstatus ! CPIBuildProductAlert
+	
+!----------------------------------------------------------------------------
+Sub SndAFle()
+! send the alert file to the web
+ Try
+	! get needed data (standard file .net)
+	Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+	!Webstr$=bsdel$,"ALERTS",fdel$,rdel$
+	!call addtostr(e$,rstr$,webstr$) ! already on the file
+	! see if it's there!
+	call findf(FLNAME$,found)
+	if not(found) goto SAFExit ! no file - exit
+	Afle=findchannel()
+	Try
+		Open #AFle,FLName$ ! open the text file!
+	Else
+		goto SAFExit ! cannot open file - exit
+	End try
+	FLine=0
+	Webstr$=" ",webstr$ ! clear it
+	AFLoop: ! loop until no more
+	Read #afle;WebStr$; ! get line
+	if RTrim$(webstr$)<>"" ! has data
+	   SCHLoop: ! strip to last real char
+	   X=Len(webstr$)
+	   if x>0 ! don't send blank/null line
+		   Tmp$=webstr$[len(webstr$)] ! check last character
+		   if tmp$<>"" and tmp$<" " ! control char?
+				webstr$[Len(webstr$)]=""
+				goto SCHLoop
+		   Endif ! ok just real data
+		   call addtostr(e$,rstr$,webstr$) ! format is correct?
+		   webstr$=" ",webstr$ ! clear (in case)
+		   Fline=Fline+1
+	   Endif ! not a blank/null line
+	   Goto AFLoop ! try another line
+	Endif
+	SAFDone: ! finished
+	if FLine>1 ! sent 1 line(header=line 1) at least
+		webstr$=" ",webstr$
+		webstr$=esdel$ ! send end of section
+		call addtostr(e$,rstr$,webstr$)
+		Close #AFle
+		Try
+			Kill FlName$ ! kill file if sent  ! ****** TEST TEST LEAVE IT *****
+		Else
+			Rem
+		End try
+		Call NewAfle() ! build new one now!! msec count
+		cmd$="chmod go+rw "+flname$
+		system cmd$
+	Endif ! of a line was sent
+	SAFExit: ! finished
+	
+	! status section - DO NOT SEND FROM CALLEE!!
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	Call SetOutput(e$,rstr$)
+ else
+ include "src/callsuberr.inc"
+end try
+end sub ! SndAFle
+!----------------------------------------------------------------------------
+Sub SndUSers()
+! send the alert file to the web
+ Try
+	Dim K1$[50],A0$[48],A1$[40],A3$[30]
+	Dim List$[maxcnt,500]
+	DIM 1%,a5[10]
+	Dim 3%,R[99]
+	! get needed data (standard file .net)
+	Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+	UCC=Openfile(-9988,Intco)
+	if ucc=-1 ! can not open?
+		Returnstatus=0
+		message$="Can not open User File"
+		goto SUDone
+	Endif
+	Clear List$[]
+	List$[0]=bsdel$,"USERCONTACT",fdel$
+	Webstr$="USERID",fdel$,"NAME",fdel$
+	webstr$=webstr$,"TXTPHONE",fdel$,"EMAIL",fdel$
+	webstr$=webstr$,"SLSPID",fdel$
+	List$[1]=webstr$
+	Row=2
+	tmpcnt=maxcnt
+	K1$=" ",k1$
+	Do
+		Search #UCC,3,1;K1$,R,E
+		if e exit do
+		Try ! incase not written yet?
+			Mat read #ucc,r,212;a0$;
+			mat read #ucc,r,260;a1$;
+			MAT READ #UCC,R,386;A5;
+			mat read #ucc,r,600;a3$;
+		Else
+			goto nxtusr
+		End try
+		webstr$=RTrim$(K1$),fdel$ ! user
+		webstr$=webstr$,RTrim$(A1$[21,40]),fdel$ ! name/desc
+		webstr$=webstr$,RTrim$(a3$),fdel$ ! txt phone
+		webstr$=webstr$,RTrim$(a0$),fdel$ ! email
+		webstr$=webstr$,Str$(a5[5]),fdel$ ! slsm
+		List$[row]=webstr$
+		row=row+1
+		if row>tmpcntr let tmpcnt = expandarray(e$,List$[])
+		NxtUsr: ! bad data bypass
+		webstr$=" ",webstr$
+	Loop
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	Try Close #UCC Else Rem
+	SUDone: ! finished
+ 	! status section - DO NOT SEND FROM CALLEE!!
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	Call SetOutput(e$,rstr$)
+ else
+ include "src/callsuberr.inc"
+end try
+end sub ! SndUsers
+!----------------------------------------------------------------------------

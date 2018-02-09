@@ -1,0 +1,496 @@
+!"serp109a" === description  synergy erp Break Table Link Maintenance
+! 
+! loadsave -w -n 100,10 -o prog/dxport/serp109a.dl4 src/serp109a.src
+!  07/15/2009 started
+!
+include "src/copyright.inc"
+!
+include "src/inc/filebrktbl.inc" ! break table
+include "src/inc/filebrklink.inc" ! link
+
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,JDate$,FormatDate2$
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian, JulianToDate
+
+! internal subs/function
+Declare Sub OpenFiles,UpdateLog,sndsys
+Declare Sub SndLTbl,DelLTbl
+Declare Sub SbmtLtbl,Chklnk
+declare function getbtdesc$
+
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],X$[20]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim Prod$[12],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],UA2$[50]
+	Dim Mask34$[10]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,PRC,COMM_LEV,BTC,Link[9]
+	dim 1%,cost_lev[4],Whse,debug,cnvtu[2],2%,Q0[1]
+	Dim 2%,X2[9],UA2[2]
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,PRR,BTRec
+	Dim 3%,R[99],O1,UB0[16],Amount,CNVTA
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim slist$[maxcnt,1000] ! second list
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/btbl.log" ! fields for DEBUG
+
+	Dim bt. as brktbl
+	dim lt. as brklink
+
+	Def FNI(H) = Int(Abs(H) +.5) * Sgn(H)
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! call dxopen() ! done in fmmenu - for standalone run
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp109a"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	Action2$=UCase$(action2$)
+	Action2$=RTrim$(action2$) ! UC and trimmed
+	if debugdetail
+		dmsg$="SERP109A ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$ 
+		if Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	call OpenFiles() ! open all needed files
+	call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	! P60$[12,12]="Y" ! ONLY Til LIVE!! TEST ONLY!!!
+	If P60$[12,12]<>"Y" ! only if flagged
+		ReturnStatus=0
+		Message$="System Flag is N. Program not available"
+		goto serp109done
+	Endif
+	Mask34$="###.####" ! 3.4 mask
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Let Key1$=UserID$+"          " ! space fill it
+	UCC = OpenFile(-9988, intCo) \ if UCC=-1 Error 42
+	Key1$[11]="" ! cut to length
+	Search #UCC,2,1;Key1$,Rec,E
+	If Not(E)
+	  Let SCR=Rec
+	  Mat Read #ucc,scr,200;UA2;
+	  Mat read #ucc,scr,336;Ua2$;
+	  Read #ucc,scr,394;comm_lev;
+	Else
+	  Let SCR=0;comm_lev=0 ! 
+	  UA2[0]=0;UA2$=" ",UA2$
+	Endif
+	Close #UCC
+	! GET additional user data flags
+	REM UNPACK A2[0] TO B0[]                         
+	FOR X1=0 TO 15                                          
+		LET O1=2^X1 \ LET M1=1
+		! CALL $LOGIC,M1,O1,A2[0],B0[X1] ! ub
+		Call Logic(m1,O1,UA2[0],UB0[X1])
+		LET UB0[X1]=SGN(UB0[X1])
+	NEXT X1   
+	! call dxsave(0,"tmp/ltblsv.txt!") ! save web send data
+	ReturnStatus=0
+	Message$="Action 1 not found"
+  select case action1$
+
+    Case "SYSDATA" ! sys flags,droplists					doc=LNTBL-GetSysData.doc
+		returnstatus=1
+		message$="OK"
+		Call Sndsys()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent flags & droplists" \ Call updatelog(debug)
+		Endif
+		! end of sysdata
+	Case "GETTABLE" ! BT data								doc=LNTBL-GetTable.doc
+		returnstatus=1
+		message$="OK"
+		call SndLtbl()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent LTable "+Str$(BTRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of GETTABLE
+	Case "CLRTABLE" ! BTbl delete							doc=LNTBL-ClearTable.doc
+		returnstatus=1
+		message$="OK"
+		call DelLtbl()
+		if debugdetail
+			dmsg$="Clear LTable "+Str$(BTRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of DELTABLE
+	Case "SBMTTBL" ! BTbl changes							doc=LNTBL-SubmitTable.doc
+		returnstatus=1
+		message$="OK"
+		Call SbmtLtbl()
+		if debugdetail
+			dmsg$="Submit LTable "+Str$(BTRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of SBMTTBL
+
+		! call programdump("tmp/ltbllog1!","")
+  End Select
+  Serp109Done: ! finished
+  ! status section                                                       
+  Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)                 
+  Call AddToStr(e$,rstr$,WebStr$)                                        
+  Call SetOutPut(e$,rstr$)       
+  if debugdetail
+		dmsg$="End of Program SERP109A" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	BTC = OpenFile(-1952,IntCo) \ if BTC = -1 Error 42
+	LTC = OpenFile(2864,IntCo) \ if LTC = -1 Error 42
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!
+!------------------------------------------------------------------------------------------
+Sub sndsys()
+! send flags & droplists
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"CURRLTBLS",fdel$
+	List$[1]="TBLNO",fdel$,"LTDESC",fdel$
+	x2=CHF(ltc)-1
+	row=2
+	For R=1 to x2
+		Read Record #LTC,R,0;lt.; ! read only file
+		tmp$=Trim$(lt.TableDesc$)
+		if tmp$<>"" ! has desc
+			List$[row]=Str$(R),fdel$,tmp$,fdel$
+			row=row+1
+			If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next R
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	Clear List$[]
+	List$[0]=bsdel$,"CURRBTBLS",fdel$
+	List$[1]="BTID",fdel$,"TBLDESC",fdel$
+	let X2=chf(btc)-1
+	row=2
+	for R=1 to x2
+		Read Record #BTC,R,0;bt.; ! read only file
+		tmp$=Trim$(bt.Desc$)
+		if tmp$<>"" ! has desc
+			List$[row]=Str$(R),fdel$,tmp$,fdel$
+			row=row+1
+			If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next R
+	List$[row]=esdel$
+	! calling rtn to addtostr
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndsys
+!
+!------------------------------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Sub SndLTbl()
+! send commodity data
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Table Number Passed"
+		goto GTblDone
+	Endif
+	BTRec=tmp$
+	if BTRec<=0 or BTRec>CHF(LTC)-1 or Fra(BTRec)
+		returnstatus=0
+		Message$="Invalid Table Number Passed"
+		goto GTblDone
+	Endif
+	Try
+		Read Record #LTC,BTRec,0;lt.;
+	Else
+		clear lt.
+	End try
+	List$[0]=bsdel$,"LINKTBL",fdel$
+	Webstr$="TBLNO",fdel$,"DESC",fdel$
+	for x=1 to 10
+		Webstr$=webstr$,"BTBLINK"+Str$(X),fdel$,"BTDESC"+Str$(X),fdel$
+	Next x
+	List$[1]=webstr$
+	Webstr$=STR$(BTREC),fdel$,RTrim$(lt.TableDesc$),fdel$
+	webstr$=webstr$,STR$(lt.BrkTblLinks1),fdel$
+	tmp$=getbtdesc$(lt.BrkTblLinks1)
+	webstr$=webstr$,RTrim$(tmp$),fdel$
+	webstr$=webstr$,STR$(lt.BrkTblLinks2),fdel$
+	tmp$=getbtdesc$(lt.BrkTblLinks2)
+	webstr$=webstr$,RTrim$(tmp$),fdel$
+	webstr$=webstr$,STR$(lt.BrkTblLinks3),fdel$
+	tmp$=getbtdesc$(lt.BrkTblLinks3)
+	webstr$=webstr$,RTrim$(tmp$),fdel$
+	webstr$=webstr$,STR$(lt.BrkTblLinks4),fdel$
+	tmp$=getbtdesc$(lt.BrkTblLinks4)
+	webstr$=webstr$,RTrim$(tmp$),fdel$
+	webstr$=webstr$,STR$(lt.BrkTblLinks5),fdel$
+	tmp$=getbtdesc$(lt.BrkTblLinks5)
+	webstr$=webstr$,RTrim$(tmp$),fdel$
+	webstr$=webstr$,STR$(lt.BrkTblLinks6),fdel$
+	tmp$=getbtdesc$(lt.BrkTblLinks6)
+	webstr$=webstr$,RTrim$(tmp$),fdel$
+	webstr$=webstr$,STR$(lt.BrkTblLinks7),fdel$
+	tmp$=getbtdesc$(lt.BrkTblLinks7)
+	webstr$=webstr$,RTrim$(tmp$),fdel$
+	webstr$=webstr$,STR$(lt.BrkTblLinks8),fdel$
+	tmp$=getbtdesc$(lt.BrkTblLinks8)
+	webstr$=webstr$,RTrim$(tmp$),fdel$
+	webstr$=webstr$,STR$(lt.BrkTblLinks9),fdel$
+	tmp$=getbtdesc$(lt.BrkTblLinks9)
+	webstr$=webstr$,RTrim$(tmp$),fdel$
+	webstr$=webstr$,STR$(lt.BrkTblLinks10),fdel$
+	tmp$=getbtdesc$(lt.BrkTblLinks10)
+	webstr$=webstr$,RTrim$(tmp$),fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	! caller to addtostr
+	GTblDone: ! done
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndLTbl
+!
+!------------------------------------------------------------------------------------------
+Sub DelLTbl()
+! Delete commodity data
+ Try
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Table Number Passed"
+		goto DTblDone
+	Endif
+	BTRec=tmp$
+	if BTRec<=0 or BTRec>CHF(LTC)-1 or Fra(BTRec)
+		returnstatus=0
+		Message$="Invalid Table Number Passed"
+		goto DTblDone
+	Endif
+	Clear lt.
+	Try
+		Write Record #LTC,BTRec,0;lt.;
+	Else
+		Returnstatus=0
+		Message$="Cannot write to "+Str$(BTRec)
+	End try
+  DTblDone: ! finished
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DelLTbl
+!
+!------------------------------------------------------------------------------------------
+Sub SbmtLtbl()
+! submit data (all fields)
+ Try
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Table Number Passed"
+		goto SBTblDone
+	Endif
+	BTRec=tmp$
+	if BTRec<=0 or BTRec>CHF(LTC)-1 or Fra(BTRec)
+		returnstatus=0
+		Message$="Invalid Table Number Passed"
+		goto SBTblDone
+	Endif
+	! Try
+	!	Read Record #LTC,BTRec,0;lt.;
+	! Else
+		clear lt. ! always loads every field - so start at nothing!
+	! End try
+	call dxget("DESC",tmp$)
+	If RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="MUST HAVE A DESCRIPTION!"
+		goto SBTblDone
+	Endif
+	lt.TableDesc$=tmp$+Blank$
+	clear link[]
+	! link[] is used for existing in file check
+	call dxget("BTBLINK1",tmp$)
+	x2=tmp$ \ Link[0]=x2;ct=0
+	if x2<>0 call chklnk(x2)
+
+	call dxget("BTBLINK2",tmp$)
+	x2=tmp$ \ link[1]=x2;ct=1
+	if x2<>0 call chklnk(x2)
+
+	call dxget("BTBLINK3",tmp$)
+	x2=tmp$ \ link[2]=x2;ct=2
+	if x2<>0 call chklnk(x2)
+
+	call dxget("BTBLINK4",tmp$)
+	x2=tmp$ \ link[3]=x2;ct=3
+	if x2<>0 call chklnk(x2)
+
+	call dxget("BTBLINK5",tmp$)
+	x2=tmp$ \ link[4]=x2;ct=4
+	if x2<>0 call chklnk(x2)
+
+	call dxget("BTBLINK6",tmp$)
+	x2=tmp$ \ link[5]=x2;ct=5
+	if x2<>0 call chklnk(x2)
+
+	call dxget("BTBLINK7",tmp$)
+	x2=tmp$ \ link[6]=x2;ct=6
+	if x2<>0 call chklnk(x2)
+
+	call dxget("BTBLINK8",tmp$)
+	x2=tmp$ \ link[7]=x2;ct=7
+	if x2<>0 call chklnk(x2)
+
+	call dxget("BTBLINK9",tmp$)
+	x2=tmp$ \ link[8]=x2;ct=8
+	if x2<>0 call chklnk(x2)
+
+	call dxget("BTBLINK10",tmp$)
+	x2=tmp$ \ link[9]=x2;ct=9
+	if x2<>0 call chklnk(x2)
+
+	! got the info
+	BypTFact: ! 
+	if returnstatus<>1 goto SBTblDone ! had a problem
+	x1=1 ! load tbls from 1
+	for x=0 to 9
+		if link[x]>0 and link[x]<chf(BTC)-1
+			if x1=1 let lt.BrkTblLinks1=link[x]
+			if x1=2 let lt.BrkTblLinks2=link[x]
+			if x1=3 let lt.BrkTblLinks3=link[x]
+			if x1=4 let lt.BrkTblLinks4=link[x]
+			if x1=5 let lt.BrkTblLinks5=link[x]
+			if x1=6 let lt.BrkTblLinks6=link[x]
+			if x1=7 let lt.BrkTblLinks7=link[x]
+			if x1=8 let lt.BrkTblLinks8=link[x]
+			if x1=9 let lt.BrkTblLinks9=link[x]
+			if x1=10 let lt.BrkTblLinks10=link[x]
+			x1=x1+1
+		Endif
+	Next X
+	Try
+		Write Record #LTC,BTRec,0;lt.;
+	Else
+		Returnstatus=0
+		Message$="Cannot write to "+Str$(BTRec)
+	End try
+  SBTblDone: ! finished
+ else
+	include "src/callsuberr.inc"
+  end try
+end sub ! SbmtLtbl
+!
+!------------------------------------------------------------------------------------------
+Sub Chklnk(tbl)
+! can only use table once in all tables?
+ Try
+   If tbl<0 or tbl>CHF(BTC)-1 or fra(tbl)
+	Returnstatus=0
+	Message$="Invalid Link Table"
+	Exit sub
+   Endif
+   if tbl=0
+	exit sub ! don't check zero tbl entry!
+   Endif
+   Dim 1%,Test[9]
+   Dim 3%,LP[5]
+   ! this what pm mx109a does?
+   FOR LP[0]=1 TO CHF(LTC)-1 ! go thru EVERY Table?
+	  IF LP[0]=BTREC GOTO L_2255:
+	  MAT  READ #LTC,LP[0],0;TEST;
+	  FOR LP[1]=0 TO 9
+		IF TEST[LP[1]]<>Tbl GOTO L_2250:
+		L_2240: ReturnStatus=0
+		Message$="TABLE IN USE ELSEWHERE!"
+		EXIT sub
+	L_2250: NEXT LP[1]
+   L_2255: NEXT LP[0]
+	IF NOT(CT) GOTO L_2290: ! don't check 1st one?
+	FOR LP[1]=0 TO CT-1  ! check internally
+	  IF LINK[LP[1]] and LINK[LP[1]]=tbl GOTO L_2240: ! found same
+	NEXT LP[1]
+  L_2290: ! DONE
+ else
+	include "src/callsuberr.inc"
+  end try
+End Sub ! Chklnk
+!
+!------------------------------------------------------------------------------------------
+function getbtdesc$(x2)
+! get the break table desc
+Try
+	Dim btdesc$[20]
+	clear btdesc$
+	if x2<=0 exit function btdesc$
+	if x2>chf(btc)-1 exit function btdesc$
+	if fra(x2) exit function btdesc$
+	Read Record #BTC,X2,0;bt.;
+	btdesc$=bt.Desc$
+ else
+	include "src/callsuberr.inc"
+  end try
+end function btdesc$ ! getbtdesc$
+!
+!------------------------------------------------------------------------------------------

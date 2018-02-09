@@ -1,0 +1,585 @@
+! 
+! loadsave -w -n 100,10 -o prog/dxport/441i.dl4 src/441i.src
+!
+! New program for All Florida paper.  Print customer rebates based on
+! paid A/R
+!
+Rem  Copyright (c) 2010 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+include "src/copyright.inc"
+
+include "src/inc/filecust.inc"
+include "src/inc/filesslsm.inc"
+include "src/inc/filesaract.inc"
+include "src/inc/filesaracth.inc"
+include "src/inc/filesardetl.inc"
+include "src/inc/filesardetlh.inc"
+include "src/inc/filecashother.inc"
+include "src/inc/fileinvl.inc"
+include "src/inc/fileproduda.inc"
+include "src/inc/filesslsmcomm.inc"
+include "src/inc/filecommaudit.inc"
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Function getmsg$,expandarray
+Declare External Function AddToMYReports
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,PDate$,FormatDate2$,getuidinfo$,JDate$
+Declare Intrinsic Sub InpBuf,String,Time,programdump,DateToJulian,JulianToDate
+Declare External Function getuidrec
+
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+dim tmp$[800],tmp1$[800],tmp2$[800],Message$[600],msg$[100],rstr$[2000],webstr$[2000]
+dim action$[30],options$[30],userid$[8],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+Dim ReportDir$[128],BaseName1$[128],Statusfile$[128],action1$[30],action2$[30]
+
+! call dxopen() ! for standalone run
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+try
+
+dim p61$[256],k_ar$[24],k_cust$[10],k_arh$[24],k_ardetl$[36],k_invl$[14]
+dim k_produda$[12],k_comm$[16],k_commaudit$[30]
+dim arh. as saracth
+dim ardetlh. as sardetlh
+dim ar. as saract
+dim ardetl. as sardetlh
+dim cust. As cust
+dim cashother. as cashother
+dim slsm. as sslsm
+dim invl. as invl
+dim produda. as produda
+dim comm. as sslsmcomm
+dim commaudit. as commaudit
+
+dim 1%,ch_cust,ch_slsm,ch_ar,ch_ardetl,ch_cashother,ch_invl,ch_produda
+dim 1%,ch_comm,ch_commaudit
+dim 1%,toScreen,lineNo,currentSales,history,factor,adjustCommission,user
+dim 1%,CommissionAdjusted,payIt
+dim 2%,r_ar,r_ardetl,r_cust,r_invl,r_produda,r_comm,r_commaudit
+dim 2%,sdate,edate,jsdate,jedate,jlpdate
+dim 3%,totalDiscount,eligible,tot[1,3],ineligible,new_comm,merchadj,rebate
+
+
+!**********************
+!* M A I N   L O G I C
+!**********************
+DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01)
+USER = GetUIDRec(e$, intCo, userid$)
+gosub init: ! read flags, gather parameters from the web
+gosub OpenFiles:
+! "new" method.  if not going to the screen, send "processing"
+! back to the web and run in "background"
+if toscreen
+	tmp$=bsdel$,"441i",fdel$,rdel$
+	call addtostr(e$,rstr$,tmp$)
+	! set headings
+	tmp$="Salesrep",fdel$,"Salesrep Name",fdel$
+	tmp$=tmp$,"Customer",fdel$,"Customer Name",fdel$
+	tmp$=tmp$,"Inv/Cred #",fdel$,"Trans Type",fdel$,"Trans Date",fdel$
+	! tmp$=tmp$,"PD/CM Date",fdel$,"Check #",fdel$
+	tmp$=tmp$,"PD/CM Date",fdel$
+	tmp$=tmp$,"Paid Age Days",fdel$,"Merch $",fdel$
+	tmp$=tmp$,"Eligible $",fdel$,"Rebate %",fdel$,"Rebate $",fdel$
+	tmp$=tmp$,rdel$
+	call addtostr(e$,rstr$,tmp$)
+else
+	! run report in background if pdf or to printer
+	!if pdf or print, new method, after edits,setouput,dxclose
+	Call setoutput(e$,rstr$,2) !2 flag puts 0 status section in w/print in process msg, puts </page> in
+end if
+!
+! loop through customer file
+!
+k_cust$ = " ",k_cust$
+do
+	r_cust = filegetcust(e$,ch_cust,">",5,k_cust$,cust.)
+	if r_cust<=0 exit do
+	if not(currentSales)
+		currentSales = cust.SalesmanCode
+		gosub GetSalesrep:
+	else
+		if currentSales <> cust.SalesmanCode
+			if printedSalesRebate gosub SalesrepTotals:
+			printedSalesRebate = 0
+			currentSales = cust.SalesmanCode
+			gosub GetSalesrep:
+		end if
+	end if		
+	if cust.CustRebateType = 1 ! based on paid A/R
+		gosub PrintCustRebates:
+		if printedRebate printedSalesRebate = 1
+	end if
+loop
+if printedSalesRebate gosub SalesrepTotals:
+
+goto OutEnd:
+
+!********************************************************************
+!* S U B R O U T I N E S
+!********************************************************************
+init: ! read flags, gather parameters from the web
+	Mat Read #1,61,0;P61$;
+	if p61$[3,3] <> "Y"
+		e$ = "This report requires A/R detail to be turned on."
+		error 10000
+	end if
+	! get parameters from the web
+	sdate = 0 \ call dxget("sdate",tmp$)
+	if tmp$ <> ""
+		tmp1$ = tmp$[5,6]+tmp$[1,4]
+		sdate = tmp1$
+	end if
+	edate = 999999 \ call dxget("edate",tmp$)
+	if tmp$ <> ""
+		tmp1$ = tmp$[5,6]+tmp$[1,4]
+		edate = tmp1$
+	end if
+	if edate < sdate
+		e$ = "Starting paid date < ending paid date."
+		error 10000
+	end if
+	! convert the range of dates to julian so we can easily compare
+	if sdate
+		tmp$ = sdate using  "&&&&&&"
+		call datetojulian(1,tmp$)
+		jsdate = tmp$
+	end if
+	if edate <> 999999
+		tmp$ = edate using "&&&&&&"
+		call datetojulian(1,tmp$)
+		jedate = tmp$
+	else
+		jedate = 99999
+	end if
+	call dxget ("history", tmp$) \ history=tmp$
+	call dxget ("AdjustCommission", tmp$) \ adjustCommission = tmp$
+	! figure out if we are go to the browser
+	try
+		toScreen = 0 \ dummy = Chf(0)
+	else
+		toScreen = spc(8)
+	end try
+	If toScreen and toScreen <> 49 Gosub ERR_TRAP
+	pageLength = 60
+	lineNo = 999 ! set for first record to print
+return
+
+OpenFiles: ! like the name says
+	if history
+		ch_ar = openfile(-1408, intCO) \ if ch_ar = -1 error 42
+		ch_ardetl = openfile(-9983, intCO) \ if ch_ardet = -1 error 42
+	else
+		ch_ar = openfile(-1504, intCO) \ if ch_ar = -1 error 42
+		ch_ardetl = openfile(-9984, intCO) \ if ch_ardet = -1 error 42
+	end if
+	ch_cust = openfile(-1808,intCO) \ if ch_cust = -1 error 42
+	ch_slsm = openfile(-1824,intCO) \ if ch_slsm = -1 error 42
+	ch_cashother = openfile(-1488,intCO) \ if ch_cashother = -1 error 42
+	ch_invl = openfile(-1184, intCO) \ if ch_invl = -1 error 42
+	ch_produda = openfile(-9967, intCO) \ if ch_produda = -1 error 42
+	ch_comm = openfile(2240,intCO) \ if ch_comm = -1 error 42
+	ch_commaudit = openfile(9931,intCO) \ if ch_commaudit = -1 error 42
+return
+
+PrintCustRebates: ! print rebates for customer contained in cust.
+	k_ar$ = " ",k_ar$
+	k_ar$[1,6] = cust.CustomerCode using "######"
+	! even though the next part of the key is not the LAST
+	! paid date, it's safe to start as we will be starting far
+	! enough back in time that anything earlier would not meet
+	! the criteria for a rebate
+	k_ar$[7,12] = (jsdate - cust.CustRebateDays - cust.CustRebateGrace - 1) using "######"
+	printedRebate = 0
+	do ! loop through ar
+		if history
+			r_ar = filegetsaracth(e$,ch_ar,">",2,k_ar$,arh.)
+			! transfer history vars to non-history structure
+			ar.Date = arh.Date
+			ar.CustomerCode = arh.CustomerCode
+			ar.LastPayDate = arh.LastPayDate
+			ar.AgeTypeCount = arh.AgeTypeCount
+			ar.ReferenceNo = arh.Reference
+			ar.MerchAmt = arh.MerchAmt
+		else
+			r_ar = filegetsaract(e$,ch_ar,">",2,k_ar$,ar.)
+		end if
+		if r_ar<=0 exit do
+		if ar.customercode <> cust.customercode exit do
+		! if the transaction date is greater then the ending range date
+		! we have reached the end as there is no possible way
+		! it was paid within the range asked for by the user
+		! (you can't pay for an invoice before it is generated).
+		if ar.Date > jedate exit do
+		if not(ar.LastPayDate) goto skip_ar: ! not paid yet
+		tmp$ = ar.LastPayDate using "&&&&&&"
+		call DateToJulian(1,tmp$)
+		jlpdate = tmp$
+		! are we fully paid within the rage requested?
+		if jlpdate < jsdate or jlpdate > jedate goto skip_ar:
+		! is this an invoice or credit memo?
+		arType = int(fra(ar.AgeTypeCount) * 100)
+		if arType <> 1 and arType <> 6 goto skip_ar:
+		! make sure it is FULLY paid
+		if not(history)
+			if abs(ar.PriorCredit + ar.CurrentCredit) <> abs(ar.OrigAmt)
+				goto skip_ar:
+			end if
+		end if
+		!
+		! OK - at this point the last paid date is within the
+		! report range and it is fully paid - did they make it
+		! within the grace period?  We print no matter what,
+		! put only pay if they meet the requirement.
+		!
+		! is last paid date fully within the time allowed?
+		payIt = 1
+		if jlpdate > (ar.Date + cust.CustRebateDays + cust.CustRebateGrace)
+			payIt = 0
+		end if
+		! YUP, got one.
+		if not(printedRebate) gosub PrintHeader:
+		printedRebate = 1
+		factor = 1 \ if arType = 6 factor = -1
+		gosub PrintRebate:
+		gosub UpdateAccums:
+		if adjustCommission and payIt gosub AdjustCommission:
+		skip_ar: ! didn't meet criteria
+	loop
+	if printedRebate ! if we actually printed something for this cust
+		gosub CustomerTotals:
+	end if
+Return
+
+
+GetSalesrep: ! read salesrep record based on customer salesrep
+	tmp$ = cust.SalesmanCode using "###"
+	search #ch_slsm,2,1;tmp$,r_slsm,e \ if e>1 gosub Err_Search:
+	if e
+		slsm.name$ = "Salesman not on file "
+	else
+		Read Record #ch_slsm,r_slsm;slsm.;
+	endif
+Return
+
+PrintRebate: ! Print 1 rebate
+	printDiscount = 0 \ gosub DiscountSpin:
+	eligible = ar.MerchAmt + totalDiscount - ineligible
+	if payIt
+		lateAmount = 0
+	else ! was paid, but beyond rebate terms (late)
+		lateAmount = eligible
+		totalDiscount = totalDiscount + lateAmount
+		eligible = 0
+	end if
+	rebate = eligible * (cust.CustRebatePercent/100)
+	if toScreen
+		tmp$=str$(currentSales),fdel$,slsm.Name$,fdel$
+		tmp$=tmp$,str$(cust.CustomerCode),fdel$,cust.Name$,fdel$
+		tmp$=tmp$,str$(ar.ReferenceNo),fdel$
+		if arType = 1 tmp$=tmp$,"Invoice",fdel$
+		if arType = 6 tmp$=tmp$,"Credit Memo",fdel$
+		tmp1$ = ar.Date \ call JulianToDate(5,tmp1$)
+		tmp$=tmp$,tmp1$,fdel$
+		tmp1$ = ar.LastPayDate using "&&&&&&"
+		tmp$=tmp$,tmp1$[3,4],"/",tmp1$[5,6],"/",tmp1$[1,2],fdel$
+		tmp$=tmp$,str$(jlpdate - ar.Date),fdel$
+		tmp$=tmp$,ltrim$(ar.MerchAmt * factor using "-------#.##"),fdel$
+		tmp$=tmp$,ltrim$(eligible * factor using "-------#.##"),fdel$
+		tmp$=tmp$,ltrim$(cust.CustRebatePercent using "---#.##"),fdel$
+		tmp$=tmp$,ltrim$(rebate * factor using "-------#.##"),fdel$
+		tmp$=tmp$,rdel$
+		call addtostr(e$,rstr$,tmp$)
+		return
+	end if
+	if lineNo > pageLength gosub PrintHeader:
+	print #0; ar.ReferenceNo using "##########"; tab 12;
+	if arType = 1 print #0;"Invoice";
+	if arType = 6 print #0;"Credit Memo";
+	tmp$ = ar.Date \ call JulianToDate(5,tmp$)
+	print #0; tab 23; tmp$;
+	tmp$ = ar.LastPayDate using "&&&&&&"
+	print #0;tab 34;tmp$[3,4];"/";tmp$[5,6];"/";tmp$[1,2];
+	print #0;using "###"; tab 55; jlpdate - ar.Date;
+	print #0;using "-------#.##"; tab 69;ar.MerchAmt * factor;
+	print #0; using "-------#.##"; tab 81; eligible * factor;
+	print #0; using "---#.##"; tab 93; cust.CustRebatePercent;
+	print #0; using "-------#.##";tab 102;rebate * factor;
+	print #0; ""
+	lineNo = lineNo + 1
+	printDiscount = 1 \ gosub DiscountSpin:
+Return
+
+UpdateAccums: !
+	! tot[0,x] = customer
+	! tot[1,x] = salesrep
+	! tot[x,0] = merch $
+	! tot[x,1] = disc $
+	! tot[x,2] = eligible $
+	! tot[x,3] = rebate $
+	for i = 0 to 1
+		tot[i,0] = tot[i,0] + (ar.MerchAmt * factor)
+		tot[i,1] = tot[i,1] + (totalDiscount * factor)
+		tot[i,2] = tot[i,2] + (eligible * factor)
+		tot[i,3] = tot[i,3] + (rebate * factor)
+	next i
+Return
+
+! spin through A/R discounts printDiscount flag indicates if it should
+! print or just total
+DiscountSpin:
+	k_ardetl$ = " ",k_ardetl$
+	k_ardetl$[1,6] = k_ar$[1,6]
+	k_ardetl$[7,17] = k_ar$[13,23]
+	totalDiscount = 0
+	do
+		if history
+			r_ardetl = filegetsardetlh(e$,ch_ardetl,">",1,k_ardetl$,ardetlh.)
+			! transfer history to ardetl structure
+			ardetl.DiscountApplied = ardetlh.DiscountApplied
+			ardetl.DiscountType = ardetlh.DiscountType
+			ardetl.TransactionDate = ardetlh.TransactionDate
+		else
+			r_ardetl = filegetsardetl(e$,ch_ardetl,">",1,k_ardetl$,ardetl.)
+		end if
+		if r_ardetl<=0 exit do
+		if k_ardetl$[1,6] <> k_ar$[1,6] exit do
+		if k_ardetl$[7,17] <> k_ar$[13,23] exit do
+		!* got a detail record - need to figure out if
+		!* it impacts customer rebates
+		gotDiscount = 0
+		if ardetl.DiscountApplied <> 0 ! maybe
+			if ardetl.DiscountType = 0 ! Terms Discount - YUP
+				totalDiscount = totalDiscount + ardetl.DiscountApplied
+				gotDiscount = 1
+			else ! other discount - still maybe
+				Read Record #ch_cashother,ardetl.DiscountType;cashother.;
+				if cashother.CustRebate = 1 ! YUP
+					totalDiscount = totalDiscount + ardetl.DiscountApplied
+					gotDiscount = 1
+				end if
+			end if
+		end if
+		if gotDiscount and printDiscount
+			if lineNo > pageLength gosub PrintHeader:
+			if ardetl.DiscountType = 0
+				print #0;tab 12;"Terms Disc";
+			else
+				print #0;tab 12;"Other Disc";
+			end if
+			tmp$ = ardetl.TransactionDate using "&&&&&&"
+			print #0; tab 23; tmp$[3,4];"/";tmp$[5,6];"/";tmp$[1,2];
+			print #0; using "-----#.##";tab 69;ardetl.DiscountApplied * factor;
+			print #0; ""
+			lineNo = lineNo + 1
+		end if
+	loop
+	! look for ineligible products
+	k_invl$ = " ",k_invl$
+	k_invl$[1,10] = ar.ReferenceNo using "##########"
+	ineligible = 0
+	do
+		r_invl = filegetinvl(e$,ch_invl,">",1,k_invl$,invl.)
+		if r_invl<=0 exit do
+		if invl.InvNum <> ar.ReferenceNo exit do
+		if invl.NStkItem goto eligibleProd:
+		! read product uda record
+		k_produda$ = invl.ProdCode$
+		r_produda = filegetproduda(e$,ch_produda,"=",1,k_produda$,produda.)
+		if r_produda<=0 goto eligibleProd:
+		if rtrim$(ucase$(produda.ANUda13$)) = "Y" ! this is excluded
+			ineligible = ineligible + invl.ExtShipAmt
+		end if
+		eligibleProd: !
+	loop
+	if ineligible and printDiscount
+		if lineNo > pageLength gosub PrintHeader:
+		print #0;tab 12;"Inelig. Products";
+		print #0; using "-----#.##";tab 69;ineligible * -1 * factor;
+		print #0; ""
+		lineNo = lineNo + 1
+	end if
+	if lateAmount and printDiscount
+		if lineNo > pageLength gosub PrintHeader:
+		print #0;tab 12;"Pd Beyond Terms";
+		print #0; using "-----#.##";tab 69;lateAmount * -1 * factor;
+		print #0; ""
+		lineNo = lineNo + 1
+	end if
+Return
+
+PrintHeader: !
+	if toScreen return
+	if lineNo <> 999 print #0; "\14\" ! if not first time - form feed
+	lineNo = 1
+	if doingSalesTotals
+		print #0; "Salesrep Totals: ";str$(currentSales);" - ";
+		print #0; slsm.Name$
+	else
+		print #0; "Customer: ";cust.CustomerCode; " - ";cust.Name$
+	endif
+	lineNo = lineNo + 1
+	print #0; tab 4; "For Paid Accounts Receivable Dollars ";
+	if not(sdate)
+		print #0; "ALL to ";
+	else
+		tmp$=sdate using "&&&&&&"
+		print #0;tmp$[3,4];"/";tmp$[5,6];"/";tmp$[1,2];" to ";
+	end if
+	if edate = 999999
+		print #0; "ALL"
+	else
+		tmp$=edate using "&&&&&&"
+		print #0;tmp$[3,4];"/";tmp$[5,6];"/";tmp$[1,2]
+	end if
+	lineNo = lineNo + 1
+	print #0;"Inv/Cred #";tab 12;"Trans Type";tab 23;"Trans Date";
+	! print #0;tab 34;"PD/CM Date";tab 45;"Check #";tab 55;
+	print #0;tab 34;"PD/CM Date";tab 45;"";tab 55;
+	print #0;"Paid Age Days";tab 69;"Merch $";
+	print #0;tab 81;"Eligible $";tab 93;"Rebate %";tab 102;
+	print #0;"Rebate $"
+	print #0;""
+	lineNo = lineNo + 2
+Return
+
+CustomerTotals: ! Print Customer Totals, reset accums
+	if toScreen return
+	print #0; ""
+	print #0; "** CUSTOMER TOTAL";
+	print #0; using "-------#.##";tab 69;tot[0,0];
+	! bprint #0; using "-----#.##";tab 81;tot[0,1];
+	print #0; using "-------#.##"; tab 81; tot[0,2];
+	print #0; using "-------#.##"; tab 102; tot[0,3];
+	for i = 0 to 3
+		tot[0,i] = 0
+	next i
+Return
+
+SalesrepTotals: ! Print Salesrep Totals, reset accums
+	if toScreen return
+	doingSalesTotals = 1
+	gosub PrintHeader:
+	doingSalesTotals = 0
+	print #0; "** SALESREP TOTAL";
+	print #0; using "-------#.##";tab 69;tot[1,0];
+	! print #0; using "-----#.##";tab 81;tot[1,1];
+	print #0; using "-------#.##"; tab 81; tot[1,2];
+	print #0; using "-------#.##"; tab 102; tot[1,3]
+	for i = 0 to 3
+		tot[1,i] = 0
+	next i
+Return
+
+AdjustCommission: ! adjust commission by rebate amount
+	CommissionAdjusted = 0
+	! we have a request for an adjustment to commissions - all
+	! appropriate checks have been completed.  See if there is
+	! an existing commission record out there.
+	k_comm$ = " ",k_comm$
+	k_comm$[1,3] = cust.SalesmanCode using "###"
+	k_comm$[4,13] = ar.ReferenceNo using "##########"
+	k_comm$[14,14] = artype using "#"
+	r_comm = filegetsslsmcomm(e$,ch_comm,"=",1,k_comm$,comm.)
+	if r_comm<=0
+		! no existing commission record - see if a manual
+		! record exists
+		k_comm$[14,14] = artype + 1 using "#"
+		r_comm = filegetsslsmcomm(e$,ch_comm,"=",1,k_comm$,comm.)
+		if r_comm<=0 return ! DO NOT CREATE - must exist or we skip
+	end if
+	! the rebate amount adjusts the MERCHANDISE dollars (effecting
+	! overall gross profit) which is then re-multiplied by the
+	! commission percent to calculate the new amount
+	merchadj = rebate * -1 * factor
+	! new commission is the adjusted merchandise total - the
+	! cost * the commission rate
+	new_comm = fnr(((comm.InvCMDollars + merchadj) - comm.CostLoadedFrght) * (comm.CommPercent/100))
+	gosub CreateCommissionAudit:
+	comm.CommDollars = new_comm
+	comm.InvCMDollars = comm.InvCMDollars + merchadj
+	! write the changes back out
+	e = fileupdatesslsmcomm(e$,ch_comm,"c",r_comm,comm.)
+	if e error 10000
+	CommissionAdjusted = 1
+return
+
+CreateCommissionAudit: !
+	let k_commaudit$=" ",k_commaudit$
+	let k_commaudit$[1,13]=k_comm$[1,13]
+	let k_commaudit$[26,26]=k_comm$[14,14]
+	chk_auditrecord: !
+	LET k_commaudit$[14,15]=TIM(8) USING "&&"   !"year
+	LET k_commaudit$[16,17]=TIM(9) USING "&&"   !"month
+	LET k_commaudit$[18,19]=TIM(10) USING "&&"  !"date
+	LET k_commaudit$[20,21]=TIM(11) USING "&&"  !"hour
+	LET k_commaudit$[22,23]=TIM(12) USING "&&"  !"minute
+	LET k_commaudit$[24,25]=TIM(13) USING "&&"  !"second
+	r_commaudit = filegetcommaudit(e$,ch_commaudit,"=",1,k_commaudit$,commaudit.)
+	IF r_commaudit>0 ! already on file
+		SIGNAL 3,20
+		goto chk_auditrecord:
+	ENDIF
+	! build new record and insert
+	commaudit.Salesman = comm.Salesman
+	commaudit.Type = k_commaudit$[26,26]
+	commaudit.Updated = 0
+	commaudit.PortNo = SPC(6)
+	commaudit.Customer = comm.CustCode
+	commaudit.User = user
+	commaudit.CommBefore = comm.CommDollars
+	commaudit.CommAfter = new_comm
+	commaudit.InvCM = comm.Invoice
+	commaudit.OrderCM = comm.Order
+	commaudit.DateChanged = k_commaudit$[14,19]
+	commaudit.TimeChanged = k_commaudit$[20,25]
+	commaudit.Source$[10] = "441i"
+	commaudit.Reason$[60] = "Customer Rebate Adjustment"
+	commaudit.OrigComm = comm.OrigCommDollars
+	commaudit.AdjustType = 5 ! rebate adjustment
+	commaudit.CROtherDiscNum = 0
+	commaudit.OrigCommPercent = comm.CommPercent
+	commaudit.NewCommPercent = comm.CommPercent
+	commaudit.OrigInvCMDollars = comm.InvCMDollars
+	commaudit.NewInvCMDollars = comm.InvCMDollars + merchadj
+	commaudit.OrigCost = comm.CostLoadedFrght
+	commaudit.NewCost = comm.CostLoadedFrght
+	commaudit.RebateExcludedDollar = ineligible * factor
+	commaudit.Spare$=" ",commaudit.Spare$
+	! write the record
+	r_commaudit = 0
+	r_commaudit = fileupdatecommaudit(e$,ch_commaudit,"a",r_commaudit,commaudit.)
+	if r_commaudit<=0 error 10000
+Return
+
+OUTEND: Rem END
+If toScreen! dx xml
+	Call addtostr(e$,rstr$,esdel$) !end section
+	Call setoutput(e$,rstr$,1) !1 flag puts 0 status seciton in, puts </page> in
+End If
+End
+
+ERR_SEARCH: Rem
+	ENUM = E;ELINE = Spc(16);CTERR = 0
+	If E = 5 Let CTERR = Err(8)
+	e$ = "RETURN STATUS",(E + (CTERR * .001))
+	e$ = e$,"/ STATEMENT",ELINE," IN PROGRAM " + Msc$(4)
+	Call programdump("tmp/069se!","")
+	Goto ERR_MSG ! Error 10000
+Return ! End
+
+ERR_MSG: ! send message
+	ReturnStatus = 1 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)
+	Message$ = e$
+	Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	Call AddToStr(e$,rstr$,WebStr$)
+	Call SetOutPut(e$,rstr$)
+End
+
+else
+	ERR_TRAP: !
+	!
+	include "src/callmainerrnet.inc"
+end try

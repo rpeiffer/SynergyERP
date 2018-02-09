@@ -1,0 +1,489 @@
+!! --- SERP146
+! description Commission grids
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp146.dl4 src/serp146.src
+!
+! 1.0 mm/dd/yyyy change??
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+include "src/inc/filematcode.inc" ! material code (for droplist)
+! as handling 1200+ sql fields is insane - NO COMMGRID Struct! JUST MATRICES
+
+! *declare additional dl4 intrinsic subs & functions
+Declare Intrinsic Function FindChannel
+Declare Intrinsic Sub Logic, programdump, datetojulian
+!
+! *declare additional external libs & subs & functions
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr, CreateNetStatus, GetDelimiters
+!
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,formatdate2$,PDate$
+Declare External Function formatdate$,FMTphone2$,getuidrec
+Declare External Sub ArBuck
+Declare External Sub UserCntrl 
+Declare External Sub GetCostLevels
+
+External lib "libfilehandler.lib"
+Declare External sub filedroplistcntrlfile
+
+! Program subs/functions
+Declare Sub OpenFiles,DoCommgrid,sndlists,SendLPCFlag
+Declare Sub dochrgbk
+
+try
+ dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+ dim custom_customer$[30]
+ OPTION GOSUB NESTING 12  ! Default is 8
+ Option String Redim is legal ! in case subs dim/use same names
+ !
+ dim matcd. as matcode
+ !
+ dim action$[30],options$[30],userid$[10],b$[200],Action1$[30],Action2$[30],3%
+ dim matdesc$[25],AHYPO$[1]
+ Dim mode$[3],XDate$[10],SearKey$[60]
+ dim Message$[200],WebStr$[700],P9$[50],fields$[1,30],P60$[50],p61$[256]
+ dim 2%,currdate,maxcnt \ maxcnt=100 ! init max records in arrays for list
+ Dim 3%,UIDREC[1],cost_lev[3]
+ Dim 1%,X1[9],2%,X2[9],3%,X3[9],R[99]
+
+ dim 1%,keyno,valact1,vers,2%,ReturnStatus
+ dim List$[maxcnt,700] ! for .net
+ dim SList$[maxcnt,700] ! for .net selector(drop down) list
+ dim DList$[maxcnt,700] ! for a third .net data list
+ !
+  Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[1200],tmp$[1200]
+  dim tmp2$[100],tmp3$[100],key2$[64],QMask$[20]
+  Dim CG$[6],2%,CG[13],CG1[99,11] ! commgrid
+  !
+  dim cgkey$[26],tmp1$[100]
+  Dim 3%
+  ! 
+ b$=" ",b$
+ !
+ ! call dxopen() ! done in menu - here for standalone
+ !
+ 
+ !
+ Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+ ! Call GetCostLevels(e$,cost_lev[],IntCo,Userid$) ! get cost security 
+ ! open files
+
+ !
+ ! LAST PRICE BASED COMMISSION TOTALLY DIFFERENT GRIDS
+ !
+ call dxget("u_custom_customer", custom_customer$)
+ lastPriceCommission = 0
+ if custom_customer$ = "CSS" lastPriceCommission = 1
+ if action1$ <> "GETLPCOMMFLAG" and lastPriceCommission
+	chain "serp146_lp.dl4"
+ end if
+ if action1$ = "CHRGBACK" ! now a whole separate maint.
+	chain "serp146_cbt.dl4"
+ end if
+ action$=UCase$(action$) ! used in fmmenu
+ action$=RTrim$(Action$) ! "trim spaces from end
+ action1$=UCase$(action1$)
+ action1$=RTrim$(Action1$) ! "trim spaces from end
+ action2$=UCase$(action2$)
+ action2$=RTrim$(Action2$) ! "trim spaces from end
+ call OpenFiles() ! open any/all here and NOW
+ Mat read #CTLC,19,50;P9$;
+ Mat read #CTLC,60,50;P60$;
+ Mat read #CTLC,61,0;P61$;
+ tmp$=tim(8) using "&&"
+ tmp$=tmp$+tim(9) using "&&"
+ tmp$=tmp$+tim(10) using "&&" ! yymmdd
+ currdate=tmp$
+ QMask$="---------#.##"
+ ! Call dxsave(0,"/tmp/cgrid.txt!") !   Stop
+!Call programdump("tmp/cglog1in!","") ! dump program vars
+  Returnstatus=0
+  Message$="ACTION NOT FOUND"
+ Select Case action1$
+	case "GETLPCOMMFLAG"
+		returnstatus=1
+		Message$="OK"
+		call SendLPCFlag()
+	Case "DLISTS" ! flags/droplists							doc=CMG-GetDLists.doc
+		returnstatus=1
+		Message$="OK"
+		call sndlists()
+		! end of dlists
+	Case "COMMGRID" ! wants actual							doc=CMG-GetGridData.doc
+		returnstatus=1 !						copy		doc=CMG-CopyGridData.doc
+		Message$="OK" !							delete		doc=CMG-DeleteGridData.doc
+		call docommgrid() !						submit		doc=CMG-SubmitGridData.doc
+		! end of commgrid
+	Case "HYPOTHET" ! hypothetical							doc=CMG-GetHypothecticGridData.doc
+		returnstatus=1 !						copy		doc=CMG-CopyHypothecticGridData.doc
+		Message$="OK" !							delete		doc=CMG-DeleteHypothecticGridData.doc
+		AHYPO$="N" !							submit		doc=CMG-SubmitHypothecticGridData.doc
+		SCR1=GetUIDRec(e$,IntCo,Userid$)
+		IF SCR1>0
+		  CH_UsrCtl=openfile(-9988,IntCo) \ if ch_usrctl=-1 error 42
+		  READ #CH_USRCTL,SCR1,338;AHYPO$;
+		  Close #ch_usrctl
+		ENDIF
+		if AHYPO$="N"
+			returnstatus=0
+			message$="You can not access Hypothetical Commission"
+			goto MCGDone
+		Endif
+		Close #CGC ! no commgrid - use hypo
+		CGC=findchannel()
+		tmp$="2/COMMGRIDH"+Str$(Intco) ! hypo filename
+		try
+			Open #CGC,tmp$
+		Else ! not found - build
+			LET tmp2$="[100:2431] "+tmp$+"!"
+			BUILD #cGC,tmp2$
+			LET E=0;SCR=3 ! key size
+			SEARCH #CGC,0,1;TMP1$,SCR,E
+			IF E ! GOSUB ERR_SEARCH:
+				returnstatus=0
+				message$="Search Error "+Str$(E)+" building HGrid"
+				goto MCGDone
+			Endif
+			LET E=0;SCR=1 ! keys done
+			SEARCH #CGC,0,0;TMP1$,SCR,E
+			IF E ! GOSUB ERR_SEARCH:
+				returnstatus=0
+				message$="Search Error "+Str$(E)+" building HGrid"
+				goto MCGDone
+			Endif
+			LET E=0;SCR=0 ! rec def
+			SEARCH #CGC,1,0;TMP1$,SCR,E
+			IF E ! GOSUB ERR_SEARCH:
+				returnstatus=0
+				message$="Search Error "+Str$(E)+" building HGrid"
+				goto MCGDone
+			Endif
+			tmp2$="chmod go+rw files/"+LCase$(tmp$)+"*" ! dx bad permissions - set to rw
+			System tmp2$
+			close #cgc
+			Open #CGC,tmp$
+		End try
+		
+		Let HYPGRID=1
+		! rest functions exactly like normal uses same channel, data, etc!
+		call docommgrid()
+
+		! end of HYPOTHET
+!	Case "CHRGBACK" ! chargeback							doc=CMG-GetChrgBackData.doc
+!		returnstatus=1 !						clear		doc=CMG-ClearChrgBackData.doc
+! 		Message$="OK" !							submit		doc=CMG-SubmitChrgBackData.doc
+! 		call dochrgbk()
+! 		! end of chrgback
+ 	!
+   End Select
+
+   MCGDone: ! finished
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+!
+	Call SetOutput(e$,rstr$)
+! end of main
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of serp146 program
+!
+! Subs used in program -------------------------------------------------
+Sub OpenFiles()
+
+  Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	CGC=OpenFile(1584,IntCo) \ if CGC=-1 Error 42 ! commgrid
+	MCC=OpenFile(-2272,IntCo) \ if mcc=-1 error 42 ! Matcode
+    !
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+
+!----------------------------------------------------------------------------
+Sub SendLPCFlag()
+! Flags & lists
+  Try
+	Clear List$[]
+	List$[0]=bsdel$,"LPCOMMFLAG",fdel$
+	List$[1]="FLAG",fdel$
+	List$[2] = str$(lastPriceCommission),fdel$
+	List$[3]=esdel$
+	call addToStr(e$,rstr$,list$[])
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SendLPCFlag
+
+!----------------------------------------------------------------------------
+
+Sub sndlists()
+! Flags & lists
+  Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	! how to send existing? (there's no description!)
+	! send ordtypes
+	call filedroplistcntrlfile(e$,list$[],62,38,20,0,"","0")   !rcd 62, 34fields of  20char
+	call addToStr(e$,rstr$,list$[])
+	Clear List$[]
+	! matcodes
+	! call filedroplistmatcode(e$,list$[],maxcnt,MCC,"",fields$[],1,"","0") ! incl 0 none
+	! WE DON'T WANT 0 = NONE, WE NEED BLANK = NONE
+	List$[0]=bsdel$,"droplistmatcode",fdel$
+	List$[1]="ID",fdel$,"Description",fdel$
+	row=2;tmpcnt=maxcnt
+	List$[row]=" ",fdel$,"NONE",fdel$
+	row=row+1
+	If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	searkey$=" ",searkey$
+	do
+		MCR=filegetmatcode(e$,MCC,">",1,searkey$,matcd.)
+		if mcr<=0 exit do
+		tmp$=RTrim$(matcd.Description$)
+		! send all - even blank$
+		list$[row]=Searkey$[1,1],fdel$,tmp$,fdel$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Loop
+	List$[row]=esdel$
+	call addToStr(e$,rstr$,list$[])
+	! grid type
+	Clear List$[]
+	List$[0]=bsdel$,"GRIDTYPE",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	List$[2]="1",fdel$,"MERCHANDISE DOLLARS",fdel$
+	List$[3]="2",fdel$,"GROSS PROFIT DOLLARS",fdel$
+	List$[4]=esdel$
+	call addToStr(e$,rstr$,list$[])
+	! all done
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndlists
+!----------------------------------------------------------------------------
+Sub docommgrid()
+! does all - send, save, delete, copy here (action2$)
+  Try
+	dim MCode$[1],FMCode$[1]
+	Dim 1%,OType,FOType
+	dim 3%,GRCL,FGRCL
+	Clear List$[]
+	tmpcnt=maxcnt
+	call dxget("GRIDCLASS",tmp$)
+	X3=tmp$
+	if x3<1 or x3>999 or fra(x3)
+		returnstatus=0
+		message$="Invalid Grid Class (1-999)"
+		goto DCGDone
+	Endif
+	GRCL=X3
+	call dxget("ORDTYPE",tmp$)
+	x3=tmp$
+	if x3<0 or x3>38 or fra(x3)
+		returnstatus=0
+		message$="Invalid Order type (0-38)"
+		goto DCGDone
+	Endif
+	OType=x3
+	call dxget("MATCODE",tmp$)
+	! if Trim$(tmp$)="0" let tmp$="" ! sends 0 on droplist - need blank
+	MCode$=tmp$,b$
+	Searkey$=GRCL Using "###"
+	SearKey$[4]=OType Using "##"
+	Searkey$[6]=MCode$
+	Searkey$[7]="" ! cut at 7
+	Search #CGC,2,1;SearKey$,R[2],E
+	if not(E)
+		MAT  READ #CGC,R[2],0;CG$ 
+		MAT  READ #CGC,R[2],6;CG  
+		MAT  READ #CGC,R[2],62;CG1
+		CG$=SEARKEY$+b$
+	Else
+		R[2]=0
+		if action2$[1,4]="SAVE" ! Saving a new one - create record
+			Let E=2;r=0
+			search #CGC,1,0;searkey$,R,E
+			if e
+				returnstatus=0
+				message$="Search Error "+Str$(E)+" adding new grid"
+				goto DCGDone
+			Endif
+			Search #CGC,4,1;searkey$,R,E
+			if e
+				returnstatus=0
+				message$="Search Error "+Str$(E)+" inserting new grid"
+				goto DCGDone
+			Endif
+			cg$=" ",cg$;r[2]=r
+			cg$=searkey$+B$
+			mat write #CGC,R[2],0;CG$
+			clear cg1[]
+			clear cg[]
+			MAT WRITE #CGC,R[2],6;CG ! will fill later
+			Mat write #CGC,R[2],62;CG1; ! will file later
+		Endif ! of save new
+		cg$=searkey$+B$
+	Endif
+	iF action2$="COPY" ! copy
+		call dxget("FGRIDCLASS",tmp$)
+		X3=tmp$
+		if x3<1 or x3>999 or fra(x3)
+			returnstatus=0
+			message$="Invalid Grid Class (1-999)"
+			goto DCGDone
+		Endif
+		FGRCL=X3
+		call dxget("FORDTYPE",tmp$)
+		x3=tmp$
+		if x3<0 or x3>38 or fra(x3)
+			returnstatus=0
+			message$="Invalid Order type (0-38)"
+			goto DCGDone
+		Endif
+		FOType=x3
+		call dxget("FMATCODE",tmp$)
+		FMCode$=tmp$,b$
+		key2$=FGRCL Using "###"
+		Key2$[4]=FOType Using "##"
+		key2$[6]=FMCode$
+		Key2$[7]="" ! cut at 7
+		Search #CGC,2,1;Key2$,R[3],E
+		if not(E)
+			MAT  READ #CGC,R[3],0;CG$ 
+			MAT  READ #CGC,R[3],6;CG  
+			MAT  READ #CGC,R[3],62;CG1
+		Else ! no from
+			returnstatus=0
+			message$="From Grid not found"
+			goto DCGDone
+		Endif
+		CG$=SearKey$+B$ ! set to new
+	End if ! of copy
+	if action2$="DELETE" ! delete
+		If R[2]>0
+			search #CGC,5,1;searkey$,R,E
+			if e
+				returnstatus=0
+				message$="Search Error "+Str$(E)+" deleting key"
+				goto dcgdone
+			Endif
+			Let E=3;r=r[2]
+			Search #CGC,1,0;searkey$,R,E
+			if e
+				returnstatus=0
+				message$="Search Error "+Str$(E)+" returning record"
+				goto dcgdone
+			Endif
+		Endif ! of existing
+		Returnstatus=1
+		Message$="Grid deleted"
+		goto DCGDone ! no redisplay
+	Endif
+	if action2$<>"SAVE" ! send the data: COPY or regular
+		Clear List$[]
+		List$[0]=bsdel$,"GRIDHEAD",fdel$
+		! if HYPGRID let List$[0]=bsdel$,"HYPGRIDHEAD",fdel$
+		Webstr$="GRIDCLASS",fdel$,"ORDTYPE",fdel$,"MATCODE",fdel$
+		Webstr$=Webstr$,"NE",fdel$,"AH",fdel$ ! new/exist,actual/Hypo
+		webstr$=webstr$,"GTYPE",fdel$,"MINGP",fdel$
+		For X=1 to 12
+			webstr$=webstr$,"DOLLAR"+Str$(X),fdel$
+		Next X
+		List$[1]=webstr$
+		Row=2
+		Webstr$=CG$[1,3],fdel$,cg$[4,5],fdel$,cg$[6,6],fdel$
+		If R[2]>0 let tmp$="EXIST" Else let tmp$="NEW"
+		webstr$=webstr$,tmp$,fdel$
+		tmp$="ACTUAL" \ IF HYPGRID LET TMP$="HYPOTHETICAL"
+		webstr$=webstr$,tmp$,fdel$ ! type
+		if cg[12]<1 or cg[12]>2 let cg[12]=1
+		webstr$=webstr$,Str$(CG[12]),fdel$
+		if cg[12]=2 let cg[13]=0 ! no min gp
+		Webstr$=webstr$,LTrim$(CG[13] Using QMask$),fdel$
+		for x=0 to 11
+			webstr$=webstr$,LTrim$(CG[X] using "######"),fdel$
+		Next X
+		List$[2]=webstr$
+		list$[3]=esdel$
+		call addtostr(e$,rstr$,List$[])
+		! ok - now the body (ONLY LINES WITH ###'s)
+		Clear List$[]
+		List$[0]=bsdel$,"GRIDLINES",fdel$
+		! if HYPGRID let List$[0]=bsdel$,"HYPGRIDLINES",fdel$
+		Webstr$="ID",fdel$
+		for x=1 to 12
+			webstr$=webstr$,"FLD"+Str$(X),fdel$
+		Next X
+		List$[1]=webstr$
+		row=2
+		for x=1 to 99
+			x2=0 ! any values 
+			for x1=0 to 11
+				if cg1[x,x1] let x2=1
+			Next X1
+			if x2 ! has a value
+				webstr$=Str$(X),fdel$
+				for x1=0 to 11
+					webstr$=webstr$,LTrim$(CG1[x,x1] using "##.##"),fdel$
+				Next X1
+				List$[row]=webstr$
+				row=row+1
+				If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			Endif ! of has something
+		Next X
+		List$[row]=esdel$
+		call addtostr(e$,rstr$,List$[])
+	Endif ! of send
+	if Action2$="SAVE" ! save ALL or  HEAD" ! save header data
+		call dxget("GTYPE",tmp$)
+		x2=tmp$
+		if x2<1 or x2>2 
+			returnstatus=0
+			message$="Grid type is 1 or 2 only"
+			goto DCGDone
+		Endif
+		cg[12]=x2
+		call dxget("MINGP",tmp$)
+		cg[13]=tmp$
+		if cg[12]=2 let cg[13]=0
+		for x=1 to 12
+			call dxget("DOLLAR"+Str$(X),tmp$)
+			cg[x-1]=tmp$
+		Next X
+		mat write #CGC,R[2],0;cg$;
+		mat write #CGC,R[2],6;cg;
+	!Endif ! savehead ! unrem for header/lines separate saves
+	!if action2$="SAVELINES" ! save lines (ONLY CHANGED/OR WITH ###'S)
+		Fndone=0
+		for x=1 to 99
+			call dxget("ID"+Str$(X),tmp$)
+			x3=tmp$
+			if x3 and x3>0 and x3<100 ! has an id
+				for x1=1 to 12 ! will send as fld1-12 + ID
+					call dxget("FLD"+Str$(X1)+"ID"+str$(X),tmp$) ! fld1ID1,fld2ID1,fld11ID1,fld12ID1,fld12ID99
+					cg1[x,x1-1]=tmp$
+					if RTrim$(tmp$)<>"" let fndone=1
+				Next X1
+			Endif ! of id sent
+		Next X
+		Mat write #CGC,R[2],62;CG1;
+		if fndone=0
+			returnstatus=0
+			message$="NO PERCENT FIELDS WERE RECEIVED"
+		Endif
+	Endif ! savelines or save all
+
+	DCGDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! docommgrid
+!----------------------------------------------------------------------------

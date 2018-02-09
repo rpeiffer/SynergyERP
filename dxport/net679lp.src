@@ -1,0 +1,278 @@
+!Program Name: net679lp
+! loadsave -w -n 100,10 -o prog/dxport/net679lp.dl4 src/net679lp.src
+!                                                  
+!Last Updated:  
+! 08/2012 - add slsm security based on userid
+
+! Include "src/cuvars.inc"
+
+Declare External sub ProdSoldto
+Declare Sub updatelog,errTrap
+
+
+Dim 3%
+
+!Call prodSoldto(1,999,1,"files/6/dx.log","999-0124930","",0,ss, 100)
+!print "done"
+!stop
+
+
+External Sub ProdSoldto(intCo,intSalesMan,debug,dlog$,prod$,keynext$,ii ,ss, iLimit)
+
+Try
+
+	External Lib "libgeneral.lib"
+	Declare External Sub SubErr
+
+	Declare Intrinsic Function FindChannel,Trim$
+	Declare Intrinsic Sub FormatDate,DXSet
+	Declare External Function FDate$,PDate$,BaseName$,FMTPhone$,OpenFile
+	Declare External Sub CalcARs
+	Declare External Function XAmount, Xunit$, formatdate$
+	External Lib "ubsfunc.dl4","ubsprconv.dl4"
+	Declare External Sub UserCntrl
+
+	Include "src/ubsprod.inc"
+	Include "src/ubscust.inc"
+	Include "src/ubslastprice.inc"
+
+	!include copyright, common libs, common intrinsics
+	include "src/copyright.inc"
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],3%
+
+	DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01)
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[1200],tmp$[1200]
+	Dim PRK$[12],sellum$[4],priceum$[4],costum$[4]
+
+	Dim PR. As prod
+	Dim LP. As lastprice
+	Dim cust. as customer
+
+	Dim 1%,debugDetail
+	! Variables for Channel#'s
+	Dim 2%,PRC,CTLC,PRS
+	! Variables for Search Record#
+	Dim 3%,PRR,PRSR
+	! Variables for Search Error
+	Dim 2%,PRE,CSE
+
+	Dim Msg$[256],pgmName$[20]
+	Dim P9$[50],P61$[256]
+	Dim Temp$[100],Space$[100],SLS$[3],Sales$[30],CO$[2]
+	Dim 1%,FndUID,UA5[10],Cost_Lev[3] ! vars for call usercntrl
+	Dim UA2$[50],TUID$[10] ! vars for call usercntrl
+	Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5] 
+	Dim Addr2$[30],Addr3$[30]
+	Dim CUK$[6],LPK$[40],X$[20]
+
+	Dim 1%, ARMONTH,BOYMONTH,MM
+	Dim 2%, ErrStat, X1,X2
+	Dim 2%, Q0[1],custsec[1]
+	Dim 3%,ARS[5],Z1[2]
+
+	 Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+
+	debugDetail=0
+	pgmName$="ubsprodsls"
+	msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+	msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+	Space$=" ",Space$
+	ErrStat = 0
+	ii=0
+
+	SLS$=intSalesMan Using "###" ! Passed Salesman
+	CO$=Str$(intCo) ! Company
+	msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+
+	PRC= OpenFile(-1792,intCo) \ If PRC=-1 Error 42    ! prod master
+	CTLC= OpenFile(-9999,intCo)\ If CTLC=-1 Error 42   ! Control
+	! PRS=OpenFile(-2080,intCo)  \ If PRS=-1 Error 42    ! prodsls
+	CCC = OpenFile(-1728,intCo) \ If CCC = -1 Error 42  ! u/m codes file
+	LPC = OpenFile(-1376,intCo) \ If LPC = -1 Error 42  ! lastprice file
+	CUC = OpenFile(-1808,intCo) \ If CUC = -1 Error 42  ! cust file
+
+	let TUID$=UserID$+"          " ! set up temp var
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max as usercntrl is 10 chars vs 8 for .net
+	If TUID$[1,10]<>"          " !  no blank users!
+	  Call UserCntrl(TUID$,UA2$,UA5[],FndUID,intCo)
+	  If FndUID=0 ! means found it, =1 is not found
+	    Cost_Lev[0]=UA5[0];Cost_Lev[1]=UA5[1] ! avg / load
+		Cost_Lev[2]=UA5[2];Cost_Lev[3]=UA5[3] ! PO / base
+	  Endif ! if not found would be zeroes from dim
+	Endif
+	! Start Prog.
+	Read #CTLC,19,50;P9$; ! What is this?
+	Read #CTLC,61,0;P61$; ! Yet control flag item.
+	Mat Read #CTLC,115,40;Q0;
+	USlsm=UA5[5] ! for security (hard code version)
+
+	If not(Q0[1]) let Q0[1]=2                                                 
+	Let Dec$="#",Dec$;Qmask$="---,---,--#"                                    
+	If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask        
+	If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask      
+	Let Emask$="$$$,$$$,$$$,$$-.##"                         !ext. price mask       
+
+	! section and header
+	tmp$=bsdel$+"SoldTo"+fdel$+rdel$
+	tmp$=tmp$+"CustID"+fdel$
+	tmp$=tmp$+"Custname"+fdel$
+	tmp$=tmp$+"LastDate"+fdel$
+	tmp$=tmp$+"Cost"+fdel$
+	tmp$=tmp$+"Cost_UM"+fdel$
+	tmp$=tmp$+"Last Price"+fdel$
+	tmp$=tmp$+"Last Price_UM"+fdel$
+	tmp$=tmp$+"YTDQty"+fdel$
+	tmp$=tmp$+"YTDQty_UM"+fdel$
+	tmp$=tmp$+"LastQTY"+fdel$
+	tmp$=tmp$+"LastQTY_UM"+fdel$
+	tmp$=tmp$+"LYrQty"+fdel$
+	tmp$=tmp$+rdel$ ! final
+	Call AddToStr(e$,rstr$,tmp$)  ! put header into rstr$
+	tmp$=""
+
+	Call DXGet("prodid",prod$) \ prod$=UCase$(prod$)
+	PRK$=PROD$
+	 ! get product record
+	!  Call DXGet("keyvar",prod$)
+	 prod$ = prod$+"            "
+	 ! prr = getprod(e$,PRC,prod$,PR.)
+	 Search #PRC,2,1;prod$,R,E
+	 If Trim$(prod$) <> Trim$(prk$) Let e = 2
+	 If e = 0                                             
+		 Read Record #PRC,r;pr.;                           
+	  Else                                                 
+		  r = e * -1                                         
+	  End If
+	  PRR=R
+	If not(prr) Goto PREND:
+	LPK$=prod$
+
+	Do 
+		Search #LPC,3,5;LPK$,LPR,LPE \ if LPE > 2 error 42
+		If Trim$(LPK$[1,12])<>Trim$(prod$) let LPE=22
+		IF LPE goto Done_LP:
+
+		Read Record #LPC,LPR; LP.;
+
+		CUK$=LP.LPC1[0] using "######"	! cust code
+		!cur = getcust(e$,CUC,CUK$,cust.)
+		Search #CUC,2,1;CUK$,R,E
+		if e=0
+			read record #CUC,R,0;cust.;
+		Else
+			R=e*-1
+		Endif
+		! first do a sslsm sec check - Do internal chk instead of call "custsec.dl4"
+		if USlsm>0 and r>0 ! has usercntrl slsm and cust is valid
+			rem if cust.C1[2]<>USlsm goto Done_LP: ! bypass
+			CUSTSEC[0] = cust.C1[1]
+			CUSTSEC[1] = 1
+			IF P9$[21,21]="N" ! MULTI SLSM
+			 call "custsec.dl4",Custsec[],ctlc,userid$,e$,rstr$
+			ELSE
+			CUSTSEC[0]=0
+			ENDIF
+			 IF CUSTSEC[0] = -1 goto Done_LP: ! bypass
+		Endif
+		CNVTU[0] = 0
+		CNVTU[1] = LP.LPC3[2]
+		CNVTU[2] = 1
+		CNVTA = LP.LPC2[0]	! last qty
+		LP.LPC2[0] = XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],ctlc,FLAG)
+
+		CNVTU[0] = 0
+		CNVTU[1] = LP.LPC3[3]
+		CNVTU[2] = 2
+		CNVTA = LP.LPC2[1]	! last price
+		LP.LPC2[1] = XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],ctlc,FLAG)
+
+		CNVTU[0] = 0
+		CNVTU[1] = LP.LPC3[4]
+		CNVTU[2] = 2
+		CNVTA = LP.LPC2[2]	! last cost
+		LP.LPC2[2] = XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],ctlc,FLAG)
+
+		! CNVTU[0] = 0
+		! CNVTU[1] = LP.LPC3[2]
+		! CNVTU[2] = 1
+		! CNVTA = LP.LPR[3]	! mtd sales units
+		! LP.LPR[3] = XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],ctlc,FLAG)
+
+		CNVTU[0] = 0
+		CNVTU[1] = LP.LPC3[2]
+		CNVTU[2] = 1
+		CNVTA = LP.LPR[4]	! ytd sales units
+		LP.LPR[4] = XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],ctlc,FLAG)
+
+		! added task 35424 - last year units
+		CNVTU[0] = 0
+		CNVTU[1] = LP.LPC3[2]
+		CNVTU[2] = 1
+		CNVTA = LP.LPUNF[6]	! last year sales units
+		LP.LPUNF[6] = XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],ctlc,FLAG)
+
+		sellum$=xunit$(LP.LPC3[2],ccc)
+		priceum$=xunit$(LP.LPC3[3],ccc)
+		costum$=xunit$(LP.LPC3[4],ccc)
+
+
+		tmp$=str$(LP.LPc1[0])+fdel$
+		tmp$=tmp$+Rtrim$(cust.a1$[31,60])+fdel$
+		if LP.LPC1[2]>700100 ! 1900's
+			let x$=formatdate$(LP.LPC1[2] using "19&&####")
+		Else
+			if LP.LPC1[2]<>0 let x$=formatdate$(LP.LPC1[2] using "20&&####")
+			if LP.LPC1[2]=0 let x$="01/01/1969" ! 
+		endif
+		tmp$=tmp$+x$+fdel$
+		If Cost_Lev[1]>0 ! load cost security
+		  tmp$=tmp$+LTrim$(LP.LPC2[2] using PMask$) +fdel$
+		  tmp$=tmp$+costum$+fdel$
+		Else ! no cost
+		  tmp$=tmp$+" ",fdel$," ",fdel$ ! send blank cost/um
+		Endif
+		tmp$=tmp$+LTrim$(LP.LPC2[1] using PMask$) +fdel$
+		tmp$=tmp$+priceum$+fdel$
+		tmp$=tmp$+Str$(LP.LPR[4])+" "+fdel$
+		tmp$=tmp$+sellum$+fdel$
+		tmp$=tmp$+Str$(LP.LPC2[0])+" "+fdel$
+		tmp$=tmp$+sellum$+fdel$
+		tmp$=tmp$+Str$(LP.LPUNF[6])+" "+fdel$
+		tmp$=tmp$+rdel$
+		Call AddToStr(e$,rstr$,tmp$)
+		
+		ii=ii+1	! line counter
+	Done_LP: Loop Until LPE
+
+
+	PREND: !===============================================================
+		Call AddToStr(e$,rstr$,esdel$)
+		Call SetOutput(e$,rstr$)
+
+	Close #PRC,#CTLC,#PRS,#CCC,#CUC
+
+	msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+	ss=ErrStat
+	Exit Sub
+Else
+    ss=SpC(10)
+    Call errTrap(pgmName$)
+End Try
+
+
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub       
+
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+		
+
+End Sub
+

@@ -1,0 +1,3600 @@
+! >>> Program 227B
+!
+! description INVOICE ACCEPT PART 3
+!
+! loadsave -w -n 100,10 -o prog/dxport/227b.dl4 src/227b.src
+!
+! 1.0 mm/dd/yyyy change??
+!
+include "src/copyright.inc" ! dx
+Rem MX227B  INVOICE ACCEPT
+Rem PRT 2 - REG / PRT 3 - GL
+Rem LAST UPDATE:10/88 FOR REV 2.3
+! ************************************************************
+!   IF CHANGES ARE MADE HERE - CHECK IF EVAPUPDATE NEEDS CHANGING ALSO
+! ************************************************************
+! Last Update:  05/01/1991 roman. add labels and remarks and
+!                          fix history variables/displacements
+!               03/31/1992 B. Swet update taxable/non-taxable freight,
+!                          misc charges, disc, & handling to tax file
+!               07/07/1992 RJS UPDATE CASH TICKETS PAID IN FULL IF
+!                          SUFLAG IS SET UPDATE A/R & CASH
+!               09/22/1992 roman. create whse records if none there
+!               03/17/1993 roman. open arproof on #34
+!               03/93      rek - back out freight addons
+!               12/08/1993 roman - handle negative line qty's
+!               05/10/1994 roman - change invoice to credit
+!               05/20/1994 rjs - add prod line disc into terms disc a/r
+!               02/14/1996 vst -don't calc prod line disc-done in print
+!               09/04/1996 nate - fix bug relating to backordered non- 
+!                                 stocks. CCT#94363. 
+! 12/10/96 rjs fix so auto post cash works with negative invoices
+!               1/24/97 TC - type 15 goes on order only before billed, cct 99235
+!               03/03/97vst -cct100598 -added GOSUB L_5900: to line #1223
+!               06/18/97jlp cct104034 reset tot_sell for b/o's
+!               07/07/97 - A2[4] IS JULIAN
+! jliu cct122199 4/27/99 add qty prev. billed field in ROLNEW file for
+!      taking care the o/t 4 (ref mxline, mx227)
+! jllp 11/29/99 make sure units get set properly in 8000 routine when setting
+!  them back; nonstock units are in sell u/m, not base.
+! jliu cct130779 01/20/00 change the way to calculate the open order amt
+!      when order is o/t=4 and backorder count is >0
+!          05/09/00 jcs - cct 135146 - No More GG Freezing - now EIM
+!   rce 2/17/03 add weekly sales file update 2/weeklysls# see update_weeklysls:
+!   rce 03/03/03 add rdms tracking file search for rdms we write the record 
+!			numbers for the invh & divhist files to text files for importing
+! 			to RDMS
+!	rce 04/24/03 add wh & div to weeklysls file
+! 8/18/03 typo in dir 4 for weeklysls
+! 10/10/03 zyc cct172296 clear LPRINTED, LP_DATE, and LP_TIME
+! 6/10/08 jliu cct226292 delete the order line tag
+! -------------------  notes for custom H T Berry  ------------------
+! 08/01/07  rjs cct210769 - commission service charge
+! 12/07/07 jliu cct220357 - do not update the usage for order type 35
+! ------------------------------------------------------------------------------
+! -------------------- notes for custom United Paper - Wisc -------
+! 12/15/09 rjs cct237350 - if an order has a backorder on it, change the order
+!                          type to "9" as it is set back to a status "1".
+!        erp - not custom - uses system flag p61$[90,90] so use that instead
+! ------------------------------------------------------------------------------
+! 04/2012 - add status channel for myreports
+! CUSTOM ACTION: - set truck & stop to zero on backorder
+! ------ notes for Synergy/ERP (xrev9) upgrade for Athens Janitor Supply -------
+! 02/19/2013 - Order types 36 & 37 are STANDARD (NO SLS UPDATE TIL EOM)
+! 10/09/01 jcs cct150508 - EVAP Billing/Shipping    
+! 10/25/02 kag cct159514 - not saving the old sproddesc rec# for o/t 36 & 37
+! 07/02/03 jcs cct168238 - credit memos in to EVAP
+! ------------------------------------------------------------------------------
+! ADDED FOR WE NELSON - 228886 - SU FLAG P61$[50,50] (SCREEN 3 - PAGE 2 #50)
+!
+! ************************************************************
+!   IF CHANGES ARE MADE HERE - CHECK IF EVAPUPDATE NEEDS CHANGING ALSO
+! ************************************************************
+! CAN RESTART HERE - NO RESTART FROM WEB!!! YET?
+!
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: SEP 24, 2008  13:24:08
+Rem /w2/papermaster/r2005//usr/acct/custom/xrev9/mx227b.src (univ2) 
+Rem  Copyright (c) 2008 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+Declare Intrinsic Sub DateToJulian,FindF,InpBuf,JulianToDate,String
+Declare Intrinsic Sub getglobals,date
+Declare Intrinsic sub programdump,env
+Declare Intrinsic function findchannel
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub suberr,mainerr,GetSession,AddToStr,SetOutput,CreateNetStatus
+External Lib "ubsfunc.dl4"
+Declare External Function getuidrec,getuidinfo$
+Declare External Function OpenMySQLMirror
+include "src/inc/sql_slscurr.inc"
+include "src/inc/sql_prod.inc"
+!Option Default Dialect IRIS1
+try
+!
+! whole program bracketed by try/try end
+!
+Com 1%,TERMFLAG,IntCo,icflag,statchan
+Com 2%,PASSR[9]
+Com 1%,PFU1[20],CNVTU[2],3%,PFU2[6],CNVTA,A[33],e$[500]
+!
+Def FNR(H) = Sgn(H) * (Int(Abs(H) * 100 + .5) * .01)
+Def FND(H) = FNR(H - (H * D3[0]))
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variable
+Dim rstr$[2000]
+dim 1%,ohcurrid,arcurrid,parcurrid,crcurrid,3%,ohcurrfact,arcurrfact,parcurrfact,crcurrfact,crcurrvar
+Dim A$[50],A1$[50],A2$[12],F$[16],M$[10],M1$[40],J$[8],PRODA$[156]
+Dim ORDCSH0$[156],SPUNIT$[4],HMAT$[2],SMAT$[2],S1$[118],P9$[50],P61$[256],s2$[20]
+Dim A3$[16],A4$[60],P0$[20],L2$[20],L7$[6],K9$[50],A5$[156],K5$[50]
+Dim X$[10],SP$[50],W$[50],P2$[23],I1$[30],S$[30],FLG$[4],NS$[50],L6$[60]
+Dim K6$[60],S3$[33],SUNIT$[4],PUNIT$[4],PAY3$[16],CSH$[70],P60$[50]
+Dim K36$[40],Z1$[10],SCRATCH$[80],SLFLG$[38],PRODCODE$[12]
+DIM HGLCOMM$[4]
+Dim 1%,UN[2],T9,DDAY[4],A0[12],OLS2[1],TAX[100],DTAX,HTAX,MTAX,FTAX,S8
+Dim 1%,CDAY,MCTXBL[9],HWHSE,LWHSE,FLAG[99],SPFU1[20],OPFU1[20],OPUM,SPUM
+Dim 1%,C,C8[4],D,H3[1],L3[3],M,ARMONTH,S[30],H4[2],X1[9],W1[2],WH8[47],NS[1]
+Dim 1%,SYSMONTH,I,E,S4[1],WHSE,CSH1[2],CSH4,PAY0[12],BNK[1],J9[2],EUN[2]
+Dim 1%,TRACK[1],LINENUM,PORTNUM,PART,TYPE,TRACKDATE$[25]
+dIM 1%,HGLWHSE,months_exist,OFILE[20],URec
+DIM KEYOT$[10],1%,OT2[11],3%,R51
+DIM 3%,NSFRT1[1]
+Dim WHPROD$[12],2%,WHBLD[2],ORDNUM,numbol
+Dim 1%,LPRINTED,PREVBOLINE,S0,RESTART,SplitFlag,SplitType,cpiFlag
+Dim 2%,LP_DATE,LP_TIME,SHPL,truck,CSPLT[4],ROS_S5
+Dim 3%,ACC_CTR,Z9[2],S9[17],L7[11],O7[12],T1,origT1,N1[4,4],P9[10],NMERCH,CS9[3],ocs1[3]
+Dim 3%,D2[19,5],D4[5],Q2[8],Q3[8],S6[1],W5[25],W3[24],OLM[5],CUST,CUSTORD
+Dim 3%,C7,L5[3],P2[12,2],T2[25],C5[5],C6[9],N2[12,4],SCOM[4],S5[3],LTAX1
+Dim 3%,SCST[4],SMER[4],A5[6],AMOUNT,SPC4[6],SPC5[2],PLV[1],WHLV[1],RDNETDL
+Dim 3%,MCHARGE[9,1],TOT[4],CS7[2],TOT_SELL,C12[1],C0,R[99],PFN[1]
+Dim 3%,S2[1],A3[13],L8[4],S7[20],D0[7],CFIN[8],EB[8],NOLINES,UNF[6],WHDISC
+Dim 3%,SRN[5],MISCCHGS_TAXED,MISCCHGS_NONTAXED,MERCHSUBT,TL2[1],phup
+Dim 3%,CST,R2,GLCTY[12],GLCOST,OPFU2[6],SPFU2[6],OPT1,OPA[33],SPA[33]
+Dim 2%,A2[5],ARDATE,D9,X,X9[12],Y9,C2,JRNL,OLDL4,A4[8],ORDCSH0[4]
+Dim 2%,L6[5],C9,U4[1],DUED,SP1[5],SLSM[9],L9[1],P6[2],H6[8],PAY2[5]
+Dim 2%,V2,S1[3],S3[1],H5[16],CURDATE,B[24],P1,DEPT,TAXTYP,W2[9]
+Dim 2%,W7[12],HA3[2],SHIPDATE,A1[2],MCODE[9],SRVLVL[12,1],PAY1[2]
+Dim 2%,A9,H0[12],L4[3],N0,X2,H1,CSH2[8],I2,PAY4[7],BUDGD[1],SLBDD[1]
+dim 2%,commDiv
+Dim 3%,V1,L1,R6,R9,R36,W9,SP,commsrvchg,X3[9],WHMISC[6]
+Dim 3%,P3[11,1],P8,SUNIT[3],PUNIT,TX0[3],TX1[10],TX2[10],C10[5],R1[9]
+Dim 1%,BUCK,3%,ARAGEBUCK[5],ARAMT,REC_CUST,KEYCUST$[6]
+Dim 4%,D3[1],3%,LYP2[12,2],PAY3[13],PAY5[5],PAID,CSH3[6],ORDCSH1[2],QPB
+Dim 2%,MSDS2[1],OWHT1[1],WN[6],MM,DD,YY,BASCOST,POCOST,AVGCOST,NETPOCOST
+Dim 2%,DSP3[4],KEY1$[60],KEY2$[60],KEY3$[60],KEY4$[60],KEY5$[60],KEY6$[60],chkdep$[50],blank$[50]
+dim keyrod$[50],3%,rec_rod,2%,DEP1[7],3%,DEP2[4],1%,DEP3[1]
+Dim DSP3$[6],MT$[2],TRACKFILE$[30],LPONUM$[30],LJOBNUM$[30],Custom_customer$[30]
+Dim PSNUM$[30],MSG1$[30],MSG2$[30],BPO$[20],PPU$[6],Msg$[100]
+Dim 3%,OREF[5],INVNO,ARREF[1],PYREF[1],REC_WEEKLYSLS,BUDG[1],NEWL4,rec_cr,rec_pay
+dim 3%,recPWS,USAGE_TY[12],USAGE_LY[12],SALES_TY[12],SALES_LY[12],HITS_TY[12]
+dim 3%,LDCOST_TY[12],LDCOST_LY[12],AVGCOST_TY[12],AVGCOST_LY[12],HITS_LY[12]
+dim kPWS$[60],uid$[10],K_comma1$[28],K_comma2$[32]
+Dim 1%,C3[2],PWSWH
+DIM 3%,ARCOMM[1],QuantityAllocated,RESSTKAMT
+dim taxdesc$[20]
+
+! commaudit vars
+! specific commission variables
+Dim 3%,AORIGCOMM
+Dim 1%,AS1[3],AS4[1]
+Dim 2%,AS2[1]
+Dim 3%,AS3[5],AS_$[60],SOURCE$[10],AS5[5]
+
+
+Dim buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp$[800],tmp1$[200],nextblockid$[8],Message$[600],WebStr$[600],blockid$[100]
+Dim action$[30],options$[30],userid$[8],b$[200],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+dim sql_slscurr. as sql_slscurr
+B$=" ",B$
+!Try 
+!call dxopen() ! may not need this! NEEDS FOR DXTEST RUN!!
+!Else
+	Rem
+!End try
+RESTART0: Rem let restart = 1   ! unrem me to restart!
+COID = IntCo ! Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64)
+If RESTART
+  F$ ="cntrl/cntrl"+Str$(COID) !  Using "cntrl#"
+  !If COID > 9 Let F$ = COID Using "cntrl##"
+  Open #1,F$
+End If 
+let blank$=" ",blank$
+For X1 = 2 To 37
+  Read I \ If I = -1 Goto L_260
+  Read #1,88,I;F$;
+  Open #X1,F$
+L_260: Next X1
+Data "1648","1808","2080","1792","2064","1504","1840","1856","1872","1888","2128"
+Data "1824","1968","2176","2192","2240","2016","1600","2048","1664","-1","2896","2912"
+Data "1744","2928","1728","1936","688","928","-1","-1","2224","400","1632","1312","-1"
+F$ = "4/PWSALES" + Str$(COID) \ Open #37,F$
+!
+Try
+	Close #50
+else
+	REM
+end try
+! open mysql on channel 76 as it seems to be available...
+sqlChan = OpenMySQLMirror(e$,76)
+f$ = "2/PRODWHSTAT"+str$(coid) \ open #81,f$
+F$ = "2/ARTERMCODE" + Str$(COID) \ Ropen #50,F$
+f$ = "cntrl/usercntrl" \ ropen #82,f$
+UserId$ = GetParameter$("S_USER.ID")
+uid$ = UserId$
+! call 43,1,UID$
+uid$ = ucase$(uid$)
+UID$ = UID$ + "          "
+URec=0
+Search #82,2,1;UID$,URec,E
+If E let URec=0
+Close #82
+f$ = "4/COMMAUDIT"+str$(coid) \ open #82,f$
+ch_comma = 82
+
+Try                          
+	close #51 
+else
+	rem 
+end try
+let f$="3/SORDTYPE"+STR$(COID)\ROPEN #51,F$
+
+SCRATCH$ = "cntrl/weeklyslsflag" + Str$(COID)
+F$ = "2/weeklysls" + Str$(COID)
+WEEKLYSLSFLAG = 0 \ Call FindF(SCRATCH$,WEEKLYSLSFLAG)
+If WEEKLYSLSFLAG
+  Rem {begin src/inc/dim.weeklysls.i}
+  Dim PRODCODE$[12]
+  Dim 1%,WOY[1],WSDIV,WSWH
+  Dim 2%,CUSTCODE
+  Dim 3%,DOW[7,9]
+  Rem {end dim.weeklysls.i}
+  CH_WEEKLYSLS = 38
+  Open #38,F$
+End If 
+F$ = "cntrl/rdms.ini"
+RDMSFLAG = 0 ! \ Call FindF(F$,RDMSFLAG) ! STILL NEED/USE ON WEB!!??
+Read #1,3,172;CURDATE;
+M$ = "#",M$
+Try  Close #35  Else REM
+Mat Read #1,19,50;P9$; \ Mat Read #1,61,0;P61$;
+Mat Read #1,60,50;P60$;
+MAT READ #1,52,82;HGLWHSE;	 ! HELD INVENTORY WAREHOUSE
+IF HGLWHSE<1 OR HGLWHSE>99 LET HGLWHSE=0
+MAT READ #1,52,100;HGLCOMM$; ! HELD INVENTORY COMMODITY CODE
+FOR CTR=1 TO 4
+	IF HGLCOMM$[CTR,CTR]="" LET HGLCOMM$[CTR,CTR]=" "
+NEXT CTR
+! open cpi needed files on 77 and 78 as they seem available
+if p61$[111,111] = "Y"
+	ropen #77,"2/CONTRACTH"+str$(coid)
+	open #78,"2/CPIDET"+str$(coid)
+end if
+Mat Read #1,3,188;SHIPDATE;
+Mat Read #1,165,0;SLFLG$;
+mat read #1,115,60;custom_customer$; ! ALT
+custom_customer$=RTrim$(UCase$(custom_customer$))
+If P60$[23,23] = "Y"
+  Read #1,88,1264;F$; \ Open #75,F$
+End If 
+If P9$[48,48] = "Y"  or p61$[94,94]="Y" ! auto post cash or sales order deposit
+	Mat Read #1,88,1456;F$; \ Open #31,F$
+	Mat Read #1,88,1536;F$; \ Open #32,F$
+	If P61$[3,3] = "Y"
+		Mat Read #1,88,1408;F$; \ Open #40,F$
+	End If 
+endif
+if p61$[94,94]="Y" ! open the deposit file
+	let f$="3/sorddep"+str$(coid)
+	open #41,f$
+endif
+	
+L_560: Rem "bypass auto cash
+ROLTAGFLAG = 0
+F$ = "3/SORDROLTAG" + Str$(COID)
+Call FindF(F$,ROLTAGFLAG)
+If ROLTAGFLAG
+  Open #44,F$
+End If 
+Read #1,88,2112;F$[1,16]; \ Open #42,F$
+F$ = "4/CSLSALES" + Str$(COID)
+Open #43,F$
+! call programdump("/tmp/ialog13!","")
+If RESTART
+  Open #80,"files/1/227track" + Str$(COID)
+  Read #80,0,0;TRACK[0],TRACK[1],ORDNUM,LINENUM,PORTNUM,PART,TYPE,TRACKDATE$,PASSR[1],PASSR[2],PASSR[3];
+  TERMFLAG = TYPE
+Else 
+  TRACKFILE$ = "files/1/227track" + Str$(COID) ! COID Using "1/227track#"
+  SCRATCH$ = "[1:42] " + TRACKFILE$ + "!" \ Build #80,SCRATCH$
+  Try Close #80 Else Rem
+  tmp$="chmod go+rw "+trackfile$
+  System tmp$
+  Open #80,TRACKFILE$
+  TRACK[0] = 0;TRACK[1] = 0
+  PORTNUM = Spc(6);PART = 3;TYPE = TERMFLAG;TRACKDATE$ = Msc$(3)
+  Write #80,0,0;TRACK[0],TRACK[1],ORDNUM,LINENUM,PORTNUM,PART,TYPE,TRACKDATE$,PASSR[1],PASSR[2],PASSR[3];
+End If 
+! Statchan=88 ! instead of keeping irm open (pass it as com)
+if statchan Print #statchan;"Part 3 of accept starting"
+!Print 'CR MU CL';"PLEASE WAIT . . . . "; \ Signal 3,0
+For X = 1 To 12 \ Read X9[X] \ Next X
+Data "0","31","59","90","120","151","181","212","243","273","304","334"
+Mat Read #1,0,118;SYSMONTH;
+Read #1,0,108;ARDATE;
+J$ = ARDATE Using "######"
+Gosub L_3900 \ YR = Y9
+A9 = 0 \ X9[0] = D9
+Read #1,0,120;ARMONTH;
+! call programdump("/tmp/ialog14!","")
+L_1000: Rem "====================== accept starts here
+A$ = " ",A$;A$[1,2] = " 7"
+L_1070: Search #8,3,1;A$,V1,E \ If E > 2 error 11000
+If E Or A$[1,2] <> " 7" Goto OUTEND
+H1 = V1
+Mat Read #8,H1,104;H5;
+If PASSR[1] = 757 ! "came from Separate OT 16 Accept
+  If H5[7] <> 16 Goto L_1070
+  If PASSR[3] And H5[11] <> PASSR[3] Goto L_1070
+Else 
+  If H5[7] = 16 Goto L_1070
+End If 
+! if h5[7]=36 or h5[7]=37 goto L_1070 ! EVAP NOT READY
+If RDMSFLAG System "echo " + Str$(H1) + " >> 6/invhaccept"
+Mat Read #8,H1;H0; \ Mat Read #10,H0[3],8;T2;
+If TERMFLAG = 1 And T2[10] = 0 Goto L_1070
+If TERMFLAG = 2 And T2[10] <> 0 Goto L_1070
+ACC_CTR = ACC_CTR + 1
+ORDNUM = H0[7] \ Write #80,0,4;ORDNUM;
+J$ = H0[8] Using "######" \ Gosub L_3900
+Mat Read #8,H1,52;H3;
+Mat Read #8,H1,446;P0$;
+Mat Read #8,H1,78;H4; \ Mat Read #8,H1,444;HMAT$;
+Mat Read #8,H1,348;SMER; \ Mat Read #8,H1,378;SCST;
+Mat Read #8,H1,278;SLSM; \ Mat Read #8,H1,318;SCOM;
+If H4 <= 0 Let H4 = 1
+If H4 >= Chf(15) Let H4 = Chf(15) - 1
+Mat Read #8,H1,104;H5;
+Mat Read #8,H1,408;H6;
+Mat Read #8,H1,490;OWHT1;
+Mat Read #8,H1,512;OREF;
+Mat Read #8,h1,548;CSPLT;
+!if custom_customer$="HTBERRY" ! no longer custom
+	MAT  READ #8,H1,568;COMMSRVCHG;
+!Endif
+mat read #8,h1,598;SplitFlag;
+if SplitFlag < -1 or SplitFlag > 3 LET SplitFlag = 0
+READ #8,h1,586;PHUP;
+If OWHT1[1] = 0 And H3[0] <> 0 Let OWHT1[1] = H3[0]
+HWHSE = H4[2]
+INVNO = OREF[1]
+mat read #8,h1,624;ohcurrid;
+mat read #8,h1,626;ohcurrfact;
+if p61$[136,136]="Y"
+	if ohcurrid<0 or ohcurrid>9999
+		let ohcurrid=0
+		let ohcurrfact=0
+	endif
+	if ohcurrfact<0 let ohcurrfact=0
+else
+	let ohcurrid=0
+	let ohcurrfact=0
+endif
+Mat Read #9,H0[2],8;S1$;
+Mat Read #9,H0[2],154;SRN;
+K5$ = " ",K5$;K5$[1,6] = H0[1] Using "######"
+K5$[7,17] = OREF[1] Using "##########1"
+L_1175: Search #7,2,1;K5$,V1,E \ If E > 1 error 11000
+If E = 0 And TRACK[0] < 5 Msg$="A/R ALREADY EXISTS!! " \ error 11000
+If E = 1 And TRACK[0] >= 5 Msg$="A/R RESTART CONSISTENCY PROBLEM-ABORTING!! " \ error 11000
+Mat Read #10,H0[3],8;T2;
+Mat Read #10,H0[3],168;MCODE;
+Mat Read #10,H0[3],208;MCHARGE;
+Mat Read #10,H0[3],328;TOT; \ Mat Read #10,H0[3],358;MCTXBL;
+MERCHSUBT = T2[1]
+If T2[0] < 0 If K5$[17,17] = "1" Let K5$[17,17] = "6" \ Goto L_1175
+T2[1] = T2[1] - H6[6];T2[5] = T2[5] + H6[6]
+K5$ = " ",K5$
+D3[0] = 0;D3[1] = 0;N0 = H0[7]
+If T2[1] Let D3[1] = T2[3] / T2[1]
+If D3[1] < -1 Or D3[1] > 1 Let D3[1] = 0
+D3[0] = D3[1]
+Gosub L_5500
+If H5[7] = 24 Goto L_1240
+If H5[7]=36 Goto L_1240: ! "EVAP Billing - keep on order
+If H5[7] = 15 And H0[5] Gosub L_5900 \ Goto L_1240
+Read #3,C0,412;CUSTORD
+If H5[7] = 4 And H0[5]
+  CUSTORD = CUSTORD - T2[0]
+  Goto L_1510
+End If 
+If P60$[40,40] = "O" And (T2[24] - TOT[4]) > 0
+  CUSTORD = CUSTORD - (T2[0] - MERCHSUBT + T2[24] - TOT[4])
+Else 
+  CUSTORD = CUSTORD - T2[0]
+End If 
+L_1510: If TRACK < 1 Write #3,C0,412;CUSTORD;
+L_1240: If TRACK < 1 Let TRACK = TRACK + 1 \ Write #80,0,0;TRACK[0];
+Mat Read #3,C0,378;C8;
+Mat Read #3,C0,668;C12;
+Gosub L_5900
+If H5[7] = 15 And H0[5] Goto L_1270
+If H0[1] = H0[4] Goto L_1270
+If H5[7] = 24 Goto L_1270
+IF H5[7]=36 GOTO L_1270: ! "EVAP Billing - keep on order
+Read #3,V1,412;CUSTORD
+If H5[7] = 4 And H0[5]
+  CUSTORD = CUSTORD - T2[0]
+  Goto L_1640
+End If 
+If P60$[40,40] = "O" And (T2[24] - TOT[4]) > 0
+  CUSTORD = CUSTORD - (T2[0] - MERCHSUBT + T2[24] - TOT[4])
+Else 
+  CUSTORD = CUSTORD - T2[0]
+End If 
+L_1640: If TRACK < 2 Write #3,V1,412;CUSTORD;
+L_1270: If TRACK < 2 Let TRACK = TRACK + 1 \ Write #80,0,0;TRACK[0];
+If H5[7] = 8 Or H5[7] = 16 Goto L_1300
+If TRACK < 3 Gosub L_5600
+If TRACK < 3 Let TRACK = TRACK + 1 \ Write #80,0,0;TRACK[0];
+If TRACK < 4 Gosub L_2500
+If TRACK < 4 Let TRACK = TRACK + 1 \ Write #80,0,0;TRACK[0];
+L_1300: Rem "======================================== line items
+If H5[7] = 8 Or H5[7] = 16 And TRACK < 3 Let TRACK = TRACK + 2 \ Write #80,0,0;TRACK[0];
+PREVBOLINE = 0
+numbol=0 ! counter for number of lines b/o
+A$ = " ",A$;NOLINES = 0
+A$[1,6] = N0 Using M$[1,6]
+A1$ = A$
+L_1340: Search #11,3,1;A$,V1,E \ If E > 2 error 11000
+If E Goto L_1900
+If A$[1,6] <> A1$[1,6] Goto L_1900
+iF STATCHAN PRINT #STATCHAN;"Doing...";ACC_CTR;A$
+LINENUM = A$[7,9] \ Write #80,0,8;LINENUM;
+A1$ = A$
+L1 = V1
+Mat Read #11,L1,8;L3;
+If L3[3] < 1 Let L3[3] = 1
+If L3[3] > 20 Let L3[3] = 20
+Mat Read #11,L1,16;L4;
+IF L3 LET OLDL4=L4
+If Not(L4[1]) Let L4[1] = H0[11]
+If SplitFlag <> -1 Let L4[1] = H0[11]
+LWHSE = L4[3] \ If LWHSE <= 0 Or LWHSE > 99 Let LWHSE = HWHSE
+Mat Read #11,L1,32;L5;
+Mat Read #11,L1,56;L6; \ Mat Read #11,L1,404;OLM;
+Mat Read #11,L1,80;L6$; \ Mat Read #11,L1,368;MT$;
+Mat Read #11,L1,140;L2$ \ Mat Read #11,L1,250;UN;
+Mat Read #11,L1,160;L9; \ Mat Read #11,L1,508;LTAX1;
+If Not(A9) If L3[2] >= 990 Goto L_1720
+Mat Read #11,L1,168;L7; \ Mat Read #11,L1,250;L7$; \ Mat Read #11,L1,256;OLS2;
+If A9 If L3[2] >= 990 Goto L_1700
+Mat Read #11,L1,260;S9; \ Mat Read #11,L1,370;S3$;
+Mat Read #11,L1,446;EUN; \ Mat Read #11,L1,452;UNF; \ Mat Read #11,L1,542;QPB;
+Mat Read #11,L1,502;CST
+L5[2] = L5[2] - S9[15];OLM[3] = OLM[3] - S9[15]
+L5[0] = L5[0] - OLM[0];L5[3] = L5[3] - OLM[1]
+If P60$[42,42] = "Y" Gosub L_4800 ! SALES TAX BY LINE
+If TRACK[1] < 1 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If L7[4] Let NOLINES = NOLINES + 1
+If (H5[7] = 21 Or H5[7] = 22) And A1$[7,9] = "   " Goto L_1720
+T1 = L7[4]
+If H5[7] = 15 !bill & hold
+  T1 = 0 \ S9[12] = 0
+  If Not(H0[5]) Let T1 = L7[2];S9[12] = S9[13]
+End If 
+If OLS2[0] = 3 !message line
+  X2 = -1
+  If L4 And L3[0] Write #12,L4,8;X2;
+  Goto L_1700
+End If 
+IF P61$[132,132]="Y" AND L3[0]<>0 AND L4[0]<>0
+	MAT  READ #12,L4,190;NSFRT1;     
+	LET NSFRT1[1]=NSFRT1[1]+NSFRT1[0]
+	LET NSFRT1[0]=0                  
+	MAT  WRITE #12,L4,190;NSFRT1;   
+endif
+GLCOST = L7[10]
+If P9$[17,17] = "N" Let GLCOST = (T1 * CST)
+If Not(GLCOST) Let GLCOST = S9[12]
+If L5[3] >= 0 Let D3[0] = D3[1] Else Let D3[0] = - D3[1]
+If L3 Goto L_7400 ! NONSTOCK UPDATE
+Mat Read #5,L4,512;PFU1 \ Mat Read #5,L4,554;PFU2
+L_1493: Mat Read #5,L4,256;A
+MAT  READ #5,L4,0;PRODA$
+Mat Read #5,L4,990;PLV
+If H5[7] = 8 Or H5[7] = 16 Goto L_1560
+If H5[7] = 6 Or H5[7] = 10 Goto L_1560
+IF H5[7]=36 OR H5[7]=37 GOTO L_1560: ! "EVAP - No Sales Update
+If TRACK[1] > 1 Goto L_1560
+A[7] = A[7] + FND(L5[3])
+A[8] = A[8] + FND(L5[3])
+IF H5[7]=3 and L2$[17,20]=HGLCOMM$[1,4] and l3[1]=0 ! indirect ord type, comm code=held comm code and stock update=N
+	Rem bypass 
+else
+	A[9] = A[9] + T1;A[10] = A[10] + T1 ! PROD FILE - MTD/YTD - Unit Sales
+endif
+A[11] = A[11] + S9[12]
+A[12] = A[12] + S9[12]
+If T1 < 0 ! "qty is less than zero, treat as a credit
+  A[30] = A[30] + Abs(FND(L5[3]))
+  A[31] = A[31] + Abs(T1)
+  A[32] = A[32] + Abs(S9[12])
+End If 
+L_1560: Write #5,L4,204;H0[8]
+Mat Write #5,L4,256;A
+Mat Write #5,L4,990;PLV
+If TRACK[1] < 2 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If H5[7] = 8 Or H5[7] = 16
+	! make sure above writes to prod record get written out
+	if sqlChan<>-1
+		e = prod_UpdateSQLFromDL4(e$, intCo, proda$[140,151], sqlChan,5)
+		if e<>1 error 11000
+	end if
+	Goto L_1664
+End if
+D4 = H0[4]
+Write #5,L4,472;D4;
+! make sure above writes to prod record get written out
+if sqlChan<>-1
+	e = prod_UpdateSQLFromDL4(e$, intCo, proda$[140,151], sqlChan,5)
+	if e<>1 error 11000
+end if
+If L3 Let L4 = OLDL4
+L_1600: Rem.DONT DROP
+If H5[7] = 6 Or H5[7] = 10 Goto L_1664
+IF H5[7]=36 OR h5[7]=37 GOTO L_1664:  ! "EVAP - No Sales update
+If OREF[2] If TRACK[1] < 3 Gosub L_6100
+If TRACK[1] < 3 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If S9[17] Gosub L_10000
+If TRACK[1] < 4 Gosub L_3000
+If TRACK[1] < 4 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If TRACK[1] < 5 Gosub L_5650
+If TRACK[1] < 5 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If TRACK[1] < 6 Gosub L_3600
+If TRACK[1] < 6 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If TRACK[1] < 7 Gosub L_4300
+If TRACK[1] < 7 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If L9[0] If TRACK[1] < 8 Gosub L_12000
+If TRACK[1] < 8 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If TRACK[1] < 9 Gosub L_8000
+If TRACK[1] < 9 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+L_1664: If TRACK[1] < 10 Gosub L_7900
+If TRACK[1] < 10 Let TRACK[1] = 10 \ Write #80,0,2;TRACK[1];
+If H5[7] = 6 Or H5[7] = 8 Or H5[7] = 10 Or H5[7] = 16 OR H5[7]=36 OR H5[7]=37 
+  If L3 And OLDL4 Let L4 = OLDL4
+  Goto L_1700
+End If 
+If L3[0] = 1 If TRACK[1] < 11 Gosub L_6640
+If TRACK[1] < 11 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If TRACK[1] < 12 Gosub L_5200
+If TRACK[1] < 12 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If Int(S9[16]) = 1 If TRACK[1] < 13 Gosub L_6170
+If TRACK[1] < 13 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If TRACK[1] < 14 Gosub L_13500
+If TRACK[1] < 14 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If TRACK[1] < 15 Gosub UPDATE_WEEKLYSLS
+If TRACK[1] < 15 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+If TRACK[1] < 16 ! "shiplist sales curr
+  Gosub SHPL_SALES
+  TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+End If 
+L_1700: Rem "====================================== line accepted. now delete it
+If H5[7] = 21 Or H5[7] = 22 Goto L_1719
+If H5[7] = 24 Goto L_7000
+If H5[7]=36 Goto L_7000: ! "EVAP Bill - always Backorder
+If L7[3] Goto L_7000
+If L7[11] If L3[0] = 0 Goto L_7000
+If OLS2[0] = 3 And PREVBOLINE = 1 Goto L_7000
+If H5[7] = 15 Let L3[1] = 0
+If (H5[7] = 4 Or H5[7] = 15) If L7[2] > L7[0] + S9[6] Or (L7[2] > QPB + S9[7]) Let A9 = 99 \ Goto L_7000
+L_1719: Gosub L_6500
+PREVBOLINE = 0
+L_1720: A$ = A1$ \ V1 = L1
+Search #11,5,1;A$,V1,E \ If E error 11000
+If L3[0] Goto L_1820
+A$ = " ",A$
+A$[1,6] = L4[0] Using M$[1,6]
+A$[7,12] = N0 Using M$[1,6]
+A$[13,16] = A1$[7,10]
+V1 = L1
+Search #11,5,2;A$,V1,E \ If E > 1 error 11000
+L_1820: E = 3;V1 = L1 \ Search #11,1,0;A$,V1,E \ If e error 11000
+L_1840: A$ = A1$
+K36$ = " ",K36$ \ K36$[1,9] = A1$[1,9]
+L_1855: Search #36,3,1;K36$,R36,E \ If E = 2 Goto L_1895
+If E error 11000
+If K36$[1,9] <> A1$[1,9] Goto L_1895
+Search #36,5,1;K36$,R36,E \ If E error 11000
+E = 3 \ Search #36,1,0;K36$,R36,E \ If E error 11000
+Goto L_1855
+L_1895: TRACK[1] = 0 \ Write #80,0,2;TRACK[1];
+Goto L_1340
+L_1900: Rem "===================================== no more lines
+If H5[7] = 8 Or H5[7] = 16 Goto L_1950
+If TRACK[0] < 5 ! "Update A/R
+  Gosub L_2000
+  TRACK[0] = TRACK[0] + 1 \ Write #80,0,0;TRACK[0];
+End If 
+If TRACK[0] < 6 ! "INVTOT (FRGT)
+  Gosub L_3800
+  TRACK[0] = TRACK[0] + 1 \ Write #80,0,0;TRACK[0];
+End If 
+If TRACK[0] < 7 ! "SHIP LIST (BEFORE CUST UPDATE!)
+  Gosub SHIPL_BUDG
+  TRACK[0] = TRACK[0] + 1 \ Write #80,0,0;TRACK[0];
+End If 
+If TRACK[0] < 8 ! "CUST MISC UPDATE
+  Gosub L_3200
+  TRACK[0] = TRACK[0] + 1 \ Write #80,0,0;TRACK[0];
+End If 
+If TRACK[0] < 9 ! "Entered by update
+  Gosub L_3500
+  TRACK[0] = TRACK[0] + 1 \ Write #80,0,0;TRACK[0];
+End If 
+L_1950: Gosub L_6000
+gosub L_6200 ! rol tag
+If TRACK[0] < 10 ! "division file
+  Gosub L_3700
+  TRACK[0] = 10 \ Write #80,0,0;TRACK[0];
+End If 
+Gosub L_4200
+ORD_DELETED = 0 \ Gosub L_4000
+If ORD_DELETED Goto L_1995
+If H5[7] = 4 Or H5[7] = 24 Or H5[7] = 15 Gosub L_6600
+IF H5[7] = 24 
+	for i=0 to 20 \ ofile[i]=0 \ next i
+	Call "777ORD.DL4",COID,H0[7],OFILE[]   !! RESET SORDLOT LOCATIONS
+endif
+L_1995: TRACK[0] = 0 \ Write #80,0,0;TRACK[0];
+Goto L_1000
+L_2000: Rem "========================================= update AR
+If H5[7] = 16 And T2[0] = 0 Return 
+if h5[7]=37 GOTO L_2390: ! "no a/r - EVAP shipping? but AR Proof!
+Read #10,H0[3],164;JRNL;
+A2[0] = H0[11];A2[1] = 0;A2[2] = C9;A2[4] = ARDATE
+ARREF[0] = OREF[1];ARREF[1] = 0
+ARCOMM[0]=0;ARCOMM[1]=0
+For X1 = 0 To 11
+  Let A0[X1] = 0
+  If X1 <= 2 Let A1[X1] = 0
+  If X1 <= 8 Let A4[X1] = 0
+  If X1 <= 5 Let A5[X1] = 0
+  A3[X1] = 0
+Next X1
+If T2[0] < 0 Goto L_2060
+If T2[13] > T2[0] Let T2[13] = T2[0]
+L_2060: A3[0] = Abs(T2[0]);A3[2] = Abs(T2[13])
+If T2[0] < 0 Let A3[0] = A3[0] + A3[2] \ A3[2] = 0
+A3[4] = T2[5];A3[5] = T2[1]
+A4$ = " ",A4$;A4$[1,20] = P0$
+A1[0] = H0[7]
+A1[1] = C12[1]
+A2[4] = H0[8];A4[3] = H0[8]
+BUCK = 0
+If T2[0] < 0 ! credit balance
+  If P9$[19,19] = "N" Let BUCK = 1
+  A2[3] = BUCK + .06
+Else 
+  A2[3] = BUCK + .01
+End If 
+Gosub L_11000
+A4[3] = DUED
+X$ = A2[4] Using "&&&&&&" \ Call DateToJulian(1,X$,X$,E) \ If E Let X$ = Tim(6) Using "#####"
+A2[4] = X$[1,5]
+A3[7] = T2[7];A3[13] = T2[16]
+A0[1] = H4[0];A1[2] = OWHT1[1];A0[5] = H5[8]
+A3[10] = T2[4] + T2[6];A5[0] = Abs(T2[11])
+A0[6] = H5[7];A0[7] = H5[9];A0[8] = H5[0]
+A3[12] = T2[22];A4[0] = T2[23]
+A0[9] = H3[1];A0[10] = 0;A4[1] = H0[4]
+A0[3] = HWHSE;A5[6] = T2[3];A0[0] = H0[12]
+A4[2] = JRNL
+A3[8] = H5[13] - (H5[14] - T2[17] + T2[18])
+A3[6] = H5[13] - H5[14]
+A0[2] = ARMONTH * 100 + YR
+a0[12]=227 ! accept source
+if p61$[136,136]="Y"
+	let arcurrid=ohcurrid
+	let arcurrfact=ohcurrfact
+else
+	let arcurrid=0
+	let arcurrfact=0
+endif
+Gosub L_2400
+A$ = " ",A$;A$[1,6] = C9 Using "######";A$[7,17] = OREF[1] Using "##########1"
+If T2[0] < 0 ! "make into a credit
+  A$[17,17] = "6"
+  A3[4] = - A3[4];A3[5] = - A3[5];A3[7] = - A3[7];A5[6] = - A5[6];A3[10] = - A3[10]
+End If 
+If Not(A3[0] - A3[1] - A3[2]) Let A2[1] = H0[8]
+E = 2 \ A1$ = A$ \ Search #7,1,0;A$,V1,E \ If E error 11000
+Mat Write #7,V1,0;A2;
+Mat Write #7,V1,24;A3;
+A3$ = " ",A3$ \ Mat Write #7,V1,108;A3$;
+Mat Write #7,V1,124;A0;
+Mat write #7,v1,150;arcurrid;
+Mat Write #7,V1,154;A4;
+Mat Write #7,V1,190;A1;
+
+Mat Write #7,V1,202;A5;
+Mat Write #7,V1,256;A4$;
+Mat Write #7,V1,316;ARREF;
+Mat Write #7,v1,330;arcomm;
+mat write #7,v1,342;arcurrfact;
+A3[6] = 0;S3[0] = V1;C = 7;D = 1
+Gosub L_5000 \ If E error 11000
+A$[7,12] = A2[4] Using "######"
+A$[13] = A1$[7]
+C = 7;D = 2 \ Gosub L_5000 \ If E error 11000
+A$ = " ",A$;A$[1,6] = C12[1] Using "######"
+A$[7,12] = A2[2] Using "######";A$[13,18] = A2[4] Using "######"
+A$[19] = A1$[7]
+C = 7;D = 3 \ Gosub L_5000 \ If E error 11000
+A$ = " ",A$;A$[1,6] = A1[1] Using "######"
+A$[7,16] = A1$[7,16];A$[17,22] = A1$[1,6];A$[23] = A1$[17]
+C = 7;D = 4 \ Gosub L_5000 \ If E error 11000
+A$ = " ",A$;A$[1,6] = A1[1] Using "######"
+A$[7,12] = A2[4] Using "######"
+A$[13,22] = A1$[7,16];A$[23,28] = A1$[1,6];A$[29] = A1$[17]
+C = 7;D = 5 \ Gosub L_5000 \ If E error 11000
+If (A3[0] - A3[1] - A3[2])
+  ARAMT = (A3[0] - A3[1] - A3[2])
+  If Int(Fra(A2[3]) * 100) > 5 And BUCK <> 1 Let ARAMT = - (ARAMT)
+  KEYCUST$ = A2[2] Using "######"
+  Search #3,2,1;KEYCUST$,REC_CUST,E \ If E error 11000
+  Mat Read #3,REC_CUST,210;ARAGEBUCK
+  ARAGEBUCK[BUCK] = ARAGEBUCK[BUCK] + ARAMT
+  Mat Write #3,REC_CUST,210;ARAGEBUCK;
+End If 
+If P9$[48,48] = "Y" 
+	If T2[10] <> 0 And T2[12]<>0 Gosub L_12200
+endif
+if p61$[94,94]="Y" ! sales order deposit
+	If Int(Fra(A2[3]) * 100) > 5 ! credit - delete deposit if on file
+		gosub deldeposit:
+	else
+		gosub applydep:
+	endif
+	
+endif
+
+L_2330: Rem "============================= cash/non cash month totals
+If H5[7]=36 Or H5[7]=37 Return ! "EVAP - No Sales Update
+If T2[10] <> 0 Mat Read #19,1;N1;
+If T2[10] = 0 Mat Read #19,1,150;N1;
+X = HWHSE - 1 \ If X < 0 Let X = 0 Else If X > 4 Let X = 4
+N1[0,X] = N1[0,X] + T2[1]
+N1[1,X] = N1[1,X] + T2[7]
+N1[2,X] = N1[2,X] + T2[3]
+N1[3,X] = N1[3,X] + T2[4] + T2[6]
+N1[4,X] = N1[4,X] + T2[5]
+If T2[10] <> 0 Mat Write #19,1;N1;
+If T2[10] = 0 Mat Write #19,1,150;N1;
+Return 
+L_2390: ! "Setup for OT 37 & AR Proof
+Let A3[0]=0;A3[6]=H5[13]-H5[14]
+Goto L_2400: ! "let it do the return
+L_2400: Rem "================================== ar proof file
+Mat Read #34,2,0;P9
+X = 1 \ If T2[0] < 0 Let X = -1
+P9[0] = P9[0] + (A3[0] * X)
+P9[1] = P9[1] + (A3[0] * X) \ P9[2] = P9[2] + (A3[0] * X)
+P9[3] = P9[3] + A3[6] \ P9[4] = P9[4] + A3[6] \ P9[5] = P9[5] + A3[6]
+P9[6] = P9[6] + 1 \ P9[7] = P9[7] + 1 \ P9[8] = P9[8] + 1
+Mat Write #34,2,0;P9;
+If Not(H5[8]) Let H5[8] = 1
+Mat Read #34,(H5[8] * 10) + 2,0;P9
+X = 1 \ If T2[0] < 0 Let X = -1
+P9[0] = P9[0] + (A3[0] * X)
+P9[1] = P9[1] + (A3[0] * X) \ P9[2] = P9[2] + (A3[0] * X)
+P9[3] = P9[3] + A3[6] \ P9[4] = P9[4] + A3[6] \ P9[5] = P9[5] + A3[6]
+P9[6] = P9[6] + 1 \ P9[7] = P9[7] + 1 \ P9[8] = P9[8] + 1
+Mat Write #34,(H5[8] * 10) + 2,0;P9;
+Read #34,0,12;P8
+P8 = P8 + (A3[0] * X)
+Write #34,0,12;P8;
+Return 
+L_2500: Rem "================================== update commissions
+! Split Flag:	-1 = category splits
+! 		0 = no splits
+!		1 = split commission
+!		2 = not currently supported
+!		3 = split gross profit
+!
+If P9$[14,14] = "N" Return ! no commissions
+If H5[7] = 6 Return ! order type 6
+IF H5[7]=36 OR H5[7]=37 RETURN ! "EVAP - No Update
+For X5 = 0 To 4 ! run through for mult-slsm splits
+	IF SplitFlag=0 ! "not multi-slsm type
+		IF X5>0 GOTO L_2895:
+	Endif
+	If SLSM[X5] = 0 Goto L_2895 ! no rep # - no commission
+	A$ = " ",A$ \ D4 = 1
+	A$[1,3] = SLSM[X5] Using "###"
+	A$[4,13] = OREF[1] Using "##########"
+	A$[14,14] = "1"
+	Search #17,2,1;A$,V1,E \ If E > 1 error 11000
+	If Not(E) Goto L_2680
+	D4 = 0;E = 2 \ Search #17,1,0;A$,V1,E \ If E error 11000
+	SMAT$ = " ",SMAT$
+	CS7 = 0;CS7[1] = OREF[1];cs7[2]=csplt[x5]
+	For X1 = 0 To 3
+		S1[X1] = 0;CS9[X1] = 0
+		If X1 < 2 Let S2[X1] = 0;S3[X1] = 0;S4[X1] = 0;S6[X1] = 0
+	Next X1
+	commDiv = h5[8]
+	Mat Write #17,V1,0;S1;
+	Mat Write #17,V1,16;S2;
+	Mat Write #17,V1,28;S3;
+	Mat Write #17,V1,36;S4;
+	Mat Write #17,V1,40;S6;
+	Mat Write #17,V1,52;SMAT$;
+	Mat Write #17,V1,54;CS7;
+	Mat Write #17,V1,72;CS9;
+	!if custom_customer$="HTBERRY" ! no longer custom
+	MAT WRITE #17,V1,100;COMMSRVCHG;
+	!Endif
+	Mat Write #17,V1,140;commDiv
+	L_2680: Rem EXISTING Commission Record
+	Mat Read #17,V1,0;S1
+	Mat Read #17,V1,16;S2
+	Mat Read #17,V1,28;S3
+	Mat Read #17,V1,36;S4
+	Mat Read #17,V1,40;S6
+	Mat Read #17,V1,52;SMAT$
+	Mat Read #17,V1,54;CS7;
+	Mat Read #17,V1,72;CS9
+	Mat Read #17,V1,140;commDiv
+	!if custom_customer$="HTBERRY" ! no longer custom
+	MAT  READ #17,V1,100;COMMSRVCHG
+	!Endif
+
+	S1[0] = SLSM[X5];S1[1] = H0[7];S1[2] = SLSM[X5 + 5];S1[3] = H0[8]
+	If SplitFlag=1 ! " was P61$[72,72]="Y" ! "commission Split
+		If X5>0 Let S1[2]=Slsm[5] ! "comm % is only on main slsm
+	Else ! "not splitting one comm $
+		if SplitFlag=0 Let CSPLT[x5]=100 ! "split always 100 to the guy
+	Endif
+	S2[0] = 0;S2[1] = 0
+	S6[0] = 0;S6[1] = 0
+	CS7 = 0
+	if SplitFlag <> 2
+		LET cs7[2]=csplt[x5] ! commission split %
+		LET SplitType = 0
+	else
+		let cs7[2] = SLSM[x5+5]
+		Let SplitType = csplt[x5]
+	end if
+	If SplitFlag = -1
+		! if category splits
+		Let S2[0] = S2[0] + SMER[X5]
+		Let S6[0] = S6[0] + SCST[X5]
+		Let S6[1] = 0
+	else 
+		! not category splits
+		! record ttl inv$ in each slsm
+		S2[0] = S2[0] + T2[1];S6[0] = S6[0] + T2[17] ! tot sales / cost $
+		S6[1] = S6[1] + T2[18] ! tot average cost
+		! see if there are any extra dollar amounts
+		! that are flagged to impact GP outside
+		! of merchandise amount
+		extraInvDollars = 0
+		extraCostDollars = 0
+		! record ttl inv$ in each slsm
+		If P9$[35,35] = "Y" Let extraInvDollars = extraInvDollars + T2[5] ! inc freight
+		If P9$[36,36] = "Y" Let extraInvDollars = extraInvDollars - T2[3] ! inc ord discount
+		If P9$[37,37] = "Y" Let extraCostDollars = extraCostDollars + T2[20] ! inc freight cost
+		If P9$[38,38] = "Y" Let extraInvDollars = extraInvDollars + T2[6] ! inc other charges
+		extraCostDollars = extraCostDollars + TOT[2] ! add misc charge cost for profit
+		extraInvDollars = extraInvDollars + TOT[1] ! add misc charge for profit
+		! check to see if commission
+		! by line involved
+		commByLine = 0
+		if P60$[24,24] = "Y"
+			commByLine = 1
+		else
+			! even if commission by line
+			! flag not set, can still be
+			! triggered by line level
+			! overrides at product level, etc.
+			!
+			! If there is extraCostDollars or extraInvDollars
+			! and it doesn't appear they were included
+			! in commission calculation, we assume
+			! that commission by line was tripped
+			if extraInvDollars - extraCostDollars <> 0
+				merchCommission = FNR((S2[0] - S6[0]) * (S1[2] / 100) * (CS7[2] / 100))
+				if merchCommission = SCOM[X5]
+					! commission doesn't reflect
+					! any other header related charges
+					! assume commission by line was
+					! tripped
+					commByLine = 1
+				end if
+			end if
+			! due to rounding issues in the blended commission rate
+			! the check above to see if it got triggered can get
+			! missed, so don't do any adjustments unless
+			! commByLine SUFLAG set.
+			! POSSIBLE FUTURE SOLUTION - save unrounded blended
+			! rate in invoice header file.
+			commByLine = 0
+		end if
+			! record ttl inv$ in each slsm
+		if commByLine = 0
+			S6[0] = S6[0] + extraCostDollars ! add misc charge cost for profit
+			S2[0] = S2[0] + extraInvDollars ! add misc charge for profit
+		end if
+	end if
+	SMAT$[1,2] = HMAT$[1,2]
+	S2[1] = S2[1] + SCOM[X5] ! commisson rate
+	If H5[7] = 10 Let S1[2] = 0 \ S2[1] = 0 \ S2[0] = 0
+	S3[0] = H5[7]
+	S3[1] = H0[1]
+	S4[0] = ARMONTH
+	ocs1[0] = s2[1]
+	ocs1[1] = s1[2]
+	ocs1[2] = s2[0]
+	ocs1[3] = s6[0]
+	Mat Write #17,V1,0;S1
+	Mat Write #17,V1,16;S2
+	Mat Write #17,V1,28;S3
+	Mat Write #17,V1,36;S4
+	Mat Write #17,V1,40;S6
+	Mat Write #17,V1,52;SMAT$
+	Mat Write #17,V1,54;CS7
+	Mat Write #17,V1,72;CS9
+	mat write #17,v1,112;ocs1
+	!if custom_customer$="HTBERRY" ! no longer custom
+		MAT WRITE #17,V1,100;COMMSRVCHG
+	!Endif
+	mat write #17,v1,136;SplitFlag
+	mat write #17,v1,138;SplitType;
+	If D4 = 1 Goto L_2895
+	A$ = " ",A$
+	A$[1,3] = S1[0] Using "###"
+	A$[4,13] = CS7[1] Using "##########"
+	A$[14,14] = "1"
+	C = 17 \ D = 1
+	Gosub L_5000 ! insert key
+	if e error 11000
+	A$ = " ",A$
+	A$[1,4] = commDiv using "####"
+	A$[5,7] = S1[0] Using "###"
+	A$[8,17] = CS7[1] Using "##########"
+	A$[18,18] = "1"
+	C = 17 \ D = 2
+	Gosub L_5000
+	if e error 11000
+	if commByLine and p61$[139,139] = "Y" and extraInvDollars - extraCostDollars <> 0
+		gosub CommByLineTotalsAdjustment:
+	end if
+L_2895: Next X5
+Return 
+CommByLineTotalsAdjustment: !
+	!
+	! Initialize CommAudit Record
+	!
+	k_comma1$ = " ",k_comma1$
+	K_comma1$[1,3] = S1[0] using "###"
+	K_comma1$[4,13] = CS7[1] Using "##########"
+	K_comma1$[26,26] = "1"
+	i=0
+	CommAuditKeyLoop: !
+		k_comma1$[14,15] = Tim(8) Using "&&"
+		k_comma1$[16,17] = Tim(9) Using "&&"
+		k_comma1$[18,19] = Tim(10) Using "&&"
+		k_comma1$[20,21] = Tim(11) Using "&&"
+		k_comma1$[22,23] = Tim(12) Using "&&"
+		k_comma1$[24,25] = Tim(13) Using "&&"
+		Search #ch_comma,2,1;k_comma1$,R_comma,E
+		If Not(E)
+			i=i+1
+			Signal 3,20 ! pause for new tims
+			IF i>10 error 11000
+			goto CommAuditKeyLoop:
+		end if
+	E = 2 \ Search #ch_comma,1,0;k_comma1$,R_comma,E
+	If E error 11000
+	Search #ch_comma,4,1;k_comma1$,R_comma,E
+	If E error 11000
+	k_comma2$ = " ",k_comma2$
+	k_comma2$[1,6] = 0 Using "######"
+	k_comma2$[7,29] = K_comma1$[4,26]
+	k_comma2$[30,32] = k_comma1$[1,3]
+	Search #ch_comma,4,2;k_comma2$,R_comma,E \ If E Error 11000
+	AS1[0] = S1[0] ! rep
+	AS1[1] = 1;AS1[2] = 0;AS1[3] = Spc(6)
+	AS2[0] = S3[1]
+	AS2[1] = URec
+	AS3[0] = S2[1]
+	AS3[2] = CS7[1]
+	AS3[3] = CS7[0]
+	AS3[4] = K_comma1$[14,19]
+	AS3[5] = K_comma1$[20,25]
+	AORIGCOMM = OCS1[0]
+	AS4[0] = 10
+	AS4[1] = 0
+	AS5[0] = s1[2]
+	AS5[1] = s1[2]
+	AS5[2] = s2[0]
+	! NEW INV $
+	s2[0] = s2[0] + extraInvDollars
+	AS5[3] = s2[0]
+	AS5[4] = S6[0]
+	! NEW COST $
+	s6[0] = s6[0] + extraCostDollars
+	AS5[5] = s6[0]
+	! NEW COMMISSION $
+	! new GPD * commission rate * split percentage
+	s2[1] = FNR((s2[0] - s6[0]) * (s1[2] / 100) * (CS7[2] / 100))
+	as3[1] = s2[1] ! new commiss $
+	SOURCE$ = "227b",b$
+	AS_$="COMMISSION BY LINE - ADJUSTMENT FOR ORDER TOTALS",b$
+	! write out commission record changes
+	Mat Write #17,V1,16;S2
+	Mat Write #17,V1,40;S6
+	! write out audit record
+	Mat Write #ch_comma,R_comma;AS1
+	Mat Write #ch_comma,R_comma,8;AS2
+	Mat Write #ch_comma,R_comma,16;AS3
+	Mat Write #ch_comma,R_comma,52;SOURCE$
+	Mat Write #ch_comma,R_comma,62;AS_$
+	Write #ch_comma,R_comma,122;AORIGCOMM
+	Mat Write #ch_comma,R_comma,128;AS4
+	Mat Write #ch_comma,R_comma,132;AS5;
+Return
+L_3000: Rem "=============================== update customer file /custsales
+If H5[7] = 10 Or H5[7] = 6 Goto L_3149
+IF H5[7]=36 OR H5[7]=37 RETURN ! "EVAP - No Update
+Mat Read #3,C0,252;C5
+IF H5[7]=3 and L2$[17,20]=HGLCOMM$[1,4] and l3[1]=0 ! indirect ord type, comm code=held comm code and stock update=N
+	rem no qty update
+else
+	C5[0] = C5[0] + T1 \ C5[1] = C5[1] + T1
+endif
+C5[2] = C5[2] + FND(L5[3]) \ C5[3] = C5[3] + FND(L5[3])
+C5[4] = C5[4] + FND(L5[3]) - S9[12]
+C5[5] = C5[5] + FND(L5[3]) - S9[12]
+Mat Write #3,C0,252;C5;
+A3[6] = A3[6] + (FND(L5[3]) - S9[12])
+Mat P2 = Zer
+Mat Read #6,C0,4;P2;
+Gosub L_3150
+Write #6,C0,0;H0[4];
+Mat Write #6,C0,4;P2;
+Write #6,C0,508;H0[8];
+L_3149: Return 
+L_3150: Rem "======================= add to monthly sales buckets
+IF H5[7]=3 and L2$[17,20]=HGLCOMM$[1,4] and l3[1]=0 ! indirect ord type, comm code=held comm code and stock update=N
+	rem no qty update
+else
+	P2[0,0] = P2[0,0] + T1 \ P2[ARMONTH,0] = P2[ARMONTH,0] + T1
+endif
+P2[0,1] = P2[0,1] + FND(L5[3])
+P2[ARMONTH,1] = P2[ARMONTH,1] + FND(L5[3])
+P2[0,2] = P2[0,2] + S9[12]
+P2[ARMONTH,2] = P2[ARMONTH,2] + S9[12]
+Return 
+UPDATE_WEEKLYSLS: Rem 2/weeklysls#
+If Not(WEEKLYSLSFLAG) Return 
+IF H5[7]=36 OR H5[7]=37 RETURN ! "EVAP - No Update
+If L3
+  PRODCODE$ = "Z ZZZZZZZZZZ"
+  If NEWL4 And L3 Let L4 = NEWL4
+  If Not(NEWL4) And L3 Return 
+  If L7[7]
+    NETPOCOST = L7[7]
+    POCOST = L7[7];AVGCOST = L7[7];BASECOST = L7[7]
+  Else 
+    NETPOCOST = L5[1]
+    POCOST = L5[1];AVGCOST = L5[1];BASECOST = L5[1]
+  End If 
+Else 
+  PRODCODE$ = L2$[1,12]
+  If P9$[32,32] = "Y" ! warehouse pricing
+    W$ = " ",W$;W$[1,12] = PRODCODE$;W$[13,14] = LWHSE Using "##"
+    Search #25,2,1;W$,W9,E \ If E error 11000
+    Mat Read #25,W9,78;W3
+    Read #25,W9,812;NETPOCOST;
+    POCOST = W3[16];AVGCOST = W3[15];BASECOST = W3[18]
+  Else ! regular prod file
+    Mat Read #5,L4,156;B
+    Read #5,L4,910;BASECOST
+    Mat Read #5,L4,1018;PFN;
+    POCOST = B[10];AVGCOST = B[21];NETPOCOST = PFN[0]
+  End If 
+End If 
+EXT = 1
+CNVTU[0] = 0;CNVTU[1] = UN[2];CNVTU[2] = 2;CNVTA = BASECOST;AMOUNT = 0
+If CNVTA Gosub L_20000 \ BASECOST = AMOUNT * EXT
+CNVTU[0] = 0;CNVTU[1] = UN[2];CNVTU[2] = 2;CNVTA = POCOST;AMOUNT = 0
+If CNVTA Gosub L_20000 \ POCOST = AMOUNT * EXT
+CNVTU[0] = 0;CNVTU[1] = UN[2];CNVTU[2] = 2;CNVTA = NETPOCOST;AMOUNT = 0
+If CNVTA Gosub L_20000 \ NETPOCOST = AMOUNT * EXT
+CNVTU[0] = 0;CNVTU[1] = UN[2];CNVTU[2] = 2;CNVTA = AVGCOST;AMOUNT = 0
+If CNVTA Gosub L_20000 \ AVGCOST = AMOUNT * EXT
+X$ = H0[8] Using "&&&&&&"
+YY = X$[1,2]
+MM = X$[3,4]
+DD = X$[5,6]
+Call "weeknum",MM,DD,YY,WN[] ! is on DL4 - same as ub
+CUSTCODE = 0
+WEEKLYLOOPCTR = 1
+LOOP_WEEKLYSLS: Rem
+WOY[0] = 0;WOY[1] = 0
+For X = 0 To 7
+  For Y = 0 To 9 \ DOW[X,Y] = 0 \ Next Y
+Next X
+SCRATCH$[1,4] = WN[1] Using "&&&&"
+SCRATCH$[5,6] = WN[0] Using "##"
+SCRATCH$[7,18] = PRODCODE$
+SCRATCH$[19,20] = H5[8] Using "##"
+SCRATCH$[21,22] = LWHSE Using "##"
+SCRATCH$[23,28] = CUSTCODE Using "######"
+Search #CH_WEEKLYSLS,2,1;SCRATCH$,REC_WEEKLYSLS,E \ If E > 1 error 11000
+If E
+  E = 2 \ Search #CH_WEEKLYSLS,1,0;SCRATCH$,REC_WEEKLYSLS,E
+  If E error 11000
+  Gosub WRITE_WEEKLYSLS
+  Search #CH_WEEKLYSLS,4,1;SCRATCH$,REC_WEEKLYSLS,E
+  If E error 11000
+  SCRATCH$[1,4] = WN[1] Using "&&&&"
+  SCRATCH$[5,6] = WN[0] Using "##"
+  SCRATCH$[7,12] = CUSTCODE Using "######"
+  SCRATCH$[13,24] = PRODCODE$
+  SCRATCH$[25,26] = H5[8] Using "##"
+  SCRATCH$[27,28] = LWHSE Using "##"
+  Search #CH_WEEKLYSLS,4,2;SCRATCH$,REC_WEEKLYSLS,E
+  If E error 11000
+  SCRATCH$[1,12] = PRODCODE$
+  SCRATCH$[13,14] = H5[8] Using "##"
+  SCRATCH$[15,16] = LWHSE Using "##"
+  SCRATCH$[17,22] = CUSTCODE Using "######"
+  SCRATCH$[23,26] = WN[1] Using "&&&&"
+  SCRATCH$[27,28] = WN[0] Using "##"
+  Search #CH_WEEKLYSLS,4,3;SCRATCH$,REC_WEEKLYSLS,E
+  If E error 11000
+  SCRATCH$[1,6] = CUSTCODE Using "######"
+  SCRATCH$[7,10] = WN[1] Using "&&&&"
+  SCRATCH$[11,12] = WN[0] Using "##"
+  SCRATCH$[13,24] = PRODCODE$
+  SCRATCH$[25,26] = H5[8] Using "##"
+  SCRATCH$[27,28] = LWHSE Using "##"
+  Search #CH_WEEKLYSLS,4,4;SCRATCH$,REC_WEEKLYSLS,E
+  If E error 11000
+End If 
+Rem {begin src/inc/read.weeklysls.i}
+Read #CH_WEEKLYSLS,REC_WEEKLYSLS,0;CUSTCODE
+Read #CH_WEEKLYSLS,REC_WEEKLYSLS,4;PRODCODE$
+Mat Read #CH_WEEKLYSLS,REC_WEEKLYSLS,16;WOY
+Mat Read #CH_WEEKLYSLS,REC_WEEKLYSLS,20;DOW
+Mat Read #CH_WEEKLYSLS,REC_WEEKLYSLS,500;WSDIV
+Mat Read #CH_WEEKLYSLS,REC_WEEKLYSLS,502;WSWH
+Rem {end read.weeklysls.i}
+WOY[0] = WN[0]
+WOY[1] = WN[1]
+WSDIV = H5[8]
+WSWH = L4[3]
+DOW[0,0] = WN[4] - (WN[3] - 1)
+IF H5[7]=3 and L2$[17,20]=HGLCOMM$[1,4] and l3[1]=0 ! indirect ord type, comm code=held comm code and stock update=N
+	rem no qty update
+else
+	DOW[0,1] = DOW[0,1] + T1
+ENDIF
+DOW[0,2] = DOW[0,2] + S9[4]
+DOW[0,3] = DOW[0,3] + FND(L5[3])
+DOW[0,4] = DOW[0,4] + BASECOST
+DOW[0,5] = DOW[0,5] + S9[12]
+DOW[0,6] = DOW[0,6] + POCOST
+DOW[0,7] = DOW[0,7] + NETPOCOST
+DOW[0,8] = DOW[0,8] + AVGCOST
+DOW[0,9] = DOW[0,9] + GLCOST
+DOW[WN[3],0] = WN[2]
+IF H5[7]=3 and L2$[17,20]=HGLCOMM$[1,4] and l3[1]=0 ! indirect ord type, comm code=held comm code and stock update=N
+	rem no qty update
+else
+	DOW[WN[3],1] = DOW[WN[3],1] + T1
+ENDIF
+DOW[WN[3],2] = DOW[WN[3],2] + S9[4]
+DOW[WN[3],3] = DOW[WN[3],3] + FND(L5[3])
+DOW[WN[3],4] = DOW[WN[3],4] + BASECOST
+DOW[WN[3],5] = DOW[WN[3],5] + S9[12]
+DOW[WN[3],6] = DOW[WN[3],6] + POCOST
+DOW[WN[3],7] = DOW[WN[3],7] + NETPOCOST
+DOW[WN[3],8] = DOW[WN[3],8] + AVGCOST
+DOW[WN[3],9] = DOW[WN[3],9] + GLCOST
+Gosub WRITE_WEEKLYSLS
+If WEEKLYLOOPCTR = 1
+  WEEKLYLOOPCTR = 2
+  CUSTCODE = H0[4]
+  Goto LOOP_WEEKLYSLS
+End If 
+If L3 And OLDL4 Let L4 = OLDL4
+Return 
+WRITE_WEEKLYSLS: Rem
+Rem {begin src/inc/write.weeklysls.i}
+Write #CH_WEEKLYSLS,REC_WEEKLYSLS,0;CUSTCODE
+Write #CH_WEEKLYSLS,REC_WEEKLYSLS,4;PRODCODE$
+Mat Write #CH_WEEKLYSLS,REC_WEEKLYSLS,16;WOY
+Mat Write #CH_WEEKLYSLS,REC_WEEKLYSLS,20;DOW
+Mat Write #CH_WEEKLYSLS,REC_WEEKLYSLS,500;WSDIV
+Mat Write #CH_WEEKLYSLS,REC_WEEKLYSLS,502;WSWH
+Rem {end write.weeklysls.i}
+Return 
+L_3200: Rem "================= cust sales tax, freight, misc + salestax file
+If H5[7] = 10 Or H5[7] = 6 Goto L_3350
+Mat Read #3,C0,288;C6
+Mat Read #3,C0,544;CFIN;
+Mat Read #3,C0,624;C10
+C6[0] = C6[0] + T2[7] \ C6[1] = C6[1] + T2[7]
+C6[2] = C6[2] + T2[5] \ C6[3] = C6[3] + T2[5]
+C10[0] = C10[0] + T2[20];C10[1] = C10[1] + T2[20]
+C6[4] = C6[4] + T2[3] \ C6[5] = C6[5] + T2[3]
+C6[6] = C6[6] + T2[4] + T2[6] \ C6[7] = C6[7] + T2[4] + T2[6]
+CFIN[0] = CFIN[0] + 1
+CFIN[1] = CFIN[1] + 1
+Write #3,C0,200;H0[8]
+Mat Write #3,C0,288;C6
+Mat Write #3,C0,544;CFIN
+Mat Write #3,C0,624;C10;
+Mat Read #3,C0,728;PPU$;
+Mat Read #3,C0,734;BPO$;
+Mat Read #3,C0,754;BUDG;
+Mat Read #3,C0,766;BUDGD;
+If BUDG[0] <= 0 Goto L_3350
+If Len(BPO$) < 20 Let BPO$ = BPO$ + "                    "
+If BPO$[1,1] <> "" And BPO$[1,5] <> "     " ! "is using Blanket PO
+  If BPO$ <> P0$ Goto L_3350
+  FLAG[3] = 0
+End If 
+If Not(FLAG[3]) ! "did not update shiplist budget
+  If BUDGD[1] ! budget by date range
+    If BUDGD[0] <= H0[10] And BUDGD[1] >= H0[10] ! ship date falls in budget period
+      BUDG[1] = BUDG[1] + T2[0]
+    End If 
+  Else ! no budget date range
+    BUDG[1] = BUDG[1] + T2[0]
+  End If 
+  Mat Write #3,C0,754;BUDG;
+End If 
+L_3350: Rem "===== now do sales tax file
+Read #3,C0,498;TAXTYP
+Gosub L_8900
+Gosub L_8980
+Mat Read #15,h4,0;TAXDESC$;
+Mat Read #15,H4,24;D4
+Mat Read #15,H4,132;TX0
+Mat Read #15,H4,156;TX1
+Mat Read #15,H4,222;TX2
+If P60$[42,42] <> "Y" ! not tax by line option
+  D4[0] = D4[0] + T2[7];D4[3] = D4[3] + T2[7]
+  D4[1] = D4[1] + T2[11];D4[4] = D4[4] + T2[11]
+  D4[2] = D4[2] + T2[9];D4[5] = D4[5] + T2[9]
+  TX0[0] = TX0[0] + T2[8];TX0[2] = TX0[2] + T2[8]
+  TX0[1] = TX0[1] + T2[9];TX0[3] = TX0[3] + T2[9]
+Else 
+  D4[0] = D4[0] + TOT[3];D4[3] = D4[3] + TOT[3]
+  D4[1] = D4[1] + MISCCHGS_TAXED;D4[4] = D4[4] + MISCCHGS_TAXED
+  If FTAX<>0
+	IF TAXDESC$[1,1]="+"
+		LET D4[1]=D4[1]+T2[5];D4[4]=D4[4]+T2[5]
+	else
+		IF t2[8]<>0
+			Let D4[1] = D4[1] + T2[5];D4[4] = D4[4] + T2[5]
+		ENDIF
+	ENDIF
+  endif
+  If H5[7] <> 6 And H5[7] <> 10
+    If DTAX Let D4[1] = D4[1] - T2[3];D4[4] = D4[4] - T2[3]
+    If HTAX Let D4[1] = D4[1] + T2[6];D4[4] = D4[4] + T2[6]
+  End If 
+End If 
+If H5[7] = 6 Or H5[7] = 10
+  TX1[4] = TX1[4] + T2[3];TX2[4] = TX2[4] + T2[3]
+  TX1[7] = TX1[7] + T2[6];TX2[7] = TX2[7] + T2[6]
+Else 
+  If DTAX
+    TX1[0] = TX1[0] + T2[3];TX2[0] = TX2[0] + T2[3]
+  Else 
+    TX1[4] = TX1[4] + T2[3];TX2[4] = TX2[4] + T2[3]
+  End If 
+  If HTAX
+    TX1[3] = TX1[3] + T2[6];TX2[3] = TX2[3] + T2[6]
+  Else 
+    TX1[7] = TX1[7] + T2[6];TX2[7] = TX2[7] + T2[6]
+  End If 
+End If 
+If FTAX<>0 
+	IF TAXDESC$[1,1]="+"
+		TX1[2] = TX1[2] + T2[5];TX2[2] = TX2[2] + T2[5]	
+	else
+		IF t2[8]<>0 ! taxable merch freight taxed
+			TX1[2] = TX1[2] + T2[5];TX2[2] = TX2[2] + T2[5]	
+		else
+			TX1[6] = TX1[6] + T2[5];TX2[6] = TX2[6] + T2[5]
+		ENDIF
+	ENDIF
+Else 
+  TX1[6] = TX1[6] + T2[5];TX2[6] = TX2[6] + T2[5]
+End If 
+TX1[1] = TX1[1] + MISCCHGS_TAXED;TX2[1] = TX2[1] + MISCCHGS_TAXED
+TX1[5] = TX1[5] + MISCCHGS_NONTAXED;TX2[5] = TX2[5] + MISCCHGS_NONTAXED
+Mat Write #15,H4,24;D4
+Mat Write #15,H4,132;TX0
+Mat Write #15,H4,156;TX1
+Mat Write #15,H4,222;TX2;
+Return 
+L_3500: Rem ENTERED BY SALES
+IF H5[7]=36 OR H5[7]=37 RETURN ! "EVAP - No Update
+If H5[0] < 0 Or H5[0] > 999 Or Fra(H5[0]) Let H5[0] = 999
+Mat Read #21,H5,20;EB
+Gosub L_3560
+Mat Write #21,H5,20;EB
+Mat Read #21,H5,74;EB
+Gosub L_3560
+Mat Write #21,H5,74;EB;
+Return 
+L_3560: Rem ENTD BY ROUTINE
+For X = 0 To 5
+  If X = 2 Let EB[X] = EB[X] + T2[7] \ Goto L_3580
+  If X = 4 Let EB[X] = EB[X] + T2[6] + T2[4] \ Goto L_3580
+  EB[X] = EB[X] + T2[X]
+L_3580: Next X
+EB[6] = EB[6] + H5[13] - H5[14];EB[7] = EB[7] + 1
+EB[8] = EB[8] + NOLINES
+Return 
+L_3600: Rem "======================================== invoice totals
+IF H5[7]=36 OR H5[7]=37 RETURN ! "EVAP - No Update
+X = L9[1] \ If X < 0 Let X = 0 Else If X > 8 Let X = 8
+Mat Read #16,L3[3];Q2
+Mat Read #16,L3[3],54;Q3
+Q2[X] = Q2[X] + FND(L5[3])
+Q3[X] = Q3[X] + S9[12]
+Mat Write #16,L3[3];Q2
+Mat Write #16,L3[3],54;Q3;
+Return 
+L_3700: Rem "=========================== update division file (DIVFLE)
+IF H5[7]=36 OR H5[7]=37 RETURN ! "EVAP - No Update
+If H5[8] < 1 Or H5[8] > 99 Let H5[8] = 1
+Mat Read #29,H5[8],28;D0
+D0[0] = D0[0] + T2[1]
+D0[1] = D0[1] + T2[17]
+D0[2] = D0[2] + 1
+D0[4] = D0[4] + T2[1]
+D0[5] = D0[5] + T2[17]
+D0[6] = D0[6] + 1
+Mat Write #29,H5[8],28;D0;
+Return 
+L_3800: Rem "============================= invtot (freight)
+IF H5[7]=36 OR H5[7]=37 RETURN !  "EVAP - No Sales Update
+X = OWHT1[1] \ If X < 0 Let X = 0 Else If X > 8 Let X = 8
+Mat Read #16,0;Q2
+Mat Read #16,0,54;Q3;
+Q2[X] = Q2[X] + T2[5]
+Q3[X] = Q3[X] + T2[20]
+Mat Write #16,0;Q2;
+Mat Write #16,0,54;Q3;
+Return 
+L_3900: Rem "=========== date breakdown
+Y9 = J$[1,2]
+M = J$[3,4]
+D = J$[5,6]
+D9 = 365 * Y9 + X9[M] + D
+If M > 2 If Not(Fra(Y9 / 4)) Let D9 = D9 + 1
+Return 
+L_4000: Rem "====================== whole order accepted. delete it.
+IF H5[7]=36 GOTO L_7500:  ! "EVAP BILL - KEEP OPEN
+If A9 Goto L_7500
+ORD_DELETED = 1
+Mat Read #8,H1;H0;
+E = 3 \ Search #9,1,0;A$,H0[2],E \ If E error 11000
+E = 3 \ Search #10,1,0;A$,H0[3],E \ If E error 11000
+A$ = " ",A$
+A$[1,2] = H0[0] Using "##"
+A$[3,8] = N0 Using M$[1,6]
+A$[9] = ""
+Search #8,2,1;A$,V1,E \ If E error 11000
+Search #8,5,1;A$,V1,E \ If E error 11000
+Rem CCT # 164770 - RESET TRACKING- FOR PROBLEM ON RESTART-wmb 6/06
+TRACK[0] = 0 \ Write #80,0,0;TRACK[0];
+A$ = " ",A$
+A$[1,6] = H0[4] Using M$[1,6]
+A$[7,12] = N0 Using M$[1,6]
+A$[13] = ""
+Search #8,2,2;A$,V1,E \ If E error 11000
+Search #8,5,2;A$,V1,E \ If E error 11000
+A$ = " ",A$
+A$[1,3] = H0[11] Using "###"
+A$[4,9] = N0 Using M$[1,6]
+A$[10] = ""
+SEARCH #8,2,3;A$,V1,E \ IF E>1 error 11000
+if e
+	gosub fix_smkey
+else
+	SEARCH #8,5,3;A$,V1,E \ IF E error 11000
+endif
+E = 3;V1 = H1 \ Search #8,1,0;A$,V1,E \ If E error 11000
+Rem REM CLEAR ACKNOWLEDGEMENT PRINTED IF IT STILL EXISTS.
+If P60$[23,23] <> "Y" Return 
+A$ = " ",A$
+A$[2,7] = N0 Using M$[1,6]
+Search #75,2,1;A$,V1,E
+If E > 1 error 11000
+If E = 1
+  A$[1,1] = "*"
+  Search #75,2,1;A$,V1,E
+  If E > 1 error 11000
+End If 
+Search #75,5,1;A$,V1,E
+If E > 1 error 11000
+Return 
+L_4200: Rem ==================================== clear out sordcash
+IF H5[7]=36 RETURN ! "EVAP - no sales update
+A$ = H0[7] Using "######"
+Search #33,5,1;A$,V1,E \ If E > 1 error 11000
+If Not(E) Let E = 3 \ Search #33,1,0;A$,V1,E \ If E error 11000
+Return 
+L_4300: Rem "======================================= slscurr
+IF H5[7]=36 OR H5[7]=37 RETURN ! "EVAP - no sales update
+If Not(C8[2]) Return 
+If L3 Let A2$ = "Z ZZZZZZZZZZ" \ Goto L_4330
+Read #5,L4,139;A2$;
+L_4330: C2 = H0[4]
+Mat P2 = Zer
+A$ = " ",A$
+A$[1,6] = C2 Using "######"
+A$[7,18] = A2$[1,12]
+A$[19,20] = LWHSE Using "##"
+Search #18,2,1;A$,R1,E
+If E > 1 error 11000
+If E = 1 Gosub L_4500 \ Goto L_4330
+Mat Read #18,R1,16;P2
+Gosub L_3150
+Mat Write #18,R1,16;P2;
+if sqlChan >= 0
+	e = slscurr_UpdateSQLFromDL4(e$, intCo, a$, sqlChan,18)
+	if e<>1 error 11000
+end if
+Return 
+L_4500: Rem NEW REC
+E = 2 \ Search #18,1,0;A$,R1,E
+If E error 11000
+Write #18,R1;A$[7,18];
+Write #18,R1,12;C2;
+For C = 0 To 12
+  For I = 0 To 2
+    P2[C,I] = 0
+  Next I
+Next C
+Mat Write #18,R1,16;P2;
+Write #18,R1,254;LWHSE;
+Mat Write #18,R1,256;P2;
+C = 18 \ D = 1 \ V1 = R1
+Gosub L_5000
+If E > 1 error 11000
+If Not(E) Goto L_4650
+E = 3 \ Search #18,1,0;A$,R1,E
+Return 
+L_4650: Rem DIR #2
+A$ = " ",A$
+A$[1,12] = A2$[1,12]
+A$[13,18] = C2 Using "######"
+A$[19,20] = LWHSE Using "##"
+C = 18 \ D = 2 \ V1 = R1
+Gosub L_5000
+If E error 11000
+Return 
+L_4800: Rem SALES TAX BY LINE ITEM
+If P60$[42,42] <> "Y" Return 
+If L6[5] Let TAXREC = L6[5] Else Let TAXREC = H4
+Mat Read #15,TAXREC,24;D4 \ Mat Read #15,TAXREC,132;TX0
+D4[0] = D4[0] + LTAX1;D4[3] = D4[3] + LTAX1
+X3[8]=L6[5] \ if custom_customer$="MORRISETTE" let X3[8]=LTAX1
+If X3[8] ! was L6[5] (morrisette custom)
+  TX0[0] = TX0[0] + L5[3];TX0[2] = TX0[2] + L5[3]
+  D4[1] = D4[1] + L5[3];D4[4] = D4[4] + L5[3]
+Else 
+  TX0[1] = TX0[1] + L5[3];TX0[3] = TX0[3] + L5[3]
+  D4[2] = D4[2] + L5[3];D4[5] = D4[5] + L5[3]
+End If 
+If TRACK[1] < 1 Mat Write #15,TAXREC,24;D4 \ Mat Write #15,TAXREC,132;TX0;
+Return 
+L_5000: Rem "====================== insert dir
+Search #C,4,D;A$,V1,E \ If E > 2 error 11000
+If Not(E) Return 1
+Return ! !Print 'RB';A$;"  ALREADY IN FILE!!" \ Return 
+L_5200: Rem "======================= product sales history
+If H5[7]=36 Or H5[7]=37 Return ! "EVAP - No Sales Update
+If NEWL4 And L3 Let L4 = NEWL4
+If Not(NEWL4) And L3 Goto L_5289
+P1 = L4
+Mat P2 = Zer
+Mat Read #4,P1,16;P2
+Gosub L_3150
+Mat Write #4,P1,16;P2;
+L_5289: If L3 And OLDL4 Let L4 = OLDL4
+Return 
+L_5500: Rem GET CUST.REC.#
+A$ = " ",A$
+A$[1,6] = H0[4] Using M$[1,6]
+Search #3,2,1;A$,V1,E
+C0 = V1
+If Not(E) Return 
+E$="CUSTOMER # "+A$[1,6]+" NOT FOUND!"
+error 11000
+L_5600: Rem "================================= salesman file
+If H5[7]=36 Or H5[7]=37 Return ! "EVAP - No Sales Update
+For X5 = 0 To 4
+  IF SplitFlag = 0  ! "both use multiple slsm
+	IF X5>0 GOTO L_5635:
+  Endif
+  If SLSM[X5] = 0 Goto L_5635
+  A$ = " ",A$
+  A$ = SLSM[X5] Using "###"
+  Search #13,2,1;A$,V1,E \ If E > 1 error 11000
+  If E let msg$="SALESMAN # "+A$+" NOT FOUND!" \ error 11000
+  Mat Read #13,V1,118;S5
+  S5[2] = S5[2] + SCOM[X5]
+  S5[3] = S5[3] + SCOM[X5]
+  Mat Write #13,V1,118;S5;
+L_5635: Next X5
+Return 
+L_5650: Rem "================================ salesman file / sls
+If H5[7]=36 Or H5[7]=37 Return ! "EVAP - No Sales Update
+A$ = " ",A$
+A$ = L4[1] Using "###"
+Search #13,2,1;A$,V1,E \ If E error 11000
+Mat Read #13,V1,142;D2
+If Not(L3[3]) Let L3[3] = 1
+X = L3[3] - 1
+IF H5[7]=3 and L2$[17,20]=HGLCOMM$[1,4] and l3[1]=0 ! indirect ord type, comm code=held comm code and stock update=N
+	rem no qty update
+else
+	D2[X,0] = D2[X,0] + T1;D2[X,1] = D2[X,1] + T1
+endif
+D2[X,2] = D2[X,2] + FND(L5[3])
+D2[X,3] = D2[X,3] + FND(L5[3])
+D2[X,4] = D2[X,4] + (FND(L5[3]) - S9[12])
+D2[X,5] = D2[X,5] + (FND(L5[3]) - S9[12])
+Mat Write #13,V1,142;D2;
+Mat P2 = Zer
+Mat Read #20,V1,4;P2
+Gosub L_3150
+Mat Write #20,V1,4;P2
+Write #20,V1,0;L4[1]
+Write #20,V1,508;H0[8];
+Return 
+L_5900: Rem CHK BILLTO (& Posting)
+If P61$[41,41] = "Y" ! "Posting Customer
+  FLAG[2] = 1;C9 = C12[1] \ Gosub CHKCCODE
+  If E Let C9 = H0[1]
+Else ! "not using Posting - Set to BillTo
+  C12[1] = H0[1]
+End If 
+FLAG[2] = 0
+C9 = H0[1] \ Gosub CHKCCODE
+Return 
+CHKCCODE: Rem "Check it (C9 used as Billto #)
+A$ = " ",A$;A$ = C9 Using "######"
+Search #3,2,1;A$,V1,E
+If Not(E) Return 
+If E > 1 error 11000
+If FLAG[2] Return 
+E$="BILL TO CUSTOMER # "+A$[1,6]+" NOT FOUND!"
+error 11000
+L_6000: Rem ! "================= clear messages file
+IF H5[7]=36 RETURN ! "EVAP BILL - KEEP OPEN
+! added 07/2014 t#36357 - remove "Carton " on BO's
+If custom_customer$<>"MIDATLANTIC"
+	If A9 Return 
+endif
+A$ = " ",A$
+A$[1,6] = H0[7] Using M$[1,6]
+L_6030: Search #14,3,1;A$,V1,E
+If E Return 
+X2 = A$[1,6]
+If X2 <> H0[7] Return 
+Mat read #14,v1;M1$;
+if custom_customer$="MIDATLANTIC"
+	if a9=99 and m1$[1,7]<>"Carton " goto L_6030: ! keep all BUT Carton
+endif ! if BO - DELETE lines starting with "Carton " (pack summary - sys gen'd)
+M1$ = " ",M1$
+Write #14,V1;M1$;
+Search #14,5,1;A$,V1,E
+If E error 11000
+E = 3
+Search #14,1,0;A$,V1,E
+If E error 11000
+Goto L_6030
+L_6200: Rem ! "================= clear messages file
+If A9 Return 
+If Not(ROLTAGFLAG) Return 
+A$ = " ",A$
+A$[1,6] = H0[7] Using M$[1,6]
+L_6230: Search #44,3,1;A$,R44,E
+If E Return 
+X2 = A$[1,6]
+If X2 <> H0[7] Return 
+TL2[0] = 0 \ TL2[1] = 0
+LINENUM = 0
+LPONUM$ = " ",LPONUM$
+LJOBNUM$ = " ",LJOBNUM$
+PSNUM$ = " ",PSNUM$
+MSG1$ = " ",MSG1$
+MSG2$ = " ",MSG2$
+Mat Write #44,R44,0;TL2;
+Write #44,R44,12;LINENUM;
+Write #44,R44,14;LPONUM$;
+Write #44,R44,44;LJOBNUM$;
+Write #44,R44,74;PSNUM$;
+Write #44,R44,104;MSG1$;
+Write #44,R44,134;MSG2$;
+Search #44,5,1;A$,R44,E
+If E error 11000
+E = 3
+Search #44,1,0;A$,R44,E
+If E error 11000
+Goto L_6230
+L_6100: Rem B/O REL RESET
+K9$ = " ",K9$
+K9$[1,6] = OREF[2] Using "######"
+K9$[7,9] = L3[2] Using "###"
+Search #11,2,1;K9$,R9,E
+If E Return 
+Mat Read #11,R9,168;O7
+O7[12] = O7[12] - L7[4]
+O7[0] = O7[0] + L7[4]
+Mat Write #11,R9,168;O7;
+Return 
+L_6170: Rem "============================== substitute prod sales history
+If H5[7]=36 Or H5[7]=37 Return ! "EVAP - No Sales Update
+If L3 Return 
+Read #5,L4,139;A2$;
+L_6185: WHSE = LWHSE
+Mat P2 = Zer
+A$ = " ",A$
+A$[1,12] = S3$[21,33]
+A$[13,24] = A2$[1,12]
+A$[25,26] = WHSE Using "##"
+Search #24,2,1;A$,R1,E
+If E > 1 error 11000
+If E = 1 Gosub L_6255 \ Goto L_6185
+Mat Read #24,R1,24;P2;
+Gosub L_3150
+Mat Write #24,R1,24;P2;
+Return 
+L_6255: Rem "substitute record not there. make one!
+E = 2 \ Search #24,1,0;A$,R1,E
+If E error 11000
+Write #24,R1;A$[1,24];
+For C = 0 To 12
+  For I = 0 To 2
+    P2[C,I] = 0
+  Next I
+Next C
+Mat Write #24,R1,24;P2;
+Write #24,R1,258;WHSE;
+C = 24 \ D = 1 \ V1 = R1
+Gosub L_5000
+If E > 1 error 11000
+If Not(E) Goto L_6365
+E = 3 \ Search #24,1,0;A$,R1,E
+Return 
+L_6365: Rem "build dir #2
+A$ = " ",A$
+A$[1,12] = A2$[1,12]
+A$[13,24] = S3$[21,33]
+A$[25,26] = WHSE Using "##"
+C = 24 \ D = 2 \ V1 = R1
+Gosub L_5000
+If E error 11000
+Return 
+SUBSTUSG: Rem "Update Usage of Original if Substituted
+SUBSUP = 0
+If P61$[48,48] <> "Y" Return 
+If S3$[21,21] = "" Or S3$[21,25] = "     " Return 
+W$ = " ",W$;W$ = S3$[21,32]
+Search #5,2,1;W$,R[5],E \ If E > 1 error 11000
+If E = 1 Return 
+Mat Read #5,R[5],256;OPA;
+Mat Read #5,R[5],512;OPFU1;
+Mat Read #5,R[5],554;OPFU2;
+OPT1 = T1
+If OLS2[0] = 1 Or OLS2[0] = 2 ! "it's been cut!
+  If OLS2[1] Let OPT1 = OPT1 * OLS2[1]
+End If 
+If PFU1[0] = OPFU1[0] Goto GET_OPWHSE
+For X = 1 To 7
+  If OPFU1[X] ! "only non-zero
+    For X1 = 0 To 7
+      If PFU1[X1] And OPFU1[X] = PFU1[X1] Goto GOT_OPUM
+    Next X1
+  End If 
+Next X
+Return 
+GOT_OPUM: Rem "convert subs prod from base to match um for original
+OPUM = X;SPUM = X1
+For X = 0 To 33
+  SPA[X] = A[X]
+  If X <= 20 Let SPFU1[X] = PFU1[X]
+  If X <= 6 Let SPFU2[X] = PFU2[X]
+Next X
+CNVTU[0] = 0;CNVTU[1] = PFU1[SPUM];CNVTU[2] = 1
+CNVTA = T1 \ Gosub L_20000
+OPT1 = AMOUNT
+For X = 0 To 33
+  A[X] = OPA[X]
+  If X <= 20 Let PFU1[X] = OPFU1[X]
+  If X <= 6 Let PFU2[X] = OPFU2[X]
+Next X
+CNVTU[0] = PFU1[OPUM];CNVTU[1] = 0;CNVTU[2] = 1
+CNVTA = OPT1 \ Gosub L_20000
+OPT1 = AMOUNT
+For X = 0 To 33
+  A[X] = SPA[X]
+  If X <= 20 Let PFU1[X] = SPFU1[X]
+  If X <= 6 Let PFU2[X] = SPFU2[X]
+Next X
+GET_OPWHSE: Rem "get whse record for original prod
+W$ = " ",W$;W$[1,12] = S3$[21,32];W$[13,14] = LWHSE Using "##"
+Search #25,2,1;W$,W9,E \ If E > 1 error 11000
+If E = 1 Goto SUBSTUDONE
+Mat Read #25,W9,228;W5
+Mat read #25,w9,800;whmisc
+If H5[7] = 7 Goto S_7934
+If L3[0] Or Not(L3[1]) Goto SUBSTUDONE
+If H5[7] = 8 goto S_7945 ! Or H5[7] = 16 Goto S_7945
+!if custom_customer$<>"MAYFIELD" ! mayfield - update usage on ot16 #2516
+	if h5[7]=16 AND WHMISC[6]=0 goto S_7945 ! whse flag - no update
+!Endif ! TASK 8286 - back to no update
+S_7934: ! 
+origT1 = T1 \ T1 = OPT1
+If custom_customer$<>"HTBERRY" ! normal
+	W5[0] = W5[0] + OPT1;W5[ARMONTH] = W5[ARMONTH] + OPT1
+	gosub DoUpdateProdWhStat:
+Else
+	if h5[7]<>35
+		LET W5[0]=W5[0]+OPT1;W5[ARMONTH]=W5[ARMONTH]+OPT1
+		gosub DoUpdateProdWhStat:
+	end if
+Endif
+T1 = origT1
+SUBSUP = 1
+S_7945: Rem "
+Mat Write #25,W9,228;W5;
+SUBSTUDONE: Rem "
+Return 
+L_6500: Rem "============================== update ship history
+If H5[7]=36 Or H5[7]=37 Return ! "EVAP - No Sales Update
+If OLS2 = 3 Return 
+Mat Read #1,60,6;FLG$;
+If FLG$[1,1] = "N" Return 
+Gosub L_10500
+Try Close #22  Else REM
+Mat Read #1,88,2496;K5$;
+Open #22,K5$
+K5$ = " ",K5$;K5$[1,6] = H0[4] Using "######";K5$[7,12] = H0[7] Using "######"
+K5$[13,15] = L3[2] Using "###" \ K5$[16,21] = H0[10] Using "######"
+If RESTART Search #22,2,1;K5$,R1[9],E \ If Not(E) Goto SHIPHISTDONE
+E = 2 \ Search #22,1,0;K5$,R1[9],E \ If E error 11000
+K5$[22,28] = R1[9] Using "###### "
+Search #22,4,1;K5$,R1[9],E \ If E error 11000
+S$ = " ",S$ \ For X = 0 To 20 \ S7[X] = 0 \ Next X
+S$[1,10] = P0$;S$[11,14] = SUNIT$[1,4];S$[15,18] = PUNIT$[1,4]
+S$[19,30] = L2$[1,12]
+S7[0] = H0[7];S7[1] = H0[7];S7[2] = H0[6];S7[3] = L3[2];S7[4] = SUNIT[0]
+S7[5] = SUNIT[2];S7[6] = H0[10];S7[7] = PUNIT;S7[8] = L5[3];S7[9] = H0[9]
+S7[10] = 0 \ S7[11] = 0
+S7[12] = H0[4] \ S7[13] = L4[0] \ S7[14] = L3[0]
+S7[15] = SUNIT[1]
+If Not(A9) Let S7[10] = 227 \ S7[11] = CURDATE
+Mat Write #22,R1[9],0;S$
+Mat Write #22,R1[9],30;S7;
+SHIPHISTDONE: Close #22
+Return 
+L_6600: Rem BILL AND HOLD NEXT SHIP DATE !
+!Swap 1,"MX227BH"
+Call "227bh.dl4",H1,IntCo,E$,rstr$
+!Chain Write H1
+Return 
+L_6640: Rem "============================= non stock sales history
+If H5[7]=36 Or H5[7]=37 Return ! "EVAP - No Sales Update
+L_6655: C2 = S9[14] \ WHSE = LWHSE
+If S3$[1,4] = "    " Or Len(S3$) = 0 Let S3$[1,20] = "99999999999999999999"
+Mat N2 = Zer
+A$ = " ",A$
+A$[1,6] = C2 Using "######"
+A$[7,26] = S3$[1,20]
+A$[27,28] = WHSE Using "##"
+Search #23,2,1;A$,R1,E \ If E > 1 error 11000
+If E Gosub L_6725 \ Goto L_6655
+Mat Read #23,R1,24;N2
+Mat Read #23,R1,416;NS
+Gosub L_6890
+Mat Write #23,R1,24;N2
+If HA3[1] Let NS[0] = HA3[1]
+Mat Write #23,R1,416;NS;
+Return 
+L_6725: Rem "non stock record not there. make one!
+E = 2 \ Search #23,1,0;A$,R1,E \ If E error 11000
+Write #23,R1;A$[7,26];
+Write #23,R1,20;C2;
+For C = 0 To 12
+  For I = 0 To 4
+    N2[C,I] = 0
+  Next I
+Next C
+Mat Write #23,R1,24;N2;
+Write #23,R1,414;WHSE;
+NS[0] = 0;NS[1] = 0 \ Mat Write #23,R1,416;NS;
+C = 23 \ D = 1 \ V1 = R1
+Gosub L_5000 \ If E > 1 error 11000
+If Not(E) Goto L_6835
+E = 3 \ Search #23,1,0;A$,R1,E
+Return 
+L_6835: Rem "build dir #2
+A$ = " ",A$
+A$[1,20] = S3$[1,20]
+A$[21,26] = S9[14] Using "######"
+A$[27,28] = WHSE Using "##"
+C = 23 \ D = 2 \ V1 = R1
+Gosub L_5000 \ If E error 11000
+Return 
+L_6890: Rem "=========================== add to non stock sales buckets
+N2[0,0] = N2[0,0] + T1;N2[ARMONTH,0] = N2[ARMONTH,0] + T1
+N2[0,1] = N2[0,1] + FND(L5[3])
+N2[ARMONTH,1] = N2[ARMONTH,1] + FND(L5[3])
+N2[0,2] = N2[0,2] + S9[12]
+N2[ARMONTH,2] = N2[ARMONTH,2] + S9[12]
+X = 1 \ If T1 < 1 Let X = -1
+N2[0,3] = N2[0,3] + X * FNR(Abs((L6[2] * L7[4]) / UNF[4]))
+N2[ARMONTH,3] = N2[ARMONTH,3] + X * FNR(Abs((L6[2] * L7[4]) / UNF[4]))
+N2[0,4] = N2[0,4] + X * S9[4]
+N2[ARMONTH,4] = N2[ARMONTH,4] + X * S9[4]
+Return 
+L_7000: Rem "============================ process b'ord line
+A9 = 99
+PREVBOLINE = 1
+If TRACK[1] > 16 Goto L_1840
+Gosub L_6500
+LPRINTED = 0;LP_DATE = 0;LP_TIME = 0
+L5[2] = L5[2] + S9[15];OLM[3] = OLM[3] - S9[15]
+L5[0] = L5[0] + OLM[0];L5[3] = L5[3] + OLM[1]
+QPB = QPB + S9[7]
+eun[2]=0 ! don't write out perm price to last price after first pass !cct244182
+IF H5[7]=36 GOTO L_7080: ! "evap bILL - NO QTY CHANGE
+If H5[7] <> 24
+  numbol=numbol+1
+  L7[0] = L7[0] + L7[4];L7[1] = L7[1] + L5[3]
+  L7[4] = 0
+  S9[4] = 0
+  If L3[2] > 900 Goto L_7070
+  Z9 = Z9 + L5 \ Z9[1] = Z9[1] + (L7[2] * L6[4])
+  S9[6] = 0;S9[7] = 0
+L_7070: L5[3] = 0;S9[12] = 0;S9[10] = 0;S9[9] = 0
+End If 
+L_7080: ! write now
+Mat Write #11,L1,8;L3
+Mat Write #11,L1,16;L4
+Mat Write #11,L1,32;L5
+Mat Write #11,L1,56;L6
+Mat Write #11,L1,168;L7;
+Mat Write #11,L1,260;S9;
+MAT  WRITE #11,L1,446;EUN;
+Mat Write #11,L1,542;QPB;
+Mat Write #11,L1,548;LPRINTED;
+Mat Write #11,L1,552;LP_DATE;
+Mat Write #11,L1,556;LP_TIME;
+If TRACK[1] < 17 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+Goto L_1840
+L_7400: Rem "===================== update non stocks
+If TRACK[1] > 1 Goto L_7495
+IF H5[7]=36 OR H5[7]=37 GOTO L_7495: ! "EVAP - No Sales Update
+Gosub L_30000
+Gosub L_10500 \ T1 = SUNIT[2]
+If Not(L4) Let HA3[1] = 0 \ Goto L_7495
+Mat Read #12,L4,120;HA3
+L8 = L3[3]
+L8[1] = T1
+L8[2] = L5[1]
+L8[3] = OLM[3]
+L8[4] = L5[3]
+X2 = 0 \ If Not(L7[3]) Let X2 = -1
+If H5[7] = 24 Let X2 = 0
+If H5[7] = 4 And (L7[2] > L7[0] + S9[6] Or L7[2] > QPB + S9[7]) Let X2 = 0
+If H5[7] = 15 And (L7[2] > L7[0] + S9[6] Or L7[2] > QPB + S9[7]) Let X2 = 0
+If X2 = -1 Write #12,L4,8;X2;
+OLDL4 = L4 \ NEWL4 = 0
+NS$ = " ",NS$ \ NS$[1,12] = "Z ZZZZZZZZZZZZ"
+Search #5,2,1;NS$,L4,E \ If E > 1 error 11000
+If E Let L4 = 0 Else Let NEWL4 = L4
+If L4 Goto L_1493 Else Let L4 = OLDL4
+L_7495: If TRACK[1] < 2 Let TRACK[1] = TRACK[1] + 1 \ Write #80,0,2;TRACK[1];
+Goto L_1600
+L_7500: Rem "======================== set up header and keep this b'order
+If TRACK[0] > 10 Goto KEEP_BACKORDER_DONE
+H0[5] = H0[5] + 1
+IF H5[7]=24 or h5[7]=36 GOTO L_7516: ! "same as b/h for standing order
+If H5[7] <> 4 And H5[7] <> 15 
+	Let H0[10] = 999999
+endif
+L_7516: S1$[118,118] = "1";SRN[0] = 0
+S8 = 1 ! status to set BO's
+s8=1 ! default status - entered^M                                          
+LET S8=1 \ IF P9$[45,45]="Y" LET S8=2 ! "bypass 221 flag/different status^M
+let keyot$=" ",keyot$                                                   
+let keyot$[1,2]=H5[7] using "##"                                         
+search #51,2,1;keyot$,r51,e                                              
+if not(e)                                                               
+      mat read #51,r51,32;ot2;                                          
+      If ot2[11]>0 and ot2[11]<5                                         
+              let s8=ot2[11] 
+			  if h5[7]=2 and ot2[11]=4 ! direct sales order - status set to ready to invoice
+				let h0[10]=curdate
+			  endif
+      endif                                                              
+endif                         
+If custom_customer$="ACME" ! acme wants all orders to 1!
+	Let S8 = 1
+Endif
+If custom_customer$="PERFORMANCE_CHEM" 
+ IF h5[7]=24 ! STANDING ORDERS
+ LET S8=4  ! SET THEM BACK TO A 4
+ ENDIF
+ENDIF
+iF h5[7]=36 LET S8=4 ! "STATUS 4 FOR evap BILLING
+Mat Write #8,H1;H0
+If H5[7] <> 24 and H5[7]<>36 Let TOT_SELL = 0 \ Mat Write #8,H1,56;TOT_SELL
+X1 = 0 \ Write #8,H1,506;X1;
+Mat Write #9,H0[2],8;S1$;
+Write #9,H0[2],154;SRN;
+if custom_customer$="ACTION" or custom_customer$="WENELSON" or CUSTOM_CUSTOMER$ = "AREA8045" Or CUSTOM_CUSTOMER$ = "NW8045"
+	let h4[1]=0;ros_s5=0
+	mat write #8,h1,78;h4;
+	write #9,h0[2],146;ROS_S5;
+Endif
+A$ = " ",A$
+A$[1,2] = S8 Using "##"
+A$[3,8] = N0 Using M$[1,6]
+A$[9] = " "
+C = 8;D = 1;V1 = H1
+Gosub L_5000 \ if e error 11000
+A$[1,2] = H0 Using "##"
+A$[9] = ""
+Search #8,2,1;A$,V1,E \ If E error 11000
+Search #8,5,1;A$,V1,E \ If E error 11000
+IF H5[7]=24 OR H5[7]=36 GOTO L_7730: ! "keep totals on standing order
+TOT[4] = TOT[4] + MERCHSUBT
+For I = 0 To 25
+  If I < 3 Let TOT[I] = 0
+  If I < 10 Let MCODE[I] = 0;MCHARGE[I,0] = 0;MCHARGE[I,1] = 0
+  If I <> 2 And I <> 24 Let T2[I] = 0
+Next I
+L_7730: A9 = 0
+H5[5] = Z9[1]
+JRNL = 0
+Mat Write #10,H0[3],8;T2;
+Mat Write #10,H0[3],164;JRNL;
+Mat Write #10,H0[3],168;MCODE; \ Mat Write #10,H0[3],208;MCHARGE;
+Mat Write #10,H0[3],328;TOT;
+Z9 = 0;Z9[1] = 0
+let phup=0
+let h6[2]=0
+H0 = S8
+Write #8,H1;H0;
+Mat write #8,H1,408;H6;
+write #8,H1,586;PHUP;
+if custom_customer$="EDMAR" or custom_customer$="RIVERSIDE"
+	mat read #9,h0[2],126;S2$;
+	s2$[19,20]="00" ; truck=0
+	mat  write #9,h0[2],126;S2$;
+    mat  write #9,h0[2],146;truck;
+	h4[1]=0 ! stop
+	write #8,h1,80;h4[1];
+endif
+Rem update customer on order
+If H5[7] <> 4 And H5[7] <> 15 And H5[7] <> 24
+  If P60$[40,40] = "O" And (T2[24] - TOT[4]) > 0
+    Gosub L_5500
+    Read #3,C0,412;CUSTORD
+    CUSTORD = CUSTORD + (T2[0] - T2[1] + T2[24] - TOT[4])
+    Write #3,C0,412;CUSTORD;
+    If H0[1] <> H0[4] ! update billto
+      Read #3,C0,378;C8;
+      Gosub L_5900
+      Read #3,V1,412;CUSTORD
+      CUSTORD = CUSTORD + (T2[0] - T2[1] + T2[24] - TOT[4])
+      Write #3,V1,412;CUSTORD;
+    End If 
+  End If 
+End If 
+if p61$[90,90]="Y"
+  !If Custom_customer$="UPCW" ! or is this everyone depending on sysflag?
+	IF numbol>1 and h5[7]=1
+		let h5[7]=9
+		Mat write #8,H1,104;H5;
+	end if
+  !Endif ! I say it depends on sysflag S3 P  50> Make OT 9 in 227 bol
+end if
+If TRACK[0] < 11 Let TRACK[0] = 10 \ Write #80,0,0;TRACK[0];
+!! ACCUM TOT MERCH $ PREV SHIPPED ON REMAINING LINES-WMB 8/10 CCT#242601
+LET Z9=0;Z9[1]=0 \ LET Z9[2]=0
+LET A$=" ",A$
+LET A$[1,6]=N0 USING M$[1,6]
+L_7780: SEARCH #11,3,1;A$,V1,E \ IF E>2 error 11000
+IF E GOTO L_7782:
+LET Z9[1]=A$[1,6]
+IF Z9[1]<>N0 GOTO L_7782: ! "hit next order
+MAT  READ #11,V1,32;L5;
+MAT  READ #11,V1,168;L7; 
+LET Z9=Z9+ L7[1]
+LET Z9[2]=Z9[2]+L5[0] !TOTAL MDSE AMT (ORDERED)- ADJUST FOR DELETED LINES 
+GOTO L_7780: ! "another line
+L_7782: !WRITE OUT TOTALS
+mat  read #10,h0[3],8;t2
+MAT  READ #10,H0[3],328;TOT
+LET TOT[4]= Z9
+LET T2[24]=Z9[2]   
+MAT  WRITE #10,H0[3],8;T2 ! "totals  
+MAT  WRITE #10,H0[3],328;TOT;
+LET A$=" ",A$
+LET Z9=0;Z9[1]=0 \ LET Z9[2]=0
+KEEP_BACKORDER_DONE: Return 
+L_7900: Rem "==================================== update warehouse file
+If L3[0] Goto L_7954
+SUBSUP = 0
+If Int(S9[16]) = 1 Gosub SUBSTUSG
+W$ = CURDATE Using "######" \ M9 = W$[3,4]
+W$ = " ",W$;W$[1,12] = L2$[1,12];W$[13,14] = LWHSE Using "##"
+Search #25,2,1;W$,W9,E \ If E error 11000
+Mat Read #25,W9,32;W1
+Mat Read #25,W9,38;W2
+Mat Read #25,W9,78;W3
+Mat Read #25,W9,228;W5 \ Mat Read #25,W9,444;WH8
+Mat Read #25,W9,780;WHLV \ Mat Read #25,W9,696;W7
+MAT  READ #25,W9,800;WHMISC	
+Mat Read #5,L4,670;U4;
+x1=0 ! exceptional sale
+If H5[7] = 7 Goto L_7934
+If L3[0] Or Not(L3[1]) Goto L_7954
+!If H5[7] = 8 Or H5[7] = 16 Goto L_7945
+If H5[7] = 8 goto L_7945 ! Or H5[7] = 16 Goto L_7945
+!if custom_customer$<>"MAYFIELD" ! mayfield - update usage on ot16 #2516
+	if h5[7]=16 AND WHMISC[6]=0 goto L_7945 ! Whse Flag - no update
+!Endif
+L_7934: ! 
+If custom_customer$<>"HTBERRY"
+	IF H5[7]=3 and L2$[17,20]=HGLCOMM$[1,4] and l3[1]=0 ! indirect ord type, comm code=held comm code and stock update=N
+		rem no qty update
+	else
+		If Not(SUBSUP)
+			Let W5[0] = W5[0] + T1;W5[ARMONTH] = W5[ARMONTH] + T1
+			gosub DoUpdateProdWhStat:
+		end if
+	ENDIF
+Else
+	IF H5[7]=3 and L2$[17,20]=HGLCOMM$[1,4] and l3[1]=0 ! indirect ord type, comm code=held comm code and stock update=N
+		rem no qty update
+	else
+		If Not(SubsUp) and H5[7]<>35
+			LET W5[0]=W5[0]+T1;W5[ARMONTH]=W5[ARMONTH]+T1 ! "unit sales (ytd/mtd)
+			gosub DoUpdateProdWhStat:
+		end if
+	endif
+Endif
+If L3[1] If W3[9] If U4[0] If W3[9] + (W3[9] * U4[0] / 100) <= L7[4] ! "check for exc. sale
+  WH8[M9 - 1 + 24] = 1
+  ! call to alert/notify
+  let x1=1 ! set flag to make the call
+End If ! REM IF W3[0]-W3[2]<=0 LET WH8[M9-1]=1 ! "out-of-stock flag
+If W3[0] > 0 Goto L_7945
+If W7[8] And Not(W7[9]) Goto L_7945
+W7[8] = CURDATE;W7[11] = W7[11] + 1;W7[9] = 0
+L_7945: Mat Write #25,W9,32;W1
+W2[6] = H0[8] \ Mat Write #25,W9,38;W2
+Mat Write #25,W9,78;W3
+Mat Write #25,W9,228;W5
+Mat Write #25,W9,444;WH8
+Mat Write #25,W9,780;WHLV \ Mat Write #25,W9,696;W7;
+if x1=1 ! exceptional sale - Call AFTER WRITE! needs OnHand after
+	x1=0 ! zero flag
+  x3[0]=12;x3[1]=w1[2];x3[2]=L4[0];x3[3]=w9;x3[4]=L7[4] ! alrt#,buyer,prodrec,pwhrec,shipped
+  x3[5]=h0[7];x3[6]=ORef[1];x3[7]=H0[4] ! added - order,inv,cust#
+  x1[1]=1;x1[2]=5;x1[3]=25;msg$="Execeptional Sale "+Str$(U4[0])+"%" ! chan:ctrl,prod,pwhs
+  call "libalertproc.lib",x3[],x1[],msg$
+  ! writes to alert file
+  clear msg$
+Endif
+L_7954: Return 
+L_8000: Rem "================================== DIVISION HISTORY FILE
+If H5[7]=36 Or H5[7]=37 Return ! "EVAP - No Sales Update
+If Not(L3[0]) Let A2$[1,12] = L2$[1,12] Else Let A2$[1,12] = "Z ZZZZZZZZZZ"
+KEY1$ = " ",KEY1$
+KEY1$[1,6] = H0[4] Using "######"
+KEY1$[7,10] = L9[1] Using "####"
+KEY1$[11,22] = A2$[1,12]
+KEY1$[23,24] = H5[7] Using "##"
+KEY1$[25,26] = H5[8] Using "##"
+KEY1$[27,28] = LWHSE Using "##"
+KEY1$[29,30] = MT$[1,2]
+KEY1$[31,32] = L3[3] Using "##"
+KEY1$[33,36] = L2$[17,20]
+Search #2,2,1;KEY1$,R2,E \ If E > 1 error 11000
+If Not(E) Goto L_8330
+R2 = 0
+E = 2 \ Search #2,1,0;KEY1$,R2,E \ If E error 11000
+KEY2$ = " ",KEY2$
+KEY2$[1,8] = KEY1$[29,36]
+KEY2$[9,20] = KEY1$[11,22]
+KEY2$[21,24] = KEY1$[25,28]
+KEY2$[25,26] = KEY1$[23,24]
+KEY2$[27,36] = KEY1$[1,10]
+KEY3$ = " ",KEY3$
+KEY3$[1,4] = KEY2$[21,24]
+KEY3$[5,14] = KEY2$[27,36]
+KEY3$[15,34] = KEY2$[1,20]
+KEY3$[35,36] = KEY2$[25,26]
+KEY4$ = " ",KEY4$
+KEY4$[1,4] = KEY3$[1,4]
+KEY4$[5,24] = KEY3$[15,34]
+KEY4$[25,34] = KEY3$[5,14]
+KEY4$[35,36] = KEY3$[35,36]
+KEY5$ = " ",KEY5$
+KEY5$[1,4] = KEY3$[1,4]
+KEY5$[5,6] = KEY3$[35,36]
+KEY5$[7,36] = KEY3$[5,34]
+KEY6$ = " ",KEY6$
+KEY6$[1,12] = KEY3$[23,34]
+KEY6$[13,16] = KEY3$[1,4]
+KEY6$[17,28] = KEY4$[25,36]
+KEY6$[29,36] = KEY2$[1,8]
+Search #2,4,1;KEY1$,R2,E \ If E error 11000
+Search #2,4,2;KEY2$,R2,E \ If E error 11000
+Search #2,4,3;KEY3$,R2,E \ If E error 11000
+Search #2,4,4;KEY4$,R2,E \ If E error 11000
+Search #2,4,5;KEY5$,R2,E \ If E error 11000
+Search #2,4,6;KEY6$,R2,E \ If E error 11000
+For X = 0 To 12 \ For Y = 0 To 2
+    P2[X,Y] = 0;LYP2[X,Y] = 0
+  Next Y \ Next X
+For X = 0 To 12 \ GLCTY[X] = 0 \ Next X
+DSP3[0] = L9[1]
+DSP3[1] = LWHSE
+DSP3[2] = H5[8]
+DSP3[3] = H5[7]
+DSP3[4] = L3[3]
+DSP3$ = " ",DSP3$
+DSP3$[1,4] = L2$[17,20]
+DSP3$[5,6] = MT$[1,2]
+C2 = H0[4]
+Mat Write #2,R2,0;A2$
+Mat Write #2,R2,12;C2
+Mat Write #2,R2,16;P2
+Mat Write #2,R2,250;LYP2
+Mat Write #2,R2,488;DSP3
+Mat Write #2,R2,508;DSP3$
+Mat Write #2,R2,514;GLCTY
+Mat Write #2,R2,592;GLCTY;
+L_8330: Mat Read #2,R2,16;P2
+If P9$[20,20] <> "F" Goto L_8350
+If Not(L3[0]) Goto L_8350
+T1 = S9[4]
+If Sgn(L7[4]) <> Sgn(T1) And L7[4] <> 0 Let T1 = - T1
+L_8350: Gosub L_3150
+T1 = L7[4]
+If L3[0] Let T1 = SUNIT[2]
+If H5[7] = 15
+  T1 = 0 \ If Not(H0[5]) Let T1 = L7[2]
+End If 
+Mat Write #2,R2,16;P2;
+Mat Read #2,R2,514;GLCTY
+GLCTY[0] = GLCTY[0] + GLCOST
+GLCTY[ARMONTH] = GLCTY[ARMONTH] + GLCOST
+Mat Write #2,R2,514;GLCTY;
+If RDMSFLAG System "echo " + Str$(R2) + " >> 6/divhaccept"
+Return 
+L_8900: Rem CHECK TO SEE IF FREIGHT IS TAXABLE
+FTAX = 0 \ HTAX = 0 \ DTAX = 0 \ MTAX = 0
+If SRN[4] Let TAXTYP = SRN[4]
+Mat Read #30,TAXTYP,36;TAX;
+FTAX = TAX[99]
+DTAX = TAX[100]
+MTAX = TAX[98]
+HTAX = TAX[97]
+Return 
+L_8980: Rem =============  misc charges - taxable & nontaxable
+MISCCHGS_TAXED = 0;MISCCHGS_NONTAXED = 0;FREIGHTTAX = 0;FREIGHTNONTAX = 0
+For X = 0 To 9
+  If MCTXBL[X] = 0
+    MISCCHGS_NONTAXED = MISCCHGS_NONTAXED + MCHARGE[X,0]
+  Else 
+    MISCCHGS_TAXED = MISCCHGS_TAXED + MCHARGE[X,0]
+  End If 
+Next X
+Return 
+
+L_10000: Rem "================= check msds history
+If SRN[2] Let MSDS2[0] = SRN[2] Else Let MSDS2[0] = H0[4]
+MSDS2[1] = SRN[1]
+K6$ = " ",K6$
+K6$[1,6] = MSDS2[0] Using "######"
+K6$[7,12] = MSDS2[1] Using "######"
+K6$[13,22] = S9[17] Using "##########"
+K6$[23,34] = L2$[1,12]
+Search #26,2,1;K6$,R6,E
+If Not(E) Goto L_10120
+If E > 1 error 11000
+E = 2 \ Search #26,1,0;K6$,R6,E
+If E error 11000
+Search #26,4,1;K6$,R6,E
+If E error 11000
+L_10120: Write #26,R6,0;H0[9];
+Write #26,R6,4;H0[7];
+Write #26,R6,12;H0[4];
+Write #26,R6,16;S9[17];
+Write #26,R6,22;L2$[1,12];
+Mat Write #26,R6,34;MSDS2;
+Write #26,R6,42;INVNO;
+Return 
+
+fix_smkey: rem try to fix up things id sales key issue
+sp$=" ",sp$
+fix_smloop: SEARCH #8,3,3;sp$,sp,E \ IF E>2 error 11000
+if not(e)
+	if sp=v1   !! pointing to right header rec
+		if n0=val(sp$[4,9])
+			search #8,5,3;sp$,sp,e \ if e error 11000
+		endif
+	endif
+	goto fix_smloop
+endif
+return
+
+L_10500: Rem CONVERT TO SELLING AND PRICE UNIT (set-up for ORDSHIPHSTx)
+For X = 0 To 2
+  CNVTU[0] = 0;CNVTU[1] = UN[0];CNVTU[2] = 1;CNVTA = L7[X + 2];AMOUNT = 0
+  If CNVTA Gosub L_20000
+  SUNIT[X] = AMOUNT
+Next X
+CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2;CNVTA = L6[1];AMOUNT = 0
+If CNVTA Gosub L_20000
+L6[1] = AMOUNT
+CNVTU[0] = 0;CNVTU[1] = UN[1];CNVTU[2] = 2;CNVTA = OLM[3];AMOUNT = 0
+If CNVTA Gosub L_20000
+PUNIT = AMOUNT
+If UN[0] = -1 Let SUNIT$ = "CWT "
+If UN[0] = -2 Let SUNIT$ = "LOT "
+If UN[0] = -3 Let SUNIT$ = "LB  "
+If UN[1] = -1 Let PUNIT$ = "CWT "
+If UN[1] = -2 Let PUNIT$ = "LOT "
+If UN[1] = -3 Let PUNIT$ = "LB  "
+If UN[0] > 0 Mat Read #27,UN[0],10;SUNIT$;
+If UN[1] > 0 Mat Read #27,UN[1],10;PUNIT$;
+Return 
+L_11000: Rem "================================== calculate invoice due date
+DUED = H0[8]
+If Not(H0[8]) Goto L_11120
+If Fra(H0[12]) Or H0[12] <= 0 Or H0[12] > 99 Goto L_11120
+Mat Read #50,H0[12],30;DDAY;
+Read #50,H0[12],76;CDAY;
+X$ = H0[8] Using "&&&&&&"
+J9[0] = X$[3,4];J9[1] = X$[5,6];J9[2] = X$[1,2]
+If DDAY[0] < 0 Goto L_11065
+Call DateToJulian(1,X$,X$,E)
+If E Goto L_11120
+X2 = X$;X2 = X2 + DDAY[0];X$ = X2 Using "&&&&&&"
+Call JulianToDate(1,X$,X$,E)
+If E Goto L_11120
+J9[0] = X$[1,2];J9[1] = X$[4,5];J9[2] = X$[7,8]
+Goto L_11110
+L_11065: Rem "terms are days into next month
+J9[0] = J9[0] + 1 \ If J9[0] > 12 Let J9[0] = 1;J9[2] = J9[2] + 1
+If CDAY If J9[1] > CDAY Let J9[0] = J9[0] + 1
+J9[1] = Abs(DDAY[0])
+If J9[0] > 12 Let J9[0] = 1;J9[2] = J9[2] + 1
+If J9[2] > 99 Let J9[2] = J9[2] - 100
+L_11080: X$ = J9[2] * 10 ^ 4 + J9[0] * 10 ^ 2 + J9[1] Using "&&&&&&"
+Call DateToJulian(X$,X$,E) \ If Not(E) Goto L_11110
+J9[1] = J9[1] - 1
+If J9[0] = 2 If J9[1] < 28 Goto L_11120
+If J9[0] <> 2 If J9[1] < 30 Goto L_11120
+Goto L_11080
+L_11110: Rem "got due date
+DUED = J9[2] * 10 ^ 4 + J9[0] * 10 ^ 2 + J9[1]
+L_11120: Return 
+
+L_12000: Rem UPDATE SPECIAL PRICE FILE
+	If H5[7]=36 Or H5[7]=37 Return ! "EVAP - No Sales Update
+	CUST = 0
+	IF L9[0]=3 OR L9[0]=7 OR L9[0]=8 OR L9[0]=11 or L9[0]=16 LET CUST=999999
+	IF L9[0]=2 OR L9[0]=4 OR L9[0]=6 OR L9[0]=12 OR L9[0]=13 or L9[0]=15 LET CUST=H0[4]
+	IF L3[0] AND (L9[0]=15 OR L9[0]=16) RETURN ! non-stk - no cost group 
+	if l9[0] = -7 and olm[2] and p61$[111,111] = "Y"
+		! if CPI enabled and we have a manual price AND we have a contract number
+		! we still need to check to update the contract
+		SP$ = " ",SP$
+		SP$[7,18]=l2$[1,12]
+		goto L_12035:
+	end if
+	If Not(CUST) Return 
+	SP$ = " ",SP$
+	If L9[0] = 2 Or L9[0] = 3 Or L9[0] = 13 Let SP$[1,6] = CUST Using "######";SP$[7,18] = L2$[1,12]
+	If L9[0] = 6 Or L9[0] = 8 Let SP$[1,6] = CUST Using "######";SP$[7,7] = "#"
+	If L9[0] = 4 Or L9[0] = 7 Let SP$[1,6] = CUST Using "######";SP$[7,7] = "*";SP$[8,11] = L2$[17,20]
+	if L9[0]=15 OR L9[0]=16 LET SP$[1,6]=CUST USING "######";SP$[7,7]="-";SP$[8,18]=PRODA$[116,126]
+	If L9[0] <> 11 And L9[0] <> 12 Goto L_12035
+	SP$[1,6] = CUST Using "######";SP$[7,7] = "&"
+	If PFU1[19] > 0 Mat Read #27,PFU1[19],10;SPUNIT$;
+	SP$[8,11] = SPUNIT$[1,4];SP$[12,15] = PFU1[19] Using "####"
+	L_12035: SP$[19] = "" \ If OLM[2] Let SP$[1,6] = OLM[2] Using "C#####"
+	Search #28,2,1;SP$,SP,E
+	If E Return 
+	! update special price 
+	Mat Read #28,SP,12;SP1
+	Mat Read #28,SP,40;C3
+	Mat Read #28,SP,46;SPC4 \ Mat Read #28,SP,138;SPC5
+	Mat Read #5,L4,156;B
+	cpiFlag = 0
+	if olm[2] and p61$[111,111] = "Y"
+		! FOR CPI - if this is part of a CPI contract
+		! AND it is reserve stock type, we need to
+		! make sure we don't update the sold to date
+		! if it does not impact stock, etc.
+		tmp$ = sp$[1,6]
+		search #77,2,1;tmp$,r,e
+		if not(e)
+			mat read #77,r,50;cpiFlag;
+		end if
+		if cpiFlag
+			search #78,2,1;sp$,rCPI,e
+			if e
+				cpiFlag = 0
+			else
+				mat read #78,rCPI,42;RESSTKAMT
+				if RESSTKAMT ! yup reserve stock contract
+					if h5[7] = 2 and h5[7] = 8 and h5[7] = 16 or L3[1] = 0
+						goto notCPI: ! bypass all updates
+					end if
+				else
+					cpiFlag = 0 ! no allocations, don't need to update
+				end if
+			end if
+		end if
+	end if
+	SP1[3] = CURDATE
+	SPC4[4] = SPC4[4] + L7[4]
+	SPC4[6] = SPC4[6] + L5[3]
+	If SP1[1] Let SPC4[5] = SPC4[5] + ((B[8] * L7[4]) - (SPC5[2] * L7[4]))
+	Mat Write #28,SP,12;SP1
+	Mat Write #28,SP,46;SPC4;
+	if cpiFlag ! cpi RESERVE STOCK contract
+		mat read #78,rCPI,68;QuantityAllocated
+		QuantityAllocated = QuantityAllocated - L7[4]
+		mat write #78,rCPI,68;QuantityAllocated;
+		! if there is still an allocated quantity
+		! we cannot expire the contract
+		if not(QuantityAllocated)
+			CNVTU[0] = C3[2];CNVTU[1] = 0;CNVTU[2] = 1
+			CNVTA = RESSTKAMT \ Gosub L_20000
+			if (AMOUNT - SPC4[4] - QuantityAllocated) <= 0
+				! auto expire this line as it is been fully
+				! sold
+				call date(tim(4) using "&&&&&&", tmp$,6, e)
+				Mat Read #28,SP,12;SP1
+				if not(e) SP1[4] = tmp$
+				Mat Write #28,SP,12;SP1;
+			end if
+		END IF
+	end if
+	notCPI: !
+Return 
+
+L_12200: Rem ======================== SET UP FOR POSTING SORDCASH
+If Abs(T2[12] + T2[13]) > Abs(T2[0]) Let T2[12] = T2[0] - T2[13]
+A$ = H0[7] Using "######"
+Search #33,2,1;A$,V1,E \ If E > 1 error 11000
+If E Goto L_13220
+Mat Read #33,V1;ORDCSH0;
+Mat Read #33,V1,20;ORDCSH1;
+Mat Read #33,V1,38;ORDCSH0$;
+Mat Read #33,V1,194;BNK;
+If Abs(ORDCSH1[0] + ORDCSH1[1]) > Abs(T2[12])
+  If Abs(ORDCSH1[0]) >= Abs(T2[12])
+    ORDCSH1[1] = 0
+    ORDCSH1[0] = T2[12]
+  Else 
+    ORDCSH1[1] = T2[12] - ORDCSH1[0]
+  End If 
+End If 
+For X1 = 0 To 1
+  If Not(ORDCSH1[X1]) Goto L_13075
+  Y1 = 0
+  If Int(ORDCSH0[X1 + 2]) = 3 Let Y1 = 1
+L_12300: Read #1,20,38;I2
+  I2 = I2 + 1
+  If I2 > 99999
+    ! Print ;'CR';"CASH RECEIPTS ENTRY # EXCEEDS 99999 CAN'T UPDATE ";OREF[1]
+    Goto L_13220
+  End If 
+  If P60$[6,6] = "Y"
+    If Not(BNK[Y1]) Let BNK[Y1] = 1
+    Write #31,BNK[Y1],44;I2;
+  End If 
+  Write #1,20,38;I2;
+  If ORDCSH0[X1 + 2] = 2 ! payment type is check use check# for ref # if possible
+    PYREF[0] = ORDCSH0$[37 + (X1 * 20),42 + (X1 * 20)]
+    If PYREF[0]
+      A$ = " ",A$;A$[1,6] = A2[2] Using "######"
+      A$[7,16] = PYREF[0] Using "##########"
+      A$[17,17] = "9" \ If ORDCSH1[X1] < 0 Let A$[17,17] = "4"
+      If P61$[3,3] = "Y"
+        Search #40,2,1;A$,V1,E \ If E > 1 error 11000
+        If Not(E) Goto GETREFNUM
+      End If 
+      Search #7,2,1;A$,V1,E \ If E > 1 error 11000
+      If E = 1 Goto L_12419
+    End If 
+  End If 
+GETREFNUM: Rem 1st time get invoice # for ref #
+  A$ = " ",A$
+  PYREF[0] = OREF[1]
+  LET A$=" ",A$
+  A$[1,6] = A2[2] Using "######" \ A$[7,16] = PYREF[0] Using "##########"
+  A$[17,17] = "9" \ If ORDCSH1[X1] < 0 Let A$[17,17] = "4"
+  If PYREF[0]
+    If P61$[3,3] = "Y"
+      Search #40,2,1;A$,V1,E \ If E = 1 Goto L_12410
+      If E error 11000
+      Goto GETREFNUM2
+    End If 
+L_12410: Search #7,2,1;A$,V1,E \ If E = 1 Goto L_12419
+    If E error 11000
+  End If 
+GETREFNUM2: Rem ref # = ar month *10000 + cash receipts entry #
+  X$ = ARDATE Using "&&&&&&"
+  PYREF[0] = X$[3,4]
+  PYREF[0] = PYREF[0] * 10000 + I2
+  A$[7,16] = PYREF[0] Using "##########"
+  If P61$[3,3] = "Y"
+    Search #40,2,1;A$,V1,E \ If E > 1 error 11000
+    If Not(E) Goto GETREFNUM3
+  End If 
+  Search #7,2,1;A$,V1,E \ If E = 1 Goto L_12419
+  If E error 11000
+GETREFNUM3: Rem ref# = cash receipts entry #
+  PYREF[0] = I2;A$[7,16] = PYREF[0] Using "##########"
+  If P61$[3,3] = "Y"
+    Search #40,2,1;A$,V1,E \ If E > 1  error 11000
+    If Not(E) Goto L_12300
+  End If 
+  Search #7,2,1;A$,V1,E \ If E = 1 Goto L_12419
+  If E error 11000
+  Goto L_12300
+L_12419: Rem SET UP APPLY INFO  cash receipt apply to invoicerecord
+  CSH$ = " ",CSH$ \ Read #3,C0,30;CSH$[1,30];
+  CSH$[31,40] = "I ",OREF[1] Using "########"
+  CSH1[0] = 1 \ CSH1[1] = HWHSE
+  CSH1[2] = 1 \ CSH2[0] = C9 \ If ORDCSH1[X1] < 0 Let CSH1[2] = 4
+  CSH2[1] = C0 \ CSH2[2] = S3[0] \ CSH2[3] = 0
+  CSH2[4] = ARDATE \ CSH2[8] = I2 \ CSH4 = H5[8]
+  CSH3[0] = OREF[1];CSH3[1] = 0;CSH3[5] = CSH3[1]
+  CSH3[2] = 0 \ CSH3[3] = 0
+  CSH3[3] = ORDCSH1[X1]
+  let crcurrid=0
+  let crcurrfact=0
+  let crcurrvar=0
+  if p61$[136,136]="Y" 
+	let crcurrid=ohcurrid
+	let crcurrfact=ohcurrfact
+  endif
+  A$ = " ",A$
+  A$[1,2] = BNK[Y1] Using "##" \ A$[3,7] = I2 Using "#####"
+  A$[8] = "  2"
+  E = 2 \ A1$ = A$
+  Search #32,1,0;A$,V1,E
+  If E error 11000
+  Mat Write #32,V1;CSH1;
+  Mat Write #32,V1,6;CSH2;
+  Mat Write #32,V1,42;CSH4;
+  Mat Write #32,V1,44;CSH3;
+  Mat Write #32,V1,86;CSH$;
+  Mat Write #32,v1,172;crcurrid;
+  Mat Write #32,v1,174;crcurrfact;
+  Mat Write #32,v1,180;crcurrvar;
+  C = 32 \ D = 1
+  PAID = PAID - CSH3[3]
+  Gosub L_5000
+  If E error 11000
+  For X3 = 0 To 13 \ PAY3[X3] = 0 \ Next X3
+  PAY2[0] = A2[0] \ PAY2[1] = 0 \ PAY2[2] = A2[2]
+  BUCK = 0
+  If ORDCSH1[X1] < 0
+    PAY2[3] = BUCK + .04
+  Else 
+    If P9$[19,19] = "N" Let BUCK = 1
+    PAY2[3] = BUCK + .09
+  End If 
+  A$ = A2[4] Using "######"
+  PAY2[4] = A2[4]
+  PAY3[0] = Abs(ORDCSH1[X1]) \ PAY3[2] = Abs(ORDCSH1[X1])
+  PAY3$ = " ",PAY3$ \ PAY3$[1,10] = "I/A INV "
+  PAY3$[9,16] = OREF[1] Using "########"
+  PAY0[2] = ARMONTH * 100 + YR
+  PAY0[3] = HWHSE;PAY1[2] = OWHT1[1]
+  PAY0[5] = H5[8];PAY1[1] = C12[1]
+  PAY0[12]=305 ! Source is cash receipts since it creating the cash receipts transaction
+  parcurrid=0
+  parcurrfact=0
+  if p61$[136,136]="Y"
+	let parcurrid=ohcurrid
+	let parcurrfact=ohcurrfact
+  endif
+  let A$=" ",A$
+  A$[1,6] = PAY2[2] Using "######"
+  A$[7,16] = PYREF[0] Using "##########"
+  A$[17,17] = "9" \ If ORDCSH1[X1] < 0 Let A$[17,17] = "4"
+  E = 2 \ A1$ = A$
+  Search #7,1,0;A$,V1,E
+  If E error 11000
+  Mat Write #7,V1;PAY2;
+  Mat Write #7,V1,24;PAY3;
+  Mat Write #7,V1,108;PAY3$;
+  Mat Write #7,V1,124;PAY0;
+  Mat Write #7,V1,150;PARCURRID;  
+  Mat Write #7,V1,154;PAY4;
+  Mat Write #7,V1,190;PAY1;
+  Mat Write #7,V1,202;PAY5;
+  Mat Write #7,V1,316;PYREF;
+  Mat Write #7,V1,342;PARCURRFACT;
+  C = 7 \ D = 1 \ CSH2[3] = V1
+  Gosub L_5000
+  If E error 11000
+  A$[7,12] = PAY2[4] Using "######"
+  A$[13] = A1$[7]
+  C = 7 \ D = 2
+  Gosub L_5000 \ If E error 11000
+  A$ = " ",A$;A$[1,6] = C12[1] Using "######"
+  A$[7,12] = PAY2[2] Using "######";A$[13,18] = PAY2[4] Using "######"
+  A$[19] = A1$[7]
+  C = 7;D = 3
+  Gosub L_5000 \ If E error 11000
+  A$ = " ",A$;A$[1,6] = C12[1] Using "######"
+  A$[7,16] = A1$[7,16];A$[17,22] = A1$[1,6];A$[23] = A1$[17]
+  C = 7;D = 4
+  Gosub L_5000 \ If E error 11000
+  A$ = " ",A$;A$[1,6] = C12[1] Using "######"
+  A$[7,12] = PAY2[4] Using "######"
+  A$[13,22] = A1$[7,16];A$[23,28] = A1$[1,6];A$[29] = A1$[17]
+  C = 7;D = 5
+  Gosub L_5000 \ If E error 11000
+  If (PAY3[0] - PAY3[1] - PAY3[2]) ! update customer aging buckets
+    ARAMT = (PAY3[0] - PAY3[1] - PAY3[2])
+    If Int(Fra(A2[3]) * 100) > 5 And BUCK <> 1 Let ARAMT = - (ARAMT)
+    KEYCUST$ = PAY2[2] Using "######"
+    Search #3,2,1;KEYCUST$,REC_CUST,E \ If E error 11000
+    Mat Read #3,REC_CUST,210;ARAGEBUCK
+    ARAGEBUCK[BUCK] = ARAGEBUCK[BUCK] + ARAMT
+    Mat Write #3,REC_CUST,210;ARAGEBUCK;
+  End If 
+  CSH1[1] = 0 \ CSH1[2] = 9 \ CSH2[2] = 0
+  If ORDCSH1[X1] < 0 Let CSH1[2] = 4
+  CSH3[0] = PYREF[0]
+  CSH3[1] = ORDCSH1[X1] \ CSH3[2] = 0 \ CSH3[3] = 0 \ CSH3[5] = 0
+  A$ = " ",A$
+  A$[1,2] = BNK[Y1] Using "##" \ A$[3,7] = I2 Using "#####"
+  A$[8] = "  1"
+  let crcurrid=0
+  let crcurrfact=0
+  let crcurrvar=0
+  if p61$[136,136]="Y" 
+	let crcurrid=ohcurrid
+	let crcurrfact=ohcurrfact
+  endif
+  E = 2
+  Search #32,1,0;A$,V1,E
+  If E error 11000
+  Mat Write #32,V1;CSH1;
+  Mat Write #32,V1,6;CSH2;
+  Mat Write #32,V1,42;CSH4;
+  Mat Write #32,V1,44;CSH3;
+  Mat Write #32,V1,86;CSH$;
+  Mat Write #32,v1,172;crcurrid;
+  Mat Write #32,v1,174;crcurrfact;
+  Mat Write #32,v1,180;crcurrvar;
+  C = 32 \ D = 1
+  Gosub L_5000
+  If E error 11000
+L_13075: Next X1
+Mat Read #7,S3[0];PAY2
+Mat Read #7,S3[0],24;PAY3
+PAY2[1] = ARDATE
+If Abs(T2[12])
+  KEYCUST$ = PAY2[2] Using "######"
+  Search #3,2,1;KEYCUST$,REC_CUST,E \ If E error 11000
+  Mat Read #3,REC_CUST,210;ARAGEBUCK
+  BUCK = Int(PAY2[3]) \ If BUCK < 0 Let BUCK = 0
+  If BUCK > 5 Let BUCK = 5
+  PAY3[2] = PAY3[2] + Abs(T2[12])
+  ARAMT = Abs(T2[12])
+  If Int(Fra(PAY2[3]) * 100) > 5 And BUCK <> 1 Let ARAMT = - (ARAMT)
+  ARAGEBUCK[BUCK] = ARAGEBUCK[BUCK] - ARAMT
+  Mat Write #3,REC_CUST,210;ARAGEBUCK;
+End If 
+Mat Write #7,S3[0];PAY2;
+Mat Write #7,S3[0],24;PAY3;
+Read #34,0,6;P8
+P8 = P8 + PAID \ PAID = 0
+Write #34,0,6;P8;
+L_13220: Return 
+L_13500: Rem ========== UPDATE PROD/WHSE SALES
+If H5[7]=36 Or H5[7]=37 Return ! "EVAP - No Sales Update
+If L3[0] Return 
+W$ = " ",W$;W$[1,12] = L2$[1,12];W$[13,14] = LWHSE Using "##"
+Search #37,2,1;W$,W9,E \ If E > 1 error 11000
+If E = 1
+  W9 = 0;E = 2 \ Search #37,1,0;W$,W9,E \ If E error 11000
+  Write #37,W9,0;L2$[1,12];
+  Write #37,W9,12;LWHSE;
+  Mat Write #37,W9,14;LYP2;
+  Mat Write #37,W9,248;LYP2;
+  For I = 0 To 12 \ O7[I] = 0 \ Next I
+  Mat Write #37,W9,482;O7;
+  Mat Write #37,W9,560;O7;
+  Mat Write #37,W9,638;O7;
+  Mat Write #37,W9,716;O7;
+  For X = 0 To 1
+    For I = 0 To 12 \ SRVLVL[I,X] = 0 \ Next I
+  Next X
+  Mat Write #37,W9,950;SRVLVL;
+  Mat Write #37,W9,1054;SRVLVL;
+  MAT WRITE #37,W9,1158;MONTHS_EXIST;
+  Search #37,4,1;W$,W9,E \ If E error 11000
+End If 
+Mat Read #37,W9,14;P2
+Gosub L_3150
+Mat Write #37,W9,14;P2;
+If Not(L3[1]) Return 
+!If H0[5] Return 
+if OREF[2]<>O AND ORREF[2]<>H0[7] RETURN
+If SLFLG$[H5[7],H5[7]] <> "Y" Return 
+Mat Read #37,W9,950;SRVLVL
+SRVLVL[ARMONTH,1] = SRVLVL[ARMONTH,1] + 1
+Rem if not h5[1] let h5[1]=h0[10]! default due date=ship date
+Rem if h0[10]<=h5[1] and l7[2]<=l7[4] ! ship date<=due date & ord qty<=ship qty
+If L7[2] <= L7[4] !ord qty<=ship qty
+  SRVLVL[ARMONTH,0] = SRVLVL[ARMONTH,0] + 1
+End If 
+Mat Write #37,W9,950;SRVLVL;
+Return 
+SHPL_SALES: Rem "shiplist sales file
+If H5[7]=36 Or H5[7]=37 Return ! "EVAP - No Sales Update
+If SRN[3] = 0 Or SRN[3] = 5 Return 
+KEY6$ = " ",KEY6$
+KEY6$[1,6] = SRN[2] Using "######"
+KEY6$[7,7] = "."
+KEY6$[8] = SRN[1] Using "&&&&&&"
+Search #42,2,1;KEY6$,R[42],E \ If E > 1 error 11000
+If E Return 
+If L3 Let A2$ = "Z ZZZZZZZZZZ" \ Goto SLNSTK
+Read #5,L4,139;A2$;
+SLNSTK: C2 = SRN[2]
+SHPL = SRN[1]
+Mat P2 = Zer
+A$ = " ",A$
+A$[1,6] = C2 Using "######"
+A$[7,12] = SHPL Using "######"
+A$[13,24] = A2$[1,12]
+A$[25,26] = LWHSE Using "##"
+Search #43,2,1;A$,R1,E
+If E > 1 error 11000
+If E = 1 Gosub NWCSLR \ Goto SLNSTK
+Mat Read #43,R1,16;P2
+Gosub L_3150
+Mat Write #43,R1,16;P2;
+Return 
+NWCSLR: Rem NEW REC
+E = 2 \ Search #43,1,0;A$,R1,E
+If E error 11000
+Write #43,R1;A$[13,24];
+Write #43,R1,12;C2;
+For C = 0 To 12
+  For I = 0 To 2
+    P2[C,I] = 0
+  Next I
+Next C
+Mat Write #43,R1,16;P2;
+Write #43,R1,250;SHPL;
+Write #43,R1,254;LWHSE;
+Mat Write #43,R1,256;P2;
+Write #43,R1,490;KEY6$[1,14];
+C = 43 \ D = 1 \ V1 = R1
+Gosub L_5000
+If E > 1 error 11000
+If Not(E) Goto CSLDR2
+E = 3 \ Search #43,1,0;A$,R1,E
+Return 
+CSLDR2: Rem DIR #2 of cust/shiplist/prod/whse Sales
+A$ = " ",A$
+A$[1,12] = A2$[1,12]
+A$[13,18] = C2 Using "######"
+A$[19,24] = SHPL Using "######"
+A$[25,26] = LWHSE Using "##"
+C = 43 \ D = 2 \ V1 = R1
+Gosub L_5000
+If E error 11000
+Return 
+SHIPL_BUDG: Rem "see if po was blanket or has budget
+FLAG[3] = 0
+If SRN[3] = 0 Or SRN[3] = 5 Return 
+If SRN[2] <> H0[4] Return 
+KEY6$ = " ",KEY6$
+KEY6$[1,6] = SRN[2] Using "######"
+KEY6$[7,7] = "."
+KEY6$[8] = SRN[1] Using "&&&&&&"
+Search #42,2,1;KEY6$,R[42],E \ If E > 1 error 11000
+If E Return 
+Mat Read #42,R[42],452;BUDG;
+Mat Read #42,R[42],464;SLBDD;
+If BUDG[0] <= 0 Return 
+Mat Read #42,R[42],432;BPO$;
+If Len(BPO$) < 20 Let BPO$ = BPO$ + "                    "
+If BPO$[1,1] <> "" And BPO$[1,5] <> "     " ! "is using Blanket PO
+  If BPO$ <> P0$ Return 
+End If 
+If SLBDD[1] ! buget by date
+  If SLBDD[0] <= H0[10] And SLBDD[1] >= H0[10]
+    BUDG[1] = BUDG[1] + T2[0]
+  End If 
+Else ! no date range for budget
+  BUDG[1] = BUDG[1] + T2[0]
+End If 
+Mat Write #42,R[42],452;BUDG;
+FLAG[3] = 1
+Return 
+!!!! apply deposit routine
+applydep: !  Rem ======================== SET UP FOR POSTING Deposits
+let keyrod$=" ",keyrod$
+let keyrod$[1,6]=H0[4] using "######"
+let keyrod$[7,12]=h0[7] using "######"
+let chkdep$=keyrod$[1,12]
+searchdep: ! search thru deposit file
+search #41,3,1;keyrod$,rec_rod,e
+if e=2 return
+if e<>0 error 11000
+if keyrod$[1,12]<>chkdep$[1,12] return
+Mat read #41,rec_rod,0;dep1;
+Mat read #41,rec_rod,32;dep2;
+Mat Read #41,rec_rod,74;dep3;
+         
+getdepcrent: ! get cash receipts deposit entry
+ Read #1,20,38;I2
+ I2 = I2 + 1
+ If I2 > 99999
+    !
+    ! Print ;'CR';"CASH RECEIPTS ENTRY # EXCEEDS 99999 CAN'T UPDATE ";OREF[1]
+    !Goto L_13220
+    return
+ End If 
+ If P60$[6,6] = "Y"
+    If Not(DEP1[5]) Let DEP1[5] = 1
+    Write #31,DEP1[5],44;I2;
+  End If 
+  Write #1,20,38;I2;
+  ! first payment reference check
+   PYREF[0] = DEP2[0] 
+   If PYREF[0]<>0
+	A$ = " ",A$;A$[1,6] = A2[2] Using "######"
+	A$[7,16] = PYREF[0] Using "##########"
+	A$[17,17] = "9" \ IF DEP2[1] < 0 Let A$[17,17] = "4"
+	If P61$[3,3] = "Y"
+		Search #40,2,1;A$,V1,E \ If E > 1 error 11000
+		If Not(E) Goto GETDEPREF2: ! 
+	End If 
+	Search #7,2,1;A$,V1,E \ If E > 1 error 11000
+	If E = 1 Goto GOTDEPREF: ! L_12419
+    End If 
+  
+  GETDEPREF2: Rem 1st time get invoice # for ref #
+  A$ = " ",A$
+  PYREF[0] = OREF[1]
+  If PYREF[0]<>0
+	LET A$=" ",A$
+	A$[1,6] = A2[2] Using "######" \ A$[7,16] = PYREF[0] Using "##########"
+	A$[17,17] = "9" \ If DEP2[1] < 0 Let A$[17,17] = "4"
+ 	If P61$[3,3] = "Y"
+		Search #40,2,1;A$,V1,E \ If E >1 error 11000
+		If NOT (E) GOTO GETDEPREF3: 
+	End If 
+	Search #7,2,1;A$,V1,E \ If E = 1 Goto GOTDEPREF
+	If E error 11000
+  End If 
+
+  GETDEPREF3: Rem 3st time get order# for ref #
+  A$ = " ",A$
+  PYREF[0] = H0[7]
+  If PYREF[0]<>0
+	LET A$=" ",A$
+	A$[1,6] = A2[2] Using "######" \ A$[7,16] = PYREF[0] Using "##########"
+	A$[17,17] = "9" \ If DEP2[1] < 0 Let A$[17,17] = "4"
+ 	If P61$[3,3] = "Y"
+		Search #40,2,1;A$,V1,E \ If E >1 error 11000
+		If NOT (E) GOTO GETDEPREF4: 
+	End If 
+	Search #7,2,1;A$,V1,E \ If E = 1 Goto GOTDEPREF
+	If E error 11000
+  End If 
+
+  GETDEPREF4: Rem ref # = ar month *10000 + cash receipts entry #
+  X$ = ARDATE Using "&&&&&&"
+  PYREF[0] = X$[3,4]
+  PYREF[0] = PYREF[0] * 10000 + I2
+  A$[7,16] = PYREF[0] Using "##########"
+  If P61$[3,3] = "Y"
+    Search #40,2,1;A$,V1,E \ If E > 1 error 11000
+    If Not(E) Goto GETDEPREF5:
+  End If 
+  Search #7,2,1;A$,V1,E \ If E = 1 Goto GOTDEPREF
+  If E error 11000
+
+  GETDEPREF5: Rem ref# = cash receipts entry #
+  PYREF[0] = I2;A$[7,16] = PYREF[0] Using "##########"
+  If P61$[3,3] = "Y"
+    Search #40,2,1;A$,V1,E \ If E > 1 error 11000
+    If Not(E) Goto getdepcrent:  ! ***** ! get another c/r entry #
+  End If 
+  Search #7,2,1;A$,V1,E \ If E = 1 Goto GOTDEPREF:
+  If E error 11000
+  goto getdepcrent: ! get next cash receipt entry
+ 
+  GOTDEPREF: ! Rem -- Cash Receipts Entry #1 - log in deposit
+  ! set up for deposit amt
+  CSH1[0]=8 ! deposit allocate        
+  CSH1[1]=DEP3[0] ! Warehouse
+  CSH1[2]=0             
+  CSH2[0]=DEP1[0] ! customer code	cr.CustomerCode=custid        
+  CSH2[1]=C0 ! =custrec       
+  CSH2[2]=s3 ! invoice saract ref #            
+  CSH2[3]=0 ! cr.SaractRecFrom=rec_ar ! mtg --- set a/r record     
+  CSH2[4]=ardate ! yymmdd format       
+  CSH2[5]=DEP1[1] ! for deposit type 8 uses order #         
+  CSH2[6]=DEP1[2] ! for depoist number cash receipts type                         
+  CSH2[7]=0                        
+  CSH2[8]=I2 ! Entry #
+  csh4=dep3[1] !Div
+  CSH3[0]=pyref[0]
+  csh3[1]=0 ! bank amt
+  csh3[2]=dep2[1] ! deposit amt
+  csh3[3]=0 ! credit amt
+  csh3[4]=0 ! disc
+  csh3[5]=0 ! last pay
+  csh3[5]=0 ! freight
+  CSH$ = " ",CSH$ \ Read #3,C0,30;CSH$[1,30];
+  CSH$[31,40] = "I ",OREF[1] Using "########"
+  CSH$[41,60] = "Deposit Order ",DEP1[1] USING "######" !! JE DESCRIPTION 
+  let crcurrid=0
+  let crcurrfact=0
+  let crcurrvar=0
+  if p61$[136,136]="Y" 
+	let crcurrid=ohcurrid
+	let crcurrfact=ohcurrfact
+  endif
+  A$ = " ",A$
+  A$[1,2] = DEP1[5] Using "##" \ A$[3,7] = I2 Using "#####"
+  A$[8] = "  1" ! DEPOSIT TYPE 8 1ST CR TRANSACTION
+  E = 2 \ A1$ = A$
+  Search #32,1,0;A$,V1,E
+  If E error 11000
+  Mat Write #32,V1;CSH1;
+  Mat Write #32,V1,6;CSH2;
+  Mat Write #32,V1,42;CSH4;
+  Mat Write #32,V1,44;CSH3;
+  Mat Write #32,V1,86;CSH$;
+  Mat Write #32,v1,172;crcurrid;
+  Mat Write #32,v1,174;crcurrfact;
+  Mat Write #32,v1,180;crcurrvar;
+  C = 32 \ D = 1
+  Gosub L_5000 ! Insert deposit key
+
+  ! second - create the a/r payment entry
+  !!!! CREATE THE PAYMENT C/R TRANSACTION - upapplied payment 
+  CSH1[0]=2 ! payment       
+  CSH1[1]=DEP3[0] ! Warehouse
+  if dep2[1]<0
+	CSH1[2]=4
+  else
+	csh1[2]=9
+  endif
+  CSH2[0]=DEP1[0] ! customer code	cr.CustomerCode=custid        
+  CSH2[1]=C0 ! =custrec       
+  CSH2[2]=s3 ! invoice saract ref #   ! invoice tranaction         
+  CSH2[3]=0 ! cr.SaractRecFrom=rec_ar ! mtg --- set a/r record     
+  CSH2[4]=ardate ! yymmdd format       
+  CSH2[5]=DEP1[1] ! for deposit type 8 uses order #         
+  CSH2[6]=DEP1[2] ! for depoist number cash receipts type                         
+  CSH2[7]=0                        
+  CSH2[8]=I2 ! Entry #
+  csh4=dep3[1] !Div
+  CSH3[0]=pyref[0]
+  csh3[1]=0 ! bank amt
+  csh3[2]=0 ! deposit amt
+  csh3[3]=dep2[1] ! credit amt ! a/r credit amt
+  csh3[4]=0 ! disc
+  csh3[5]=0 ! last pay
+  csh3[5]=0 ! freight
+  let crcurrid=0
+  let crcurrfact=0
+  let crcurrvar=0
+  if p61$[136,136]="Y" 
+	let crcurrid=ohcurrid
+	let crcurrfact=ohcurrfact
+  endif
+  CSH$ = " ",CSH$ \ Read #3,C0,30;CSH$[1,30];
+  CSH$[31,40] = "I ",OREF[1] Using "########"
+  CSH$[41,60] = "Deposit Order ",DEP1[1] USING "######" !! JE DESCRIPTION
+  A$ = " ",A$
+  A$[1,2] = dep1[5] Using "##" \ A$[3,7] = I2 Using "#####"
+  A$[8] = "  2" ! PAYMENT TRANSACTION 2ND TRANSACTION
+  E = 2 \ A1$ = A$
+  Search #32,1,0;A$,V1,E
+  If E error 11000
+  Mat Write #32,V1;CSH1;
+  Mat Write #32,V1,6;CSH2;
+  Mat Write #32,V1,42;CSH4;
+  Mat Write #32,V1,44;CSH3;
+  Mat Write #32,V1,86;CSH$;
+	Mat Write #32,v1,172;crcurrid;
+  Mat Write #32,v1,174;crcurrfact;
+  Mat Write #32,v1,180;crcurrvar;
+  let rec_cr=v1! save payment c/r record
+  C = 32 \ D = 1
+  PAID = PAID - CSH3[3]
+  Gosub L_5000
+  If E error 11000
+  For X3 = 0 To 13 \ PAY3[X3] = 0 \ Next X3
+  PAY2[0] = A2[0] \ PAY2[1] = 0 \ PAY2[2] = A2[2]
+  BUCK = 0
+  If dep2[1] < 0
+    PAY2[3] = BUCK + .04
+  Else 
+    If P9$[19,19] = "N" Let BUCK = 1
+    PAY2[3] = BUCK + .09
+  End If
+  ! need to convert deposit date to julian
+  let pay2[4]=0
+  if DEP1[3]<>0
+	 X$ = DEP1[3] Using "&&&&&&" \ Call DateToJulian(1,X$,X$,E) 
+	 IF NOT(E) LET PAY2[4]=X$
+  endif
+  if not(pay2[4]) let pay2[4]=a2[4]
+  A$ = pay2[4] Using "######"
+  PAY3[0] = Abs(dep2[1]) ! \ PAY3[2] = Abs(dep2[1])
+  PAY3$ = " ",PAY3$
+  pay3$="IA INV "+str$(oref[1])+blank$
+  !PAY3$[1,10] = "IA INV "
+  !PAY3$[9,16] = OREF[1] Using "########"
+  PAY0[2] = ARMONTH * 100 + YR
+  PAY0[3] = DEP3[0] ! Warehouse
+  PAY1[2] = OWHT1[1] ! journal #
+  PAY0[5] = DEP3[1] ! Division
+  PAY1[1] = C12[1] ! posting customer
+  parcurrid=0
+  parcurrfact=0
+  if p61$[136,136]="Y"
+	let parcurrid=ohcurrid
+	let parcurrfact=ohcurrfact
+  endif
+  PAY0[12]=305 ! Source is cash receipts since it creating the cash receipts transaction
+  let A$=" ",A$
+  A$[1,6] = PAY2[2] Using "######"
+  A$[7,16] = PYREF[0] Using "##########"
+  A$[17,17] = "9" \ If dep2[1] < 0 Let A$[17,17] = "4"
+  E = 2 \ A1$ = A$
+  Search #7,1,0;A$,V1,E
+  If E error 11000
+  Mat Write #7,V1;PAY2;
+  Mat Write #7,V1,24;PAY3;
+  Mat Write #7,V1,108;PAY3$;
+  Mat Write #7,V1,124;PAY0;
+  Mat Write #7,V1,150;PARCURRID;  
+  Mat Write #7,V1,154;PAY4;
+  Mat Write #7,V1,190;PAY1;
+  Mat Write #7,V1,202;PAY5;
+  Mat Write #7,V1,316;PYREF;
+  Mat Write #7,V1,342;PARCURRFACT;
+  C = 7 \ D = 1 \ CSH2[3] = V1
+  Mat Write #32,rec_cr,6;CSH2; ! saract to record
+  let rec_pay=v1! save payment a/r rec
+  Gosub L_5000
+  If E error 11000
+  A$[7,12] = PAY2[4] Using "######"
+  A$[13] = A1$[7]
+  C = 7 \ D = 2
+  Gosub L_5000 \ If E error 11000
+  A$ = " ",A$;A$[1,6] = C12[1] Using "######"
+  A$[7,12] = PAY2[2] Using "######";A$[13,18] = PAY2[4] Using "######"
+  A$[19] = A1$[7]
+  C = 7;D = 3
+  Gosub L_5000 \ If E error 11000
+  A$ = " ",A$;A$[1,6] = C12[1] Using "######"
+  A$[7,16] = A1$[7,16];A$[17,22] = A1$[1,6];A$[23] = A1$[17]
+  C = 7;D = 4
+  Gosub L_5000 \ If E error 11000
+  A$ = " ",A$;A$[1,6] = C12[1] Using "######"
+  A$[7,12] = PAY2[4] Using "######"
+  A$[13,22] = A1$[7,16];A$[23,28] = A1$[1,6];A$[29] = A1$[17]
+  C = 7;D = 5
+  Gosub L_5000 \ If E error 11000
+  If (PAY3[0] - PAY3[1] - PAY3[2]) ! update customer aging buckets
+    ARAMT = (PAY3[0] - PAY3[1] - PAY3[2])
+    If Int(Fra(PAY2[3]) * 100) > 5 And BUCK <> 1 Let ARAMT = - (ARAMT)
+    KEYCUST$ = PAY2[2] Using "######"
+    Search #3,2,1;KEYCUST$,REC_CUST,E \ If E error 11000
+    Mat Read #3,REC_CUST,210;ARAGEBUCK
+    ARAGEBUCK[BUCK] = ARAGEBUCK[BUCK] + ARAMT
+    Mat Write #3,REC_CUST,210;ARAGEBUCK;
+    ! A/R PROOF UPDATE
+    ARAMT = (PAY3[0] - PAY3[1] - PAY3[2])
+    If Int(Fra(PAY2[3]) * 100) > 5 Let ARAMT = - (ARAMT)
+    Read #34,0,6;P8
+    P8 = P8 + ARAMT \ PAID = 0
+    Write #34,0,6;P8;
+  End If 
+  ! #3 -- used payment -- unapplied payment entry 
+  Mat Read #7,S3[0];PAY2
+  Mat Read #7,S3[0],24;PAY3
+  LET PAID=DEP2[1] ! Set to deposit amt
+  IF (PAY3[0]-PAY3[1]-PAY3[2])<DEP2[1]
+	LET PAID=(PAY3[0]-PAY3[1]-PAY3[2])
+  ENDIF
+  CSH1[0]=2 ! payment       
+  CSH1[1]=DEP3[0] ! Warehouse
+  if dep2[1]<0
+	CSH1[2]=4
+  else
+	csh1[2]=9
+  endif
+  CSH2[0]=DEP1[0] ! customer code	cr.CustomerCode=custid        
+  CSH2[1]=C0 ! =custrec       
+  CSH2[2]=s3 ! invoice saract ref #   ! invoice tranaction         
+  CSH2[3]=rec_pay ! cr.SaractRecFrom=rec_ar ! mtg --- set a/r record     
+  CSH2[4]=ardate ! yymmdd format       
+  CSH2[5]=DEP1[1] ! for deposit type 8 uses order #         
+  CSH2[6]=DEP1[2] ! for depoist number cash receipts type                         
+  CSH2[7]=0                        
+  CSH2[8]=I2 ! Entry #
+  csh4=dep3[1] !Div
+  CSH3[0]=pyref[0]
+  csh3[1]=0 ! bank amt
+  csh3[2]=0 !paid ! debit a/r amt 
+  csh3[3]=-(paid) ! ! credit amt ! a/r credit amt
+  csh3[4]=0 ! disc
+  csh3[5]=0 ! last pay
+  csh3[5]=0 ! freight
+  let crcurrid=0
+  let crcurrfact=0
+  let crcurrvar=0
+  if p61$[136,136]="Y" 
+	let crcurrid=ohcurrid
+	let crcurrfact=ohcurrfact
+  endif
+  CSH$ = " ",CSH$ \ Read #3,C0,30;CSH$[1,30];
+  CSH$[31,40] = "I ",OREF[1] Using "########"
+  CSH$[41,60] = "Deposit Order ",DEP1[1] USING "######" !! JE DESCRIPTION
+  A$ = " ",A$
+  A$[1,2] = dep1[5] Using "##" \ A$[3,7] = I2 Using "#####"
+  A$[8] = "  3" ! Unapplied PAYMENT TRANSACTION 3ND TRANSACTION
+  E = 2 \ A1$ = A$
+  Search #32,1,0;A$,V1,E
+  If E error 11000
+  Mat Write #32,V1;CSH1;
+  Mat Write #32,V1,6;CSH2;
+  Mat Write #32,V1,42;CSH4;
+  Mat Write #32,V1,44;CSH3;
+  Mat Write #32,V1,86;CSH$;
+  Mat Write #32,v1,172;crcurrid;
+  Mat Write #32,v1,174;crcurrfact;
+  Mat Write #32,v1,180;crcurrvar;
+  let rec_cr=v1! save payment c/r record
+  C = 32 \ D = 1
+  Gosub L_5000
+  If E error 11000
+  ! update applied amount in payment
+   Mat Read #7,rec_pay,24;PAY3
+   let pay3[2]=pay3[2]+paid
+   Mat Write #7,rec_pay,24;pay3;
+   Mat Read #7,rec_pay;PAY2;
+   Mat Read #7,rec_pay,24;PAY3;
+
+  If Abs(PAID)
+	 KEYCUST$ = PAY2[2] Using "######"
+	Search #3,2,1;KEYCUST$,REC_CUST,E \ If E error 11000
+	 Mat Read #3,REC_CUST,210;ARAGEBUCK
+	BUCK = Int(PAY2[3]) \ If BUCK < 0 Let BUCK = 0
+	If BUCK > 5 Let BUCK = 5
+	PAY3[2] = PAY3[2] + Abs(PAID)
+	ARAMT = Abs(PAID)
+	If Int(Fra(PAY2[3]) * 100) > 5 And BUCK <> 1 Let ARAMT = - (ARAMT)
+	ARAGEBUCK[BUCK] = ARAGEBUCK[BUCK] - PAID
+	Mat Write #3,REC_CUST,210;ARAGEBUCK;
+End If 
+
+Read #34,0,6;P8
+P8 = P8 - PAID 
+Write #34,0,6;P8;
+  ! #4 applied to invoice
+  !--- apply deposit to invoice
+  csh1[0]=1
+  CSH1[1] = 0 \ CSH1[2] = 1 \ CSH2[2] = 0
+  ! If DEP2[1] < 0 Let CSH1[2] = 4
+  CSH3[0] = ARREF[0]
+  CSH3[1] = 0 \ CSH3[2] = 0 \ CSH3[3] =PAID\ CSH3[5] = 0
+  A$ = " ",A$
+  A$[1,2] = DEP1[5] Using "##" \ A$[3,7] = I2 Using "#####"
+  A$[8] = "  4" ! INVOICE TRANSACTIONS
+  let crcurrid=0
+  let crcurrfact=0
+  let crcurrvar=0
+  if p61$[136,136]="Y" 
+	let crcurrid=ohcurrid
+	let crcurrfact=ohcurrfact
+  endif
+  E = 2
+  Search #32,1,0;A$,V1,E
+  If E error 11000
+  Mat Write #32,V1;CSH1;
+  Mat Write #32,V1,6;CSH2;
+  Mat Write #32,V1,42;CSH4;
+  Mat Write #32,V1,44;CSH3;
+  Mat Write #32,V1,86;CSH$;
+  Mat Write #32,v1,172;crcurrid;
+  Mat Write #32,v1,174;crcurrfact;
+  Mat Write #32,v1,180;crcurrvar;
+  C = 32 \ D = 1
+  Gosub L_5000
+  If E error 11000
+! get next deposit
+!--- apply deposit to invoice
+Mat Read #7,S3[0];PAY2;
+Mat Read #7,S3[0],24;PAY3;
+PAY2[1] = ARDATE
+If Abs(PAID)
+  KEYCUST$ = PAY2[2] Using "######"
+  Search #3,2,1;KEYCUST$,REC_CUST,E \ If E error 11000
+  Mat Read #3,REC_CUST,210;ARAGEBUCK
+  BUCK = Int(PAY2[3]) \ If BUCK < 0 Let BUCK = 0
+  If BUCK > 5 Let BUCK = 5
+  PAY3[2] = PAY3[2] + Abs(PAID)
+  ARAMT = Abs(PAID)
+  If Int(Fra(PAY2[3]) * 100) > 5 And BUCK <> 1 Let ARAMT = - (ARAMT)
+  ARAGEBUCK[BUCK] = ARAGEBUCK[BUCK] - ARAMT
+  Mat Write #3,REC_CUST,210;ARAGEBUCK;
+End If 
+Mat Write #7,S3[0];PAY2;
+Mat Write #7,S3[0],24;PAY3;
+Read #34,0,6;P8
+P8 = P8 + PAID \ PAID = 0
+Write #34,0,6;P8;
+! delete the deposit
+  search #41,5,1;keyrod$,rec_rod,e
+  let e=3\search #41,1,0;keyrod$,rec_rod,e
+goto searchdep:
+
+! --- start negative invoice -- need to delete the deposit and put as a payment
+!!!! DELETE DEPOSIT type 9
+DelDeposit: !! Deletes Deposits From Sales Order and makes it an unapplied payment !!
+let keyrod$=" ",keyrod$
+let keyrod$[1,6]=H0[4] using "######"
+let keyrod$[7,12]=h0[7] using "######"
+let tmp$=keyrod$[1,12]
+srchdeldep: ! search thru deposit file
+search #41,3,1;keyrod$,rec_rod,e
+if e=2 return
+if e<>0 error 11000
+if keyrod$[1,12]<>tmp$[1,12] return
+Mat read #41,rec_rod,0;dep1;
+Mat read #41,rec_rod,32;dep2;
+Mat Read #41,rec_rod,74;dep3;
+DelDepEntNum:! get the entry #
+Read #1,20,38;I2                             
+i2 = I2 + 1                                     
+Write #1,20,38;I2;                           
+If i2> 99999                                       
+	!returnstatus = 0 ! error                              
+	!message$ = "Cash Receipts Entries Have Exceeded Limit"
+	RETURN !	Goto Enddeldep:                                       
+End If 
+If p60$[6,6] = "Y" ! cash receipts by bank
+	If Not(DEP1[5]) Let DEP1[5] = 1
+	 Write #31,DEP1[5],44;I2;               
+End If
+!!! find the a/r record key
+! first payment reference check
+PYREF[0] = DEP2[0] 
+If PYREF[0]<>0
+	A$ = " ",A$;A$[1,6] = A2[2] Using "######"
+	A$[7,16] = PYREF[0] Using "##########"
+	A$[17,17] = "9" \ IF DEP2[1] < 0 Let A$[17,17] = "4"
+	If P61$[3,3] = "Y"
+		Search #40,2,1;A$,V1,E \ If E > 1 error 11000
+		If Not(E) Goto DelDEPREF2: ! 
+	End If 
+	Search #7,2,1;A$,V1,E \ If E > 1 error 11000
+	If E = 1 Goto GOTDElREF: !
+End If 
+  
+DelDEPREF2: Rem 1st time get invoice # for ref #
+A$ = " ",A$
+PYREF[0] = OREF[1]
+If PYREF[0]<>0
+	LET A$=" ",A$
+	A$[1,6] = A2[2] Using "######" \ A$[7,16] = PYREF[0] Using "##########"
+	A$[17,17] = "9" \ If DEP2[1] < 0 Let A$[17,17] = "4"
+ 	If P61$[3,3] = "Y"
+		Search #40,2,1;A$,V1,E \ If E >1 error 11000
+		If NOT (E) GOTO delDEPREF3: 
+	End If 
+	Search #7,2,1;A$,V1,E \ If E = 1 Goto GOTDElREF
+	If E error 11000
+EndIf 
+
+  DelDEPREF3: Rem 3st time get order# for ref #
+  A$ = " ",A$
+  PYREF[0] = H0[7]
+  If PYREF[0]<>0
+	LET A$=" ",A$
+	A$[1,6] = A2[2] Using "######" \ A$[7,16] = PYREF[0] Using "##########"
+	A$[17,17] = "9" \ If DEP2[1] < 0 Let A$[17,17] = "4"
+ 	If P61$[3,3] = "Y"
+		Search #40,2,1;A$,V1,E \ If E >1 error 11000
+		If NOT (E) GOTO GETDEPREF4: 
+	End If 
+	Search #7,2,1;A$,V1,E \ If E = 1 Goto GOTDElREF
+	If E error 11000
+  End If 
+
+  DelDEPREF4: Rem ref # = ar month *10000 + cash receipts entry #
+  X$ = ARDATE Using "&&&&&&"
+  PYREF[0] = X$[3,4]
+  PYREF[0] = PYREF[0] * 10000 + I2
+  A$[7,16] = PYREF[0] Using "##########"
+  If P61$[3,3] = "Y"
+    Search #40,2,1;A$,V1,E \ If E > 1 error 11000
+    If Not(E) Goto delDEPREF5:
+  End If 
+  Search #7,2,1;A$,V1,E \ If E = 1 Goto GOTDElREF
+  If E error 11000
+
+  delDEPREF5: Rem ref# = cash receipts entry #
+  PYREF[0] = I2;A$[7,16] = PYREF[0] Using "##########"
+  If P61$[3,3] = "Y"
+    Search #40,2,1;A$,V1,E \ If E > 1 error 11000
+    If Not(E) Goto deldepentnum:  ! ***** ! get another c/r entry #
+  End If 
+  Search #7,2,1;A$,V1,E \ If E = 1 Goto GOTDElREF:
+  If E error 11000
+  goto getdepcrent: ! get next cash receipt entry
+  GotDelRef: ! have an a/r reference #
+  ! create ar record for payment
+   For X3 = 0 To 13 \ PAY3[X3] = 0 \ Next X3
+  PAY2[0] = A2[0] \ PAY2[1] = 0 \ PAY2[2] = A2[2]
+  BUCK = 0
+  If dep2[1] < 0
+    PAY2[3] = BUCK + .04
+  Else 
+    If P9$[19,19] = "N" Let BUCK = 1
+    PAY2[3] = BUCK + .09
+  End If
+  ! need to convert deposit date to julian
+  let pay2[4]=0
+  if DEP1[3]<>0
+	 X$ = DEP1[3] Using "&&&&&&" \ Call DateToJulian(1,X$,X$,E) 
+	 IF NOT(E) LET PAY2[4]=X$
+  endif
+  if not(pay2[4]) let pay2[4]=a2[4]
+  A$ = pay2[4] Using "######"
+  PAY3[0] = Abs(dep2[1]) \ PAY3[2] = Abs(dep2[1])
+  PAY3$ = " ",PAY3$ \ PAY3$[1,10] = "I/A INV "
+  PAY3$[9,16] = OREF[1] Using "########"
+  ! stop here *****
+  PAY0[2] = ARMONTH * 100 + YR
+  PAY0[3] = DEP3[0] ! Warehouse
+  PAY1[2] = OWHT1[1] ! journal #
+  PAY0[5] = DEP3[1] ! Division
+  PAY1[1] = C12[1] ! posting customer
+  PAY0[12]=305 ! Source is cash receipts since it creating the cash receipts transaction
+  parcurrid=0
+  parcurrfact=0
+  if p61$[136,136]="Y"
+	let parcurrid=ohcurrid
+	let parcurrfact=ohcurrfact
+  endif
+  let A$=" ",A$
+  A$[1,6] = PAY2[2] Using "######"
+  A$[7,16] = PYREF[0] Using "##########"
+  A$[17,17] = "9" \ If dep2[1] < 0 Let A$[17,17] = "4"
+  E = 2 \ A1$ = A$
+  Search #7,1,0;A$,V1,E
+  If E error 11000
+  let arrec=v1
+  Mat Write #7,V1;PAY2;
+  Mat Write #7,V1,24;PAY3;
+  Mat Write #7,V1,108;PAY3$;
+  Mat Write #7,V1,124;PAY0;
+  Mat Write #7,V1,150;PARCURRID;  
+  Mat Write #7,V1,154;PAY4;
+  Mat Write #7,V1,190;PAY1;
+  Mat Write #7,V1,202;PAY5;
+  Mat Write #7,V1,316;PYREF;
+  Mat Write #7,V1,342;PARCURRFACT;
+  C = 7 \ D = 1 \ CSH2[3] = V1
+  Gosub L_5000
+  If E error 11000
+  A$[7,12] = PAY2[4] Using "######"
+  A$[13] = A1$[7]
+  C = 7 \ D = 2
+  Gosub L_5000 \ If E error 11000
+  A$ = " ",A$;A$[1,6] = C12[1] Using "######"
+  A$[7,12] = PAY2[2] Using "######";A$[13,18] = PAY2[4] Using "######"
+  A$[19] = A1$[7]
+  C = 7;D = 3
+  Gosub L_5000 \ If E error 11000
+  A$ = " ",A$;A$[1,6] = C12[1] Using "######"
+  A$[7,16] = A1$[7,16];A$[17,22] = A1$[1,6];A$[23] = A1$[17]
+  C = 7;D = 4
+  Gosub L_5000 \ If E error 11000
+  A$ = " ",A$;A$[1,6] = C12[1] Using "######"
+  A$[7,12] = PAY2[4] Using "######"
+  A$[13,22] = A1$[7,16];A$[23,28] = A1$[1,6];A$[29] = A1$[17]
+  C = 7;D = 5
+  Gosub L_5000 \ If E error 11000
+  If (PAY3[0] - PAY3[1] - PAY3[2]) ! update customer aging buckets
+    ARAMT = (PAY3[0] - PAY3[1] - PAY3[2])
+    If Int(Fra(A2[3]) * 100) > 5 And BUCK <> 1 Let ARAMT = - (ARAMT)
+    KEYCUST$ = PAY2[2] Using "######"
+    Search #3,2,1;KEYCUST$,REC_CUST,E \ If E error 11000
+    Mat Read #3,REC_CUST,210;ARAGEBUCK
+    ARAGEBUCK[BUCK] = ARAGEBUCK[BUCK] + ARAMT
+    Mat Write #3,REC_CUST,210;ARAGEBUCK;
+  End If 
+! cash receipts entry for deposit
+! set up for deposit amt
+  CSH1[0]=9 ! deposit allocate        
+  CSH1[1]=DEP3[0] ! Warehouse
+  CSH1[2]=0             
+  CSH2[0]=DEP1[0] ! customer code	cr.CustomerCode=custid        
+  CSH2[1]=C0 ! =custrec       
+  CSH2[2]=arrec ! invoice saract ref #            
+  CSH2[3]=0 ! cr.SaractRecFrom=rec_ar ! mtg --- set a/r record     
+  CSH2[4]=ardate ! yymmdd format       
+  CSH2[5]=DEP1[1] ! for deposit type 8 uses order #         
+  CSH2[6]=DEP1[2] ! for depoist number cash receipts type                         
+  CSH2[7]=0                        
+  CSH2[8]=I2 ! Entry #
+  csh4=dep3[1] !Div
+  CSH3[0]=pyref[0]
+  csh3[1]=0 ! bank amt
+  csh3[2]=dep2[1] ! deposit amt
+  csh3[3]=0 ! credit amt
+  csh3[4]=0 ! disc
+  csh3[5]=0 ! last pay
+  csh3[5]=0 ! freight
+  CSH$ = " ",CSH$ \ Read #3,C0,30;CSH$[1,30];
+  CSH$[31,40] = "I ",OREF[1] Using "########"
+  CSH$[41,60] = "Deposit Order ",DEP1[1] USING "######" !! JE DESCRIPTION 
+  A$ = " ",A$
+  A$[1,2] = DEP1[5] Using "##" \ A$[3,7] = I2 Using "#####"
+  A$[8] = "  1" ! DEPOSIT TYPE 9 1ST CR TRANSACTION
+  let crcurrid=0
+  let crcurrfact=0
+  let crcurrvar=0
+  if p61$[136,136]="Y" 
+	let crcurrid=ohcurrid
+	let crcurrfact=ohcurrfact
+  endif
+  E = 2 \ A1$ = A$
+  Search #32,1,0;A$,V1,E
+  If E error 11000
+  Mat Write #32,V1;CSH1;
+  Mat Write #32,V1,6;CSH2;
+  Mat Write #32,V1,42;CSH4;
+  Mat Write #32,V1,44;CSH3;
+  Mat Write #32,V1,86;CSH$;
+  Mat Write #32,v1,172;crcurrid;
+  Mat Write #32,v1,174;crcurrfact;
+  Mat Write #32,v1,180;crcurrvar;
+  C = 32 \ D = 1
+  Gosub L_5000 ! Insert deposit key
+! cash receipts entry for the unappliedpayment
+! set up for deposit amt
+  CSH1[0]=2 ! deposit allocate        
+  CSH1[1]=DEP3[0] ! Warehouse
+  CSH1[2]=9            
+  CSH2[0]=DEP1[0] ! customer code	cr.CustomerCode=custid        
+  CSH2[1]=C0 ! =custrec       
+  CSH2[2]=0! invoice saract ref #            
+  CSH2[3]=arrec ! cr.SaractRecFrom=rec_ar ! mtg --- set a/r record     
+  CSH2[4]=ardate ! yymmdd format       
+  CSH2[5]=DEP1[1] ! for deposit type 8 uses order #         
+  CSH2[6]=DEP1[2] ! for depoist number cash receipts type                         
+  CSH2[7]=0                        
+  CSH2[8]=I2 ! Entry #
+  csh4=dep3[1] !Div
+  CSH3[0]=pyref[0]
+  csh3[1]=0 ! bank amt
+  csh3[2]=0 ! debit amount
+  csh3[3]=dep2[1] ! deposit amt0 ! credit amt
+  csh3[4]=0 ! disc
+  csh3[5]=0 ! last pay
+  csh3[5]=0 ! freight
+  CSH$ = " ",CSH$ \ Read #3,C0,30;CSH$[1,30];
+  CSH$[31,40] = "I ",OREF[1] Using "########"
+  CSH$[41,60] = "Deposit Order ",DEP1[1] USING "######" !! JE DESCRIPTION 
+  A$ = " ",A$
+  A$[1,2] = DEP1[5] Using "##" \ A$[3,7] = I2 Using "#####"
+  A$[8] = "  2" ! DEPOSIT TYPE 9 - 2nd transaction the payment
+  let crcurrid=0
+  let crcurrfact=0
+  let crcurrvar=0
+  if p61$[136,136]="Y" 
+	let crcurrid=ohcurrid
+	let crcurrfact=ohcurrfact
+  endif
+  E = 2 \ A1$ = A$
+  Search #32,1,0;A$,V1,E
+  If E error 11000
+  Mat Write #32,V1;CSH1;
+  Mat Write #32,V1,6;CSH2;
+  Mat Write #32,V1,42;CSH4;
+  Mat Write #32,V1,44;CSH3;
+  Mat Write #32,V1,86;CSH$;
+  Mat Write #32,v1,172;crcurrid;
+  Mat Write #32,v1,174;crcurrfact;
+  Mat Write #32,v1,180;crcurrvar;
+  C = 32 \ D = 1
+  Gosub L_5000 ! Insert deposit key
+  ! delete the deposit
+  search #41,5,1;keyrod$,rec_rod,e
+  let e=3\search #41,1,0;keyrod$,rec_rod,e \ if e error 11000
+goto srchdeldep: ! get next deposit
+return
+
+DoUpdateProdWhStat: !
+	! update specific warehouse totals
+	kPWS$ = " ",kPWS$
+	kPWS$[1,12] = l2$[1,12]
+	kPWS$[13,14] = LWHSE Using "##"
+	gosub ReadCreateProdWhStat:
+	gosub UpdateProdWhStat:
+	! update totals for ALL warehouses
+	kPWS$ = " ",kPWS$
+	kPWS$[1,12] = l2$[1,12]
+	kPWS$[13,14] = " 0"
+	gosub ReadCreateProdWhStat:
+	gosub UpdateProdWhStat:
+RETURN
+
+ReadCreateProdWhStat: ! read record if there, if not, create
+	search #81,2,1;kPWS$,recPWS,e
+	if e ! not found - create
+		Let E=2 ! get record
+		Search #81,1,0;kPWS$,recPWS,E
+		if e error 11000
+		search #81,4,1;kPWS$,recPWS,e
+		if e error 11000
+		mat write #81,recPWS,0;kPWS$[1,12]
+		PWSWH = kPWS$[13,14]
+		mat write #81,recPWS,12;PWSWH
+		for i = 0 to 12
+			USAGE_TY[I] = 0
+			USAGE_LY[I] = 0
+			SALES_TY[I] = 0
+			SALES_LY[I] = 0
+			LDCOST_TY[I] = 0
+			LDCOST_LY[I] = 0
+			AVGCOST_TY[I] = 0
+			AVGCOST_LY[I] = 0
+			HITS_TY[I]=0
+			HITS_LY[I]=0
+		next i
+	else
+		gosub ReadProdWhStat:
+	end if
+RETURN
+
+UpdateProdWhStat: !
+	! total for current month
+	usage_ty[ARMONTH] = usage_ty[ARMONTH] + t1
+	sales_ty[ARMONTH] = sales_ty[ARMONTH] + l5[3]
+	ldcost_ty[ARMONTH] = ldcost_ty[ARMONTH] + s9[12]
+	avgcost_ty[ARMONTH] = avgcost_ty[ARMONTH] + GLCOST
+	! hits = the sale affects usage and is the first shipment for order
+	if T1<>0 and not(L7[0]) ! it affects usage and no previous shipment so it's a hit
+		hits_ty[ARMONTH]=hits_ty[ARMONTH] + 1
+	ENDIF
+	! total for year
+	usage_ty[0] = usage_ty[0] + t1
+	sales_ty[0] = sales_ty[0] + l5[3]
+	ldcost_ty[0] = ldcost_ty[0] + s9[12]
+	avgcost_ty[0] = avgcost_ty[0] + GLCOST
+	if T1<>0 and not(L7[0]) ! no previous shipment so it's a hit
+		hits_ty[0]=hits_ty[0] + 1
+	ENDIF
+	gosub WriteProdWhStat:
+RETURN
+
+
+
+ReadProdWhStat: !
+	mat read #81,recPWS,14;USAGE_TY
+	mat read #81,recPWS,92;USAGE_LY
+	mat read #81,recPWS,170;SALES_TY
+	mat read #81,recPWS,248;SALES_LY
+	mat read #81,recPWS,326;LDCOST_TY
+	mat read #81,recPWS,404;LDCOST_LY
+	mat read #81,recPWS,482;AVGCOST_TY
+	mat read #81,recPWS,560;AVGCOST_LY
+	mat read #81,recPWS,638;HITS_TY
+	mat read #81,recPWS,716;HITS_LY
+RETURN
+
+WriteProdWhStat: !
+	mat write #81,recPWS,14;USAGE_TY
+	mat write #81,recPWS,92;USAGE_LY
+	mat write #81,recPWS,170;SALES_TY
+	mat write #81,recPWS,248;SALES_LY
+	mat write #81,recPWS,326;LDCOST_TY
+	mat write #81,recPWS,404;LDCOST_LY
+	mat write #81,recPWS,482;AVGCOST_TY
+	mat write #81,recPWS,560;AVGCOST_LY
+	mat write #81,recPWS,638;HITS_TY
+	mat write #81,recPWS,716;HITS_LY;
+RETURN
+
+! end routine
+
+
+L_20000: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)
+If CNVTU[2] = 3 Goto L_20050
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[2] = 0 Goto L_20050
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+L_20050: ! 
+L_20120: Rem "====== unibasic 5+ logic
+Call "MXPRCONV5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,e$,rstr$
+If CNVTU[2] = 0 Goto L_20160
+If FLAG Let E = FLAG \ error 11000
+AMOUNT = CNVTA
+L_20160: Return 
+L_30000: Rem ===== set units for conversions (stock/nonstock version)
+If OLS2[0] = 3 Goto L_30099
+A[6] = L6[4];A[5] = UNF[5] \ If Not(A[5]) Let A[5] = 1;UNF[5] = 1
+PFU1[0] = EUN[0];PFU1[1] = UN[0]
+PFU1[2] = UN[1];PFU1[3] = UN[2]
+PFU1[4] = EUN[1]
+PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+PFU1[8] = UN[0];PFU1[9] = UN[0];PFU1[10] = EUN[1]
+PFU1[11] = UN[2];PFU1[12] = UN[1]
+If Not(L3[0]) Goto L_30060
+PFU1[13] = UN[0];PFU1[16] = EUN[0];PFU1[17] = EUN[0]
+PFU1[18] = UN[0];PFU1[19] = UN[0]
+L_30060: PFU2[0] = UNF[0];PFU2[1] = UNF[1]
+PFU2[2] = UNF[2];PFU2[3] = UNF[3]
+PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+For X1 = 1 To 4
+  For X2 = 0 To X1 - 1
+    If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+  Next X2
+Next X1
+L_30099: Return 
+
+Rem {begin rtn.error.s}
+OUTEND: Rem EXIT
+If statchan print #statchan;"Part 3 COMPLETE ";Str$(ACC_CTR);" INVOICE(S) ACCEPTED "
+!Signal 3,40
+!Print 'CS'
+If P9$[48,48] = "Y" And TERMFLAG <> 2 Let S0 = 0 \ Write #1,20,8;S0;
+If P61$[94,94] = "Y"  Let S0 = 0 \ Write #1,20,8;S0;
+For I=0 to 90 ! DO NOT CLOSE ALL ! 
+	if I<>statchan Try Close #I  Else Rem
+Next I
+! call programdump("/tmp/ialog15!","")
+Chain "227C.DL4"
+RESTART_EXIT: ! Close 
+If icflag                      
+  Chain "serpinvo.odcs.dl4"    
+Endif
+!Chain ""
+!Stop 
+!Print 'CS'
+!Close 
+!Chain "MX000"
+!Stop 
+Else ! whole program bracketed by try/try end
+!
+If statchan print #statchan;"Part 3 - Error... Please call Universal."
+!
+include "src/callmainerrnet.inc"
+end try
+! whole program bracketed by try/try end
+End ! the whole program

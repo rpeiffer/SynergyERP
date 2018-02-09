@@ -1,0 +1,1374 @@
+! --- serp941.dl4
+! Warehouse info. maintenance program converted from ut941
+!
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp941.dl4 src/serp941.src
+!
+! FUNCTIONALITY LOST DUE TO NO "SUSER" or SU as there is no USERPORT stuff.
+!   1. Once a WH is added, if RASL is at WH level, cannot modify RASL "Y/N" for the WH
+!   2. Once a WH is added, cannot modify PO Cntrl # (if used)
+!   3. Once a WH is added, cannot modify DM Cntrl # (if used)
+!   4. No ability to CLEAR current or ALL WH
+!   5. No ability to clear all process flags
+!
+! 1.0 10/21/2009 - initial conversion
+! From the original code:
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: JAN 18, 2008  16:46:39
+Rem /w2/papermaster/r2005//usr/acct/txc/work/r2005/ut/ut941.src (univ2) [txc] {03527}
+Rem  Copyright (c) 2008 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+Rem     UT941  WAREHOUSE INFORMATION MAINTENANCE
+Rem     *************
+Rem     GEORGE DOSCHER  3/21/86
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+! include "src/inc/file?.inc"
+!
+Declare Intrinsic Sub InpBuf,String,Findf,programdump
+Declare Intrinsic Function FindChannel
+!Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile
+!Declare External Function openfile,pdate$,jdate$,Formatdate2$
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200],List$[50,200],3%,Maxcnt
+b$=" ",b$;maxcnt=50
+dim message$[150],webstr$[200]
+ !
+ ! call dxopen()
+ !
+ ! call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+ Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+! If Err 0 Gosub ERR_TRAP
+Dim 1%,N1[6],WPF[1024],C[17],CLFLAG,G1[2],POCFLAG,BSRC,FCWGT,CH_OSREG
+Dim 1%,WHOF[4],defPrinter
+Dim 1%,DNREORDER,EDITSTATUS
+DIM 1%,FWC,TITLE$[30]
+Dim 2%,K,R2,D9[5],I,I1,N4[2],NEWN4[2],SCAN[8]
+Dim 2%,WHOS,OSREG[1],cnswh
+Dim 3%,N2[12,2],N3[12,2],R[99],TRANCUST
+Dim P9$[50],P60$[50],P61$[256]
+Dim N1$[4],n1_dl$[4],N2$[118],n2_dl$[118],N3$[240],ID$[19],FLG$[4],BINM$[6]
+Dim P8$[7],C$[40],K3$[30],K4$[30],J$[20]
+Dim KOSREG$[10],OSREGNAME$[30],Custom_customer$[30]
+Dim Custk$[60],CustNm$[30],PRINTER$[20]
+
+!
+! get all the flag values we need
+!
+Mat Read #1,19,50;P9$;
+Mat Read #1,52,60;P8$; \ Mat Read #1,51,0;C;
+Mat Read #1,60,50;P60$;
+Mat Read #1,61,0;P61$;
+Read #1,51,76;POCFLAG;  ! purchase order control flag
+Mat Read #1,115,0;D9;
+Mat Read #1,60,6;FLG$;
+EDII = (FLG$[2,2] = "T" Or FLG$[2,2] = "H")
+RASL = 0 \ If P9$[41,41] = "Y" Or P9$[41,41] = "W" Let RASL = 9
+Read #1,115,60;custom_customer$;
+Custom_customer$=UCase$(Trim$(custom_customer$))
+! see if this user is the super user
+! Open #7,"cntrl/USERPORT"
+! Read #7,Spc(6),0;X1; \ SUSER = 0
+! Close #7
+! If X1 < 0 Let SUSER = 9
+SUSER = 0 ! no admin functionality by port
+
+!
+! open the rest of the files.  make sure to open all the hard
+! coded values (from conversion) before openfiles (which will work
+! around allocated channels)
+!
+Read #1,88,2768;tmp$; \ Open #2,tmp$
+If P61$[60,60] = "Y" ! fifo special cost done for spicers
+  CH_OSREG = 10
+  If intco < 10
+    tmp$ = intco Using "2/whosreg#"
+  Else
+    tmp$ = intco Using "2/whosreg##"
+  End If
+  Open #10,tmp$
+End If
+! client flag
+CLFLAG = 0 ! set if there are multiple gl clients by warehouse
+If P9$[17,17] = "Y" Or P9$[17,17] = "M" ! gl interface flag
+	If C[3] ! if there is multiple gl clients
+		If P8$[7,7] = "W" ! multiple gl clients by warehouse
+			Mat Read #1,88,48;tmp$; \ Open #3,tmp$  ! GL client master
+			Mat Read #1,88,464;tmp$; \ Open #4,tmp$ ! GL interface control
+			CLFLAG = 99
+		End If
+	End If
+End If
+
+LPTC = FindChannel()
+ropen #LPTC,"cntrl/CNTRL.LPT"
+
+FWC = openfile(-9964,intCo) \ If FWC = -1 Error 42 ! forecast weight tables
+CUC=OpenFile(-1808,intco) \ if CUC=-1 Error 42 ! customer for transfer order
+!Call dxsave(0,"tmp/941in.txt!")
+! in all cases except getting the initial warehouse list we need to read
+! the warehouse record
+EDITSTATUS = 0
+if action1$ <> "GETLIST"
+	Call DxGet("WHID", tmp$)
+	r2 = tmp$
+	if r2 < 1 OR r2 > D9[5]
+		returnstatus=0
+		message$ = "Invalid warehouse # entered!" !\ Error 10000
+		goto outerr
+	Endif
+	r2 = r2 - 1
+	gosub ReadWHInfo
+	If Rtrim$(N1$) = "" ! this record has never been defined before
+		gosub WHInitRec
+		call DxGet("Designator", tmp$) \ tmp$ = rtrim$(tmp$)
+		if tmp$ <> "" n1$ = tmp$,b$
+		call DxGet("Description", tmp$)
+		n2$[1,30] = tmp$,b$
+		EDITSTATUS = 1 ! new record
+	end if
+	! force RASL flag if not an a per WH level
+	If P9$[41,41] = "Y" Let N1[4] = 1
+	If P9$[41,41] = "N" Let N1[4] = 0
+end if
+
+!
+! Section 1 - No matter what we are doing we must some housekeeping items
+!
+tmp$=bsdel$+"HouseKeeping"+fdel$+rdel$+"MaxWH"+fdel$+"NewRec"+fdel$+rdel$
+tmp$=tmp$+str$(d9[5])+fdel$+str$(EDITSTATUS)+fdel$+rdel$+esdel$
+call addToStr(e$,rstr$,tmp$)
+
+!
+! GETTING WH LIST
+!
+if action1$ = "GETLIST" !						doc=WHInfo941-GetList.doc
+	! section 2 WH drop list
+	gosub BuildWHDroplist ! * added to rstr
+	!
+	! section - status
+	Message$=""
+	goto OutEnd:
+!
+! GETTING DATA FOR A SPECIFIC WH
+!
+else if action1$ = "GETDATA"   !				doc=WHInfo941-GetData.doc
+	!
+	! Warhouse data has been read or initialized and R2 contains record #
+	! load the data to send back to the web
+	!
+	gosub BuildWHDroplist
+	gosub BuildWHConditional
+	gosub BuildWHHeader
+ 	gosub BuildWHData
+	gosub BuildWHOverflow
+	gosub BuildWHSupportingDroplist
+	Message$=""
+	goto OutEnd:
+!
+! SUBMITTING DATA
+!
+else if action1$ = "SUBMITDATA" !				doc=WHInfo941-SubmitData.doc
+	! Call dxsave(0,"tmp/941in.txt!")
+	gosub UnloadDataAndUpdate
+	Gosub BuildWHDroplist
+	! section x - status
+	Message$="Record updated."
+	goto OutEnd:
+!
+! DELETE WH
+!
+else if action1$ = "DELETE" !					doc=WHInfo941-Delete.doc
+	gosub WHDelete
+	Gosub BuildWHDroplist
+	! section x - status
+	Message$="Record deleted."
+	goto OutEnd:
+!
+! UNKNOWN ACTION
+!
+else
+	message$ = "Unknown action1: "+action1$
+	returnstatus=0
+	Goto OutErr ! error 10000
+end if
+
+! ***********************************************************************
+! Nobody but us subroutines and exit code down here
+! ***********************************************************************
+
+!----------------------------------------------------------------------------
+! build initial drop list of existing warehouses
+!----------------------------------------------------------------------------
+BuildWHDroplist: !
+	! Add section header and column defs
+	tmp$=bsdel$+"WHDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$,rstr$,tmp$)
+	for i = 1 to D9[5]
+		Mat Read #2,i-1;N1_DL$
+		Mat Read #2,i-1,4;N2_DL$
+		If N1_DL$ > "    " ! if there is a WH desginator we have a defined record
+			tmp$=str$(i)+fdel$+str$(i)+" - "+rtrim$(n1_DL$)+": "+rtrim$(n2_DL$[1,30])+fdel$+rdel$
+			call addToStr(e$, rstr$, tmp$)
+		end if
+	next i
+	call addToStr(e$, rstr$, esdel$)
+Return
+
+!----------------------------------------------------------------------------
+! build conditional flags for wh information
+!----------------------------------------------------------------------------
+BuildWHConditional:
+	! flags for fields that are only conditionally displayed
+	!
+	! header
+	tmp$=bsdel$+"ConditionalFlags"+fdel$+rdel$
+	tmp$=tmp$+"BinMask"+fdel$+"EDISend"+fdel$+"EDIQual"+fdel$
+	tmp$=tmp$+"ProdWH"+fdel$+"GLClientID"+fdel$
+	tmp$=tmp$+"POControlNum"+fdel$+"DMControlNum"+fdel$
+	tmp$=tmp$+"WHRasl"+fdel$+"PORTSToDflt"+fdel$+"RASLAllocBin"+fdel$
+	tmp$=tmp$+"TagSBLoc"+fdel$+"WHOSREG"+fdel$
+	call addToStr(e$,rstr$,tmp$+rdel$)
+	! flags
+	if not(n1[4])
+		tmp$="Y"+fdel$
+	else
+		tmp$="N"+fdel$
+	end if
+	if EDII
+		tmp$=tmp$+"Y"+fdel$+"Y"+fdel$
+	else
+		tmp$=tmp$+"N"+fdel$+"N"+fdel$
+	end if
+	If P60$[17,17] = "Y" And P9$[2,2] = "M"
+		tmp$=tmp$+"Y"+fdel$
+	else
+		tmp$=tmp$+"N"+fdel$
+	end if
+	If CLFLAG
+		tmp$=tmp$+"Y"+fdel$
+	else
+		tmp$=tmp$+"N"+fdel$
+	end if
+	If POCFLAG
+		tmp$=tmp$+"Y"+fdel$+"Y"+fdel$
+	else
+		tmp$=tmp$+"N"+fdel$+"N"+fdel$
+	end if
+	If P9$[41,41] = "W"
+		tmp$=tmp$+"Y"+fdel$
+	else
+		tmp$=tmp$+"N"+fdel$
+	end if
+	If RASL AND N1[4]
+		tmp$=tmp$+"Y"+fdel$+"Y"+fdel$
+	else
+		tmp$=tmp$+"N"+fdel$+"N"+fdel$
+	End If
+	If RASL
+		tmp$=tmp$+"Y"+fdel$
+	else
+		tmp$=tmp$+"N"+fdel$
+	end if
+	If P61$[60,60] = "Y"
+		tmp$=tmp$+"Y"+fdel$
+	else
+		tmp$=tmp$+"N"+fdel$
+	end if
+	call addToStr(e$, rstr$, tmp$+rdel$+esdel$)
+Return
+
+!----------------------------------------------------------------------------
+! build header data for main wh information
+!----------------------------------------------------------------------------
+BuildWHHeader:
+	! build section header and column header
+	tmp$=bsdel$+"TableData"+fdel$+rdel$
+	tmp$=tmp$+"WHID"+fdel$
+	tmp$=tmp$+"Designator"+fdel$+"Description"+fdel$+"Address1"+fdel$+"Address2"+fdel$
+	tmp$=tmp$+"City"+fdel$+"State"+fdel$+"Zip"+fdel$
+	tmp$=tmp$+"BinMask"+fdel$
+	tmp$=tmp$+"DistCharge"+fdel$
+	tmp$=tmp$+"InvoiceMsg1"+fdel$+"InvoiceMsg2"+fdel$+"InvoiceMsg3"
+	tmp$=tmp$+fdel$+"InvoiceMsg4"+fdel$
+	tmp$=tmp$+"EDISend"+fdel$+"EDIQual"+fdel$
+	tmp$=tmp$+"ProdWH"+fdel$
+	tmp$=tmp$+"GLClientID"+fdel$
+	tmp$=tmp$+"POControlNum"+fdel$+"DMControlNum"+fdel$
+	tmp$=tmp$+"ShopPrint"+fdel$+"XferRegion"+fdel$
+	tmp$=tmp$+"WHRasl"+fdel$
+	tmp$=tmp$+"PORTSToDflt"+fdel$+"RASLAllocBin"+fdel$
+	tmp$=tmp$+"BuyingSource"+fdel$+"FCWT"+fdel$
+	tmp$=tmp$+"TagSBLoc"+fdel$
+	tmp$=tmp$+"DoNotReorder"+fdel$
+	tmp$=tmp$+"WHOSREG"+fdel$
+	tmp$=tmp$+"WHTCUSTID"+fdel$+"CUSTName"+fdel$
+	tmp$=tmp$+"DefaultPrinter"+fdel$
+	call addToStr(e$, rstr$, tmp$+rdel$)
+Return
+
+!----------------------------------------------------------------------------
+! build data for main wh information
+!----------------------------------------------------------------------------
+BuildWHData:
+	tmp$=str$(r2+1)+fdel$
+	tmp$=tmp$+n1$+fdel$+n2$[1,30]+fdel$+N2$[31,60]+fdel$+N2$[61,90]+fdel$
+	tmp$=tmp$+N2$[91,105]+fdel$+N2$[106,107]+fdel$+N2$[108,117]+fdel$
+	! bin mask - non-rasl only
+	if not(n1[4])
+		tmp$=tmp$+BINM$+fdel$
+	else
+		tmp$=tmp$+fdel$
+	end if
+	tmp$=tmp$+str$(N1[0])+fdel$+N3$[1,60]+fdel$+N3$[61,120]+fdel$+N3$[121,180]+fdel$
+	tmp$=tmp$+N3$[181,240]+fdel$
+	! send EDI info if EDI flag set
+	if EDII
+		tmp$=tmp$+ID$[1,17]+fdel$+ID$[18,19]+fdel$
+	else
+		tmp$=tmp$+fdel$+fdel$
+	end if
+	! if auto wh create and package type is manufacturing send production whse
+	If P60$[17,17] = "Y" And P9$[2,2] = "M"
+		tmp$=tmp$+str$(N1[1])+fdel$
+	else
+		tmp$=tmp$+fdel$
+	end if
+	! if client flag - send gl client
+	If CLFLAG
+		tmp$=tmp$+str$(N4)+fdel$
+	else
+		tmp$=tmp$+fdel$
+	end if
+	! if purchase order control flag
+	If POCFLAG
+		tmp$=tmp$+str$(N4[1])+fdel$+str$(N4[2])+fdel$
+	else
+		tmp$=tmp$+fdel$+fdel$
+	end if
+	tmp$=tmp$+str$(N1[2])+fdel$+str$(N1[3])+fdel$
+	! RASL dependent fields
+	If P9$[41,41] = "W"
+		tmp$=tmp$+str$(N1[4])+fdel$
+	else
+		tmp$=tmp$+fdel$
+	end if
+	If RASL AND N1[4]
+		tmp$=tmp$+str$(n1[5])+fdel$+str$(N1[6])+fdel$
+	else
+		tmp$=tmp$+fdel$+fdel$
+	End If
+	tmp$=tmp$+str$(BSRC)+fdel$+str$(FCWgT)+fdel$
+	If RASL
+		tmp$=tmp$+N2$[118,118]+fdel$
+	else
+		tmp$=tmp$+fdel$
+	end if
+	tmp$=tmp$+str$(DNREORDER)+fdel$
+	If P61$[60,60] = "Y"
+		tmp$=tmp$+str$(WHOS)+fdel$
+	else
+		tmp$=tmp$+fdel$
+	end if
+	if TRANCUST>0 and TRANCUST<1000000
+		custk$=" ",custk$
+		custk$=TRANCUST Using "######"
+		search #cuc,2,1;custk$,R[cuc],E
+		if e
+			trancust=0
+			custnm$=" ",custnm$
+		else
+			mat read #cuc,r[cuc],30;custnm$;
+		endif
+	else ! <=0 or out of range
+		trancust=0
+		custnm$=" ",custnm$
+	endif
+	tmp$=tmp$+Str$(TRANCUST)+fdel$+RTrim$(CustNm$)+fdel$
+	tmp$=tmp$+str$(defPrinter)+fdel$
+	call addToStr(e$, rstr$, tmp$+rdel$+esdel$)
+Return
+
+!----------------------------------------------------------------------------
+! wh overflow information
+!----------------------------------------------------------------------------
+BuildWHOverflow:
+	tmp$=bsdel$+"WHOverflow"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+rdel$
+	call addTostr(e$, rstr$, tmp$)
+	for i = 0 to 4
+		call addToStr(e$, rstr$, str$(whof[i])+fdel$+rdel$)
+	next i
+	call addTostr(e$, rstr$, esdel$)
+Return
+
+!----------------------------------------------------------------------------
+! all the support droplists for the main wh data
+!----------------------------------------------------------------------------
+BuildWHSupportingDroplist:
+	!
+	! drop list for distribution charge
+	!
+	tmp$=bsdel$+"DistChargeDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	call addToStr(e$, rstr$, "0"+fdel$+"NOT DIST CHRG"+fdel$+rdel$)
+	call addToStr(e$, rstr$, "1"+fdel$+"BY CUBE"+fdel$+rdel$)
+	call addToStr(e$, rstr$, "2"+fdel$+"BY WEIGHT"+fdel$+rdel$)
+	call addToStr(e$, rstr$, "3"+fdel$+"BY PIECE"+fdel$+rdel$)
+	call addToStr(e$, rstr$, "4"+fdel$+"BY VALUE"+fdel$+rdel$+esdel$)
+	!
+	! drop list for gl client list
+	!
+	tmp$=bsdel$+"GLClientDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	IF CFLAG
+		found = 0
+		do
+			K3$ = " ",K3$ \ K3$[3,6] = N4 Using "####"
+			Search #3,3,1;K3$,R3,E \ If E > 2 Gosub Err_Search ! Error 42
+			if e exit do
+			Mat Read #3,R3,10;C$;
+			i=k3$[3,6]
+			if i = N4 found = 1
+			call addToStr(e$, rstr$, str$(i)+fdel$+rtrim$(C$)+fdel$+rdel$)
+		loop
+		if not(found)
+			call addToStr(e$, rstr$, str$(N4)+fdel$+"Invalid Client!!!"+fdel$+rdel$)
+		end if
+	end if
+	call addToStr(e$, rstr$, esdel$)
+	!
+	! RASL Bin Alloc droplist
+	!
+	tmp$=bsdel$+"RASLAllocBinDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	IF RASL AND N1[4]
+		call addToStr(e$, rstr$, "0"+fdel$+"PRIMARY/BIN"+fdel$+rdel$)
+		call addToStr(e$, rstr$, "1"+fdel$+"PRIMARY/ONLY"+fdel$+rdel$)
+		call addToStr(e$, rstr$, "2"+fdel$+"PRIMARY/FIFO"+fdel$+rdel$)
+	END IF
+	call addToStr(e$, rstr$, esdel$)
+	!
+	! Buying Source Droplist
+	!
+	tmp$=bsdel$+"BuyingSourceDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	call addToStr(e$, rstr$, "0"+fdel$+"None"+fdel$+rdel$)
+	call addToStr(e$, rstr$, "1"+fdel$+"EOQ"+fdel$+rdel$)
+	call addToStr(e$, rstr$, "2"+fdel$+"INV CLASS"+fdel$+rdel$)
+	call addToStr(e$, rstr$, "3"+fdel$+"SEASONAL"+fdel$+rdel$)
+	call addToStr(e$, rstr$, "4"+fdel$+"START UP"+fdel$+rdel$)
+	call addToStr(e$, rstr$, "5"+fdel$+"ARBITRARY"+fdel$+rdel$)
+	call addToStr(e$, rstr$, "6"+fdel$+"MIN/MAX"+fdel$+rdel$+esdel$)
+	!
+	! Forecast weight table droplist
+	!
+	tmp$=bsdel$+"FCWTDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	found = 0
+	for i = 1 to 999
+		READ #FWC,I,96;TITLE$; \ title$=rtrim$(title$)
+		if title$ <> ""
+			if i = FCWGT found = 1
+			call addToStr(e$, rstr$, str$(i)+fdel$+title$+fdel$+rdel$)
+		end if
+	next i
+	if not(found)
+		call addToStr(e$, rstr$, str$(FCWGT)+fdel$+"Not On File"+fdel$+rdel$)
+	end if
+	call addToStr(e$, rstr$, esdel$)
+	!
+	! WH Offshore Region Droplist
+	!
+	tmp$=bsdel$+"WHOSREGDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	If P61$[60,60] = "Y"
+		call addToStr(e$, rstr$, "0"+fdel$+"None"+fdel$+rdel$)
+		KOSREG$ = " ",KOSREG$
+		do
+			! OSREGNAME$ = "region not on file "
+			Search #CH_OSREG,3,1;KOSREG$,REC_OSREG,E \ if E>2 Gosub Err_search ! Error 42
+			if (E) exit do
+			Mat Read #CH_OSREG,REC_OSREG,0;OSREGNAME$;
+			tmp$=ltrim$(KOSREG$)+fdel$+rtrim$(OSREGNAME$)+fdel$+rdel$
+			call addToStr(e$, rstr$, tmp$)
+		loop
+	end if
+	call addToStr(e$, rstr$, esdel$)
+	! printer droplist
+	tmp$=bsdel$+"PrinterDroplist"+fdel$+rdel$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	tmp$="0"+fdel$+"-- NONE --"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	for i = 1 to Chf(LPTC) - 1
+		Read #LPTC,i,10;PRINTER$;
+		tmp$=str$(i)+fdel$+str$(i)+" - "+printer$+fdel$+rdel$
+		call addToStr(e$, rstr$, tmp$)
+	next i
+	call addToStr(e$, rstr$, esdel$)
+Return
+
+!----------------------------------------------------------------------------
+! get returning information and update the record
+!----------------------------------------------------------------------------
+UnloadDataAndUpdate: !
+	!if EDITSTATUS = 0 ! existing record - new record has this loaded already
+		call DxGet("Designator", tmp$) \ n1$=tmp$,b$
+		call DxGet("Description", tmp$) \ n2$[1,30]=tmp$,b$
+	if rtrim$(n1$)="" or rtrim$(tmp$)="" ! gotta have it!
+		returnstatus=0
+		message$="Designator and Description required!"
+		goto OutErr
+	Endif
+	!end if ! NO THEY DON't!
+	call DxGet("Address1", tmp$) \ n2$[31,60]=tmp$,b$
+	call DxGet("Address2", tmp$) \ n2$[61,90]=tmp$,b$
+	call DxGet("City", tmp$) \ n2$[91,105]=tmp$,b$
+	call DxGet("State", tmp$) \ n2$[106,107]=tmp$,b$
+	call DxGet("Zip", tmp$) \ n2$[108,117]=tmp$,b$
+	! bin mask - non-rasl only
+	if not(n1[4])
+		call DxGet("BinMask", tmp$) \ tmp$=ucase$(tmp$)
+		binm$=tmp$,b$
+	end if
+	call DxGet("DistCharge", tmp$) \ n1[0]=tmp$
+	call DxGet("InvoiceMsg1", tmp$) \ N3$[1,60]=tmp$,b$
+	call DxGet("InvoiceMsg2", tmp$) \ N3$[61,120]=tmp$,b$
+	call DxGet("InvoiceMsg3", tmp$) \ N3$[121,180]=tmp$,b$
+	call DxGet("InvoiceMsg4", tmp$) \ N3$[181,240]=tmp$,b$
+	! send EDI info if EDI flag set
+	IF EDII
+		call DxGet("EDISend", tmp$) \ ID$[1,17]=tmp$,b$
+		call DxGet("EDIQual", tmp$) \ ID$[18,19]=tmp$,b$
+	end if
+	! if auto wh create and package type is manufacturing send production whse
+	If P60$[17,17] = "Y" And P9$[2,2] = "M"
+		call DxGet("ProdWH", tmp$) \ n1[1]=tmp$
+	end if
+	! if client flag - send gl client
+	If CLFLAG
+		call DxGet("GLClientID", tmp$) \ n4=tmp$
+		K3$ = " ",K3$ \ K3$[3,6] = N4 Using "####"
+		Search #3,2,1;K3$,R3,E \ If E>1 Gosub err_search ! Error 42
+		If E 
+			returnstatus=0
+			message$="Invalid GL Client Number!" !\ error 10000
+			goto OutErr
+		Endif
+	end if
+	! if purchase order control flag
+	If POCFLAG
+		call DxGet("POControlNum", tmp$) \ n4[1]=tmp$
+		call DxGet("DMControlNum", tmp$) \ n4[2]=tmp$
+	end if
+	call DxGet("ShopPrint", tmp$) \ N1[2]=tmp$
+	call DxGet("XferRegion", tmp$) \ n1[3]=tmp$
+	if n1[3]<0 or n1[3]>99 or fra(n1[3])
+		returnstatus=0
+		message$="Invalid transfer region (0-99)"
+		goto outerr
+	Endif
+	! RASL dependent fields
+	If P9$[41,41] = "W"
+		call DxGet("WHRasl", tmp$) \ n1[4]=tmp$
+	end if
+	If RASL AND N1[4]
+		call DxGet("PORTSToDflt", tmp$) \ n1[5]=tmp$
+		call DxGet("RASLAllocBin", tmp$) \ n1[6]=tmp$
+	end if
+	
+	call DxGet("BuyingSource", tmp$)
+	X2=tmp$
+	! it's from droplist - trust it?
+	if custom_customer$="MAYFIELD" and x2<>BSRC Gosub wrtlog:
+	BSRC=tmp$
+	call DxGet("FWCT", tmp$) \ FCWGT=tmp$ ! should be "FCWT" - easier to chg backend
+
+	IF RASL
+		call DxGet("TAGSBLoc", tmp$) \ n2$[118,118]=tmp$,b$
+	end if
+	call DxGet("DoNotReorder", tmp$) \ DNREORDER=tmp$
+	If P61$[60,60] = "Y"
+		call DxGet("WHOSREG", tmp$) \ WHOS=tmp$
+	end if
+	for I = 1 to 5
+		call DxGet("OFID_"+str$(i), tmp$) \ WHOF[i-1]=tmp$
+	next i
+	call dxget("WHTCUSTID",tmp$)
+	x2=tmp$
+	if x2>0 and x2<1000000
+		custk$=" ",custk$
+		custk$=X2 using "######"
+		search #cuc,2,1;custk$,r[cuc],E
+		if e
+			returnstatus=0
+			message$="Invalid Customer Number!" !\ error 10000
+			goto OutErr
+		endif
+		read #cuc,r[cuc],490;cnswh;
+		if cnswh=0 or cnswh<>(r2+1)
+			returnstatus=0
+			message$="Customer not set up for transfers!"
+			goto outErr
+		endif
+		!?? any check of customer? like if they are actually transfer cust?
+	else
+		x2=0 ! invalid or out of range
+	endif
+	trancust=x2
+	call DxGet("DefaultPrinter", tmp$) \ defPrinter=tmp$
+	Gosub WriteWHInfo
+Return
+
+WHDelete: Rem clear variables before writing it out
+	N1$ = " ",N1$;N2$ = " ",N2$;N3$ = " ",N3$;BINM$ = " ",BINM$;ID$ = " ",ID$
+	N2[0,1] = 0 \ N2[0,2] = 0
+	N3[0,1] = 0 \ N3[0,2] = 0
+	For I = 0 To 12
+		N2[I,1] = 0 \ N2[I,2] = 0
+		N3[I,1] = 0 \ N3[I,2] = 0
+	Next I
+	For I = 0 To 6 \ N1[I] = 0 \ Next I
+	N1[0] = 0;N1[1] = 0
+	defPrinter = 0
+	Gosub WriteWHInfo
+Return
+
+WrtLog: ! record changes to buying source
+System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" WH="+Str$(r2+1)+" Old=" + Str$(BSRC) +  " New="+Str$(X2)+"'' >> tmp/941log"
+Return
+
+
+! L_1000: Gosub DisplayScreen
+! J0$ = "3 00 222 2"
+! J1 = 0
+! X$ = D9[5] Using "&&"
+! J5$ = "Enter warehouse number (1-",X$,"), <CR>: exit"
+! Gosub ISINPUT \ J5$ = ""
+! If J4$ = "" Goto OUTEND
+! EDITSTATUS = 0
+! R2 = J1 - 1
+! If R2 >= 0 If R2 < D9[5] Goto L_1200
+! J7$ = "INVALID WAREHOUSE NUMBER" \ Gosub ISERRMSG \ Goto L_1000
+
+! L_1200: Rem GET RECORD
+! Gosub ReadWHInfo
+! If P9$[41,41] = "Y" Let N1[4] = 1
+! If P9$[41,41] = "N" Let N1[4] = 0
+! If N1[4] = 1 Print @48,3;'CL';
+! If N1$ > "    " Goto L_2000
+
+! EDITSTATUS = 99
+! Gosub WHInitRec
+! L_1230: Rem "Enter all fields
+! For W0 = 1 To 28 \ Gosub L_2200 \ Next W0
+! Goto L_2000
+
+! L_2000: Rem
+! Gosub L_5000
+! L_2020: Print @0,23;'CL';"ENTER #:  E: end R: re-enter all O: overflows ";
+! If SUSER Print " CLEAR  C/CA FLG ";
+! Print " or DELETE:  ";
+! Input Len 16390; Tim 600;""U5$ \ Print @0,23;'CL';
+! Signal 6,-3,X,X
+! Call String(1,U5$)
+! Print @0,23;'CL';
+! If U5$ = "O" Gosub OVERFLOW
+! If U5$ = "CFLG" Or U5$ = "CAFLG" Goto L_8500
+! If U5$ = "E" Or U5$ = "" Goto L_2500
+! If U5$ = "R" Goto L_1230
+! If U5$ = "DELETE" Goto CLEARFIRST
+! If U5$ = "CLEAR" Goto L_8200
+! W0 = U5$ \ If W0 Gosub L_2200
+! Goto L_2020
+
+! L_2200: Rem
+! On W0 Gosub L_3000,L_3040,L_3080,L_3120,L_3160,L_3200,L_3240,L_3280,L_3395,L_3420
+! On W0 - 10 Gosub L_3445,L_3470,L_3500,L_3550,L_3600,L_3650,L_3800,L_3900,L_3920,EDT_RASL
+! On W0 - 20 Gosub EDT_PORTS,EDT_RASLATYPE,GETDMCNTRL,EDT_BS,EDT_FWT,EDT_TAGLOC,EDT_DNREORDER,OSREGOPT
+! Return 
+
+! L_2500: Rem END
+! If CLFLAG
+!   K3$ = " ",K3$ \ K3$[3,6] = N4 Using "####"
+!   Search #3,2,1;K3$,R3,E \ If Not(E) Goto L_2509
+!   If E > 1 Gosub ERR_SEARCH
+!   Print @0,23;'CL RB';"INVALID CLIENT NUMBER!!! MUST BE ENTERED FOR THE INTERFACE";
+!   Signal 3,30 \ Print @0,23;'CL';
+!   Goto L_2020
+! End If 
+! L_2509: Gosub WriteWHInfo
+! Goto L_1000
+
+! L_3000: J0$ = "2 00 453 2"
+! J1$ = N1$
+! J5$ = ""
+! Gosub ISINPUT
+! N1$ = J$
+! J5$ = ""
+! Return 
+
+! L_3040: J0$ = "2 003016 5"
+! J1$ = N2$[1,30]
+! J5$ = ""
+! Gosub ISINPUT
+! N2$[1,30] = J$
+! J5$ = ""
+! Return 
+
+! L_3080: J0$ = "2 003016 6"
+! J1$ = N2$[31,60]
+! J5$ = ""
+! Gosub ISINPUT
+! N2$[31,60] = J$
+! J5$ = ""
+! Return 
+
+! L_3120: J0$ = "2 003016 7"
+! J1$ = N2$[61,90]
+! J5$ = ""
+! Gosub ISINPUT
+! N2$[61,90] = J$
+! J5$ = ""
+! Return 
+
+! L_3160: J0$ = "2 001516 8"
+! J1$ = N2$[91,105]
+! J5$ = ""
+! Gosub ISINPUT
+! N2$[91,105] = J$
+! J5$ = ""
+! Return 
+
+! L_3200: J0$ = "2 00 216 9"
+! J1$ = N2$[106,107]
+! J5$ = ""
+! Gosub ISINPUT
+! N2$[106,107] = J$
+! J5$ = ""
+! Return 
+
+! L_3240: J0$ = "2 00101610"
+! J1$ = N2$[108,117]
+! J5$ = ""
+! Gosub ISINPUT
+! N2$[108,117] = J$
+! J5$ = ""
+! Return 
+
+! L_3280: J0$ = "3000012316"
+! J1 = N1[0]
+! J5$ = "0=DO NOT, 1= BY CUBE, 2= BY WEIGHT, 3= BY PIECE, 4= BY VALUE "
+! Gosub ISINPUT
+! If J1 < 0 Or J1 > 4 Goto L_3280
+! N1[0] = J1
+! Print @25,16;"             ";
+! If N1[0] = 0 Print @25,16;"NOT DIST CHRG"
+! If N1[0] = 1 Print @25,16;"BY CUBE"
+! If N1[0] = 2 Print @25,16;"BY WEIGHT"
+! If N1[0] = 3 Print @25,16;"BY PIECE"
+! If N1[0] = 4 Print @25,16;"BY VALUE"
+! Return 
+
+! L_3395: J0$ = "2 00602017"
+! J5$ = " ",J5$
+! J1$ = N3$[1,60]
+! Gosub ISINPUT
+! N3$[1,60] = J$
+! Return 
+
+! L_3420: J0$ = "2 00602018"
+! J5$ = " ",J5$
+! J1$ = N3$[61,120]
+! Gosub ISINPUT
+! N3$[61,120] = J$
+! Return 
+
+! L_3445: J0$ = "2 00602019"
+! J5$ = " ",J5$
+! J1$ = N3$[121,180]
+! Gosub ISINPUT
+! N3$[121,180] = J$
+! Return
+
+! L_3470: J0$ = "2 00602020"
+! J5$ = " ",J5$
+! J1$ = N3$[181,240]
+! Gosub ISINPUT
+! N3$[181,240] = J$
+! Return 
+
+! L_3500: If Not(EDII) Return
+! J0$ = "2 00172021"
+! J5$ = " ",J5$;J1$ = ID$[1,17]
+! Gosub ISINPUT
+! J1$ = ID$[18,19];J0$ = "2 00023921"
+! ID$ = " ",ID$;ID$[1,Len(J$)] = J$[1,Len(J$)]
+! Gosub ISINPUT
+! ID$[18,Len(J$) + 17] = J$[1,2]
+! Return
+
+! L_3550: Rem BIN MASK$
+! If N1[4] = 1 Return 
+! J5$ = "Enter the Mask for WHSE Locations A:anything,N:number,L:letter"
+! J0$ = "2 00 670 3"
+! J1$ = BINM$[1,6]
+! Gosub ISINPUT
+! Gosub L_8300 \ Goto L_3550
+! BINM$ = J$[1,6] \ Return
+
+! L_3600: Rem AUTO GEN OUT OF WHSE #
+! If P60$[17,17] <> "Y" Let N1[1] = R2 + 1 \ Return 
+! L_3610: J5$ = "Enter the Production Whse # for AutoGen Sales Orders on this Whse"
+! J0$ = "3000 270 4"
+! J1 = N1[1] \ If J1 <= 0 Let J1 = R2 + 1
+! Gosub ISINPUT
+! If J1 < 1 Or J1 > D9[5] Goto L_3610
+! N1[1] = J1
+! Return 
+
+! L_3650: Rem CLIENT #
+! If Not(CLFLAG) Return 
+! If N4
+!   K4$ = " ",K4$
+! L_3665: Search #4,3,1;K4$,R4,E \ If E = 2 Goto L_3695
+!   If E Gosub ERR_SEARCH
+!   Mat Read #4,R4,0;G1; \ If G1[1] <> D1 Goto L_3665
+!   Print @0,23;'CL RB';"G/L - A/R CONTROLS ARE SETUP FOR THIS DIVISION ";
+!   Signal 3,30 \ Print @0,23;'CL';
+!   Return 
+! L_3695: End If
+! L_3700: J0$ = "3 000460 5"
+! J2$ = "####" \ J1 = N4
+! J5$ = "Enter Client Number To Interface To General Ledger"
+! Gosub ISINPUT
+! K3$ = " ",K3$ \ K3$[3,6] = J1 Using "####"
+! Search #3,2,1;K3$,R1,E \ If E > 1 Gosub ERR_SEARCH
+! If E = 1
+!   Print @0,23;'CL RB';"CLIENT NOT ON FILE!!!!"; \ Signal 3,30
+!   Print @0,23;'CL'; \ Goto L_3700
+! End If 
+! Mat Read #3,R1,10;C$;
+! Print @61,5;C$[1,15]
+! If J1 <> N4 If EDITSTATUS <> 99 If EDITSTATUS <> 1 Let EDITSTATUS = 3
+! N4 = J1
+! If K = 2 Goto L_2020
+! Return 
+
+! L_3800: Rem purchase order cntrl  #17
+! If SUSER <> 9 Return 
+! If Not(POCFLAG) Return 
+! J0$ = "3 000664 6"
+! J2$ = "######" \ J1 = N4[1]
+! J5$ = "Enter Purchase Order Control Number "
+! Gosub ISINPUT
+! If J1 <> N4[1] If EDITSTATUS <> 99 Let EDITSTATUS = 1
+! N4[1] = J1
+! Return 
+
+! L_3900: Rem Shopprint today only #18
+! J0$ = "6 00017607"
+! J5$ = "N=Shopprint any PICK TICKET, Y=only entered and ship today."
+! J1 = N1[2]
+! Gosub ISINPUT
+! N1[2] = J1
+! Return 
+
+! L_3920: Rem "Region for Whse #19
+! J5$ = "Enter the Location Region(1-99) or 0=all"
+! J0$ = "3000026808";J1 = N1[3]
+! Gosub ISINPUT
+! N1[3] = J1
+! Return 
+
+! EDT_RASL: Rem "Use Rasl in this Warehouse #20
+! If P9$[41,41] <> "W"
+!   N1[4] = 0 \ If P9$[41,41] = "Y" Let N1[4] = 1
+!   Return 
+! End If 
+! If Not(SUSER)
+!   J7$ = "PLEASE CALL UBS TO CHANGE THIS SETTING!"
+!   Gosub ISERRMSG \ Return 
+! End If 
+! J5$ = "Does this Warehouse Use RASL? (Y/N)"
+! J0$ = "6 00 15609";J1 = N1[4]
+! Gosub ISINPUT
+! N1[4] = J1 \ Return
+
+! EDT_PORTS: Rem "locations in PO RTS(371) #21
+! If Not(RASL) Or N1[4] = 0 Return 
+! J5$ = "Enter and edit Locations / Quantites in 371? (Y/N)"
+! J0$ = "6 00 16510";J1 = N1[5]
+! Gosub ISINPUT
+! N1[5] = J1 \ Return 
+! EDT_RASLATYPE: Rem "Rasl Allocation Type #22
+! If Not(RASL) Or N1[4] = 0 Return 
+! J5$ = "ALLOCATE RASL: 0=Primary/Bin, 1=Primary Only, 2=Primary/FIFO"
+! J0$ = "3000 26111";J1 = N1[6]
+! Gosub ISINPUT
+! If J1 < 0 Or J1 > 2 Goto EDT_RASLATYPE
+! N1[6] = J1 \ Print Using "##";@61,11;N1[6];'CL';
+! If N1[6] = 0 Print @64,11;"PRIMARY/BIN ";
+! If N1[6] = 1 Print @64,11;"PRIMARY ONLY";
+! If N1[6] = 2 Print @64,11;"PRIMARY/FIFO";
+! Return 
+
+! GETDMCNTRL: Rem debit memo cntrl  #23
+! If SUSER <> 9 Return 
+! If Not(POCFLAG) Return 
+! J0$ = "3 00065612"
+! J2$ = "######" \ J1 = N4[2]
+! J5$ = "Enter Debit Memo Control Number "
+! Gosub ISINPUT
+! If J1 <> N4[2] If EDITSTATUS <> 99 Let EDITSTATUS = 1
+! N4[2] = J1
+! Return 
+
+! EDT_BS: Rem "Buying Source #24
+! J5$ = "1-eoq, 2-inv class, 3-seasonal, 4-start-up, 5-arbitrary, 6-min/max"
+! J0$ = "3000 26113";J1 = BSRC
+! Gosub ISINPUT
+! BSRC = J1
+! If BSRC > 6 Goto EDT_BS
+! Print Using "##";@61,13;BSRC;'CL';
+! If BSRC = 1 Print @64,13;"EOQ";
+! If BSRC = 2 Print @64,13;"INV CLASS";
+! If BSRC = 3 Print @64,13;"SEASONAL";
+! If BSRC = 4 Print @64,13;"STAR UP";
+! If BSRC = 5 Print @64,13;"ARBITRARY";
+! If BSRC = 6 Print @64,13;"MIN/MAX";
+! Return 
+
+! EDT_FWT: Rem Forecast Weight Table ! #25
+! J5$ = "Enter the Forecast Weight Table for this item(1-999) -:list"
+! J0$ = "3000 36414-";J1 = FCWGT \ If J1 < 1 Let J1 = 1
+! If J1 > 999 Let J1 = 1
+! Gosub ISINPUT
+! If J4$[1,1] = "-" Gosub FORECAST_WINDOW
+! If J1 < 1 Or J1 > 999 Goto EDT_FWT
+! FCWGT = J1
+! Return 
+
+! EDT_TAGLOC: Rem force the tag number should be the location in 693 - #26
+! If Not(RASL) Return 
+! J5$ = "The tag number should be the location in 693? (Y/N)"
+! J0$ = "2 00016415"
+! If N2$[118,118] = "Y" Let J1$ = "Y" Else Let J1$ = "N"
+! Gosub ISINPUT \ If J$[1,1] <> "Y" If J$[1,1] <> "N" Goto EDT_TAGLOC
+! If J$[1,1] = "Y" Let N2$[118,118] = "Y" Else Let N2$[118,118] = "N"
+! Return 
+
+! EDT_DNREORDER: Rem set the do not reorder flag to y,n or o - #27
+! J5$ = "Set the do not reorder flag to Y/N/O"
+! J0$ = "2 00016416"
+! J1$ = "N" \ If DNREORDER Let J1$ = "Y"
+! If DNREORDER = 2 Let J1$ = "O"
+! Gosub ISINPUT
+! If J$ <> "O" If J$ <> "Y" If J$ <> "N" Goto EDT_DNREORDER
+! DNREORDER = 0 \ If J$ = "Y" Let DNREORDER = 1
+! If J$ = "O" Let DNREORDER = 2
+! Return 
+
+! OSREGOPT: Rem enter the offshore region code
+! If P61$[60,60] <> "Y" Return 
+! ORGREG = WHOS
+! J5$ = "Enter the offshore region for this warehouse  0: none  -: list "
+! J0$ = "3000045721-" \ J1 = WHOS
+! Gosub ISINPUT
+! If J4$[1,1] = "-"
+!   OSREG[0] = 10
+!   ADDFLAG = 99
+!   Call "mxwhosreg",OSREG[],ADDFLAG
+!   Goto OSREGOPT
+! End If 
+! WHOS = J1
+! If WHOS
+!   Gosub GETOSREG
+!   If E
+!     Call "errmsg","Offshore Region not on file. Please enter a valid region"
+!     WHOS = ORGREG
+!     Goto OSREGOPT
+!   End If 
+! Else 
+!   OSREGNAME$ = " ",OSREGNAME$
+!   Print @62,21;OSREGNAME$[1,17];
+! End If 
+! Return 
+
+! GETOSREG: Rem get offshore region
+! KOSREG$ = " ",KOSREG$
+! KOSREG$[1,4] = WHOS Using "####"
+! OSREGNAME$ = "region not on file "
+! Search #CH_OSREG,2,1;KOSREG$,REC_OSREG,E
+! If Not(E)
+!   Mat Read #CH_OSREG,REC_OSREG,0;OSREGNAME$;
+! End If 
+! Print @62,21;OSREGNAME$[1,17];
+! Return 
+
+! FORECAST_WINDOW: Rem "Show the Desc's in table
+! If Err 0 Rem
+! Close #85
+! If Err 0 Gosub ERR_TRAP
+! FT$ = "3/FRCSTWGT" + Str$(COID)
+! Ropen #85,FT$
+! TITLE$ = "FORECAST WEIGHT TABLES"
+! START$ = "";SCAN[0] = 0;SCAN[1] = 85
+! SCAN[2] = 0;SCAN[3] = 0;SCAN[4] = 3;SCAN[5] = 96
+! SCAN[6] = 30;SCAN[7] = 0;SCAN[8] = 2
+! Call "MXSCAN",SR,SC,SCAN[],TITLE$,START$
+! Close #85
+! J1 = SCAN[0]
+! Return 
+
+! L_5000: Rem "====================================== display data
+! For OFW = 0 To 4
+!   If WHOF[OFW]
+!     Print @44,1;'BR';"OVERFLOW WHS ON FILE ";'ER';
+!     OFW = 6
+!   End If 
+! Next OFW
+! Print @53,2;N1$;
+! Print @16,5;N2$[1,30];
+! Print @16,6;N2$[31,60];
+! Print @16,7;N2$[61,90];
+! Print @16,8;N2$[91,105];
+! Print @16,9;N2$[106,107];
+! Print @16,10;N2$[108,117];
+! If N1[4] <> 1 Print @70,3;BINM$;
+! Print " "
+! If N1[0] = 0 Print @25,16;"NOT DIST CHRG"
+! If N1[0] = 1 Print @25,16;"BY CUBE"
+! If N1[0] = 2 Print @25,16;"BY WEIGHT"
+! If N1[0] = 3 Print @25,16;"BY PIECE"
+! If N1[0] = 4 Print @25,16;"BY VALUE"
+! Print @20,17;N3$[1,60]
+! Print @20,18;N3$[61,120]
+! Print @20,19;N3$[121,180]
+! Print @20,20;N3$[181,240]
+! If EDII Print @20,21;ID$[1,17];"  ";ID$[18,19]
+! If P60$[17,17] = "Y" And P9$[2,2] = "M"
+!   Print Using "##";@70,4;N1[1]
+! End If 
+! If CLFLAG
+!   Print Using "####";@60,5;N4;
+!   C$ = "Invalid Client!!!!!!"
+!   K3$ = " ",K3$ \ K3$[3,6] = N4 Using "####"
+!   Search #3,2,1;K3$,R3,E \ If E = 1 Goto L_5145
+!   If E Gosub ERR_SEARCH
+!   Mat Read #3,R3,10;C$;
+! L_5145: Print @61,6;C$[1,19]
+! End If 
+! If POCFLAG Print Using "######";@64,6;N4[1];
+! If N1[2] Let X$ = "Y" Else Let X$ = "N"
+! Print @76,7;X$;
+! Print Using "##";@68,8;N1[3];
+! If N1[4] Let X$ = "Y" Else Let X$ = "N"
+! If P9$[41,41] = "W" Print @56,9;X$;
+! If RASL
+!   If N1[5] Let X$ = "Y" Else Let X$ = "N"
+!   If N1[4] Print @65,10;X$
+!   If N1[4]
+!     Print Using "##";@61,11;N1[6];'CL';
+!     If N1[6] = 0 Print @64,11;"PRIMARY/BIN ";
+!     If N1[6] = 1 Print @64,11;"PRIMARY ONLY";
+!     If N1[6] = 2 Print @64,11;"PRIMARY/FIFO";
+!   End If 
+! End If 
+! If POCFLAG Print Using "######";@56,12;N4[2];
+! Print Using "##";@61,13;BSRC;'CL';
+! If BSRC = 1 Print @64,13;"EOQ";
+! If BSRC = 2 Print @64,13;"INV CLASS";
+! If BSRC = 3 Print @64,13;"SEASONAL";
+! If BSRC = 4 Print @64,13;"STAR UP";
+! If BSRC = 5 Print @64,13;"ARBITRARY";
+! If BSRC = 6 Print @64,13;"MIN/MAX";
+! Print Using "###";@64,14;FCWGT;
+! If RASL
+!   Print @64,15;N2$[118,118];
+! End If 
+! X$ = "N" \ If DNREORDER = 1 Let X$ = "Y"
+! If DNREORDER = 2 Let X$ = "O"
+! Print @64,16;X$;
+! If P61$[60,60] = "Y"
+!   Print Using "####";@57,21;WHOS;
+!   If WHOS
+!     Gosub GETOSREG
+!   End If 
+! End If 
+! Return 
+! 
+! DisplayScreen: !
+! 	Print 'CS ED';@0,0;"UT941";@20,0;"WAREHOUSE INFORMATION MAINTENANCE"
+! 	Print @57,0;Msc$(3)
+! 	Print @4,2;'BD';"WAREHOUSE NUMBER";
+! 	Print @37,2;"1> DESIGNATION";
+! 	Print @1,4;"--------   SHIPPING ADDRESS  ------------";
+! 	Print @4,5;"NAME";
+! 	Print @4,6;"ADDRESS 1";
+! 	Print @52,3;"LOCATION MASK";
+! 	Print @4,7;"ADDRESS 2";
+! 	If P60$[17,17] = "Y" And P9$[2,2] = "M" Print @52,4;"PRODUCTION WHSE";
+! 	Print @4,8;"CITY";
+! 	If CLFLAG Print @52,5;"CLIENT";
+! 	Print @4,9;"STATE";
+! 	If POCFLAG Print @52,6;"PO CNTRL#";
+! 	Print @4,10;"ZIP CODE";
+! 	Print @52,7;"SHOPPRINT TODAY'S ONLY: ";
+! 	Print @44,8;"REGION";
+! 	If P9$[41,41] = "W" Print @44,9;"USE RASL";
+! 	If RASL Print @44,10;"PO RTS LOCTN EDIT"
+! 	If RASL Print @44,11;"RASL ALLOCATE #";
+! 	If POCFLAG Print @44,12;"DM CNTRL#";
+! 	Print @44,13;"BUYING SOURCE";
+! 	Print @44,14;"FORECAST WHGT#";
+! 	If RASL
+! 		Print @44,15;"TAG# S/B LOCATION";
+! 	End If
+! 	Print @44,16;"DO NOT REORDER";
+! 	Print @4,16;"DISTRIBUTE CHARGES ";
+! 	Print @4,17;"INVOICE MSG. #1"
+! 	Print @4,18;"INVOICE MSG. #2"
+! 	Print @4,19;"INVOICE MSG. #3"
+! 	Print @4,20;"INVOICE MSG. #4"
+! 	If EDII Print @4,21;"EDI IDENTIFER ";
+! 	If P61$[60,60] = "Y"
+! 		Print @47,21;"OS REGION";
+! 	End If
+! 	Print 'ED';
+! 	Print @37,2;"1>";
+! 	Print @1,5;"2>";
+! 	Print @1,6;"3>";
+! 	Print @1,7;"4>";
+! 	Print @1,8;"5>";
+! 	Print @1,9;"6>";
+! 	Print @1,10;"7>";
+! 	Print @1,16;"8>";
+! 	Print @1,17;"9>";
+! 	Print @0,18;"10>";
+! 	Print @0,19;"11>";
+! 	Print @0,20;"12>";
+! 	If EDII Print @0,21;"13>";
+! 	Print @48,3;"14>";
+! 	If P60$[17,17] = "Y" And P9$[2,2] = "M"
+! 		Print @48,4;"15>";
+! 	End If
+! 	If CLFLAG Print @48,5;"16>";
+! 	If POCFLAG Print @48,6;"17>";
+! 	Print @48,7;"18>";
+! 	Print @40,8;"19>";
+! 	If P9$[41,41] = "W" And SUSER Print @40,9;"20>";
+! 	If RASL Print @40,10;"21>";@40,11;"22>";
+! 	If POCFLAG Print @40,12;"23>";
+! 	Print @40,13;"24>";
+! 	Print @40,14;"25>";
+! 	If RASL
+! 		Print @40,15;"26>";
+! 	End If
+! 	Print @40,16;"27>";
+! 	If P61$[60,60] = "Y" ! fspc code
+! 		Print @43,21;"28>";
+! 	End If
+! Return
+
+ReadWHInfo: Rem "====================================== READ WHSINFO (do not lock!)
+	Mat Read #2,R2;N1$
+	Mat Read #2,R2,4;N2$
+	Mat Read #2,R2,122;N1
+	Mat Read #2,R2,136;N2
+	Mat Read #2,R2,370;N3
+	Mat Read #2,R2,604;N3$ \ Mat Read #2,R2,844;N4
+	Mat Read #2,R2,858;BSRC
+	Mat Read #2,R2,860;FCWGT
+	Mat Read #2,R2,862;BINM$
+	Mat Read #2,R2,868;ID$
+	Mat Read #2,R2,898;DNREORDER
+	Mat Read #2,R2,900;WPF;
+	Mat Read #2,R2,2948;WHOF;
+	Mat Read #2,R2,2970;WHOS;
+	Mat Read #2,R2,3032;TRANCUST;
+	Mat Read #2,R2,3052;defPrinter;
+Return
+
+WriteWHInfo: Rem "====================================== WRITE WHSINFO
+	Mat Write #2,R2;N1$
+	Mat Write #2,R2,4;N2$
+	Mat Write #2,R2,122;N1
+	Mat Write #2,R2,136;N2
+	Mat Write #2,R2,370;N3
+	Mat Write #2,R2,604;N3$
+	Rem ONLY WRITE OUT N4 IF NEW OR CHANGED 12/03-WMB
+	! EDITSTATUS of 99 = new record
+	! EDITSTATUS of 1 = client ID only changed
+	! EDITSTATUS of 3 = PO/DB control numbers have been modified
+! 	If EDITSTATUS <> 0
+! 		If EDITSTATUS = 99
+! 			Mat Write #2,R2,844;N4
+! 		Else
+! 			Mat Read #2,R2,844;NEWN4
+! 			If EDITSTATUS <> 1 Let N4[1] = NEWN4[1] \ N4[2] = NEWN4[2]
+! 			Mat Write #2,R2,844;N4
+! 		End If
+! 	End If
+	! since it's not possible to track original values to determine if an
+	! edit is made AND po and dm control numbers are updated en masse by other
+	! programs, we only will change those values on a new record added
+	IF EDITSTATUS ! now 0 = edit record, 1 = new record
+		! new record, update N4
+		Mat Write #2,R2,844;N4
+	else
+		! N4 contains client #, PO cntrl, and DM cntrl.  Changes to
+		! PO and DM cntrl are not allowed on existing records.
+		! Therefore ONLY update N4 if client #s are being used and be
+		! careful to preserve current cntrl # values.
+		if CLFLAG
+			Mat Read #2,R2,844;NEWN4
+			Let N4[1] = NEWN4[1] \ N4[2] = NEWN4[2]
+			Mat Write #2,R2,844;N4
+		end if
+	end if
+	Mat Write #2,R2,858;BSRC
+	Mat Write #2,R2,860;FCWGT
+	Mat Write #2,R2,862;BINM$
+	Mat Write #2,R2,868;ID$
+	Mat Write #2,R2,898;DNREORDER
+	Mat Write #2,R2,2948;WHOF
+	Mat Write #2,R2,2970;WHOS
+	Mat Write #2,R2,3032;TRANCUST
+	Mat Write #2,R2,3052;defPrinter;
+Return
+
+! 
+! 
+WHInitRec: Rem "================== init record
+	N1$ = R2 + 1 Using "WH##"
+	N2$ = " ",N2$;N3$ = " ",N3$;BINM$ = " ",BINM$
+	For I = 0 To 6 \ N1[I] = 0 \ Next I
+	For I = 0 To 4 \ WHOF[I] = 0 \ Next I
+	For I = 0 To 12 \ For I1 = 0 To 2
+		N2[I,I1] = 0;N3[I,I1] = 0
+	Next I1 \ Next I
+	N1[3] = R2 + 1
+	WHOS = 0;TranCust=0;defPrinter=0
+	If RASL Let N1[4] = 1
+Return
+! 
+! L_8200: Rem CLEAR FILE
+! Gosub L_8600 \ Goto L_2020
+! Gosub WHInitRec \ N1$ = ""
+! For R2 = 0 To Chf(2) - 1
+! 	Gosub WriteWHInfo
+! Next R2
+! Goto L_1000
+! 
+! L_8300: Rem PROCESS BIN MASK
+! 	For X = 1 To 6
+! 		If J$[X,X] = " " Let J$[X,X] = "A"
+! 		If J$[X,X] = "A" Goto L_8340
+! 		If J$[X,X] = "L" Goto L_8340
+! 		If J$[X,X] = "N" Goto L_8340
+! 		Goto L_8350
+! 	L_8340: Next X
+! Return 1
+! 
+! L_8350: Rem NO GOOD
+! 	J7$ = "INVALID ENTRY! OPTIONS ARE: A, L, OR N!"
+! 	Gosub ISERRMSG
+! Return
+! 
+! L_8500: Rem CLEAR PORT FLAGS FOR THIS (OR ALL) WHSES
+! Gosub L_8600 \ Goto L_8560
+! BWH = R2;EWH = R2
+! If U5$ = "CAFLG" Let BWH = 0;EWH = 99
+! For X = 0 To 1024 \ WPF[X] = 0 \ Next X
+! For LWH = BWH To EWH
+! 	R1 = LWH
+! 	Mat Write #2,R1,900,50;WPF;
+! Next LWH
+! L_8560: Gosub ReadWHInfo
+! Goto L_2020
+! 
+! L_8600: Rem CONFIRM CLEAR
+! Print @0,23;'RB CL';"CLEAR ";
+! If U5$ = "CLEAR" Print 'BR BD';"ALL";'ED ER';" WAREHOUSES ";
+! If U5$ = "CFLG" Print "WHSE PROCESS FLAGS ";
+! If U5$ = "CAFLG" Print "ALL WHSE PROCESS FLAGS ";
+! Print "CHOSEN. OK TO CONTINUE? (Y/N)   ";
+! Input Len 16385;""X$ \ Print @0,23;'CL';
+! If X$ = "N" Return 
+! If X$ <> "Y" Goto L_8600
+! Return 1
+
+! OVERFLOW: Rem enter or display the overflow whses
+! Window Open @44,4; Size 30,9; Using "OVERFLOW WAREHOUSES"
+! For OFW = 1 To 5
+!   Print @1,(1 + (OFW - 1));OFW;"> ";
+!   If WHOF[OFW - 1]
+!     Print Using "##";@5,(1 + (OFW - 1));WHOF[OFW - 1]
+!   End If 
+! Next OFW
+! WHSELECT: Rem get selection
+! Print @1,7;
+! Print 'CE';"ENTER FILED # OR E: END ";
+! Input ""X$
+! If X$ = "E"
+!   Window Close 
+!   Return 
+! End If 
+! OFW = X$
+! If OFW < 1 Or OFW > 5 Goto WHSELECT
+! GETOVERFLOW: Rem
+! J5$ = "Enter whse "
+! J0$ = "3000 205 0"
+! J0$[9,10] = (1 + (OFW - 1))
+! J1 = WHOF[OFW - 1]
+! Gosub ISINPUT
+! If J1 = (R2 + 1) Goto GETOVERFLOW
+! If J1 > D9[5] Goto GETOVERFLOW
+! WHOF[OFW - 1] = J1
+! Goto WHSELECT
+! Gosub WHInitRec
+! Goto L_2500
+ERR_SEARCH: Rem
+ENUM = E ;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+message$ = "RETURN STATUS",(E + (CTERR * .001))
+message$ = message$,"/ STATEMENT",ELINE," IN PROGRAM "+Msc$(4)
+returnstatus=0
+Call programdump("tmp/941se!","")
+goto OutErr ! err_msg ! Error 10000
+
+OUTEND: Rem EXIT ROUTINE
+ReturnStatus=1
+Outerr: ! out 
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call addToStr(e$,rstr$,webstr$)
+call setoutput(e$,rstr$)
+Close
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end

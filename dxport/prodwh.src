@@ -1,0 +1,1804 @@
+! --- prodwh
+! description product warehouse main programs 
+!
+! loadsave -w -n 100,10 -o prog/dxport/prodwh.dl4 src/prodwh.src
+!
+! 1.0  10/10/07 new
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+!include structure,filehandler libs & default structure dims
+!
+include "src/inc/fileprodwhse.inc" ! product warehouse
+include "src/inc/sql_prodwhse.inc" ! product
+include "src/inc/fileprod.inc" ! product
+include "src/inc/filea80vm.inc" ! vendor
+include "src/inc/filematcode.inc" ! material code
+include "src/inc/filesprodcatgy.inc" ! product category
+include "src/inc/filewhinfoz.inc" ! whse info
+include "src/inc/fileprodgroup.inc" ! prod group
+include "src/inc/filecosthist.inc" ! cost history
+!
+! *declare additional dl4 intrinsic subs & functions
+Declare Intrinsic Function FindChannel
+Declare Intrinsic Sub Logic,FormatDate, programdump, env, FindF
+!
+! *declare additional external libs & subs & functions
+!
+External Lib "ubsfunc.dl4"
+Declare External Function FormatDate$,OpenFile,OpenMySQLMirror
+Declare External Sub UserCntrl,LogAccess
+!
+External Lib "ubsprconv.dl4"
+Declare External Function XAmount, Xunit$
+!
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,CreateNetStatus
+!
+External Lib "libprodwhdisplay.lib"
+Declare External Sub ProdWHDetail,ProdWHDemand,ProdWHControls,ProdWHCategory
+Declare External Sub ProdWHPrice,ProdWHSeason,ProdWHProftVal
+!
+External lib "libproddisplay.lib"
+Declare external sub ProdInfoSection
+!
+External lib "libprodwhlist.lib"
+Declare External Sub ProdWHUsage,ProdWHHistory,ProdWHSrvLvl,ProdWHSales
+Declare External Sub ProdWHCostChg,ProdWHCostHst
+!
+External Lib "serpmxload5l.dl4"
+Declare External Sub Mxload5l,mxload5pv
+!
+External Lib "libfilebrktbl.lib"
+Declare External Sub filedroplistbrktbl
+!
+External Lib "libfileloadmarkx.lib"
+Declare External Sub filedroplistloadmarkx
+!
+External Lib "libfilebuyer.lib"
+Declare External Sub filedroplistbuyer
+!
+External Lib "libprod.lib"
+Declare External Sub mkcosthist
+!
+Declare Sub OpenFiles,whedlist,SndLists
+Declare Sub WhseCopy,WhseSave,WhseDelete
+Declare Sub wlcprcupdt,plcprcupdt,PRICEFAC
+Declare Sub listsprodmark,listpricemark,EdtCosts
+Declare Sub Update_cost_hist
+!
+!--------------------------------------------------------------------
+!
+!
+! **main procedure
+!
+!
+Try
+  Option String Redim is legal ! in case subs dim/use same names
+  OPTION GOSUB NESTING 16  ! Default is 8
+  !
+  dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+  !
+  Dim 1%,tmp1,UA5[10],status,yy,x1[9],WhseNo,ch[99]
+  Dim 1%,cnvtu[2],ARMONTH,MTHDAYS,recalcnew
+  dim 2%,x2[9],tmp2,maxcnt \ maxcnt=50 ! init max records in arrays for list
+  dim 2%,BDAYS[24],currdate,FChan[9],oldMinDaysMths
+  Dim 3%,amount,COST_LEV[3],COMM_LEV,COLLSEC,HIDECOST,ProdRec
+  dim 3%,x3[9],tmp3,PRRec,VMRec,WHRec,r[99],oldMin
+  Dim 3%,Cnvta,Amount,AA,passinfo[99]
+  DIM 1%,HOLDFLAG,PORTSCR,AA1$[40],file$[80],cmd$[80],line_$[200],U9$[30]
+  !
+  dim action$[30],options$[30],userid$[8],b$[200],action1$[30],msg$[100]
+  Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+  dim Field$[1,30],action2$[30],UA2$[50],TUID$[10],passinfoStr$[1,99]
+  dim tmp$[1200],tmp1$[300],custom_customer$[30]
+  Dim Prod$[12],WH$[2],P9$[50],P60$[50],P61$[255]
+  dim Message$[200],WebStr$[600]
+  dim SearKey$[64],ProdKey$[64],mode$[4]
+  dim Blank$[100] \ Blank$=" ",Blank$
+  dim M2$[2] \ M2$="##"
+  dim M32$[6] \ M32$="###.##"
+  dim M52$[8] \ M52$="#####.##"
+  dim M6$[6] \ M6$="######"
+  dim M92$[12] \ M92$="#########.##"
+  !
+  sqlChan = -1
+  dim List$[maxcnt,600] ! for .net 
+  !
+  dim WH. as prodwhse ! product warehouse
+  dim sql_prodwhse. as sql_prodwhse
+  dim tmpWH. as prodwhse ! copy of prodwhse
+  dim PR. as prod ! product
+  dim VM. as a80vm ! vendor
+  Dim WHI. as whinfo ! whse info
+  Dim PCH. as costhist ! cost history
+  !
+  call dxopen()
+  !
+  call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+  !
+  ! CALL dxsave(0,"tmp/prodwh.txt!")
+  call dxget("prodid",Prod$) \ Prod$=ucase$(Prod$),Blank$
+  call LogAccess(e$,"Product: "+Prod$)
+  !
+  call OpenFiles()
+  !
+  ! get product record
+  ProdKey$=Prod$
+  if prod$=blank$[1,12]
+	returnstatus=-1
+	Message$="Blank Product Code not allowed!"
+	goto WHPDone
+  Endif
+  ProdRec=filegetprod(e$,PRC,"=",1,ProdKey$,PR.) ! product mode=2 dir=1
+  !
+  MAT READ #CTLC,19,50;P9$;
+  MAT READ #CTLC,60,50;P60$;
+  MAT READ #CTLC,61,0;P61$;
+  READ #ctlc,0,120;ARMONTH;
+  Read #ctlc,115,60;Custom_customer$;
+  MAT  READ #CTLC,11,0;BDAYS;    
+  LET MTHDAYS=BDAYS[ARMONTH]  
+  IF MTHDAYS<=0 LET MTHDAYS=21
+  tmp$=tim(8) using "&&"
+  tmp$=tmp$+tim(9) using "&&"
+  tmp$=tmp$+tim(10) using "&&" ! yymmdd
+  currdate=tmp$
+  custom_customer$=UCase$(Trim$(custom_customer$))
+  tmp$=UserID$+Blank$
+  If RTRIM$(TMP$)=""
+	Call DXGet("S_USER.ID",tmp$) ! get from system variable
+  Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	let TUID$=UserID$+"          " ! set up temp var
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max as usercntrl is 10 chars vs 8 for .net
+	If TUID$[1,10]<>"          " !  no blank users!
+	  Call UserCntrl(TUID$,UA2$,UA5[],FndUID,intCo)
+	  If FndUID=0 ! means found it, =1 is not found
+	    Cost_Lev[0]=UA5[0];Cost_Lev[1]=UA5[1] ! avg / load
+		Cost_Lev[2]=UA5[2];Cost_Lev[3]=UA5[3] ! PO / base
+		try comm_lev=UA5[4] Else Comm_lev=1000
+	  Endif ! if not found would be zeroes from dim
+	Endif
+  AA1$=UCase$(userid$)
+  If custom_customer$="MORRISETTE" ! !"cct208298
+	LET FILE$="/v/reports/dnrlog"
+	MDNRLog=1 ! dflt=y
+	CALL FINDF(file$,FOUND)
+	IF NOT(FOUND)
+	   LET CMD$="touch "+file$
+	   Try
+		SYSTEM CMD$
+		MDNRLog=1
+	   Else
+		MDNRLog=0
+	   End Try
+	ENDIF 
+	If MDNRLog
+		MDNRCh=findchannel()
+		Try
+			OPEN #MDNRCh,file$ 
+			MDNRLog=1
+		Else
+			MDNRlog=0
+		End try
+		IF NOT(FOUND) and MDNRLog
+		   PRINT #MDNRCh;"      The DO NOT RECORDER FLAG Log           ";MSC$(0)    
+		   print #MDNRCh;tab 0;"Access Code"; tab 12;"Old Flag"; tab 22;"New Flag";
+		   print #MDNRCh;tab 40;"Prod code";tab 60;"whse";tab 70;"Date changes";
+		   print #MDNRCh;tab 100;"Program#"
+		 Endif
+	endif
+  Endif ! morrisette - dnr log
+  !
+  action$=UCase$(action$) ! make sure UPPERCASE
+  action$=RTrim$(action$) ! trim trailing spaces
+  Action1$=ucase$(Action1$) ! get action1 - make UPPERCASE
+  Action1$=RTrim$(action1$) ! trim trailing spaces
+  Action2$=ucase$(Action2$) ! get action2 - make UPPERCASE
+  Action2$=RTrim$(action2$) ! trim trailing spaces
+  !
+  if action$<>"INPUT" ! so prodid & warehouse REQUIRED ALWAYS
+    call dxget("warehouse",WH$) \ tmp1=WH$ \ WH$=tmp1 using M2$
+	if tmp1<1 or tmp1>99 or fra(tmp1)
+		Returnstatus=-1
+		Message$="Warehouse Number Invalid"
+		goto WHPDone
+	Endif
+	Whseno=tmp1
+	SearKey$=Prod$,WH$
+	WHRec=filegetprodwhse(e$,WHC,"=",1,SearKey$,WH.)
+  endif
+  If action2$<>"" ! not inquiry - is ADD,EDIT,COPY,SAVE
+	if prodrec<0 ! MUST BE VALID PRODUCT
+		returnstatus=-1
+		Message$="PRODUCT NOT FOUND"
+		goto WHPDone
+	Endif
+	call dxget("WHREC",tmp$)
+	tmp3=tmp$ ! warehouse rec use for ?
+	close #WHC ! close read-only
+	WHC = OpenFile(1744,intCo) \ If WHC = -1 Error 42 ! prodwhse as read/write
+  Endif
+  !
+  ReturnStatus=-1
+  Message$="Action not found!"
+  !Call dxsave(0,"tmp/prwhin.txt!") ! save web data sent
+  !Call programdump("tmp/pwlog1in!","")
+  Select Case action$
+    Case "INPUT" ! send selection list						doc=WarehouseInput.doc
+	  ! action2$<>"" it's entry/edit						doc=Prodwh-GetPWhse.doc
+	  returnstatus=1
+	  Message$="OK"
+	  Field$[0]="Whse" ! warehouse 
+	  SearKey$=Prod$
+	  !
+	  if action2$="" ! normal lookup - existing only
+		call filedroplistprodwhse(e$,list$[],maxcnt,WHC,"WHDropList",Field$[],1,SearKey$)
+	  Else ! send all available
+		call whedlist()
+	  Endif
+	  call AddToStr(e$,rstr$,List$[])
+	  call SetOutPut(e$,rstr$)
+	  !
+    Case "MAIN" ! main screen display/get					doc=WarehouseMain.doc
+      ! action2$=entry/edit									doc=Prodwh-GetWhseData.doc
+	  returnstatus=1
+	  Message$="OK"
+	  !
+	  if action2$="COPY" ! copy from diff whse				doc=Prodwh-CopyPWhse.doc
+		CALL WhseCopy()
+		if Returnstatus=0 goto WHMDone ! problem - done
+		! otherwise fall thru
+	  Endif
+	  if action2$="SAVE" ! save whse						doc=Prodwh-SubmitPWhse.doc
+		call whsesave()
+		goto WHMDone
+	  Endif
+	  if action2$="DELETE" ! delete prod					doc=Prodwh-DeletePWhse.doc
+		call whsedelete()
+		goto WHMDone
+	  Endif
+	  if action2$="ADD" ! add new (from scratch)			doc=Prodwh-AddPWhse.doc
+	    If WhRec>0 ! existing? DO NOT CLEAR!
+			Returnstatus=0
+			Message$="Warehouse already on file!"
+			Goto WHMDone ! WHADone  - or bypass & send?
+		Endif
+		WHRec=0 ! so no error
+		clear wh.
+		wh.ProdCode$=prod$+blank$
+		wh.Whse=whseno
+		tmp$=RTrim$(wh.ProdCode$)
+		IF wh.whse<=0 or tmp$=""
+			returnstatus=0
+			message$="Warehouse or Product Invalid"
+			goto WHMDone
+		Endif
+		r=WHSENO-1 \ if r<0 let r=0 ! 1 is dflt if none
+		try 
+			read record #WIC,R,0;whi.;
+		Else
+			clear whi.
+		End try
+		! clear strings
+		wh.VendPN$=blank$
+		wh.ComdtyCode$=pr.ComdtyCode$+blank$
+		wh.SupercedeCode$=blank$
+		wh.UseAdjReasons$=blank$
+		wh.VendDiscOverrides$=blank$
+		wh.ChkBrknQty$=blank$
+		wh.Opne$=blank$
+		wh.VpMupType$=blank$
+		wh.Spare$=blank$
+		wh.Vend=pr.PrimVend ! do defaults from prod
+		wh.VendPN$=pr.VendItem$+blank$
+		wh.BrkTbl=pr.BrkTbl
+		wh.MUpTbl=pr.MUpTbl
+		wh.Load1MupTbl=pr.Load1MupTbl
+		if custom_customer$="PIEDMONT" wh.Load1MupTbl=1
+		wh.Load2MupTbl=pr.Load2MupTbl
+		if custom_customer$="PIEDMONT" and WH.Whse = 1 let wh.LifoPoolCost=1
+		wh.DNReordFlg=whi.DoNotReord
+		if whi.BuyingSrc>0 and whi.BuyingSrc<7 let wh.CalcSrc=whi.BuyingSrc
+		if custom_customer$="MAYFIELD" let wh.CalcSrc=6
+		if whi.ForecastWgt>0 and whi.ForecastWgt<CHF(FWC) let wh.FrcstWgtTbl=whi.ForecastWgt
+		wh.prodgrp=1
+	  WHADone: ! bypass clearing
+	  Endif
+	  ! product information section, ID and desc
+	  call ProdInfoSection(e$,0,List$[],PR.)
+	  call AddToStr(e$,rstr$,List$[])
+	  !
+	call ProdWHDetail(e$,Intco,WHRec,List$[],maxcnt,WHC,VMC,BYC,PGC,CCC,PR.,WH.)
+	  call AddToStr(e$,rstr$,List$[])
+	  !
+	  call ProdWHDemand(e$,WHRec,List$[],maxcnt,FWC,CCC,CTLC,PR.,WH.)
+	  call AddToStr(e$,rstr$,List$[])
+	  !
+	  call ProdWHControls(e$,WHRec,List$[],maxcnt,CCC,CTLC,PWSC,PR.,WH.)
+	  call AddToStr(e$,rstr$,List$[])
+	  !
+	  call ProdWHCategory(e$,WHRec,List$[],maxcnt,CCC,CTLC,PR.,WH.)
+	  call AddToStr(e$,rstr$,List$[])
+      !
+	  If action2$="EDIT" or action2$="ADD" or action2$="COPY" ! see respective action
+		! send related link sections
+		if p9$[32,32]="N"
+			call plcprcupdt() ! do load cost & Price updates (Get Curr Price/Cost!)
+		Else
+			call wlcprcupdt() ! whse 
+		Endif
+		!! - PRICING
+		call ProdWHPrice(e$,WHRec,List$[],maxcnt,CCC,CTLC,intCo,PR.,WH.)
+		call AddToStr(e$,rstr$,List$[])
+		!
+		!!- profitabilty is display ONLY!
+		!! - SEASONAL
+		Call ProdWHSeason(e$,WHRec,List$[],maxcnt,CCC,CTLC,PR.,WH.)
+		call AddToStr(e$,rstr$,List$[])
+		!
+	  Endif
+	  If WHRec<0 or ProdRec<0
+	    ReturnStatus=0
+		tmp$="Can't get "
+		If WHRec<0 let tmp$=tmp$,"Warehouse record "
+		If ProdRec<0 let tmp$=tmp$,"Product record "
+		Message$=tmp$
+	  else
+	    ReturnStatus=1
+		Message$="OK"
+	  endif
+	  WHMDone: ! finished
+	  !
+	  call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  !
+	  call SetOutPut(e$,rstr$)
+	Case "DLISTS" ! droplists/flags							doc=Prodwh-GetLists.doc
+		Returnstatus=1
+		Message$="OK"
+		call sndlists()
+		call AddToStr(e$,rstr$,List$[])
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  !
+	  call SetOutPut(e$,rstr$)
+	Case "CHGCOST" ! changed cost or table					doc=Prodwh-CostPriceCalc.doc
+		! if user chgs costs or tables - recalc & send
+		returnstatus=1
+		message$="OK"
+		! enter stuff
+		call edtcosts()
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		!
+		! end of CHGCOST
+    Case "RELATEDLINKS"
+		! product information section, ID and desc always sent as first section
+		call ProdInfoSection(e$,0,List$[],PR.)
+		call AddToStr(e$,rstr$,List$[])
+	    If Action1$="PRICING" ! price/cost					doc=WarehousePriceCost.doc
+			!
+			if p9$[32,32]="N"
+				call plcprcupdt() ! do load cost & Price updates (Get Curr Price/Cost!)
+			Else
+				call wlcprcupdt() ! whse 
+			Endif
+			call ProdWHPrice(e$,WHRec,List$[],maxcnt,CCC,CTLC,intCo,PR.,WH.)
+			call AddToStr(e$,rstr$,List$[])
+			!
+		Endif
+		!
+		If Action1$="SEASONAL" ! seasonal					doc=WarehouseSeasonal.doc
+			!
+			Call ProdWHSeason(e$,WHRec,List$[],maxcnt,CCC,CTLC,PR.,WH.)
+			call AddToStr(e$,rstr$,List$[])
+			!
+		Endif
+		!
+		If Action1$="PROFITVAL" ! profitability				doc=WarehouseProfitability.doc
+			!
+			Call ProdWHProftVal(e$,WHRec,List$[],maxcnt,CTLC,CCC,intCo,PR.,WH.)
+			call AddToStr(e$,rstr$,List$[])
+			!
+		Endif
+		! next action
+
+		! below is always sent & performed on all action1 as last section
+		If WHRec<0 or ProdRec<0
+			ReturnStatus=0
+			tmp$="Can't get "
+			If WHRec<0 let tmp$=tmp$,"Warehouse record "
+			If ProdRec<0 let tmp$=tmp$,"Product record "
+			Message$=tmp$
+		else
+			ReturnStatus=1
+			Message$="OK"
+		endif
+		!
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		!
+		call SetOutPut(e$,rstr$)
+	!
+	Case "TAB"
+	!
+		! product information section, ID and desc always sent as first section(except chains)
+		call ProdInfoSection(e$,0,List$[],PR.)
+		call AddToStr(e$,rstr$,List$[])
+	    If Action1$="USAGE" !								doc=WarehouseUsage.doc
+			!
+			call ProdWHUsage(e$,WHRec,List$[],maxcnt,CCC,CTLC,PWSC,PR.,WH.)
+			call AddToStr(e$,rstr$,List$[])
+			!
+		Endif
+		!
+		If Action1$="HISTORY" !								doc=WarehouseHistory.doc
+			!
+			call ProdWHHistory(e$,WHRec,List$[],maxcnt,CCC,CTLC,PWSC,intCo,PR.,WH.)
+			call AddToStr(e$,rstr$,List$[])
+			!
+		Endif
+		!
+		If Action1$="SERVICELEVEL" !						doc=WarehouseServiceLevel.doc
+			!
+			call ProdWHSrvLvl(e$,WHRec,List$[],maxcnt,CCC,CTLC,PWSC,PR.,WH.)
+			call AddToStr(e$,rstr$,List$[])
+			!
+		Endif
+		!
+		If Action1$="SALESHIST" ! 24 mos					doc=WarehouseSalesHist.doc
+			!
+			call ProdWHSales(e$,WHRec,List$[],maxcnt,CCC,CTLC,PWSC,IntCo,PR.,WH.)
+			call AddToStr(e$,rstr$,List$[])
+			!
+		Endif
+		!
+		If Action1$="COSTCHANGES" ! cost chgs				doc=WarehouseCostChanges.doc
+			!
+			call ProdWHCostChg(e$,WHRec,List$[],maxcnt,CCC,CTLC,intCo,PR.,WH.)
+			call AddToStr(e$,rstr$,List$[])
+			!
+		Endif
+		!
+		If Action1$="COSTHISTORY" ! 
+			call ProdWHCostHst(e$,Whseno,List$[],maxcnt,CCC,CTLC,intCo,rstr$,PR.)
+			call AddToStr(e$,rstr$,List$[])
+			!
+		Endif
+		!
+		If Action1$="STOCK" ! stock status					doc=WarehouseStock.doc
+			!
+			Chain "stockinq.dl4" ! has own data string creation
+			!
+		Endif
+		!
+		If Action1$="WKSALES" ! weekly sales				doc=WarehouseWeeklySales.doc
+			!
+			Chain "weeklysls.dl4" ! has own data string creation
+			!
+		Endif
+		!
+		If Action1$="INVENTORY" ! inv trans					doc=WarehouseInventory.doc
+			!
+			Chain "invttrans.dl4" ! has own data string creation
+			!
+		Endif
+		!
+		If Action1$="FIFO" ! fifo							doc=WarehouseFIFO.doc
+			!
+			Chain "fifoinq.dl4" ! has own data string creation
+			!
+		Endif
+		!
+		If Action1$="ORDERS" ! orders						doc=WarehouseOrders.doc
+			!
+			Chain "prodordlist.dl4" ! has own data string creation
+			!
+		Endif
+		! next action
+
+		! below is always sent & performed on all action1(except chains) as last section
+		If WHRec<0 or ProdRec<0
+			ReturnStatus=0
+			tmp$="Can't get "
+			If WHRec<0 let tmp$=tmp$,"Warehouse record "
+			If ProdRec<0 let tmp$=tmp$,"Product record "
+			Message$=tmp$
+		else
+			ReturnStatus=1
+			Message$="OK"
+		endif
+		!
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		!
+		call SetOutPut(e$,rstr$)
+	!
+  End Select
+  WHPdone: ! finito a place for bypass
+  If returnstatus=-1 ! no action found here or a problem
+	returnstatus=0
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	!
+	call SetOutPut(e$,rstr$)
+  Endif
+  
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+sub OpenFiles()
+  !
+  ! Open files for cash receipts
+  !
+  Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	PRC = OpenFile(-1792,intCo) \ If PRC = -1 Error 42 ! prod
+	WHC = OpenFile(-1744,intCo) \ If WHC = -1 Error 42 ! prodwhse
+ 	VMC = OpenFile(-2400,intCo) \ If VMC = -1 Error 42 ! vendor file
+	BYC = OpenFile(-9991,intco) \ If BYC = -1 Error 42 ! buyer
+	PGC = OpenFile(-9965,intco) \ If PGC = -1 Error 42 ! prod group
+ 	CCC = OpenFile(-1728,intCo) \ If CCC = -1 Error 42 ! u/m codes file
+	FWC = OpenFile(-9964,intCo) \ If FWC = -1 Error 42 ! forecast weight
+	PWSC = OpenFile(-9963,intCo) \ If PWSC = -1 Error 42 ! prod. whse sales
+	WIC = OpenFile(-2768,intco) \ if WIC=-1 Error 42 ! whse info
+	CMC = OpenFile(-2288,intco) \ if CMC=-1 Error 42 ! commodity
+	PRMC=Openfile("SPRICEMARK",IntCo,"R") \ if PRMC=-1 Error 42 ! spricemark
+	sqlChan = OpenMySQLMirror(e$)
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub whedlist()
+! send list of whses(all) with status
+  Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"WHSELIST",fdel$
+	List$[1]="ID",fdel$,"WHSE",fdel$,"WHREC",fdel$
+	row=2
+	for r=0 to 98
+		try 
+			read record #WIC,R,0;whi.;
+		Else
+			clear whi.
+		End try
+		tmp$=RTrim$(whi.WhName$)
+		if tmp$<>"" ! ok has name
+			searkey$=Prod$,(R+1) using "##"
+			WHrec=filegetprodwhse(e$,WHC,"=",1,searkey$,wh.)
+			! set string
+			if whrec<0 let whrec=0
+			List$[row]=SearKey$,fdel$,Str$(R+1),fdel$,Str$(whrec),fdel$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[]) 
+		Endif
+	Next R
+	list$[row]=esdel$
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! whedlist
+! 
+!--------------------------------------------------------------------
+Sub SndLists()
+! send all droplists used by whse
+  Try
+	dim fields$[1,30],TITLE$[30]
+	Dim 3%
+	dim PG. as prodgroup
+	clear list$[]
+	tmpcnt=maxcnt
+	LIST$[0]=bsdel$,"SYSFLAGS",fdel$
+	webstr$="WPFlag",FDEL$,"ALWDEL",fdel$
+	webstr$=webstr$,"AVGCS",FDEL$,"LOADCS",FDEL$,"POCS",FDEL$,"BASECS",FDEL$
+	webstr$=webstr$,"COMMLVL",fdel$
+	List$[1]=webstr$
+	tmp$="N" \ if UA2$[29,29]="Y" let tmp$="Y" ! allow wh rec delete
+	webstr$=p9$[32,32],fdel$,tmp$,fdel$
+	webstr$=webstr$,Str$(cost_lev[0]),fdel$,str$(cost_lev[1]),fdel$
+	webstr$=webstr$,Str$(cost_Lev[2]),fdel$,Str$(Cost_Lev[3]),fdel$
+	webstr$=webstr$,Str$(Comm_Lev),fdel$
+	List$[2]=webstr$
+	list$[3]=esdel$
+	call addtostr(e$,rstr$,list$[])
+	! whse list
+	clear List$[]
+	call filedroplistwhinfoz(e$,list$[],tmpcnt,WIC)
+	call addtostr(e$,rstr$,list$[])
+	! forecast weight
+	!9964 strFile$="3/FRCSTWGT" (can't get droplist to work??)
+	Chan=OpenFile(-9964,IntCo)
+	Clear List$[]
+	List$[0]=bsdel$,"FORECASTWGT",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$ ! evidently BESIDES ON DROPLIST it needs REQUIRED checked?
+	List$[2]="0",fdel$,"NONE",fdel$
+	row=3
+	For R=1 to chf(chan)-1
+	  Try
+		Mat Read #Chan,r,96;title$;
+	  Else
+	    Title$=blank$
+	  End try
+	  tmp$=RTrim$(Title$)
+	  if tmp$<>""
+		List$[row]=Str$(R),fdel$,tmp$,fdel$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Endif
+	Next R
+	List$[row]=esdel$
+	call addtostr(e$,rstr$,list$[])
+	Close #Chan
+	! buyers
+	!9991 strFile$="2/BUYERS"
+	Chan=OpenFile(-9991,IntCo)
+	Clear List$[]
+	call filedroplistbuyer(e$,list$[],tmpcnt,Chan,"",fields$[],"0")  !"0" parameter adds  0 None to drop list)
+	call addtostr(e$,rstr$,list$[])
+	Close #Chan
+	! price mark
+	! 2720
+	clear list$[]
+    call listpricemark(e$,list$[],tmpcnt,PRMC)
+    call addToStr(e$,rstr$,list$[])
+	! sprod mark
+	! 1712
+	SPMC=OpenFile(-1712,IntCo)
+	clear list$[]
+	call listsprodmark(e$,List$[],tmpcnt,SPMC)
+	call addToStr(e$,rstr$,list$[])
+	Close #SPMC
+	! break
+	! 1952
+	BRC=OpenFile(-1952,IntCo)
+	clear list$[]
+	call filedroplistbrktbl(e$,list$[],tmpcnt,BRC,"",fields$[],"0")  !"0" parameter adds  0 None to drop list)
+	call addToStr(e$,rstr$,list$[])
+	Close #BRC
+	! load mark
+	! 9941 strfile$="3/LOADMARK"
+	chan=openfile(-9941,intco)
+	clear list$[]
+	call filedroplistloadmarkx(e$,list$[],tmpcnt,chan,"",fields$[],"0") !and 0=none
+	call addToStr(e$,rstr$,list$[])
+	close #chan
+	! prod group
+	!9965 strFile$="2/PRODGRP"  ! ALL SCREWED - Indexed w/NO INDEX DEFINED! (or Possible)
+	Chan=OpenFile(-9965,IntCo)
+	clear List$[]
+	List$[0]=bsdel$,"PRODGROUP",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	row=2
+	SearKey$=" ",SearKey$
+	do
+		Search #chan,3,1;Searkey$,R,E
+		if e exit do
+		read record #chan,R,0;PG.;
+		tmp$=Trim$(pg.Description$)
+		if tmp$<>""
+			list$[row]=Trim$(SearKey$),fdel$,tmp$,fdel$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Loop
+	List$[row]=esdel$
+	call addtostr(e$,rstr$,list$[])
+	Close #chan
+	! reorder type?
+	Clear List$[]
+	List$[0]=bsdel$,"REORDERTYPE",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	List$[2]="1",fdel$,"1 - Econ Ord Qty",fdel$
+	List$[3]="2",fdel$,"2 - Inv Class",fdel$
+	List$[4]="3",fdel$,"3 - Seasonal",fdel$
+	List$[5]="4",fdel$,"4 - Start up",fdel$
+	List$[6]="5",fdel$,"5 - Arbitrary",fdel$
+	List$[7]="6",fdel$,"6 - Min / Max",fdel$
+	List$[8]=esdel$
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndLists
+! 
+!--------------------------------------------------------------------
+Sub WhseCopy()
+! copy from diff whse
+  Try
+	dim 1%,WH8[47]
+	dim 3%,W5[25],wh9[25]
+	call dxget("FRMWHSE",tmp$)
+	frwh=tmp$
+	if frwh<1 or frwh>99 or fra(frwh)
+		returnstatus=0
+		Message$="Invalid warehouse"
+		goto WCDone
+	Endif
+	If frwh=whseno
+		returnstatus=0
+		message$="Can not copy same"
+		goto WCDone
+	Endif
+	if WHRec>0 ! to exists
+		returnstatus=0
+		message$="Current Whse already exists"
+		goto WCDone
+	Endif
+	Searkey$=prod$,frwh using "##"
+	FWHRec=filegetprodwhse(e$,WHC,"=",1,SearKey$,wh.)
+	if FWHRec<=0
+		returnstatus=0
+		message$="Copy from Warehouse not found"
+		goto WCDone
+	Endif
+	! now change & clear - may have been easier to move in fields used!
+	wh.Whse=whseno ! NEW WHSE - same product
+	wh.ProdCode$=prod$+Blank$ ! just in case
+	tmp$=RTrim$(wh.ProdCode$)
+	IF wh.whse<=0 or tmp$=""
+		returnstatus=0
+		message$="Warehouse or Product Invalid"
+		goto WCDone
+	Endif
+	wh.FrzFlag=0;wh.LinePt=0;wh.OrdPt=0 ! gg stuff?
+	wh.Demand=0;wh.UsgRate=0;wh.EoqNoRnding=0
+	wh.EOQOrdQty=0;wh.DNReordFlg=0;wh.UseAdjReasons$=blank$
+	wh.AvgInvtVal=0;wh.InvtTurns=0;wh.RtnOnInvest=0
+	wh.AdjMarg=0;wh.AvgInvtQty=0;wh.GrossMarg=0 ! end of gg
+	wh.LastSoldDate=0;wh.LastUsedDate=0;wh.LastPhysDate=0
+	wh.LastUsedCust=0;wh.QtyOnHand=0;wh.QtyOnPO=0
+	wh.QtyOnOrd=0;wh.LastPhysQty=0;wh.PrevBrkTbl=0
+	wh.PrevMupTbl=0;wh.PendBrkTbl=0;wh.PendMupTbl=0
+	wh.LastRecptDate=0;wh.PendBaseCost=0;wh.PendBaseDate=0
+	wh.PrevBaseCost=0;wh.DateBaseChg=0;wh.PendPOCost=0
+	wh.DateOutStk=0;wh.DateBackInStk=0;wh.PrevRtsDate=0
+	wh.PendPOCostDate=0;wh.PrevPOCost=0;wh.DatePOCostChg=0
+	wh.PendLoadCost=0;wh.PrevLoadCost=0;wh.PendLoad1MupTbl=0
+	wh.PendLoad2MupTbl=0;wh.PrevLoad1MupTbl=0;wh.PrevLoad2MupTbl=0
+	wh.PendLoad2Cost=0;wh.PrevLoad2Cost=0;wh.LbsOnHand=0
+	wh.LbsOnOrder=0;wh.DateLoadChg=0;wh.DateLoad2Chg=0
+	wh.Spare$=blank$;wh.Lvl1Qty=0;wh.Lvl2Qty=0
+	wh.Opne$=blank$
+	! i won't program all the 24 month fields, just use the matrix
+	tmp3=0;r=0
+	tmp3=fileupdateprodwhse(e$,WHC,"a",r,wh.) ! ,0,0,-1) ! w/audit (not working?!)
+	if tmp3>0
+		! now clear the matrix
+		WhRec=tmp3 ! as used elsewhere
+		Mat write #WHC,WHRec,228;w5;
+		mat write #WHC,WHRec,444;wh8;
+		mat write #WHC,WHRec,540;wh9; ! adj sales?
+		! reread w/new data - for send data
+		Read record #WHC,WHRec,0;wh.;
+		if sqlChan>=0
+			call prodwhse_DL4SQLConvert(e$,"FROMDL4",wh.,sql_prodwhse.)
+			e = prodwhse_SQLInsert(e$,sqlChan,sql_prodwhse.)
+		end if
+	Else ! problem
+		returnstatus=0
+		message$="Error on add new record "+e$
+	Endif
+
+	WCdone: ! finito
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! WhseCopy
+! 
+!--------------------------------------------------------------------
+Sub WhseSave()
+! save whse to file
+  Try
+	If WHrec<=0 ! new
+		clear wh.
+		! now blank out strings (avoid nulls!)
+		wh.VendPN$=blank$;wh.SupercedeCode$=blank$
+		wh.ComdtyCode$=pr.ComdtyCode$+Blank$
+		wh.UseAdjReasons$=blank$;wh.VendDiscOverrides$=blank$
+		wh.ChkBrknQty$=blank$;wh.Opne$=blank$;wh.VpMupType$=blank$
+		wh.CPIHoldRevBy$=blank$
+		wh.Spare$=blank$;wh.Reserved$="  " ! not all way!!
+		onFile=0
+	else
+		oldMinDaysMths = wh.MinDaysMths
+		oldMin = wh.MinStkLvl
+		onFile=1
+	Endif
+	wh.ProdCode$=prod$+blank$
+	wh.Whse=WhseNo
+	tmp$=RTrim$(wh.ProdCode$)
+	Holddnrflag=wh.DNReordFlg
+	IF wh.whse<=0 or tmp$=""
+		returnstatus=0
+		message$="Warehouse or Product Invalid"
+		goto WHSDone
+	Endif
+	! CALL dxsave(0,"tmp/prodwhsv.txt!")
+	wh.ComdtyCode$=pr.ComdtyCode$+Blank$
+	!Vendor	Vendor Item	Do not reorder	Buyer	Product Group	Available	Check broken qty	Commission %	Terms Discount	Pallet	VENDID	BUYERID	PGRPID	UNTTIER	TIERSKID
+	call dxget("VENDID",tmp$)
+	wh.Vend=tmp$
+	call dxget("VENDITEM",tmp$) \ tmp$ = ucase$(tmp$)
+	wh.VendPN$=tmp$+blank$
+	call dxget("DNREORD",tmp$)
+	tmp$=UCase$(Rtrim$(tmp$))
+	wh.DNReordFlg=0 \ if tmp$="Y" let wh.DNReordFlg=1
+	if tmp$="O" let wh.DNReordFlg=2
+	call dxget("BUYERID",tmp$)
+	wh.Buyer=tmp$
+	call dxget("PGRPID",tmp$)
+	wh.ProdGrp=tmp$
+	call dxget("CHKBRKN",tmp$)
+	if tmp$<>"Y" let tmp$="N"
+	wh.ChkBrknQty$=tmp$+blank$
+	call dxget("COMMSN",tmp$)
+	If Comm_Lev=1000
+	  iF p9$[32,32]="Y"
+		let wh.CommPct=tmp$
+	  Else
+		wh.commpct=pr.CommPct
+	  Endif
+	Endif
+	call dxget("TERMDISC",tmp$)
+	wh.TermDisc=tmp$
+	call dxget("UNTTIER",tmp$)
+	wh.UnitsSkidTier=tmp$
+	call dxget("TIERSKID",tmp$)
+	wh.TiersPerSkid=tmp$
+	!Reorder Qty	Reorder Type	Forecast Table	Demand Rate	Months to Trend	Lead Time	Last Receipt	FCWTID
+	call dxget("REORDTYPE",tmp$)
+	x1=tmp$
+	if x1<1 or x1>6
+		returnstatus=0
+		message$="Reorder Type is invalid"
+		goto WHSDone
+	End if
+	wh.CalcSrc=tmp$
+	call dxget("REORDQTY",tmp$)
+	If wh.calcsrc=4 or wh.calcsrc=5
+		cnvtu[0]=PR.UMPurchDefault;cnvtu[1]=0;cnvtu[2]=1
+		x3=tmp$;cnvta=X3
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		wh.EOQOrdQty=amount;wh.EoqNoRnding=amount ! both
+	Endif
+	call dxget("FCWTID",tmp$)
+	wh.FrcstWgtTbl=tmp$
+	call dxget("MTHTREND",tmp$)
+	wh.MosUsgTrend=tmp$
+	call dxget("LEADTM",tmp$)
+	X3=tmp$
+	if x3<0 or x3>99999
+		returnstatus=0
+		message$="Invalid Lead Time"
+		goto WHSDone
+	Endif
+	wh.AvgLeadTime=X3/MThDays ! tmp$
+	!Min Qty	Max Qty	Order Point	Line Point	Safety Stock	Review Period	Months Exist
+	call dxget("MINQTY",tmp$)
+	x3=tmp$
+	if x3<0 or x3>999999999
+		returnstatus=0
+		message$="Invalid Min Qty"
+		goto WHSDone
+	Endif
+	cnvtu[0]=pr.UMStkDefault;cnvtu[1]=0;cnvtu[2]=1
+	CNVTA=x3
+	wh.MinStkLvl=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	call dxget("MAXQTY",tmp$)
+	x3=tmp$
+	if x3<0 or x3>999999999
+		returnstatus=0
+		message$="Invalid Max Qty"
+		goto WHSDone
+	Endif
+	cnvtu[0]=pr.UMStkDefault;cnvtu[1]=0;cnvtu[2]=1
+	CNVTA=x3
+	wh.MaxStkLvl=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	call dxget("ORDERPOINT",tmp$)
+	If wh.calcsrc=4 or wh.calcsrc=5
+		cnvtu[0]=pr.UMStkDefault;cnvtu[1]=0;cnvtu[2]=1
+		x3=tmp$;cnvta=x3
+		wh.OrdPt=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	Endif
+	call dxget("LINEPOINT",tmp$)
+	If wh.calcsrc=4 or wh.calcsrc=5
+		cnvtu[0]=pr.UMStkDefault;cnvtu[1]=0;cnvtu[2]=1
+		x3=tmp$;cnvta=x3
+		wh.LinePt=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	Endif
+	call dxget("SFTYSTK",tmp$)
+	wh.SafetyStk=tmp$ ! % as 671w does it
+	call dxget("REVIEWPER",tmp$)
+	x3=tmp$
+	if x3<0 or x3>999999
+		returnstatus=0
+		message$="Invalid Rev Period"
+		goto WHSDone
+	Endif
+	wh.RvwPer=X3/MthDays ! tmp$
+	!Inventory Class
+	call dxget("INVTCLASS",tmp$)
+	x2=tmp$
+	if x2<0 or x2>99 or fra(x2)
+		returnstatus=0
+		message$="Invalid Inventory Class 1"
+		goto WHSDone
+	Endif
+	wh.InvtClass1=tmp$
+	!Inventory Class2
+	clear tmp$ ! clear it!
+	call dxget("INVTCLASS2",tmp$)
+	x2=tmp$
+	if rtrim$(tmp$)<>"" ! no data sent - bypass it
+		if x2<0 or x2>99 or fra(x2)
+			returnstatus=0
+			message$="Invalid Inventory Class 2"
+			goto WHSDone
+		Endif
+	  wh.InvtClass2=tmp$
+	Endif
+	! Count Week
+	clear tmp$ ! clear it!
+	call dxget("CNTWEEK",tmp$)
+	x2=tmp$
+	if rtrim$(tmp$)<>"" ! no data sent - bypass it
+		if x2<-1 or x2>52 or fra(x2)
+			returnstatus=0
+			message$="Invalid Count Week"
+			goto WHSDone
+		Endif
+		wh.CntWeek=tmp$
+	Endif
+	!BRKTBLID	MUPID
+	call dxget("BRKTBLID",tmp$)
+	if p9$[32,32]="Y"
+		wh.BrkTbl=tmp$
+	Else
+		Wh.BrkTbl=pr.BrkTbl
+	Endif
+	call dxget("MUPID",tmp$)
+	if p9$[32,32]="Y"
+		wh.MUpTbl=tmp$
+	Else
+		wh.MUpTbl=pr.MUpTbl
+	Endif
+	!PRICES
+	If P9$[32,32]="Y" ! as mx671w always writes - do it here too!
+		! if pr.PriceType<>1 OR (pr.PriceType=1 AND wh.MUpTbl=0) ! matrixtbl - no change
+		  call dxget("LP1",tmp$)\x3=tmp$
+		  if x3<0 or x3>99999999
+			returnstatus=0
+			message$="Invalid List Price"
+			goto WHSDone
+		  Endif
+		  cnvtu[0]=pr.UMPriceDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  Wh.Price1=x3
+		  call dxget("LP2",tmp$)\x3=tmp$
+		  if x3<0 or x3>99999999
+			returnstatus=0
+			message$="Invalid List Price"
+			goto WHSDone
+		  Endif
+		  cnvtu[0]=pr.UMPriceDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  Wh.Price2=x3
+		  call dxget("LP3",tmp$)\x3=tmp$
+		  if x3<0 or x3>99999999
+			returnstatus=0
+			message$="Invalid List Price"
+			goto WHSDone
+		  Endif
+		  cnvtu[0]=pr.UMPriceDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  Wh.Price3=x3
+		  call dxget("LP4",tmp$)\x3=tmp$
+		  if x3<0 or x3>99999999
+			returnstatus=0
+			message$="Invalid List Price"
+			goto WHSDone
+		  Endif
+		  cnvtu[0]=pr.UMPriceDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  Wh.Price4=x3
+		  call dxget("LP5",tmp$)\x3=tmp$
+		  if x3<0 or x3>99999999
+			returnstatus=0
+			message$="Invalid List Price"
+			goto WHSDone
+		  Endif
+		  cnvtu[0]=pr.UMPriceDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  Wh.Price5=x3
+		  call dxget("LP6",tmp$)\x3=tmp$
+		  if x3<0 or x3>99999999
+			returnstatus=0
+			message$="Invalid List Price"
+			goto WHSDone
+		  Endif
+		  cnvtu[0]=pr.UMPriceDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  Wh.Price6=x3
+	  ! Endif ! of can chg prices
+	Else ! not whse pricing
+		wh.Price1=pr.ListPrice1
+		wh.Price2=pr.ListPrice2
+		wh.Price3=pr.ListPrice3
+		wh.Price4=pr.ListPrice4
+		wh.Price5=pr.ListPrice5
+		wh.Price6=pr.ListPrice6
+	Endif ! whse pricing
+	!COSTS
+	If P9$[32,32]="Y" ! whse cost (note - 671w always updates - so lets do it)
+	  if cost_lev[0] ! =2 ! enter/edit
+		  call dxget("avgcost",tmp$)
+		  if rtrim$(tmp$)<>"" ! sent (if lev=0 - not sent?)
+		  x3=tmp$
+		  if x3<0 or x3>99999999
+			returnstatus=0
+			message$="Invalid Avg Cost"
+			goto WHSDone
+		  Endif
+		  cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  wh.CostAvg=x3
+		  Endif ! nothing sent
+	  Endif ! always update
+	  if cost_lev[1] ! =2 ! enter/edit
+		  call dxget("LOADCOST",TMP$)
+		  if rtrim$(tmp$)<>"" ! sent (if lev=0 - not sent?)
+		  x3=tmp$
+		  if x3<0 or x3>99999999
+			returnstatus=0
+			message$="Invalid Load Cost"
+			goto WHSDone
+		  Endif
+		  cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  wh.CostLoad=x3
+		  Endif ! something sent
+		  call dxget("LDMkup",tmp$)\if RTrim$(tmp$)<>"" let wh.Load1MupTbl=tmp$
+		  call dxget("Load2Cost",tmp$)
+		  if rtrim$(tmp$)<>"" ! sent (if lev=0 - not sent?)
+		  x3=tmp$
+		  if x3<0 or x3>99999999
+			returnstatus=0
+			message$="Invalid Load 2 Cost"
+			goto WHSDone
+		  Endif
+		  cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  wh.CostLoad2=x3
+		  endif ! something sent
+		  call dxget("LD2Mkup",tmp$)\if RTrim$(tmp$)<>"" let wh.Load2MupTbl=tmp$
+	  Endif ! always update if sent
+	  if cost_lev[2] ! =2 ! enter/edit
+		  call dxget("pocost",tmp$)
+		  if rtrim$(tmp$)<>"" ! sent (if lev=0 - not sent?)
+		  x3=tmp$
+		  if x3<0 or x3>99999999
+			returnstatus=0
+			message$="Invalid PO Cost"
+			goto WHSDone
+		  Endif 
+		  cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  wh.CostLastPo=x3
+		  endif ! something sent
+		  call dxget("netpocost",tmp$)
+		  if rtrim$(tmp$)<>"" ! sent (if lev=0 - not sent?)
+		  x3=tmp$
+		  if x3<0 or x3>99999999
+			returnstatus=0
+			message$="Invalid Net PO Cost"
+			goto WHSDone
+		  Endif
+		  cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  wh.CostNetPO=x3
+		  endif ! something sent
+	  Endif ! always update
+	  if cost_lev[3] ! =2 ! enter/edit
+		  call dxget("basecost",tmp$)
+		  if rtrim$(tmp$)<>"" ! sent (if lev=0 - not sent?)
+		  x3=tmp$
+		  if x3<0 or x3>99999999
+			returnstatus=0
+			message$="Invalid Base Cost"
+			goto WHSDone
+		  Endif
+		  cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  wh.CostBase=x3
+		  Endif ! something was sent
+		endif 
+	Else ! not whse cost
+		wh.CostAvg=pr.CostAvg
+		wh.CostLoad=pr.CostLoad
+		wh.CostLoad2=pr.CostLoad2
+		wh.Load1MupTbl=pr.Load1MupTbl
+		wh.Load2MupTbl=pr.Load2MupTbl
+		wh.CostLastPo=pr.CostPO
+		wh.CostNetPO=pr.CostNetPO
+		wh.CostBase=pr.CostBase
+	Endif
+	!SEASONAL
+	call dxget("USAGETRND",tmp$)
+	wh.UsgTrendPct=tmp$
+	call dxget("SEASONAL",tmp$)
+	if tmp$<>"Y" let tmp$="N"
+	wh.SeasonalFlag=0 \ if tmp$="Y" let wh.SeasonalFlag=1
+	if wh.SeasonalFlag=1
+		call dxget("SEASONSTART",tmp$)
+		x2=tmp$ \ if x2<1 or x2>12 let x2=0
+		wh.SeasonalStart=x2
+		call dxget("SEASONEND",tmp$)
+		x2=tmp$ \ if x2<1 or x2>12 let x2=0
+		wh.SeasonalEnd=x2
+	Else
+		wh.SeasonalStart=0
+		wh.SeasonalEnd=0
+	Endif
+	call dxget("WHTransUpdtUsg",tmp$) ! layout label is wrong
+	wh.LifoPoolCost=0 \ if UCase$(RTrim$(tmp$))="Y" let wh.LifoPoolCost=1
+	call dxget("RESTRITEM",tmp$)
+	wh.RestrictedItem=0 \ if UCase$(RTrim$(tmp$))="Y" let wh.RestrictedItem=1
+	! ANY OTHER FIELDS??
+	! ok - start checking
+	If WHRec>0 ! existing
+	  read record #WHC,WHRec,0;tmpwh.; ! orig data
+	  If P9$[32,32]="Y" ! whse pricing
+		
+		IF WH.CostBase<>TMPWH.CostBase
+			wh.PrevBaseCost=tmpwh.costbase
+			wh.DateBaseChg=currdate
+			LET pch.ctype=5 
+		    lET pch.OldCost=tmpwh.costbase
+		    LET pch.NewCost=wh.costbase
+		    Call update_cost_hist()
+		Endif
+		if wh.CostLoad<>tmpwh.CostLoad
+			wh.PrevLoadCost=tmpwh.CostLoad
+			wh.DateLoadChg=currdate
+			LET pch.ctype=1              
+			lET pch.OldCost=tmpwh.CostLoad   
+			LET pch.NewCost=wh.CostLoad
+			call update_cost_hist()
+		Endif
+		if wh.CostLastPo<>tmpwh.CostLastPo
+			wh.PrevPOCost=tmpwh.CostLastPo
+			wh.DatePOCostChg=currdate
+			LET pch.ctype=3              
+			lET pch.OldCost=tmpwh.CostLastPo    
+			LET pch.NewCost=wh.CostLastPo        
+			call update_cost_hist()
+		Endif
+		if wh.CostLoad2<>tmpwh.CostLoad2
+			wh.PrevLoad2Cost=tmpwh.CostLoad2
+			wh.DateLoad2Chg=currdate
+			LET pch.ctype=2              
+			lET pch.OldCost=tmpwh.costload2
+			LET pch.NewCost=wh.costload2
+			call update_cost_hist()
+		Endif
+		if wh.Load1MupTbl<>tmpwh.Load1MupTbl
+			wh.PrevBrkTbl=tmpwh.Load1MupTbl
+			wh.DateLoadChg=currdate ! as would override cost$
+			LET pch.ctype=8;pch.oldcost=0;pch.newcost=0
+			lET pch.OldLoadTbl1=tmpwh.Load1MupTbl
+			LET pch.NewLoadTbl1=wh.Load1MupTbl
+			call update_cost_hist()
+		Endif
+		if wh.Load2MupTbl<>tmpwh.Load2MupTbl
+			wh.PrevLoad2MupTbl=tmpwh.Load2MupTbl
+			wh.DateLoad2Chg=currdate ! as overrides cost$
+			LET pch.ctype=9;pch.oldcost=0;pch.newcost=0
+			lET pch.OldLoadTbl2=tmpwh.Load2MupTbl
+			LET pch.NewLoadTbl2=wh.Load2MupTbl  
+			call update_cost_hist()
+		Endif
+		if wh.MUpTbl<>tmpwh.MUpTbl
+			wh.PrevMupTbl=tmpwh.MUpTbl
+		Endif
+		! record if avg,netpo,lastpo changed
+		IF tmpwh.CostNetPO<>wh.CostNetPO
+			LET pch.ctype=4  
+			lET pch.OldCost=tmpwh.CostNetPO
+			LET pch.NewCost=wh.CostNetPO
+			call update_cost_hist()
+		Endif
+		if tmpwh.CostAvg<>wh.CostAvg
+			LET pch.ctype=6
+			lET pch.OldCost=tmpwh.CostAvg
+			LET pch.NewCost=wh.CostAvg
+			call update_cost_hist()
+		Endif
+	  Endif ! of check/record changes (whse pricing)
+	  if tmpwh.Spare$="" ! CANNOT HAVE NULL
+		tmpwh.Spare$=blank$
+		write record #WHC,WHRec,0;tmpwh.; ! avoid se on dir 2
+	  Endif
+	Endif ! of exist rec
+	mode$="c"
+	if whrec<=0 let mode$="a";whrec=0
+	wh.Spare$=blank$ ! as used for KEY! - MAKE SURE ITS BLANK NOT NULL!
+	if p61$[111,111]="Y" ! CPI
+		! ----there is a Min Purch Qty --  update product/warehouse record Do Not ReOrder flag = N
+		! task 47328
+		! if there is a Min Stock Lvl or Max Stock Lvl or Min Days
+		! or Max Days or Min Months or Max Months NOT EQUAL to zero
+		! update product/warehouse record Do Not ReOrder flag = N
+		if wh.MinStkLvl or wh.MaxStkLvl or wh.MinDaysMths or wh.MaxDaysMths 
+			let wh.DNReordFlg = 0
+			!ReturnStatus = 1
+			!message$="Min/Max Stock and Days must be zero to change Do Not Reorder"
+			!call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		endif
+	end if
+	aa=fileupdateprodwhse(e$,WHC,mode$,WHREC,WH.) ! ,0,0,-1) ! for audit(not working?!)
+	if aa<0 ! bad stat
+		  Returnstatus=0
+		  Message$=E$
+	Else
+		if p61$[111,111]="Y" ! CPI
+			if onFile and (wh.MinStkLvl <> oldMin or wh.MinDaysMths <> oldMinDaysMths)
+				clear ch[]
+				clear passinfo[]
+				ch[1] = CTLC
+				ch[2] = PRC
+				ch[3] = WHC
+				ch[4] = VMC
+				passinfo[0]=55
+				passinfo[1]=ProdRec
+				passinfo[2]=whrec
+				passinfo[3]=oldMin
+				passinfoStr$[1]=wh.ProdCode$
+				passinfo[4]=wh.Whse
+				passinfo[5]=oldMinDaysMths
+				call "libalertproc.lib",passinfo[],ch[],msg$,0,passinfoStr$[]
+			end if
+		end if
+		if sqlChan>=0
+			call prodwhse_DL4SQLConvert(e$,"FROMDL4",wh.,sql_prodwhse.)
+			e = prodwhse_SQLAddUpdate(e$,sqlChan,sql_prodwhse.)
+		end if
+		Returnstatus=1
+		Message$="Record saved"
+	Endif
+	if custom_customer$="MORRISETTE"
+		IF MDNRLog and HOLDFLAG<>WH.DNReordFlg
+		   U9$=MSC$(0)
+		   LOOP_LOG: READ #MDNRCh;LINE_$; \ IF LINE_$ GOTO LOOP_LOG:   
+		   print #MDNRCh;tab 0;aa1$[1,10];
+		   if holdflag=1 print #MDNRCh;tab 12;"Y";
+		   if holdflag=0 print #MDNRCh;tab 12;"N";
+		   if holdflag=2 print #MDNRCh;tab 12;"O";
+		   if WH.DNReordFlg=1 print #MDNRCh;tab 22;"Y";
+		   if WH.DNReordFlg=0 print #MDNRCh;tab 22;"N";
+		   if WH.DNReordFlg=2 print #MDNRCh;tab 22;"O";
+		   print #MDNRCh;tab 40;WH.ProdCode$;tab 60;wh.Whse;tab 70;u9$[1,30];    
+		   print #MDNRCh;tab 100;"671"                                          
+		ENDIF
+		!If HOLDFLAG<>WH.DNReordFlg ! another alert added by txc 234324
+		!	CALL "testcct234324a.dl4",WH.ProdCode$+STR$(wh.Whse),HOLDFLAG,WH.DNReordFlg,Intco,Userid$
+		!Endif
+	Endif ! morrisette - dnr log
+	WHSDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! WhseSave
+! 
+!--------------------------------------------------------------------
+Sub WhseDelete()
+! delete from file
+  Try
+	dim 3%,W5[25]
+	if WHRec<=0 ! not on file
+		Returnstatus=1
+		Message$="Not on file"
+		goto WHDDone
+	Endif
+	IF UA2$[29,29]<>"Y" ! no delete for this user
+		returnstatus=0
+		message$="User can not delete warehouse records!"
+		goto WHDDone
+	Endif
+	if wh.QtyOnHand<>0 or wh.QtyOnPO<>0 or wh.QtyOnOrd<>0 ! inventory_flag
+		returnstatus=0
+		Message$="Can not delete. Inventory on file"
+		goto WHDDone
+	Endif
+	Mat read #WHC,WHRec,228;W5;
+	Sales_flag=0
+	For X=0 to 25
+		if w5[x] let sales_flag=1
+	Next X
+	If Sales_Flag<>0
+		returnstatus=0
+		Message$="Can not delete. Sales on file"
+		Goto WHDDone
+	Endif
+	! that's all that's on 671w
+	tmp3=fileupdateprodwhse(e$,WHC,"d",whrec,wh.) ! ,0,0,-1) ! w/audit(not working!?)
+	if tmp3>=0
+		returnstatus=1
+		Message$="OK - Record deleted"
+		if sqlChan>=0
+			call prodwhse_DL4SQLConvert(e$,"FROMDL4",wh.,sql_prodwhse.)
+			e = prodwhse_SQLDelete(e$,sqlChan,sql_prodwhse.)
+		end if
+	Else ! problem
+		returnstatus=0
+		Message$="Error on delete "+e$
+	Endif
+   WHDDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! WhseDelete
+! 
+!--------------------------------------------------------------------
+Sub plcprcupdt()
+! update load costs & prices on prod
+  Try
+	DIM 1%,PFU1[20],m5[5,4],2%,C4[8],lpmrk[5],3%,PFU2[6],A[33]
+	Dim 3%,PREC[2],BASECOST
+	let PRec[0]=Prodrec
+	IF PR.Load1MupTbl
+		LET WHSE=0;LTBL=PR.Load1MupTbl;CNVTA=0
+		LET OTYPE=1
+		CALL MXLOAD5L(e$,OTYPE,WHSE,LTBL,PREC[],CNVTA,IntCo,rstr$)
+		LET pr.CostLoad=CNVTA
+	ENDIF
+	IF pr.Load2MupTbl
+		LET WHSE=0;LTBL=pr.Load2MupTbl;CNVTA=0
+		LET OTYPE=1
+		CALL MXLOAD5L(e$,OTYPE,WHSE,LTBL,PREC[],CNVTA,IntCo,rstr$)
+		LET pr.CostLoad2=CNVTA
+	ENDIF
+	if custom_customer$<>"PRBRICK" ! prgbrk uses muptbl zero
+		IF pr.MUpTbl<=0 OR pr.MUpTbl>999 exit sub
+	endif
+	if pr.PriceType<>1 exit sub ! only matrix pricing uses pricemark
+	BASECOST=pr.CostBase
+	MAT READ #PRC,Prodrec,256;A;
+	mat read #PRC,Prodrec,512;Pfu1;
+	mat read #PRC,Prodrec,554;Pfu2;
+	mat read #PRC,Prodrec,894;C4;
+	if c4[3]>0 ! table zero is used
+		Mat Read #prmc,c4[3],18;M5; ! "pricemark cost base
+	else
+		clear m5[] ! so is always BASE COST
+	Endif
+	LET BASECOST=pr.CostBase ! "BASE COST
+	! set up and use array instead of individual
+	lpmrk[0]=pr.Lp1Markup;lpmrk[1]=pr.Lp2Markup;lpmrk[2]=pr.Lp3Markup
+	lpmrk[3]=pr.Lp4Markup;lpmrk[4]=pr.Lp5Markup;lpmrk[5]=pr.Lp6Markup
+	FOR FIELD=1 TO 6 ! "now 1 to 6 for LP 1-6
+		Let BASECOST=pr.CostBase ! "base default
+		If M5[field-1,4]=1 Let BASECOST=pr.CostPO ! "Last
+		If M5[Field-1,4]=2 Let BASECOST=PR.CostLoad ! "Load
+		If M5[Field-1,4]=3 Let BASECOST=pr.CostLoad2 ! "load2
+		If M5[field-1,4]=4 Let BASECOST=pr.CostAvg ! "average
+		If M5[field-1,4]=5 Let BASECOST=PR.CostNetPO ! "Net PO
+		X4=0 ! x4 is price
+		If C4[3]=0 ! "using Per Prod/List Markup %
+		  CALL "MX671MRK5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,C4[],FIELD,BASECOST,LPMRK[],e$,rstr$
+		  ! IF FLAG LET E=FLAG \ GOSUB Err_Search:
+		Else ! std - price markup table
+			CALL "MX671BRK5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,C4[],FIELD,BASECOST,e$,rstr$
+		Endif
+		IF NOT(FLAG) LET X4=CNVTA   
+		IF P61$[50,50]="Y"
+			CALL PriceFac()
+		Endif
+		If X4>=0 LET A[19+FIELD]=X4 
+	Next Field
+	! convert A[] back to sql
+	pr.ListPrice1=A[20]
+	pr.ListPrice2=A[21]
+	pr.ListPrice3=A[22]
+	pr.ListPrice4=A[23]
+	pr.ListPrice5=A[24]
+	pr.ListPrice6=A[25]
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! plcprcupdt
+! 
+!--------------------------------------------------------------------
+Sub wlcprcupdt()
+! update load costs & prices on whse
+  Try
+	DIM 1%,PFU1[20],M5[5,4],2%,lpmrk[5],C4[8],3%,PFU2[6],A[33]
+	Dim 3%,PREC[2],BASECOST
+	let PRec[0]=Prodrec
+	IF WH.Load1MupTbl
+		LET WHSE=Whseno;LTBL=WH.Load1MupTbl;CNVTA=-999
+		LET OTYPE=1
+		If not(recalcnew) ! normal
+			CALL MXLOAD5L(e$,OTYPE,WHSE,LTBL,PREC[],CNVTA,IntCo,rstr$)
+		else ! pass vars
+			call Mxload5pv(e$,OTYPE,WHSE,LTBL,PREC[],CNVTA,Intco,rstr$,pr., wh.)
+		Endif
+		LET wh.CostLoad=CNVTA
+	ENDIF
+	IF wh.Load2MupTbl
+		LET WHSE=WhseNo;LTBL=wh.Load2MupTbl;CNVTA=-999
+		LET OTYPE=1
+		If not(recalcnew) ! normal
+			CALL MXLOAD5L(e$,OTYPE,WHSE,LTBL,PREC[],CNVTA,IntCo,rstr$)
+		else ! pass vars
+			call Mxload5pv(e$,OTYPE,WHSE,LTBL,PREC[],CNVTA,Intco,rstr$,pr., wh.)
+		Endif
+		LET wh.CostLoad2=CNVTA
+	ENDIF
+	if custom_customer$<>"PRBRICK" ! prgbrk uses muptbl zero
+		IF wh.MUpTbl<=0 OR wh.MUpTbl>999 exit sub
+	endif
+	if pr.PriceType<>1 exit sub ! only matrix pricing uses pricemark
+	BASECOST=wh.CostBase
+	MAT READ #PRC,Prodrec,256;A;
+	mat read #PRC,Prodrec,512;Pfu1;
+	mat read #PRC,Prodrec,554;Pfu2;
+	mat read #PRC,Prodrec,894;C4;
+	if custom_customer$<>"PRBRICK" ! no muptbl chg for them
+		c4[3]=wh.MUpTbl ! switch to whse value
+	endif
+	if c4[3]>0 ! could have zero
+		Mat Read #prmc,c4[3],18;M5; ! "pricemark cost base
+	else
+		clear m5[] ! so always BASE COST
+	Endif
+	LET BASECOST=wh.CostBase ! "BASE COST
+	! set up and use array instead of individual (NO WHSE FIELDS)
+	lpmrk[0]=pr.Lp1Markup;lpmrk[1]=pr.Lp2Markup;lpmrk[2]=pr.Lp3Markup
+	lpmrk[3]=pr.Lp4Markup;lpmrk[4]=pr.Lp5Markup;lpmrk[5]=pr.Lp6Markup
+	FOR FIELD=1 TO 6 ! "now 1 to 6 for LP 1-6
+		Let BASECOST=wh.CostBase ! "base default
+		If M5[field-1,4]=1 Let BASECOST=wh.CostLastPo ! "Last
+		If M5[Field-1,4]=2 Let BASECOST=wh.CostLoad ! "Load
+		If M5[Field-1,4]=3 Let BASECOST=wh.CostLoad2 ! "load2
+		If M5[field-1,4]=4 Let BASECOST=wh.CostAvg ! "average
+		If M5[field-1,4]=5 Let BASECOST=wh.CostNetPO ! "Net PO
+		X4=0 ! x4 is price
+		If C4[3]=0 ! "using Per Prod/List Markup %
+		  CALL "MX671MRK5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,C4[],FIELD,BASECOST,LPMRK[],e$,rstr$
+		  ! IF FLAG LET E=FLAG \ GOSUB Err_Search:
+		Else ! std pricemark
+			CALL "MX671BRK5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,C4[],FIELD,BASECOST,e$,rstr$
+		Endif
+		IF NOT(FLAG) LET X4=CNVTA   
+		IF P61$[50,50]="Y"
+			CALL PriceFac()
+		Endif
+		If X4>=0 LET A[19+FIELD]=X4 
+	Next Field
+	! convert A[] back to sql
+	Wh.Price1=A[20]
+	Wh.Price2=A[21]
+	Wh.Price3=A[22]
+	Wh.Price4=A[23]
+	Wh.Price5=A[24]
+	Wh.Price6=A[25]
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! wlcprcupdt
+! 
+!--------------------------------------------------------------------
+Sub PRICEFAC()
+! REM round prices based upon pricing factor        
+  Try
+	dim 1%,PRFac
+	Dim 3%
+	Dim keycomm$[10]
+	IF P61$[50,50]<>"Y" Exit Sub
+	LET KEYCOMM$=pr.ComdtyCode$+Blank$
+	SEARCH #CMC,2,1;KEYCOMM$,REC_CMDTY,E                          
+	IF NOT(E)                                                   
+	  MAT  READ #CMC,REC_CMDTY,40;PRFAC;                          
+	  IF PRFAC                                                  
+		LET CNVTA=X4;CNVTU[0]=0;CNVTU[1]=pr.UMPriceDefault;CNVTU[2]=2    
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		CALL "pricernd",PRFAC,AMOUNT                            
+		LET CNVTA=AMOUNT;CNVTU[0]=pr.UMPriceDefault;CNVTU[1]=0;CNVTU[2]=2
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		LET X4=AMOUNT                                           
+	  ENDIF                                                     
+	ENDIF                                                       
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! PRICEFAC
+! 
+!--------------------------------------------------------------------
+Sub listpricemark(e$,list$[],maxrec,Chan)
+! as the layout is WACKKO - for list price calc
+ Try
+	Dim PMDesc$[16]
+	LET X2=999 ! MAX 999 RECS (1000-9999 are levels!?)
+	list$[0]=bsdel$,"PRICEMARK",fdel$
+	List$[1]="TBLNO",fdel$,"DESC",fdel$,"PTYPE",fdel$
+	List$[2]="0",fdel$,"NONE",fdel$,"1",fdel$
+	row=3
+	FOR x=1 to x2
+		try
+			mat read #chan,x,0;pmdesc$;
+		Else
+			pmdesc$=""
+		End try
+		tmp$=RTrim$(PMDesc$)
+		if tmp$<>""
+			list$[row]=Str$(X),fdel$,tmp$,fdel$,"1",fdel$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next X
+	List$[row]=esdel$
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! listpricemark
+! 
+!--------------------------------------------------------------------
+Sub listsprodmark(e$,list$[],maxrec,Chan)
+! as the layout is WACKKO (10000+TBL) - FOR 10BRKT PRICE
+ Try
+	Dim PMDesc$[16]
+	LET X2=999 ! MAX 999 RECS (1000-9999 are levels!)
+	list$[0]=bsdel$,"SPRODMARK",fdel$
+	List$[1]="TBLNO",fdel$,"DESC",fdel$,"PTYPE",fdel$
+	List$[2]="0",fdel$,"NONE",fdel$,"2",fdel$
+	row=3
+	FOR x=1 to x2
+		try
+			mat read #chan,10000+x,0;pmdesc$;
+		Else
+			pmdesc$=""
+		End try
+		tmp$=RTrim$(PMDesc$)
+		if tmp$<>""
+			list$[row]=Str$(X),fdel$,tmp$,fdel$,"2",fdel$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next X
+	List$[row]=esdel$
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! listsprodmark
+! 
+!--------------------------------------------------------------------
+Sub EdtCosts()
+! as a lot of data is required - Only existing prods
+! and only cost/price data
+ Try
+	If ProdRec<=0 ! no prod
+		returnstatus=0
+		message$="NO PRODUCT FOUND"
+		Goto ECDone
+	Endif
+	! WHREC=warehouse
+	If P9$[32,32]<>"Y"
+		returnstatus=0
+		Message$="No Warehouse Pricing"
+		goto ECDone
+	Endif
+	! taken from whsesave
+	!BRKTBLID	MUPID
+	call dxget("BRKTBLID",tmp$)
+	if p9$[32,32]="Y"
+		wh.BrkTbl=tmp$
+	Else
+		Wh.BrkTbl=pr.BrkTbl
+	Endif
+	call dxget("MUPID",tmp$)
+	if p9$[32,32]="Y"
+		wh.MUpTbl=tmp$
+	Else
+		wh.MUpTbl=pr.MUpTbl
+	Endif
+	!PRICES
+	If P9$[32,32]="Y" ! do for all as mx671w does
+		! if pr.PriceType<>1 OR (pr.PriceType=1 AND wh.MUpTbl=0) ! matrixtbl - no change
+		  call dxget("LP1",tmp$)\x3=tmp$
+		  cnvtu[0]=pr.UMPriceDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  Wh.Price1=x3
+		  call dxget("LP2",tmp$)\x3=tmp$
+		  cnvtu[0]=pr.UMPriceDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  Wh.Price2=x3
+		  call dxget("LP3",tmp$)\x3=tmp$
+		  cnvtu[0]=pr.UMPriceDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  Wh.Price3=x3
+		  call dxget("LP4",tmp$)\x3=tmp$
+		  cnvtu[0]=pr.UMPriceDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  Wh.Price4=x3
+		  call dxget("LP5",tmp$)\x3=tmp$
+		  cnvtu[0]=pr.UMPriceDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  Wh.Price5=x3
+		  call dxget("LP6",tmp$)\x3=tmp$
+		  cnvtu[0]=pr.UMPriceDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  Wh.Price6=x3
+	  ! Endif ! of can chg prices
+	Else ! not whse pricing
+		wh.Price1=pr.ListPrice1
+		wh.Price2=pr.ListPrice2
+		wh.Price3=pr.ListPrice3
+		wh.Price4=pr.ListPrice4
+		wh.Price5=pr.ListPrice5
+		wh.Price6=pr.ListPrice6
+	Endif ! whse pricing
+	!COSTS
+	If P9$[32,32]="Y" ! whse cost
+	  if cost_lev[0] ! =2 ! enter/edit
+		  call dxget("avgcost",tmp$)
+		  if RTrim$(tmp$)<>"" 
+		  x3=tmp$
+		  cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  wh.CostAvg=x3
+		  Endif
+	  Endif
+	  if cost_lev[1] ! =2 ! enter/edit
+		  call dxget("LOADCOST",TMP$)
+		  if rtrim$(tmp$)<>""
+		  x3=tmp$
+		  cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  wh.CostLoad=x3
+		  Endif
+		  call dxget("LDMkup",tmp$)\if RTrim$(Tmp$)<>"" let wh.Load1MupTbl=tmp$
+		  call dxget("Load2Cost",tmp$)
+		  if rtrim$(tmp$)<>""
+		  x3=tmp$
+		  cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  wh.CostLoad2=x3
+		  Endif
+		  call dxget("LD2Mkup",tmp$)\if RTrim$(tmp$)<>"" let wh.Load2MupTbl=tmp$
+	  Endif
+	  if cost_lev[2] ! =2 ! enter/edit
+		  call dxget("pocost",tmp$)
+		  if rtrim$(tmp$)<>""
+		  x3=tmp$
+		  cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  wh.CostLastPo=x3
+		  endif
+		  call dxget("netpocost",tmp$)
+		  if rtrim$(tmp$)<>""
+		  x3=tmp$
+		  cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  wh.CostNetPO=x3
+		  Endif
+	  Endif
+	  if cost_lev[3] ! =2 ! enter/edit
+		  call dxget("basecost",tmp$)
+		  if rtrim$(tmp$)<>""
+		  x3=tmp$
+		  cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+		  cnvta=x3
+		  x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		  wh.CostBase=x3
+		  endif
+	  endif
+	Else ! not whse cost
+		wh.CostAvg=pr.CostAvg
+		wh.CostLoad=pr.CostLoad
+		wh.CostLoad2=pr.CostLoad2
+		wh.Load1MupTbl=pr.Load1MupTbl
+		wh.Load2MupTbl=pr.Load2MupTbl
+		wh.CostLastPo=pr.CostPO
+		wh.CostNetPO=pr.CostNetPO
+		wh.CostBase=pr.CostBase
+	Endif
+	let recalcnew=1  ! use proposed? (mxload5l REREADS PROD!)
+	call wlcprcupdt() ! do load cost & Price updates (Get Curr Price/Cost!)
+	Clear List$[]
+	! send new prices/cost
+	!Action2$="EDIT" ! send edit version
+	!call dxset("ACTION2",action2$) ! doesn't work
+	call ProdWHPrice(e$,WHRec,List$[],maxcnt,CCC,CTLC,intCo,PR.,WH.)
+	call AddToStr(e$,rstr$,List$[])
+	ECDone: ! finished
+	! status
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! EdtCosts
+! 
+!--------------------------------------------------------------------
+Sub Update_Cost_hist()
+! get main data and make the call
+  Try
+   LET pch.ProdCode$=pr.ProdCode$+Blank$
+   pch.AccessCode$=Blank$
+   LET pch.Source$="PrdWh Edit"+Blank$
+   pch.sOpen$=Blank$
+   pch.Blankforkey$=Blank$
+   LET pch.CDate=0
+   LET pch.CTime=0
+   LET pch.CostUm=pr.UMCostDefault ! PFU1[11]
+	 LET pch.CstUmFactor=0
+	 IF pch.CostUm>0
+	  FOR XCST=0 TO 7 
+		IF XCST=0 LET tmp1=pr.BaseUM
+		if xcst=1 let tmp1=pr.UM2
+		if xcst=2 let tmp1=pr.UM3
+		if xcst=3 let tmp1=pr.UM4
+		if xcst=4 let tmp1=pr.UM5
+		if xcst=5 let tmp1=pr.UM6
+		if xcst=6 let tmp1=pr.UM7
+		if xcst=7 let tmp1=pr.UM8
+		IF tmp1=pr.UMCostDefault ! PFU1[11]
+		  IF XCST=0
+			LET pch.CstUmFactor=1
+		  ELSE
+			! LET CSTHST[7]=PFU2[XCST-1]
+			if xcst=1 let pch.CstUmFactor=pr.UM2Fact
+			if xcst=2 let pch.CstUmFactor=pr.UM3Fact
+			if xcst=3 let pch.CstUmFactor=pr.UM4Fact
+			if xcst=4 let pch.CstUmFactor=pr.UM5Fact
+			if xcst=5 let pch.CstUmFactor=pr.UM6Fact
+			if xcst=6 let pch.CstUmFactor=pr.UM7Fact
+			if xcst=7 let pch.CstUmFactor=pr.UM8Fact
+		  ENDIF
+		ENDIF
+	  NEXT XCST
+	ENDIF
+  LET pch.Whse=Whseno
+	call MkCostHist(e$,IntCo,fchan[],pch.)
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Update_Cost_hist
+! 
+!--------------------------------------------------------------------

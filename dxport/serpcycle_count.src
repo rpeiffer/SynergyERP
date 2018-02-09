@@ -1,0 +1,263 @@
+! --- serpcycle_count.src
+!
+! loadsave -w -n 100,10 -o prog/dxport/serpcycle_count.dl4 src/serpcycle_count.src
+!
+! --- from serpmrts option in dxport (action=CYCLE_COUNT)
+!
+! Cycle count functions based on "count week" in product record
+!
+! control rec 70 fields
+!
+! countWeek: 1-52 indicating what the current week is we are counting
+! countDays$[7]: Which days of the week we are generating tags or counting on (Mon-Sun)
+!	N = Not counting that day
+!	Y = Counting that day, tags not generated for that day
+!	X = Counting that day, tags generated for that day
+!
+! When a week is started, count week will be set and countDays will be set to all "N"
+! To start a week, the user sets which days they want to count.  Week is now started.
+!
+! Tags are generated (via separate bring program) on proper day for proper inventory items.
+!
+! From this point forward, regular physical count procedures.
+!
+! When week is completed, all tags should have been generated and inventory updated
+! via normal procedures.
+!
+! Once done, the week can then be closed. This moves all inventory items forward to the next time (week)
+! the need to be counted, moves the countWeek forward by 1 (if 52->1) and resets
+! all the count days back to "N".
+! 
+! Ready to start the week again.
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+!
+Declare Intrinsic Sub InpBuf,String,Findf,programdump
+Declare Intrinsic Function FindChannel
+!Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile
+
+include "src/inc/filephyslot.inc"
+include "src/inc/fileprod.inc"
+
+! local subroutines
+Declare Sub OpenFilesReadControl,LoadControlInfo,GetTagStatus,RollCountWeekForward
+Declare Sub StartCountWeek,CloseCountWeek
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200],List$[50,200],3%,Maxcnt
+b$=" ",b$;maxcnt=50
+dim message$[150],webstr$[200]
+Dim Custom_customer$[30]
+
+! Control Variables
+dim 1%,countWeek,countFreq[11]
+dim countDays$[7],k_tag$[50],k_prod$[50]
+dim 3%,totalTags,voidedTags,uncountedTags,r_tag,r_prod
+
+dim tag. as physlot
+dim prod. as prod
+
+dim 3%
+
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+call OpenFilesReadControl()
+call GetTagStatus()
+
+Message$=""
+ReturnStatus = 1 ! default OK
+select case action1$
+	case "GETCNTRLINFO"
+		call LoadControlInfo()
+	case "STARTWEEK"
+		call StartCountWeek()
+	case "CLOSEWEEK"
+		call CloseCountWeek()
+	case else
+		message$="UNKNOWN ACTION1: "+action1$
+		ReturnStatus = 0
+end select
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call addToStr(e$,rstr$,webstr$)
+call setoutput(e$,rstr$)
+Close
+else ! main try
+	include "src/callmainerrnet.inc"
+end try
+end
+
+!--------------------------------------------------------------------------
+! S U B R O U T I N E S
+!--------------------------------------------------------------------------
+
+sub OpenFilesReadControl()
+try
+	ch_tag = openfile(704) \ if ch_tag = -1 error 42
+	ch_prod = openfile(1792) \ if ch_prod = -1 error 42
+	! stuff we always need to do
+	Read #1,115,60;custom_customer$;
+	Custom_customer$=UCase$(Trim$(custom_customer$))
+	mat read #1,70,160;countFreq
+	mat read #1,70,184;countWeek
+	mat read #1,70,186;countDays$
+	! make sure everthing is in proper shape
+	countDays$ = ucase$(countDays$)
+	for i = 1 to 7
+		if countDays$[i,i] <> "Y" and countDays$[i,i] <> "X" countDays$[i,i] = "N"
+	next i
+	mat write #1,70,186;countDays$;
+	if countWeek = 0 !un-initialized
+		countWeek = 1
+		mat write #1,70,184;countWeek
+	end if
+else
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetTagStatus()
+try
+	k_tag$ = " ",k_tag$
+	totalTags = 0
+	uncountedTags = 0
+	voidedTags = 0
+	do
+		r_tag = filegetphyslot(e$,ch_tag,">",1,k_tag$,tag.)
+		if r_tag<0 exit do
+		totalTags = totalTags + 1
+		if rtrim$(tag.ProdId$) = "VOID TAG"
+			voidedTags = voidedTags + 1
+		else if tag.QTY = -99 ! skipped
+			uncountedTags = uncountedTags + 1
+		end if
+	loop
+else
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub LoadControlInfo()
+try
+	! build section header and column header
+	tmp$=bsdel$+"Data"+fdel$+rdel$
+	tmp$=tmp$+"CurrentWeek"+fdel$
+	tmp$=tmp$+"CountDays"+fdel$
+	tmp$=tmp$+"TotalGeneratedTags"+fdel$
+	tmp$=tmp$+"VoidedTags"+fdel$
+	tmp$=tmp$+"UncountedTags"+fdel$
+	call addToStr(e$,rstr$,tmp$+rdel$)
+	tmp$ = str$(countWeek)+fdel$+countDays$+fdel$
+	tmp$ = tmp$+str$(totalTags)+fdel$+str$(voidedTags)+fdel$+str$(uncountedTags)+fdel$
+	call addToStr(e$,rstr$,tmp$+rdel$+esdel$)
+else
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub CloseCountWeek()
+try
+	if totalTags <> 0
+		message$ = "Cannot close week when there are tags.  Either update or clear file."
+		ReturnStatus = 0
+		exit sub
+	end if
+	call dxget("FORCECLOSE",tmp$) \ forceClose = tmp$
+	call dxget("COUNTDAYS",tmp$) \ tmp$ = ucase$(tmp$)
+	search tmp$,"Y",idx
+	if idx AND not(forceClose)
+		message$ = "Cannot close week when there are still tags left to print for current week."
+		ReturnStatus = 99
+		exit sub
+	end if
+	! update product file to reflect next "week" the current week products
+	! will be counted
+	call RollCountWeekForward()
+	! increment current count week
+	countWeek = countWeek + 1 \ if countWeek>52 countWeek = 1
+	! reset which days we will be counting
+	countDays$ = "NNNNNNN"
+	mat write #1,70,184;countWeek
+	mat write #1,70,186;countDays$;
+	message$ = "Week closed, new week now ready to enter which days you want to count."
+else
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub RollCountWeekForward()
+try
+	k_prod$ = " ",k_prod$
+	do
+		r_prod = filegetprod(e$,ch_prod,">",1,k_prod$,prod.)
+		if r_prod<0 exit do
+		if prod.CntWeek <> countWeek goto skipProduct
+		if prod.InventClass2>=1 and prod.InventClass2<=12
+			frequency = countFreq[prod.InventClass2 - 1]
+			if frequency>=1 and frequency<=52
+				weeksTillNextCount = int(52 / frequency)
+				if prod.CntWeek + weeksTillNextCount <= 52
+					prod.CntWeek = prod.CntWeek + weeksTillNextCount
+				else
+					! over a 52 week boundry
+					prod.CntWeek = (prod.CntWeek + weeksTillNextCount) mod 52
+				endif
+				e = fileupdateprod(e$,ch_prod,"c",r_prod,prod.)
+				if e<0 e=abs(e) \ error 11000
+			end if
+		end if
+		skipProduct: !
+	loop
+else
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub StartCountWeek()
+try
+	if totalTags <> 0
+		message$ = "Cannot start a week when there are tags.  Current week must be closed out."
+		ReturnStatus = 0
+		exit sub
+	end if
+	search countDays$,"X",idx
+	if idx
+		message$ = "Cannot adjust count days once any tags generated for week."
+		ReturnStatus = 0
+		exit sub
+	end if
+	call DxGet("COUNTDAYS", tmp$)
+	countDays$ = ucase$(tmp$)
+	if len(countDays$) <> 7
+		message$ = "Invalid number of count days!"
+		ReturnStatus = 0
+		exit sub
+	end if
+	for i = 1 to len(countDays$)
+		if countDays$[i,i] <> "Y" and countDays$[i,i] <> "N"
+			message$ = "Invalid value entered in count days (cannot force X value)!"
+			ReturnStatus = 0
+			exit sub
+		end if
+	next i
+	search countDays$,"Y",idx
+	if not(IDX)
+		message$ = "You have not specified any days to do counts.  Week not started."
+		ReturnStatus = 0
+		exit sub
+	end if
+	mat write #1,70,186;countDays$;
+	message$ = "Week successfully started.  Days to do counts can be adjusted until first tags are generated."
+else
+include "src/callsuberr.inc"
+end try
+end sub

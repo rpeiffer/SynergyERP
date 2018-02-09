@@ -1,0 +1,527 @@
+!
+! Cycle Count Tag Variance Report
+!
+! ERP Assistant Enabled
+!
+! loadsave -w -n 100,10 -o prog/dxport/cc_var.dl4 src/cc_var.src
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+Declare External Sub ERPCronSuccess
+Declare External Function GetParameter$
+
+External Lib "ubsprconv.dl4"
+declare external function Xunit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenMySQLBrowserOutput,GetMySQLReportHeader
+Declare External Sub AddMySQLReportColumnHeadings
+Declare External Function AddMySQLReportData
+Declare External Sub FinishMySQLReport
+
+!
+!
+!include structure,filehandler libs & default structure dims
+Include "src/inc/filephyslot.inc" ! tag file
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+
+!
+Declare Intrinsic Sub InpBuf,String,Findf,programdump,DateToJulian,JulianToDate
+Declare Intrinsic Sub Time,FormatDate
+!Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,buildsort
+
+! Internal Subroutines and Functions
+Declare Sub OpenFiles,GetParameters,SelectAndSort,ProcessSortFile,ProcessProductWH
+Declare Sub AmountOnTransfer,PrintTotals
+
+Declare Sub PrintHeader,PrintLine
+
+dim 1%,cnvtu[2],currProd$[12],currWh
+dim 3%,cnvta,qtyCounted
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200],List$[50,200],3%
+b$=" ",b$
+dim message$[150],webstr$[200],custom_customer$[30]
+
+! record structures
+Dim PR. as prod ! product file
+Dim PW. as prodwhse ! prodwhse file
+Dim tag. as physlot
+
+
+! keys
+dim K_sort$[50],K_tag$[100],K_tmp$[100],K_ordl$[50],K_ordh$[50]
+dim K_pr$[50],K_pw$[50]
+dim 3%,R_pr,R_pw,R_tag
+
+! everything else
+dim P9$[50],pageHeading$[132]
+dim p61$[256]
+dim 2%,pageNo,lineNo,maxLines,Q0[1]
+dim 1%,L3[3],H4[2],OWHT[1],sw[20]
+dim 2%,L4[3],H5[16],Q0[1]
+dim 3%,L7[12],quantities[6],UMStockFactor,totals[1]
+dim qmask$[20],pmask$[20],dec$[5]
+Dim 1%,MySQL_ch,reportAborted
+Dim 3%,MySQLQueueID
+
+dim 3%
+
+
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+!
+! M A I N   L O G I C
+!
+Mat Read #1,19,50;P9$;
+mat read #1,115,60;custom_customer$;
+custom_customer$=UCASE$(TRIM$(custom_customer$))
+
+sw[0] = 0 ! use average cost rather than PO cost
+if custom_customer$ = "MAYFIELD" sw[0] = 1
+
+call OpenFiles() ! open after the check
+call GetParameters()
+if toBrowser
+	!<section>
+	MySQL_ch = OpenMySQLBrowserOutput(e$)
+	if MySQL_ch <> -1
+		MySQLQueueID = GetMySQLReportHeader(e$,MySQL_ch,"CC_VAR")
+		if MySQLQueueID = 0
+			e$ = "Could not get MySQL report header!"
+			error 10000
+		end if
+	else
+		tmp$ = bsdel$,"CC_VAR",fdel$,rdel$
+		Call addtostr(e$,rstr$,tmp$)
+	end if
+	tmp$ = ""
+	tmp$ = tmp$,"Item Code",fdel$,"Description",fdel$
+	tmp$ = tmp$,"WH",fdel$
+	tmp$ = tmp$,"Base UOM",fdel$,"Factor Base UOM to Stocking Unit",fdel$
+	tmp$ = tmp$,"Stock UOM",fdel$,"Qty on PO",fdel$
+	tmp$ = tmp$,"Qty on SO",fdel$
+	tmp$ = tmp$,"Qty on TR Out from WH",fdel$,"Qty on TR In to WH",fdel$
+	tmp$ = tmp$,"QTY OH",fdel$
+	tmp$ = tmp$,"QTY Counted",fdel$
+	tmp$ = tmp$,"Variance QTY",fdel$
+	if sw[0] ! use avg rather than po
+		tmp$ = tmp$,"AVG Cost",fdel$
+		tmp$ = tmp$,"Variance $ (AVG Cost)",fdel$
+	else
+		tmp$ = tmp$,"PO Cost",fdel$
+		tmp$ = tmp$,"Variance $ (PO Cost)",fdel$
+	end if
+	if MySQLQueueID
+		call AddMySQLReportColumnHeadings(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$)
+	else
+		call addtostr(e$,rstr$,tmp$+rdel$)
+	end if
+else
+	maxLines = 60
+end if
+
+if (not(toBrowser) or MySQLQueueID) and not(erpCron) call setoutput(e$,rstr$, 2)
+
+call SelectAndSort()
+pageHeading$ = "Cycle Count Variance Analysis"
+lineNo = maxLines + 1 ! make sure next line we print prints header
+! loop through the sorted CPI contracts
+call ProcessSortFile()
+
+
+OutEnd: !
+if MySQLQueueID and not(reportAborted)
+	call FinishMySQLReport(e$,MySQL_ch,MySQLQueueID)
+else
+	If toBrowser Call addtostr(e$,rstr$,esdel$) !end section
+	if toBrowser or erpCron call setoutput(e$,rstr$,1)
+end if
+call ERPCronSuccess()
+try Close else rem
+! 
+! 
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end
+
+
+! ***********************************************************************
+! Nobody but us subroutines down here
+! ***********************************************************************
+
+Sub OpenFiles()
+Try
+	CH_TAG=OpenFile(-704,IntCo) \ if ch_tag=-1 Error 42 ! physlot
+	CH_PR=OpenFile(-1792,IntCo) \ if ch_pr=-1 Error 42 ! product
+	CH_PW=OpenFile(-1744,IntCo) \ if ch_pw=-1 Error 42 ! product wh
+	CH_ORDH=OpenFile(-1840,IntCo) \ if ch_ordh=-1 Error 42 ! order header
+	CH_ORDL=OpenFile(-1888,IntCo) \ if ch_ordl=-1 Error 42 ! order line
+	CH_CC=OpenFile(-1728,IntCo) \ if ch_cc=-1 Error 42 ! u/m codes
+	CH_SORT = buildsort(e$,25,0) \ if ch_sort=-1 error 42
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! openfiles
+
+Sub GetParameters()
+try
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	Mat Read #1,19,50;P9$;
+	mat read #1,61,0;p61$;
+	Mat read #ctlc,115,40;q0;
+	if q0[1]<2 let q0[1]=2
+	if q0[1]>5 let q0[1]=4
+	qmask$ = "-------#.##"
+	Let Dec$="#",Dec$
+	Let Pmask$="------------.",Dec$[1,Q0[1]]     !price mas
+	MAT  READ #CTLC,115,60;CUSTOM_CUSTOMER$;
+	Custom_customer$=UCase$(Trim$(custom_customer$))
+	toBrowser = 0
+	try
+		i = Chf(0)
+	else
+		toBrowser = spc(8)
+	end try
+	if toBrowser and toBrowser <> 49 error toBrowser
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! openfiles
+
+Sub SelectAndSort()
+try
+	K_tag$ = " ",K_tag$
+	do
+		R_tag = filegetphyslot(e$,CH_TAG,">",2,K_tag$,tag.)
+		if R_tag <= 0 exit do
+		K_sort$ = " ",K_sort$
+		K_sort$[1,12] = tag.ProdId$[1,12]
+		K_sort$[13] = K_tag$
+		search #ch_sort,4,1;K_sort$,r_tag,e \ if e error 11000
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! SelectAndSort
+
+Sub ProcessSortFile()
+Try
+	currWh = 0
+	currProd$ = ""
+	K_sort$ = " ",K_sort$
+	do
+		! will be sorted in Product ID order,
+		! then by 2nd key of PHYS.LOT:
+		! Warehouse, .....
+		search #ch_sort,3,1;K_sort$,R_tag,e
+		if e exit do
+		read record #ch_tag,r_tag;tag.
+		if currProd$ <> K_sort$[1,12]
+			if currProd$ <> "" ! if this is not the first rec
+				call ProcessProductWH()
+				if reportAborted exit sub
+			end if
+			currProd$ = K_sort$[1,12]
+			currWh = K_sort$[13,14]
+			qtyCounted = 0
+		else ! product matches
+			if currWh <> val(K_sort$[13,14])
+				call ProcessProductWH()
+				if reportAborted exit sub
+				currWh = K_sort$[13,14]
+				qtyCounted = 0
+			end if
+		end if
+		! add to accums for this tag
+		if rtrim$(tag.ProdId$) <> "VOID TAG" and tag.QTY <> -99 ! skipped
+			qtyCounted = qtyCounted + tag.QTY
+		end if
+	loop
+	if currProd$ <> ""
+		call ProcessProductWH()
+		if reportAborted exit sub
+		call PrintTotals()
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ProcessSortFile
+
+sub ProcessProductWH()
+try
+	! get prod record
+	K_tmp$ = " ",K_tmp$
+	K_tmp$[1,12] = currProd$[1,12]
+	R_pr = filegetprod(e$,CH_PR,"=",1,K_tmp$,pr.)
+	if R_pr <= 0
+		e$ = "Product "+rtrim$(currProd$)+" does not exist - fatal error!"
+		error 10000
+	end if
+	! get product warehouse
+	K_tmp$ = " ",K_tmp$
+	K_tmp$[1,12] = currProd$[1,12]
+	K_tmp$[13,14] = currWh using "##"
+	R_pw = filegetprodwhse(e$,CH_PW,"=",1,K_tmp$,pw.)
+	if R_pw <= 0
+		e$ = "Product/Warehouse "+rtrim$(currProd$)+"/"+str$(currWh)+" does not exist - fatal error!"
+		error 10000
+	end if
+	! sets transIn and transOut in base units
+	call AmountOnTransfer(R_pr,currWh)
+	clear quantities[]
+
+	! convert on PO to stock units
+	let cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1;cnvta=pw.QtyOnPO !convertqty
+	quantities[0]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,flag,PR.)
+
+	! convert on SO to stock units
+	! reduce this amount by the amount on transfers going out
+	let cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1;cnvta=pw.QtyOnOrd-transOut !convertqty
+	quantities[1]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,flag,PR.)
+
+	! convert qty tranfer out to stock units
+	let cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1;cnvta=transOut !convertqty
+	quantities[2]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,flag,PR.)
+
+	! convert qty tranfer in to stock units
+	let cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1;cnvta=transIn !convertqty
+	quantities[3]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,flag,PR.)
+
+	! convert on hand to stock units
+	let cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1;cnvta=pw.QtyOnHand !convertqty
+	quantities[4]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,flag,PR.)
+	
+	! convert qty counted to stock units
+	let cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=1;cnvta=qtyCounted !convertqty
+	quantities[5]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,flag,PR.)
+
+	let cnvtu[0]=0;cnvtu[1]=pr.UMStkDefault;cnvtu[2]=2 !convert price
+	if sw[0] ! use avg cost
+		If P9$[32,32] = "Y" ! if wh pricing is enabled
+			cnvta=pw.CostAvg
+		else
+			cnvta=pr.CostAvg
+		end if
+	else ! use po cost
+		If P9$[32,32] = "Y" ! if wh pricing is enabled
+			cnvta=pw.CostLastPO
+		else
+			cnvta=pr.CostPO
+		end if
+	end if
+	! convert cost per base unit to stock units
+	quantities[6]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,flag,PR.)
+	UMStockFactor = 1
+	if pr.UMStkDefault = pr.UM2 let UMStockFactor = pr.UM2Fact
+	if pr.UMStkDefault = pr.UM3 let UMStockFactor = pr.UM3Fact
+	if pr.UMStkDefault = pr.UM4 let UMStockFactor = pr.UM4Fact
+	if pr.UMStkDefault = pr.UM5 let UMStockFactor = pr.UM5Fact
+	if pr.UMStkDefault = pr.UM6 let UMStockFactor = pr.UM6Fact
+	if pr.UMStkDefault = pr.UM7 let UMStockFactor = pr.UM7Fact
+	if pr.UMStkDefault = pr.UM8 let UMStockFactor = pr.UM8Fact
+	variance = quantities[5] - quantities[4]
+	call PrintLine()
+	totals[0] = totals[0] + variance
+	totals[1] = totals[1] + (variance * quantities[6])
+else
+end try
+end sub ! ProcessProductWH
+
+
+
+Sub AmountOnTransfer(productRec, transWH)
+try
+	dim 3%,transIn,transOut
+
+	transIn = 0
+	transOut = 0
+	K_ordl$ = " ",K_ordl$ \ K_ordl$[1,6] = productRec Using "######"
+	do
+		Search #ch_ordl,3,2;K_ordl$,R_ordl,E \ If E exit do
+		If productRec <> val(K_ordl$[1,6]) exit do 
+		Mat Read #ch_ordl,R_ordl,8;L3;
+		MAT READ #ch_ordl,R_ordl,16;L4;
+		Mat Read #ch_ordl,R_ordl,168;L7;
+		If L3[0] <> 0 Goto SkipOrderLine ! only inv items
+		foundHeader = 0
+		For ST = 1 To 7
+			K_ordh$[1,2] = ST Using "##"
+			K_ordh$[3,8] = K_ordl$[7,12]
+			Search #CH_ORDH,2,1;K_ordh$,R_ordh,E !!-!! \ If E > 1 Gosub ERR_SEARCH
+			If not(E)
+				foundHeader = 1
+				ST = 7 ! force loop to terminate
+				Mat Read #CH_ORDH,R_ordh,104;H5;
+				mat read #CH_ORDH,R_ordh,486;OWHT;
+				! determine whse (if not line level, header)
+				IF L4[3]<1 OR L4[3]>99
+					MAT READ #CH_ORDH,R_ordh,78;H4;
+					LET L4[3]=H4[2]
+				ENDIF
+			end if
+		Next ST
+		if not(foundHeader) goto SkipOrderLine
+		If H5[7] <> 16 and H5[7] <> 8 Goto SkipOrderLine
+		if H5[7] = 16 ! true transfer
+			if owht[0]=1 ! only approved
+! 				if transWH = h5[11] transIn = transIn + (L7[2] - L7[0])
+! 				if transWH = l4[3] transOut = transOut + (L7[2] - L7[0])
+				! shipped only
+				if transWH = h5[11] transIn = transIn + L7[4]
+				if transWH = l4[3] transOut = transOut + L7[4]
+			end if
+		else ! consignment transfer
+			! TRANSFER AMOUNTS SHOULD REFLECT WHAT IS SHIPPED ONLY
+			! AS BACKORERED STOCK HAS NOT BEEN RECEIVED
+			if transWH = h5[11] transIn = transIn + L7[4]
+			if transWH = l4[3] transOut = transOut + L7[4]
+		end if
+		SkipOrderLine:
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! AmountOnTransfer
+
+
+
+Sub PrintHeader()
+Try
+	if lineNo < (maxLines - 1 - extraLines) exit sub ! no need to print a header
+	! need to print one
+	if pageNo > 0 print #0;"\14\" ! form feed
+	pageNo = pageNo + 1
+	Print #0;" - CC_VAR -"; Tab (Int(66 - (Len(pageHeading$) / 2)));pageHeading$
+	tmp$ = "" \ Call Time(tmp$)
+	Print #0; Tab 1;"DATE ";tmp$;
+	Print #0; Using "PAGE ###"; Tab 119;pageNo
+	Print #0;" "
+	Print #0;"ITEM CODE"; TAB 13;"DESCRIPTION";TAB 44;
+	Print #0;"WH";TAB 47;"BASE UOM";TAB 56;"BASE->STOCK FACTOR";TAB 75;"STOCK UOM"
+	tabInc = len(qmask$) + 1
+	nextTab = 8
+	print #0;tab nextTab;"QTY ON PO";
+	nextTab = nextTab + tabInc
+	Print #0;TAB nextTab;"QTY ON SO";
+	nextTab = nextTab + tabInc
+	Print #0;TAB nextTab;"QTY TR OUT";
+	nextTab = nextTab + tabInc
+	Print #0;TAB nextTab;"QTY TR IN";
+	nextTab = nextTab + tabInc
+	Print #0;TAB nextTab;"QTY ON HAND";
+	nextTab = nextTab + tabInc
+	Print #0;TAB nextTab;"QTY COUNTED";
+	nextTab = nextTab + tabInc
+	Print #0;TAB nextTab;"VARINCE QTY";
+	nextTab = nextTab + tabInc
+	tabInc = len(pmask$) + 1
+	if sw[0]
+		Print #0;TAB nextTab;"    AVG COST";
+	else
+		Print #0;TAB nextTab;"     PO COST";
+	end if
+	nextTab = nextTab + tabInc
+	Print #0;TAB nextTab;"  VARIANCE $";
+	print #0;""
+	print #0;""
+	lineNo = 7
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintHeader
+
+Sub PrintLine()
+Try
+	if toBrowser
+		tmp$ = ""
+		tmp$ = tmp$,rtrim$(pr.ProdCode$),fdel$,rtrim$(pr.Desc1$),fdel$
+		tmp$ = tmp$,str$(pw.Whse),fdel$
+		tmp$ = tmp$,rtrim$(xunit$(pr.BaseUM,CH_CC)),fdel$
+		tmp$ = tmp$,str$(UMStockFactor),fdel$
+		tmp$ = tmp$,rtrim$(xunit$(pr.UMStkDefault,CH_CC)),fdel$,str$(quantities[0]),fdel$
+		tmp$ = tmp$,str$(quantities[1]),fdel$
+		tmp$ = tmp$,str$(quantities[2]),fdel$,str$(quantities[3]),fdel$
+		tmp$ = tmp$,str$(quantities[4]),fdel$
+		tmp$ = tmp$,str$(quantities[5]),fdel$
+		tmp$ = tmp$,str$(variance),fdel$,str$(quantities[6]),fdel$
+		tmp$ = tmp$,str$(variance * quantities[6]),fdel$
+		if MySQLQueueID
+			if not(AddMySQLReportData(e$,MySQL_ch,MySQLQueueID,fdel$,tmp$))
+				! possible user abort - report deleted exit now
+				reportAborted = 1
+			end if
+		else
+			call addtostr(e$,rstr$,tmp$+rdel$)
+		end if
+	else
+		call PrintHeader()
+		Print #0;pr.ProdCode$; TAB 13;pr.Desc1$;TAB 44;
+		Print #0;pw.whse using "##";TAB 47;"  ";xunit$(pr.BaseUM,CH_CC);TAB 56;
+		print #0;"       ";UMStockFactor using "#######";TAB 75;
+		print #0;"  ";xunit$(pr.UMStkDefault,CH_CC);
+		print #0;""
+		lineNo = lineNo + 1
+		tabInc = len(qmask$) + 1
+		nextTab = 8
+		print #0;tab nextTab;quantities[0] using qmask$;
+		nextTab = nextTab + tabInc
+		print #0;tab nextTab;quantities[1] using qmask$;
+		nextTab = nextTab + tabInc
+		print #0;tab nextTab;quantities[2] using qmask$;
+		nextTab = nextTab + tabInc
+		print #0;tab nextTab;quantities[3] using qmask$;
+		nextTab = nextTab + tabInc
+		print #0;tab nextTab;quantities[4] using qmask$;
+		nextTab = nextTab + tabInc
+		print #0;tab nextTab;quantities[5] using qmask$;
+		nextTab = nextTab + tabInc
+		print #0;tab nextTab;variance using qmask$;
+		nextTab = nextTab + tabInc
+		tabInc = len(pmask$) + 1
+		print #0;tab nextTab;quantities[6] using pmask$;
+		nextTab = nextTab + tabInc
+		print #0;tab nextTab;(variance * quantities[6]) using pmask$;
+		print #0;""
+		lineNo = lineNo + 1
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintLine
+
+Sub PrintTotals()
+Try
+	if toBrowser exit sub
+	Call PrintHeader()
+	tabInc = len(qmask$) + 1
+	nextTab = 8 + (tabInc * 6)
+	print #0;""
+	print #0; "   ** TOTALS **";tab nextTab;totals[0] using qmask$;
+	nextTab = nextTab + tabInc
+	nextTab = nextTab + len(pmask$) + 1
+	print #0;tab nextTab;totals[1] using pmask$
+	lineNo = lineNo + 2
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintTotals
+
+
+end

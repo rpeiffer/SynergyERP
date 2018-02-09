@@ -1,0 +1,250 @@
+!Program Name: libimaging.lib                                    
+! loadsave -w -s -n 100,10 -o prog/dxport/libimaging.lib src/libimaging.src
+!                                                  
+!Last Updated:                                     
+! add images
+!task 66986 
+
+include "src/copyright.inc"
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters
+
+Declare Sub CHK_VS_IM_DATE
+
+Declare External Sub GetImage
+
+Dim image$[255],e$[255]
+
+
+Call GetImage(e$,1,"DR",1,"DR  5113222222 16806",image$) 
+Print i,s
+Stop
+
+External Sub GetImage(e$, intCo, IType$, mode, keyvar$, image$)
+  ! passes back an image path if one exists
+  !
+  ! e$			: error message
+  ! intCo		: company id #
+  ! IType$		: document type DR,
+  ! Mode		: 0=return image path only 1=return path & build pdf
+  ! Keyvar$		: key variables
+  ! maxcnt		: max # of lines for list$[]
+  ! ReturnStatus : .net status
+  ! Message$	: .net message
+
+
+Try
+
+External Lib "ubsfunc.dl4"
+Declare Intrinsic Function FindChannel,Trim$
+Declare Intrinsic Sub FormatDate,DXSet,String,FindF,Env
+Declare External Function OpenFile
+Declare External Function ReplaceChar$
+Declare Intrinsic Sub DateToJulian,JulianToDate
+
+Dim Msg$[256],pgmName$[20],Space$[100],zzz$[100]
+
+! imaging dims
+Dim SCANDIR$[20],dosimage$[255],ikey$[40],WORK$[255],key1$[10],key2$[10],key3$[10]
+Dim numpages$[4],ikeysav$[40]
+Dim IMI$[66]
+Dim 3%,IMI1,1%,imi2[3],2%,IMI3[2]
+Dim IMSTO$[44]
+Dim 3%,IMSTO[4]
+!
+Dim P176$[256],ext$[4],pdffilename$[255],Webpath$[255],pagemask$[4],aspID$[30]
+!
+Dim 1%, ii,pp,factor,keylen
+Dim 2%, Q0[1],jdate[1]
+Dim 3%, Z1
+!
+image$ = ""                                    
+debugDetail=1
+pgmName$="libimage"
+ii=0 ! Item Counter
+Space$=" ",Space$
+zzz$="z",zzz$
+ErrStat = 0
+
+Call env(1,"WEBPATH",webPath$) !path on image server to pdf's
+call env(1,"UBSASPID",aspID$) ! optional asp ID
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42   ! Control 
+IMI= OpenFile(-9987,intCo)  \ If IMI=-1 Error 42    ! ImageIndex
+IMS= OpenFile(-9986,intCo)  \ If IMS=-1 Error 42    ! ImageStore
+if mode=1 OPEN #0,"$/usr/ub/sys/fax imgtif2pdf" ! DCS driver for PDFs
+!
+MAT  READ #CTLC,176,0;P176$; 
+LET EXT$=".tif"                  
+IF P176$[2,2]="Y" LET EXT$=".imd"
+IF P176$[3,3]="Y" LET EXT$=".tif"
+IF P176$[6,6]="Y" let pagemask$="&&&&" else pagemask$="&&"
+!
+	! get good guess for key length
+!	ikey$ = " ",ikey$
+!	if len(keyvar$)>=2 then ikey$[1,2] = keyvar$[1,2]
+!	search #IMI,3,1;ikey$,rec_midx,e
+!	if e = 2 goto outend:  !! none if the right type or none at all
+!	keylen=len(ikey$)
+!	if not(keylen) then keylen=40  !! make keylen something
+!	if len(keyvar$)>keylen then ikey$=keyvar$[1,keylen] \ keyvar$=ikey$  ! cut down keyvar$
+!	if len(keyvar$)=keylen !! incoming string is as long as index of imindex
+!		keyvar$[keylen,keylen] = chr$(asc(keyvar$[keylen,keylen])+1) ! if string is full, nudge last character up 1
+!	endif
+
+	ikey$ = " ",ikey$
+	if keyvar$[1,2]="PL"
+		ikey$ = rtrim$(keyvar$)+SPACE$
+	ELSE
+		ikey$ = rtrim$(keyvar$)+zzz$
+	ENDIF
+	ikeysav$ = rtrim$(keyvar$)
+	key1$="" \ key2$="" \ key3$=""
+	if keyvar$[1,2]="DR"
+		if len(keyvar$)>=8 then key1$=keyvar$[3,8]		! order
+		if len(keyvar$)>=14 then key2$=keyvar$[9,14]	! customer
+		if len(keyvar$)>=20 then key3$=keyvar$[15,20]	! date 
+	endif
+	!
+	if ikeysav$[1,2]="PL"
+		smode=2
+	else
+		smode=6 !! backward search
+	endif
+
+	pdffilename$=""
+
+image_loop:	Search #IMI,smode,1;ikey$,REC_IMIDX,E    
+	if ikey$[1,Len(ikeysav$)] <> ikeysav$ Let E = 1
+	IF E = 2 GOTO OUTEND
+	if not(E) 
+		goto get_image_info
+	else
+		if ikeysav$[1,2]="DR"
+			if key1$=ikey$[3,8]		! order match
+				if ikey$[9,14]="      "		!customer blank
+					imgfound=0
+					CALL CHK_VS_IM_DATE(imi,KEY3$,REC_IMIDX,imgfound)
+					if imgfound 
+						goto get_image_info
+					else
+						goto image_loop:
+					endif
+				else
+					if key2$=ikey$[9,14]	! customer match
+						if ikey$[15,20]="      "  ! date blank
+							imgfound=0
+							CALL CHK_VS_IM_DATE(imi,KEY3$,REC_IMIDX,imgfound)
+							if imgfound 
+								goto get_image_info
+							else
+								goto image_loop:
+							endif
+						else
+							try jdate[0]=key3$ else jdate[0]=999999
+							try jdate[1]=ikey$[15,20] else jdate[1]=0
+							if abs(jdate[0]-jdate[1])<90 
+								goto get_image_info
+							endif
+							goto image_loop							
+						endif
+					else
+						goto image_loop
+					endif 
+				endif
+			else
+				goto outend  !! no order number match
+			endif
+		endif
+		if ikeysav$[1,2]="PD" or ikeysav$[1,2]="OS" 
+			if len(ikeysav$)>14 
+				ikeysav$=ikeysav$[1,14]
+				ikey$=ikeysav$+"0"+space$
+				goto image_loop:   ! check for smaller key
+			endif
+			if len(ikeysav$)>8 
+				ikeysav$=ikeysav$[1,8]
+				ikey$=ikeysav$+"0"+space$
+				goto image_loop:   ! check for smallest key
+			endif
+		endif
+	endif
+	goto outend  !! no matches
+
+get_image_info: !! send image info back
+	Mat Read #IMI,REC_IMIDX,0;IMI$
+	Mat Read #IMI,REC_IMIDX,66;IMI1
+	Mat Read #IMI,REC_IMIDX,72;imi2
+	Mat Read #IMI,REC_IMIDX,80;IMI3
+	Rem
+	REC_IMSTO = imi2[0]
+	Rem
+	Mat Read #IMS,REC_IMSTO,0;IMSTO$
+	Mat Read #IMS,REC_IMSTO,44;IMSTO
+	Rem
+	numpages$ = imi2[1] Using pagemask$  ! "&&&&"
+	WORK$ = RTrim$(IMSTO$[21,40])
+	SCANDIR$ = WORK$
+	!dosimage$ = LCase$(SCANDIR$ + "/" + IMI$[1,2] + "/" + Str$(IMI1) + "01.txt"
+	image$ = LCase$(SCANDIR$ + "/" + IMI$[1,2] + "/" + Str$(IMI1))
+	if pdffilename$="" then pdffilename$ = LCase$(Str$(IMI1)) + str$(tim(11)) + str$(tim(12)) +str$(tim(13)) +".pdf"
+	!
+	Call String(2,image$)
+	!
+	If imi2[1] Let np = imi2[1] Else Let np = 1           
+	gotone=0
+	! if mode=1 Print #0; webpath$ + "/" + pdffilename$
+	if mode=1 Print #0; pdffilename$; tab 80; aspID$
+	For XX = 1 To np                                      
+	  work$ = image$ + XX Using pagemask$ + ext$
+	  Call FindF(work$,e1)
+	  if e1 gotone=1 \ if mode=1 Print #0; work$
+	Next XX                                               
+	image$ = pdffilename$  
+
+outend: if pdffilename$="" 
+		dr = 0
+		image$ = ""
+		numpages$ = "0"
+	endif
+	if mode=1 Close #0
+
+Close #IMI,#IMS
+Exit Sub
+
+Else 
+  Include "src/callsuberr.inc"
+  
+End Try   ! main try
+
+End Sub
+
+
+SUB CHK_VS_IM_DATE(imi,imdate$,TESTREC,imgfound)
+TRY
+	Def Struct imindex
+	 Member PREFIX$[2] : Item 0			!IMI$[1,2]                
+	 Member IKEY$[28] :   Item 2			!IMI$[3,30]  TYPE-SPECIFIC 
+	 Member COMMENT$[30] : Item 30		!IMI$[31,60]                
+	 Member PLATTER$[6]  : Item 60		!IMI$[61,66]                
+	 Member 3%,SEQNUMBER :	Item 66			!IMI1                 
+	 Member 1%,LOCATION : Item 72			!IMI2[0]  Ctrl rec 177  
+	 Member 1%,PAGES : Item 74				!IMI2[1]                
+	 Member 1%,ROTATION : Item 76			!IMI2[2]                
+	 Member 1%,EXTRA1   : Item 78			!IMI2[3]                
+	 Member 2%,STOREDATE : Item 80			!IMI3[0]                 
+	 Member 2%,LASTACCESS : Item 84			!IMI3[1]                
+	 Member 2%,EXTRA2 : Item 88				!IMI3[2]                
+	end def
+
+	dim imdx. as imindex
+	dim jdate$[10]
+	dim 3%
+	imgfound=0
+	READ RECORD #IMI,TESTREC,0;imdx.
+	Let JDate=imdate$  
+	if not(jdate) then imgfound=1
+	if abs(jdate-imdx.storedate)<10 then imgfound=1
+else
+	Include "src/callsuberr.inc"  
+End Try 
+end sub

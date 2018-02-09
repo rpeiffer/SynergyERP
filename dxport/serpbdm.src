@@ -1,0 +1,372 @@
+!"serpbdm" === description  synergy erp business days/month Maintenance
+! 
+! loadsave -w -n 100,10 -o prog/dxport/serpbdm.dl4 src/serpbdm.src
+!  07/23/2009 started
+!
+include "src/copyright.inc"
+!
+
+
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,JDate$,FormatDate2$
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian, JulianToDate
+
+! internal subs/function
+Declare Sub OpenFiles,UpdateLog,sndsys
+Declare Sub CPDATA,SbmtData,Snddata,baddays
+
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],X$[20]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim Prod$[12],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],UA2$[50]
+	Dim Mask34$[10]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,PRC,COMM_LEV,CYEAR,YEAR1
+	dim 1%,cost_lev[4],Whse,debug,cnvtu[2],2%,Q0[1]
+	Dim 2%,X2[9],UA2[2],BDays[24]
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,PRR,BTRec
+	Dim 3%,R[99],O1,UB0[16],Amount,CNVTA
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim slist$[maxcnt,1000] ! second list
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/bdm.log" ! fields for DEBUG
+
+	Def FNI(H) = Int(Abs(H) +.5) * Sgn(H)
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! call dxopen() ! done in fmmenu - for standalone run
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serpbdm"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	Action2$=UCase$(action2$)
+	Action2$=RTrim$(action2$) ! UC and trimmed
+	if debugdetail
+		dmsg$="SERPBDM ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$ 
+		if Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	Close #CTLC ! close read only control file
+	call OpenFiles() ! open all needed files
+	call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+	MAT  READ #CTLC,11,0;BDAYS;
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	LET CYEAR=TIM(8)                                       
+	IF CYEAR>67 LET CYEAR=CYEAR+1900 ELSE  LET CYEAR=CYEAR+2000
+	LET YEAR1=CYEAR-1                                      
+	Mask34$="###.####" ! 3.4 mask
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Let Key1$=UserID$+"          " ! space fill it
+	UCC = OpenFile(-9988, intCo) \ if UCC=-1 Error 42
+	Key1$[11]="" ! cut to length
+	Search #UCC,2,1;Key1$,Rec,E
+	If Not(E)
+	  Let SCR=Rec
+	  Mat Read #ucc,scr,200;UA2;
+	  Mat read #ucc,scr,336;Ua2$;
+	  Read #ucc,scr,394;comm_lev;
+	Else
+	  Let SCR=0;comm_lev=0 ! 
+	  UA2[0]=0;UA2$=" ",UA2$
+	Endif
+	Close #UCC
+	! GET additional user data flags
+	REM UNPACK A2[0] TO B0[]                         
+	FOR X1=0 TO 15                                          
+		LET O1=2^X1 \ LET M1=1
+		! CALL $LOGIC,M1,O1,A2[0],B0[X1] ! ub
+		Call Logic(m1,O1,UA2[0],UB0[X1])
+		LET UB0[X1]=SGN(UB0[X1])
+	NEXT X1   
+	! call dxsave(0,"tmp/bdmsv.txt!") ! save web send data
+	ReturnStatus=0
+	Message$="Action 1 not found"
+  select case action1$
+
+    Case "GETDATA" ! data from cntrl						doc=BDM-GetData.doc
+		returnstatus=1
+		message$="OK"
+		Call Sndsys()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent file data" \ Call updatelog(debug)
+		Endif
+		! end of GETDATA
+	Case "COPYDATA" ! data TY to LY							doc=BDM-CopyData.doc
+		returnstatus=1
+		message$="OK"
+		call CPDATA()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Copy TY to LY "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of COPYDATA
+	Case "SBMTDATA" ! BDM changes							doc=BDM-SubmitData.doc
+		returnstatus=1
+		message$="OK"
+		Call SbmtData()
+		if debugdetail
+			dmsg$="Submit BDM "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of SBMTDATA
+
+		! call programdump("tmp/bdmlog1!","")
+  End Select
+  SerpbdmDone: ! finished
+  ! status section                                                       
+  Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)                 
+  Call AddToStr(e$,rstr$,WebStr$)                                        
+  Call SetOutPut(e$,rstr$)       
+  if debugdetail
+		dmsg$="End of Program SERPBDM" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC=OpenFile(9999,Intco) \ if ctlc=-1 error 42
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!
+!------------------------------------------------------------------------------------------
+Sub sndsys()
+! send flags & droplists
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"HDGYEARS",fdel$
+	List$[1]="CURRYR",fdel$,"LASTYR",fdel$
+	List$[2]=Str$(CYEAR),fdel$,STR$(YEAR1),fdel$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	call Snddata()
+	
+	! calling rtn to addtostr
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndsys
+!
+!------------------------------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Sub SndData()
+! send days data
+ Try
+	Clear List$[]
+	
+	List$[0]=bsdel$,"BDMDATA",fdel$
+	Webstr$="JANCURR",fdel$,"FEBCURR",fdel$,"MARCURR",fdel$
+	Webstr$=webstr$,"APRCURR",fdel$,"MAYCURR",fdel$
+	Webstr$=Webstr$,"JUNCURR",fdel$,"JULCURR",fdel$
+	Webstr$=Webstr$,"AUGCURR",FDEL$,"SEPCURR",FDEL$
+	Webstr$=Webstr$,"OCTCURR",FDEL$,"NOVCURR",FDEL$,"DECCURR",FDEL$
+	Webstr$=Webstr$,"JANLAST",fdel$,"FEBLAST",fdel$,"MARLAST",fdel$
+	Webstr$=webstr$,"APRLAST",fdel$,"MAYLAST",fdel$
+	Webstr$=Webstr$,"JUNLAST",fdel$,"JULLAST",fdel$
+	Webstr$=Webstr$,"AUGLAST",FDEL$,"SEPLAST",FDEL$
+	Webstr$=Webstr$,"OCTLAST",FDEL$,"NOVLAST",FDEL$,"DECLAST",FDEL$
+	List$[1]=webstr$
+	clear webstr$
+	Webstr$="" ! so can do = +
+	FOR X=1 TO 24
+		Webstr$=webstr$+Str$(BDays[x]),fdel$
+	Next X
+	List$[2]=webstr$
+	List$[3]=esdel$
+	! caller to addtostr
+	GBDMDone: ! done
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndData
+!
+!------------------------------------------------------------------------------------------
+Sub SbmtData()
+! submit data (all fields)
+ Try
+	returnstatus=1
+	message$="OK"
+	Call dxget("JANCURR",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[1]=x2
+	Call dxget("FEBCURR",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[2]=x2
+	Call dxget("MARCURR",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[3]=x2
+	Call dxget("APRCURR",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[4]=x2
+	Call dxget("MAYCURR",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[5]=x2
+	Call dxget("JUNCURR",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[6]=x2
+	Call dxget("JULCURR",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[7]=x2
+	Call dxget("AUGCURR",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[8]=x2
+	Call dxget("SEPCURR",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[9]=x2
+	Call dxget("OCTCURR",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[10]=x2
+	Call dxget("NOVCURR",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[11]=x2
+	Call dxget("DECCURR",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[12]=x2
+	Call dxget("JANLAST",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[13]=x2
+	Call dxget("FEBLAST",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[14]=x2
+	Call dxget("MARLAST",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[15]=x2
+	Call dxget("APRLAST",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[16]=x2
+	Call dxget("MAYLAST",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[17]=x2
+	Call dxget("JUNLAST",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[18]=x2
+	Call dxget("JULLAST",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[19]=x2
+	Call dxget("AUGLAST",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[20]=x2
+	Call dxget("SEPLAST",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[21]=x2
+	Call dxget("OCTLAST",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[22]=x2
+	Call dxget("NOVLAST",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[23]=x2
+	Call dxget("DECLAST",tmp$)
+	x2=tmp$
+	if x2<0 or x2>30 or fra(x2) call baddays()
+	BDays[24]=x2
+	if returnstatus=1 ! ok
+		Mat write #CTLC,11,0;BDays;
+	Endif
+  SBTbdDone: ! finished
+ else
+	include "src/callsuberr.inc"
+  end try
+end sub ! SbmtData
+!
+!------------------------------------------------------------------------------------------
+Sub CPData()
+! copy this year to last year or done on web?
+  Try
+	FOR FIELD=1 TO 12
+	  LET BDAYS[FIELD+12]=BDAYS[FIELD]
+	NEXT FIELD
+	CALL snddata()
+	Mat write #CTLC,11,0;BDays;
+  CPbdDone: ! finished
+ else
+	include "src/callsuberr.inc"
+  end try
+end sub ! CPData
+!
+!------------------------------------------------------------------------------------------
+Sub Baddays()
+! set flag for no good
+Returnstatus=0
+Message$="Invalid days entered"
+End Sub ! baddays
+!
+!------------------------------------------------------------------------------------------

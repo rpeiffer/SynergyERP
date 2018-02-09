@@ -1,0 +1,835 @@
+!
+! CPI expired contract purge
+!
+! loadsave -w -n 100,10 -o prog/dxport/serpcpi_purge.dl4 src/serpcpi_purge.src
+!
+! ERP Assistant Enabled
+!
+! Contract Eligible for expire:
+!
+! NOTE: Procedurally Piedmont will only be allowing one active "min/max" or
+!       "non-reserve" contract per item.
+!
+! NOTE: For ALL min/max contract lines: if there is a cancel date in place,
+!       the warehouse information (min/max, etc.) will be cleared regardless
+!       of wether the contract itself is eligible for purge
+
+! NOTE: Change for task 54106 - even if all lines don't meet requirements
+!       for purge, purge those lines that do meet all criteria.
+!
+! Line must have expiration dates on or prior to entered purge date
+!
+! Line must either be of type non-reserve stock or have exhuasted all reserve stock
+!
+! if a line has stock on PO for purchasing WH - line not eligible
+!
+! if any line has inbound stock on transfer for purchasing WH - line not eligible
+!
+! Warehouse ON HAND amount: If box is checked to use all warehouses, this amount
+! is the total on hand for all warehouses for the product, if box is not checked, it
+! is just for the purchasing warehouse.
+!
+! If, for any line, there is "on hand" (see above), check the following:
+!
+!     For min/max contracts - there will only (procedural) be one contract, if there is warehouse
+!     available, it CANNOT be purged.  Per instructions above, it may have it's product warehouse
+!     data cleared if the cancel date criteria is met.
+
+!     If reserve contract, total on hand for all reserve contracts for this product
+!     and if there on hand for warehouses does not equal or exceed the on hand for
+!     contracts, it is NOT eligible for purge.
+!
+!     If it is for a reserve contract:
+!         - if there is an active min/max contract (no cancel date), can be purged, but DON'T clear
+!           warehouse data.
+!         - no min/max - total all other reserve stock contracts.  if left on contract <= total warehouse
+!           available AND there is another ACTIVE reserve stock contract if there is wh available
+!           can be purged, clear warehouse data.
+!
+!
+!include copyright, common libs, common intrinsics
+
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+Declare External Sub ERPCronSuccess
+Declare External Function GetParameter$
+
+External Lib "ubsprconv.dl4"
+declare external function Xunit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+!
+!
+!include structure,filehandler libs & default structure dims
+include "src/inc/filecpihead.inc"
+include "src/inc/filecpidet.inc"
+include "src/inc/filecpicust.inc"
+Include "src/inc/filecontracth.inc" ! Special Price Header
+Include "src/inc/filespecprice.inc" ! Special Price Lines (MANUAL KEY ADD/UPDATE ONLY!)
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+include "src/inc/filesslsm.inc"
+include "src/inc/filea80vm.inc"
+
+!
+Declare Intrinsic Sub InpBuf,String,Findf,programdump,DateToJulian,JulianToDate
+Declare Intrinsic Sub Time,FormatDate,Date
+!Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,getuidrec
+
+Declare External Function dfaudit
+
+
+! Internal Subroutines and Functions
+Declare Sub OpenFiles,GetParameters,ExpireContract,PurgeContractLine
+Declare Sub PurgeContractHeader,WarehouseValuesReset
+Declare Function ContractIsEligible,TotalOnHandAllWarehouses, IsThereAnActiveMinMax
+Declare Function AmountOnTransfer, TotalAllReserveContracts, OtherReserveContract
+Declare Sub PrintHeader,PrintLine
+
+dim old?[3072],new?[3072] ! audit binary buffers
+dim auditReason$[80]
+auditReason$ = "serpcpi_purge: Automated Purge"
+
+
+dim 1%,user
+dim 1%,cnvtu[2]
+dim 3%,cnvta,contractOnHand
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200],List$[50,200],3%
+b$=" ",b$
+dim message$[150],webstr$[200]
+
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+! call dxsave(0,"cpicbr.in!")
+USER=GetUIDRec(e$,IntCo,Userid$)
+
+! record structures
+dim cpih. as cpihead
+dim cpic. as cpicust
+Dim SCH. as contracth ! sp contract (MANUAL DIR 2 & 3!)
+dim cpid. as cpidet
+dim cpid2. as cpidet
+dim sd. as specprice
+dim sd2. as specprice
+dim sr. as sslsm
+Dim PR. as prod ! product file
+Dim PW. as prodwhse ! prodwhse file
+Dim PW2. as prodwhse ! prodwhse file
+dim vend. as a80vm
+
+! keys
+dim K_cpid$[50],K_cpid2$[50],K_sd$[50],K_sd2$[50]
+dim K_pr$[50],K_pw$[50],K_pw2$[50],K_ordl$[50],K_ordh$[50]
+dim K_vend$[50],K_cpih$[50],K_sch$[50],K_sr$[50]
+dim 3%,R_cpid,R_sd,R_pr,R_pw,R_pw2,R_ordl,R_ordh
+dim 3%,R_vend,R_cpih,R_sch,R_sr,R_cnc,R_cpid2,R_sd2
+
+dim purgeLines$[1000,50]
+
+dim qmask$[20],currProdWh$[14]
+dim 1%,L3[3],H4[2],OWHT[1]
+dim 2%,L4[3],H5[16]
+dim 3%,L7[12],onTransfer
+
+! everything else
+dim P9$[50],pageHeading$[132]
+dim p61$[256]
+dim 2%,pageNo,lineNo,maxLines
+dim 3%,repTotal
+
+!
+! M A I N   L O G I C
+!
+Mat Read #1,19,50;P9$;
+mat read #1,61,0;p61$;
+if p61$[111,111]<>"Y"
+	e$ = "CPI is not active."
+	error 10000
+	end
+Endif
+qmask$ = "--,---,--#.##"
+call OpenFiles() ! open after the check
+call GetParameters()
+if toBrowser
+	!<section>
+	tmp$ = bsdel$,"CPIPURGE",fdel$,rdel$
+	Call addtostr(e$,rstr$,tmp$)
+	tmp$ = ""
+	tmp$ = tmp$,"CONTRACT",fdel$
+	tmp$ = tmp$,"PRODUCT CODE",fdel$
+	tmp$ = tmp$,"PRODUCT DESCRIPTION",fdel$
+	tmp$ = tmp$,"PURCHASING WH",fdel$
+	tmp$ = tmp$,"START DATE",fdel$
+	tmp$ = tmp$,"END DATE",fdel$
+	tmp$ = tmp$,"UOM",fdel$
+	tmp$ = tmp$,"CONTRACT RESERVE",fdel$
+	call addtostr(e$,rstr$,tmp$+rdel$)
+else
+	maxLines = 60
+	if not(erpCron) call setoutput(e$,rstr$, 2)
+end if
+pageHeading$ = "CPI Purge Report"
+if auditOnly pageHeading$ = pageHeading$ + " - AUDIT VERSION"
+lineNo = maxLines + 1 ! make sure next line we print prints header
+! loop CPI contracts
+K_cpih$ = " ",K_cpih$
+do
+	R_cpih = filegetcpihead(e$,CH_CPIH,">",1,K_cpih$,cpih.)
+	if R_cpih <= 0 exit do
+	canPurge = ContractIsEligible()
+	if canPurge OR lineIdx
+		call ExpireContract()
+	end if
+loop
+
+OutEnd: !
+If toBrowser Call addtostr(e$,rstr$,esdel$) !end section
+if toBrowser or erpCron call setoutput(e$,rstr$,1)
+call ERPCronSuccess()
+try Close else rem
+! 
+! 
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end
+
+
+! ***********************************************************************
+! Nobody but us subroutines down here
+! ***********************************************************************
+
+Sub OpenFiles()
+Try
+	CH_SR=OpenFile(-1824,IntCo) \ if ch_sr=-1 Error 42 ! salesrep
+	CH_CC=OpenFile(-1728,IntCo) \ if ch_cc=-1 Error 42 ! u/m codes
+	CH_ORDH=OpenFile(-1840,IntCo) \ if ch_ordh=-1 Error 42 ! order header
+	CH_ORDL=OpenFile(-1888,IntCo) \ if ch_ordl=-1 Error 42 ! order line
+	CH_PR=OpenFile(-1792,IntCo) \ if ch_pr=-1 Error 42 ! product
+	if auditOnly
+		CH_PW=OpenFile(-1744,IntCo) \ if ch_pw=-1 Error 42 ! product wh
+		CH_CPIH=OpenFile(-9929,IntCo) \ if ch_cpih=-1 Error 42 ! cpi header
+		CH_CPID=OpenFile(-9928,IntCo) \ if ch_cpid=-1 Error 42 ! cpi detail
+		CH_CPIC=OpenFile(-9927,IntCo) \ if ch_cpic=-1 Error 42 ! cpi customer
+		CH_SCH=OpenFile(-2880,IntCo) \ If ch_sch=-1 Error 42 ! Contract header
+		CH_CNC=OpenFile(-9957,IntCo) \ if ch_cnc=-1 Error 42 ! customer / contract
+		CH_SD=OpenFile(-1936,IntCo) \ If ch_sd=-1 Error 42 ! Contract Lines
+	else
+		CH_PW=OpenFile(1744,IntCo) \ if ch_pw=-1 Error 42 ! product wh
+		CH_CPIH=OpenFile(9929,IntCo) \ if ch_cpih=-1 Error 42 ! cpi header
+		CH_CPID=OpenFile(9928,IntCo) \ if ch_cpid=-1 Error 42 ! cpi detail
+		CH_CPIC=OpenFile(9927,IntCo) \ if ch_cpic=-1 Error 42 ! cpi customer
+		CH_SCH=OpenFile(2880,IntCo) \ If ch_sch=-1 Error 42 ! Contract header
+		CH_CNC=OpenFile(9957,IntCo) \ if ch_cnc=-1 Error 42 ! customer / contract
+		CH_SD=OpenFile(1936,IntCo) \ If ch_sd=-1 Error 42 ! Contract Lines
+	end if
+	CH_VEND=OpenFile(-2400,IntCo) \ If ch_vend=-1 Error 42 ! vendor
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! openfiles
+
+Sub GetParameters()
+try
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	tmp$ = ucase$(GetParameter$("USEALLWH"))
+	if tmp$ = "Y" useAllWH = 1
+	tmp$ = ltrim$(GetParameter$("PURGEDATE"))
+	if tmp$ = ""
+		e$ = "You must enter a valid purge date"
+		error 10000
+	end if
+	Call date(tmp$,tmp$,6,e)
+	if e
+		e$ = "Invalid purge date"
+		error 10000
+	end if
+	call DateToJulian(1, tmp$)
+	purgeDate=tmp$
+	tmp$ = ucase$(GetParameter$("AUDITONLY"))
+	if tmp$ = "Y" auditOnly = 1
+	toBrowser = 0
+	try
+		i = Chf(0)
+	else
+		toBrowser = spc(8)
+	end try
+	if toBrowser and toBrowser <> 49 error toBrowser
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! openfiles
+
+Function ContractIsEligible()
+try
+	clear purgeLines$[] ! lines eligible for purge even if contract isn't
+	lineIdx = 0
+	IsEligible = 1 ! default to yes
+	K_cpid$ = " ",K_cpid$
+	K_cpid$[1,6] = K_cpih$[1,6]
+	do
+		! need to cycle through all lines as if there is a min/max contract
+		! line that is expired, even if the contract is not eligible for
+		! purge we need to "zero out" the product warehouse min/max, etc.
+		R_cpid = filegetcpidet(e$,CH_CPID,">",1,K_cpid$,cpid.)
+		if R_cpid <= 0 exit do
+		if K_cpid$[1,6] <> K_cpih$[1,6] exit do
+		if not(cpid.PurWhse) goto SkipThisContractLine ! no purchsing wh??
+		K_sd$ = K_cpid$ ! key should match
+		R_sd = filegetspecprice(e$,CH_SD,"=",1,K_sd$,sd.)
+		if R_sd <= 0 goto SkipThisContractLine ! shouldn't happen
+		if not(sd.CancelDate)
+			IsEligible = 0
+			goto SkipThisContractLine
+		end if
+		! get the product record (conversions)
+		k_pr$ = " ",k_pr$ \ k_pr$[1,12] = cpid.ProductID$
+		R_pr = filegetprod(e$,CH_PR,"=",1,K_pr$,pr.)
+		if R_pr <= 0 goto SkipThisContractLine ! shouldn't happen
+		K_pw$ = " ",k_pw$
+		K_pw$ = cpid.ProductID$+cpid.PurWhse using "##"
+		R_pw = filegetprodwhse(e$,CH_PW,"=",1,K_pw$,PW.)
+		If R_pw<0
+			! this could happen - warehouse record not set up
+			! treat as 0 onHand
+			clear pw.
+		end if
+		! OK - we have a cancel date. if this is min/max
+		! even if we can't purge the contact we should zero out
+		! the product warehouse info (min/max, etc.)
+		if not(cpid.ResStock) call WarehouseValuesReset()
+		tmp$ = sd.CancelDate using "&&&&&&"
+		call DateToJulian(1, tmp$)
+		contractCancel = tmp$
+		if contractCancel > purgeDate
+			! not old enough yet - not eligible
+			IsEligible = 0
+			goto SkipThisContractLine
+		end if
+		if cpid.ResStock ! reserve contract
+			if cpid.QuantityAllocated <> 0 ! something allocated to sales order
+				IsEligible = 0
+				goto SkipThisContractLine
+			end if
+			let cnvtu[0]=sd.UMQty;cnvtu[1]=0;cnvtu[2]=1;cnvta=cpid.ResStock !convertqty
+			contractOnHand=ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+			contractOnHand=contractOnHand-sd.QtySinceStart
+			if contractOnHand > 0 ! reserve stock on hand yet
+				IsEligible = 0
+				goto SkipThisContractLine
+			end if
+		end if
+		! search for this on transfer orders
+		onTransfer = AmountOnTransfer(R_pr,cpid.PurWhse)
+		whOnHand = pw.QtyOnHand
+		if useAllWH
+			whOnHand = TotalOnHandAllWarehouses()
+		end if
+		IF onTransfer > 0 or pw.QtyOnPO > 0
+			IsEligible = 0
+			goto SkipThisContractLine
+		end if
+		if whOnHand <> 0
+			! some stock still available - couple more checks
+			if cpid.ResStock ! reserve contract
+				! if there is an active min/max
+				! this is eligible, if not we
+				! need to check total for all reserve
+				! contracts against WH onhand
+				if not(IsThereAnActiveMinMax())
+					! total contract needed - again, total
+					! based on whether or not "useAllWH" is
+					! set. If set, total all, if not, total
+					! for just that WH.
+					!
+					! Also, if the contract meets ALL the criteria,
+					! BUT there is no other ACTIVE reserve contract
+					! we can't purge.
+					!
+					totalReserve = TotalAllReserveContracts()
+					if TotalAllReserveContracts() > whOnHand or not(isOtherActive)
+						IsEligible = 0
+						goto SkipThisContractLine
+					end if
+				end if
+			else
+				! if not a reserve contact - it is NOT eligible
+				! for purge with some on-hand left
+				IsEligible = 0
+				goto SkipThisContractLine
+			end if
+		end if
+		! OK - if we get here that means that the line meets all the
+		! criteria to be purged.  They only way this line *WON'T* be
+		! purged is if there are other lines on the contract itself
+		! that aren't eligible.  Task 54106 - purge individual lines
+		! as well
+		lineIdx = linIdx + 1
+		if lineIdx > 1000
+			e$ = "Max number of contract lines exceeded for purge - contract$: "+K_cpih$[1,6]
+			error 1000
+		end if
+		purgeLines$[lineIdx] = K_cpid$
+		SkipThisContractLine: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end function IsEligible ! ContractIsEligible
+
+
+
+Function AmountOnTransfer(productRec, transWH)
+try
+	dim 3%,onTransfer ! net amount of ins and outs
+
+	onTransfer = 0
+	K_ordl$ = " ",K_ordl$ \ K_ordl$[1,6] = productRec Using "######"
+	do
+		Search #ch_ordl,3,2;K_ordl$,R_ordl,E \ If E exit do
+		If productRec <> val(K_ordl$[1,6]) exit do 
+		Mat Read #ch_ordl,R_ordl,8;L3;
+		MAT READ #ch_ordl,R_ordl,16;L4;
+		Mat Read #ch_ordl,R_ordl,168;L7;
+		If L3[0] <> 0 Goto SkipOrderLine ! only inv items
+		foundHeader = 0
+		For ST = 1 To 7
+			K_ordh$[1,2] = ST Using "##"
+			K_ordh$[3,8] = K_ordl$[7,12]
+			Search #CH_ORDH,2,1;K_ordh$,R_ordh,E !!-!! \ If E > 1 Gosub ERR_SEARCH
+			If not(E)
+				foundHeader = 1
+				ST = 7 ! force loop to terminate
+				Mat Read #CH_ORDH,R_ordh,104;H5;
+				mat read #CH_ORDH,R_ordh,486;OWHT;
+				! determine whse (if not line level, header)
+				IF L4[3]<1 OR L4[3]>99
+					MAT READ #CH_ORDH,R_ordh,78;H4;
+					LET L4[3]=H4[2]
+				ENDIF
+			end if
+		Next ST
+		if not(foundHeader) goto SkipOrderLine
+		If H5[7] <> 16 Goto SkipOrderLine
+		if owht[0]=1 ! only approved
+			! coming in
+			if transWH = h5[11] onTransfer = onTransfer + (L7[2] - L7[0])
+		Endif
+	SkipOrderLine:
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end function onTransfer
+
+!
+! return a total on hand amount for all warehouses
+!
+Function TotalOnHandAllWarehouses()
+try
+	dim 3%,retval
+	retval = 0
+	K_pw2$ = " ",k_pw2$
+	K_pw2$ = cpid.ProductID$
+	do
+		R_pw2 = filegetprodwhse(e$,CH_PW,">",1,K_pw2$,PW2.)
+		if R_pw2 <= 0 exit do
+		if pw2.ProdCode$ <> cpid.ProductID$ exit do
+		retval = retval + pw2.QtyOnHand
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end Function retval ! TotalOnHandAllWarehouses
+
+!
+! return a total on hand amount for all warehouses
+!
+Function TotalAllReserveContracts()
+try
+	dim 3%,retval
+	isOtherActive = 0
+	retval = 0
+	K_cpid2$ = " ",k_cpid2$
+	K_cpid2$ = cpid.ProductID$
+	do
+		R_cpid2 = filegetcpidet(e$,CH_CPID,">",2,K_cpid2$,cpid2.)
+		if R_cpid2 <= 0 exit do
+		if cpid.ProductID$ <> cpid2.ProductID$ exit do
+		if not(cpid2.PurWhse) goto SkipThisContractLine2 ! no purchsing wh??
+		if not(cpid2.ResStock) goto SkipThisContractLine2 
+		if not(useAllWH) and cpid2.PurWhse <> cpid.PurWhse goto SkipThisContractLine2 ! not same warehouse
+		! ok - got one
+		K_sd2$ = K_cpid2$
+		R_sd2 = filegetspecprice(e$,CH_SD,"=",2,K_sd2$,sd2.)
+		if R_sd2 <= 0 goto SkipThisContractLine2 ! shouldn't happen
+		let cnvtu[0]=sd2.UMQty;cnvtu[1]=0;cnvtu[2]=1;cnvta=cpid2.ResStock !convertqty
+		contractOnHand = ConvProdAmount(e$,CNVTU[],CNVTA,1,flag,PR.)
+		retval = retval + contractOnHand
+		retval = retval - sd2.QtySinceStart
+		if contractOnHand - sd2.QtySinceStart > 0 isOtherActive = 1
+		SkipThisContractLine2: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end Function retval ! TotalAllReserveContracts
+
+!
+! is there an active min/max contract for this product (no cancel date)
+!
+Function IsThereAnActiveMinMax()
+try
+	dim 3%,retval
+	retval = 0
+	K_cpid2$ = " ",k_cpid2$
+	K_cpid2$ = cpid.ProductID$
+	do
+		R_cpid2 = filegetcpidet(e$,CH_CPID,">",2,K_cpid2$,cpid2.)
+		if R_cpid2 <= 0 exit do
+		if cpid.ProductID$ <> cpid2.ProductID$ exit do
+		if cpid2.ResStock goto SkipThisContractLine4 
+		! ok - got one
+		K_sd2$ = K_cpid2$
+		R_sd2 = filegetspecprice(e$,CH_SD,"=",2,K_sd2$,sd2.)
+		if R_sd2 <= 0 goto SkipThisContractLine4 ! shouldn't happen
+		if not(sd2.CancelDate) retval = 1 \ exit do
+		SkipThisContractLine4: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end Function retval ! TotalAllReserveContracts
+
+
+Function OtherReserveContract()
+try
+	dim 3%,retval
+	retval = 0
+	K_cpid2$ = " ",K_cpid2$
+	K_cpid2$ = cpid.ProductID$
+	do
+		R_cpid2 = filegetcpidet(e$,CH_CPID,">",2,K_cpid2$,cpid2.)
+		if R_cpid2 <= 0 exit do
+		if cpid.ProductID$ <> cpid2.ProductID$ exit do
+		if not(cpid2.PurWhse) goto SkipThisContractLine3 ! no purchsing wh??
+		if not(cpid2.ResStock) goto SkipThisContractLine3 
+		if not(useAllWH) and cpid2.PurWhse <> cpid.PurWhse goto SkipThisContractLine3 ! not same warehouse
+		if cpid2.ContractNumber = cpid.ContractNumber goto SkipThisContractLine3
+		! ok - got one
+		K_sd2$ = K_cpid2$
+		R_sd2 = filegetspecprice(e$,CH_SD,"=",2,K_sd2$,sd2.)
+		if R_sd2 <= 0 goto SkipThisContractLine3 ! shouldn't happen
+		if not(sd2.CancelDate)
+			retval = 1
+			exit do
+		end if
+		tmp$ = sd2.CancelDate using "&&&&&&"
+		call DateToJulian(1, tmp$)
+		contractCancel = tmp$
+		if contractCancel > purgeDate
+			retval = 1
+			exit do
+		end if
+		SkipThisContractLine3: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end Function retval ! OtherReserveContract
+
+
+sub ExpireContract()
+try
+	! salesrep info
+	clear sr.
+	if cpih.Salesman > 0
+		K_sr$ = " ",K_sr$
+		K_sr$[1,3] = cpih.Salesman using "###"
+		R_sr = filegetsslsm(e$,CH_SR,"=",1,K_sr$,sr.)
+		if R_sr<= 0 sr.Name$ = "NOT ON FILE!"
+	else
+		sr.Name$ = "NOT ON FILE!"
+	end if
+	numLines = 0
+	if canPurge
+		K_cpid$ = " ",K_cpid$
+		K_cpid$[1,6] = K_cpih$[1,6]
+		do
+			R_cpid = filegetcpidet(e$,CH_CPID,">",1,K_cpid$,cpid.)
+			if R_cpid <= 0 exit do
+			if K_cpid$[1,6] <> K_cpih$[1,6] exit do
+			K_sd$ = K_cpid$ ! key should match
+			R_sd = filegetspecprice(e$,CH_SD,"=",1,K_sd$,sd.)
+			if R_sd <= 0
+				e$ = "Could not locate specprice rec: "+K_sd$
+				error 10000
+			end if
+			numLines = numLines + 1
+			K_pw$ = " ",k_pw$
+			K_pw$ = cpid.ProductID$+cpid.PurWhse using "##"
+			R_pw = filegetprodwhse(e$,CH_PW,"=",1,K_pw$,PW.)
+			If R_pw<0
+				! this could happen - warehouse record not set up
+				! treat as 0 onHand
+				clear pw.
+			end if
+			clear vend.
+			if pw.Vend > 0
+				K_vend$ = pw.Vend using "######"
+				R_vend = filegeta80vm(e$,CH_VEND,"=",1,K_vend$,vend.)
+				if R_vend<= 0 vend.Name$ = "NOT ON FILE!"
+			else
+				vend.Name$ = "NOT ON FILE!"
+			end if
+			! Print contract line
+			call PrintLine()
+			! Kill off the contract line
+			if not(auditOnly)
+				call PurgeContractLine()
+				if not(IsThereAnActiveMinMax()) call WarehouseValuesReset()
+			end if
+		loop
+		if numLines = 0 call PrintLine()
+		! kill off header / customers / etc
+		if not(auditOnly) call PurgeContractHeader()
+	else if lineIdx
+		! can't purge of the entire contract, but can
+		! purge some onlines
+		for i = 1 to lineIdx
+			K_cpid$ = purgeLines$[i]
+			R_cpid = filegetcpidet(e$,CH_CPID,"=",1,K_cpid$,cpid.)
+			if R_cpid <= 0
+				e$ = "Could not locate contract line: "+K_cpid$
+				error 10000
+			end if
+			K_sd$ = K_cpid$ ! key should match
+			R_sd = filegetspecprice(e$,CH_SD,"=",1,K_sd$,sd.)
+			if R_sd <= 0
+				e$ = "Could not locate specprice rec: "+K_sd$
+				error 10000
+			end if
+			numLines = numLines + 1
+			K_pw$ = " ",k_pw$
+			K_pw$ = cpid.ProductID$+cpid.PurWhse using "##"
+			R_pw = filegetprodwhse(e$,CH_PW,"=",1,K_pw$,PW.)
+			If R_pw<0
+				! this could happen - warehouse record not set up
+				! treat as 0 onHand
+				clear pw.
+			end if
+			clear vend.
+			if pw.Vend > 0
+				K_vend$ = pw.Vend using "######"
+				R_vend = filegeta80vm(e$,CH_VEND,"=",1,K_vend$,vend.)
+				if R_vend<= 0 vend.Name$ = "NOT ON FILE!"
+			else
+				vend.Name$ = "NOT ON FILE!"
+			end if
+			! Print contract line
+			call PrintLine()
+			! Kill off the contract line
+			if not(auditOnly)
+				call PurgeContractLine()
+				if not(IsThereAnActiveMinMax()) call WarehouseValuesReset()
+			end if
+		next i
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ExpireContract
+
+sub PurgeContractLine()
+try
+	! delete the specprice line
+	K_sd$ = K_cpid$ ! key should match
+	R_sd = filegetspecprice(e$,CH_SD,"=",1,K_sd$,sd.)
+	if R_sd<=0 error 11000 ! shouldn't happen
+	Search #CH_SD,5,1;K_sd$,R_sd,E \ if e error 11000
+	tmp$ = " ",tmp$
+	tmp$=K_sd$[7,18],K_sd$[1,6]
+	Search #CH_SD,5,2;tmp$,R_sd,E \ if e error 11000
+	mat read #CH_SD,R_sd;old?; \ clear new?
+	Let E=3 \ Search #CH_SD,1,0;K_sd$,R_sd,E \ if e error 11000
+	e=dfaudit(e$,-1,"specprice","D",K_sd$,old?,new?,auditReason$)
+	! delete the CPI line
+	E=fileupdatecpidet(e$,CH_CPID,"d",R_cpid,cpid.,0,0,-1,auditReason$)
+	If E error 11000
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PurgeContractLine
+
+sub WarehouseValuesReset()
+try
+	if auditOnly exit sub ! no update
+	If R_pw>0 ! if we have one!
+		! re-get with lock
+		R_pw = filegetprodwhse(e$,CH_PW,"=",1,K_pw$,PW.,1)
+		if R_pw<= 0 exit sub ! where'd it go!
+		pw.MinStkLvl = 0
+		pw.MaxStkLvl = 0
+		pw.MinDaysMths = 0
+		pw.MaxDaysMths = 0
+		pw.EoqNoRnding = 0
+		pw.EOQOrdQty = 0
+		e = fileupdateprodwhse(e$,CH_PW,"c",R_pw,pw.)
+		if e error 11000
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PurgeContractLine
+
+
+sub PurgeContractHeader()
+try
+	! now loop sch dir 3 to get cust for delete
+	K_sch$=" ",K_sch$
+	K_sch$[1,6]=K_cpih$[1,6]
+	Do ! cust dirs loop
+		R_sch=filegetcontracth(e$,CH_SCH,">",3,K_sch$,sch.)
+		If R_sch<=0 Exit do
+		if K_sch$[1,6]<>K_cpih$[1,6] Exit do
+		! delete dir 2 - contract header
+		tmp$ = " ",tmp$
+		tmp$[1,6] = K_sch$[7,12]
+		tmp$[7,12] = K_sch$[1,6]
+		Search #CH_SCH,5,2;tmp$,R_sch,E
+		if e error 11000
+		! delete dir 3 - contract header
+		Search #CH_SCH,5,3;K_sch$,R_sch,E
+		if e error 11000
+		! delete customer contract info
+		search #CH_CNC,2,1;K_sch$,r_cnc,e
+		! allow for not found
+		if not(E)
+			Search #CH_CNC,5,1;K_sch$,R_cnc,E
+			if e error 11000
+			tmp$ = " ",tmp$
+			tmp$[1,6] = K_sch$[7,12]
+			tmp$[7,12] = K_sch$[1,6]
+			Search #CH_CNC,5,2;tmp$,R_cnc,E
+			if e error 11000
+			e=3 \ search #CH_CNC,1,0;K_sch$,R_CNC,E
+			if e error 11000
+		end if
+		R_cpic=filegetcpicust(e$,CH_CPIC,"=",1,k_sch$,cpic.)
+		if r_cpic>0 ! there - delete it!
+			E=fileupdatecpicust(e$,CH_CPIC,"d",R_cpic,cpic.,0,0,-1,auditReason$)
+			If E<0 Error 11000
+		Endif
+	Loop
+	k_sch$ = " ",k_sch$
+	k_sch$ = K_cpih$
+	R_sch=filegetcontracth(e$,CH_SCH,"=",1,K_sch$,sch.)
+	if R_sch<=0 error 11000 ! shouldn't happen
+	! okay - now delete dir4 & 1
+	E=fileupdatecontracth(e$,CH_SCH,"d",R_sch,sch.,0,0,-1,auditReason$)
+	If E Error 11000
+	! okay - delete CPI header record
+	E=fileupdatecpihead(e$,CH_CPIH,"d",R_cpih,cpih.,0,0,-1,auditReason$)
+	If E error 11000
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PurgeContractHeader
+
+Sub PrintHeader()
+Try
+	if lineNo < maxLines exit sub ! no need to print a header
+	! need to print one
+	if pageNo > 0 print #0;"\14\" ! form feed
+	pageNo = pageNo + 1
+	Print #0;" - CPIPURGE -"; Tab (Int(66 - (Len(pageHeading$) / 2)));pageHeading$
+	tmp$ = "" \ Call Time(tmp$)
+	Print #0; Tab 1;"DATE ";tmp$;
+! 	tmp$ = "FOR SALESREP: "+ltrim$(sr.SlsmNum$)+" - "+rtrim$(sr.Name$)
+! 	Print #0;Tab (Int(66 - (Len(tmp$) / 2)));tmp$;
+	Print #0; Using "PAGE ###"; Tab 119;pageNo
+	Print #0;" "
+	Print #0; "CTRCT";tab 6;"PRODUCT CODE";tab 19;
+	PRINT #0; "PRODUCT DESCRIPTION"; tab 50;
+	Print #0; "WH";Tab 53;"ST DATE";
+	Print #0; tab 62;"END DATE";Tab 71;
+	print #0; tab 20;"UNIT";tab 76;
+	print #0; "CONTRCT RESRV";
+	print #0;""
+	print #0;""
+	lineNo = 7
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintHeader
+
+Sub PrintLine()
+Try
+	if toBrowser
+		tmp$ = ""
+		if not(numLines) ! header only
+			tmp$ = tmp$,cpih.ContractNumber,fdel$
+			tmp$ = tmp$,"* NO LINES!",fdel$
+			tmp$ = tmp$,fdel$,fdel$,fdel$,fdel$,fdel,fdel$
+		else
+			tmp$ = tmp$,cpid.ContractNumber,fdel$
+			tmp$ = tmp$,rtrim$(cpid.ProductID$),fdel$
+			tmp$ = tmp$,rtrim$(pr.Desc1$),fdel$
+			tmp$ = tmp$,cpid.PurWhse,fdel$
+			if sd.StartDate
+				tmp2$ = sd.StartDate using "&&&&&&" \ call formatdate(tmp2$)
+				tmp$ = tmp$,tmp2$
+			end if
+			tmp$ = tmp$,fdel$
+			if sd.CancelDate
+				tmp2$ = sd.CancelDate using "&&&&&&" \ call formatdate(tmp2$)
+				tmp$ = tmp$,tmp2$
+			end if
+			tmp$ = tmp$,fdel$
+			tmp$ = tmp$,xunit$(sd.UMQty,CH_CC),fdel$
+			tmp$ = tmp$,rtrim$(cpid.ResStock using qmask$),fdel$
+		end if
+		call addtostr(e$,rstr$,tmp$+rdel$)
+	else
+		call PrintHeader()
+		if not(numLines) ! just header
+			print #0; cpih.ContractNumber using "#####";tab 6;
+			print #0; "* NO LINES!";
+		else
+			print #0; cpid.ContractNumber using "#####";tab 6;
+			print #0; cpid.ProductID$;tab 19;pr.Desc1$;tab 50;
+			print #0; cpid.PurWhse using "##";tab 53;
+			if sd.StartDate
+				tmp2$ = sd.StartDate using "&&&&&&" \ call formatdate(tmp2$)
+				print #0;tmp2$;
+			end if
+			print #0; tab 62;
+			if sd.CancelDate
+				tmp2$ = sd.CancelDate using "&&&&&&" \ call formatdate(tmp2$)
+				print #0;tmp2$;
+			end if
+			print #0; tab 71;
+			print #0; xunit$(sd.UMQty, CH_CC); tab 76;
+			print #0; cpid.ResStock using qmask$; tab 109;
+		end if
+		print #0;""
+		lineNo = lineNo + 1
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintLine
+
+end

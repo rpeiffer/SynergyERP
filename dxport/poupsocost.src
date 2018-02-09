@@ -1,0 +1,1276 @@
+
+!POUPS0COST -- Update the gl cost on the sales order with the po cost
+!! **** Originally From Rem POUPSO 
+!loadsave -w -n 100,10 -o prog/dxport/poupsocost.dl4 src/poupsocost.src
+!
+!
+include "src/inc/sql_prod.inc" ! SQL defintions
+!
+Declare Intrinsic Sub DateToJulian,InpBuf,Logic,String,VerifyDate
+Declare Intrinsic Sub dxopen,dxget,dxset,dxclose,dxsave,programdump,env
+
+Option Default Dialect IRIS1
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault
+Declare External Function OpenFile,PDate$,FormatDate2$
+Declare External Function OpenMySQLMirror ! new function
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,ProdGroup,UMDList,CompIList
+Declare External Function getpravail,getumrec,getMSDS,ComplFlag,ChkPrdUM,getmillflg
+
+
+Rem poupso.s Purchase order update sales order
+Rem rev:   05/02/96 -kmm- created.
+Rem last update:  jlp 12/30/96 add fnr to ext cost calc for nonstocks cct98418
+Enter CH[],REC[],STAT[],userid$
+! CH[0] = CTLC ! CONTROL FILE
+! CH[1] = ch_poh;REC[1] = R8
+!       CH[2] = ch_pol;REC[2] = R21
+!       CH[3] = ch_roh;REC[3] = - PL4[10] ! sales order #
+!       CH[4] = ch_rol;REC[4] = - PL4[11] ! sales order line
+!       CH[5] = ch_prod;REC[5] = 0
+!       CH[6] = cH_prwh;REC[6] = 0
+!	ch[7] = ch_cust;rec[7]=0
+!	ch[8] = ch_rot; rec[8]=0
+! rec[10]= user record #
+!       STAT[0] = 0;STAT[1] = 0ch[]
+!	intco = stat[2]
+DIM E$[500],RSTR$[2000]
+DIM 1%,OLCURRID,PLCURRID,3%,OLCURRFACT,PLCURRFACT
+dim 1%,cnvcu[10],3%,cnvca[10]
+Dim 1%,ch_poh,ctlc,ch_pol,CH_ROH,CH_ROL,CH_INVH[1]
+Dim 1%,CH_PROD,CH_PRWH,CH_PUPS,tmpflag
+Dim 1%,CHNL,CHNLFREE,PURGE,MAXLN,WANNAQUIT,OPT,DEBUG,SCR1
+Dim 1%,WH,LTBL,NSCH[10],NSSTAT
+Dim 1%,DCLVL,MCTXBL[9],CHAN[99]
+Dim 2%,UCA2,NSLTBL,S9[9],CFIN[8]
+Dim 2%,MCODE[9],T1[1]
+Dim 3%,MCHARGE[9,1],T2[25],TOT[4]
+Dim 3%,SCR,LD1,LD2,PREC[3],BCF,REC_PUPS,PARM[10],NSCOST,CHBASE
+Dim 3%,PASSINFO[9],PARAM[20],H1,R5,V1,rec_tot,rec_cust
+dim 1%,holdcodeflag[12],oldholdcodeflag[12]
+dim 3%,orgcost,orgamt,orgfreight,orgother,tmp3
+dim keycust$[30]
+Dim SCRATCH$[80],P9$[50],USERACCESS$[10],PUPS$[30],P61$[256],P60$[50],blank$[200],p8$[7]
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+Rem {begin dim.rtn.input}
+Dim J$[70],J0$[18],J1$[70],J2$[20],J3$[40],J4$[60],J5$[80],J7$[80],J9$[70]
+Dim X$[100],1%,J0,J2,J3,J4,J5,J7[2],J8,X1[9]
+Dim 2%,J9[9],X2[9],4%,J1
+Rem {end dim.rtn.input}
+Rem {begin src/inc/dim.pohead.i}
+Dim 2%,POH0[5],POH3[4],POH[4],POH6[1]
+Dim 1%,POH4[3],POH1[9],POH5[10]
+Dim 3%,POH7,POH8[9],POH9[12]
+Dim POH$[82],POH1$[116],ST$[14],POH2$[40]
+Rem {end dim.pohead.i}
+Rem {begin src/inc/dim.poline.i}
+Dim 1%,POL1[5],POL0[4],POMISC[2]
+Dim 2%,POL2[2]
+Dim 3%,POL3[6],POL[5],POL4[23],POL5[9],POL6[9]
+Dim POL1$[120]
+Rem {end dim.poline.i}
+Rem {begin src/inc/dim.roh.i}
+Dim 1%,H3[1],H4[2],LOCKPORT,OWHT[1],PICKBY[1]
+Dim 2%,H0[12],H5[16],ST3[24],SLSM[9],H6[8],HFAX[1]
+Dim 2%,HSTI[1],H2[0],OWHT1[1]
+Dim 3%,TOT_SELL,SCOM[4],SMER[4],SCST[4],TOTGL,OREF[5]
+Dim V0$[12],H0$[20],H1$[6],HMAT$[2],P0$[20]
+Rem {end dim.roh.i}
+Rem {begin src/inc/dim.rol.i}
+Dim 1%,L3[3],PL[1],UN[2],S2[1],EUN[2],OWHS,LPRINTED,CTWT[1]
+Dim 2%,L2[1],L4[3],L6[5],L9[1],LCO[1],LTAX2,LP_DATE,LP_TIME
+Dim 3%,L5[3],L7[12],S3[17],OLM[6],UNF[6],CST[0],LTAX1,INVNO,QPB,ROL0
+Dim L6$[60],L1$[20],MT$[2],S3$[33]
+Rem {end dim.rol.i}
+Rem {begin src/inc/dim.prod.i}
+Dim A$[156],HZ$[90],PR_A2$[30],C1$[32],PSN$[20],U3$[60]
+Dim PRFLG$[10],PRMKUPTYP$[4],PIC$[50],PRIML$[12]
+Dim 1%,LLC,PFTB[3],PFU1[20],LM[1],UPCT,PR_PO[1]
+Dim 1%,PRBASE,PRPARC2[3],PRD1[4],AGEDAY
+Dim 2%,A2,A3[2],B[24],PR_C4[10],PFCO[3],PLC[3],PSN[1],U2,U4[1]
+Dim 2%,STK[2],FDT[1],PRMKUP[3],PRD0[2]
+Dim 3%,A1[7],A[33],PF_LOAD2,PFU2[6],PLV[1],PRPARC[3],U3,PFN[1]
+Dim 3%,LBSORD,FUT[1],PRREDI[1],PRD2[3]
+Rem {end dim.prod.i}
+Rem {begin src/inc/dim.prwh.i}
+Dim W1$[32],WH3$[24],WHFLG$[10],WHMKUPTYP$[4],WCOMM$[4]
+Dim 2%,W2[9],W7[14],WH7[3],WHLPOOL,WHFDT[1],WHMKUP[3]
+Dim 1%,W0[3],W1[2],WH8[47],WHPARC[5],WHRPLN,WHLM[1],FCWGT
+Dim 1%,RESTRICTED,WHBASE,WHPARC2[3]
+Dim 3%,W3[24],W5[25],WH9[25],WHLV[2],WHMISC[6],WHMISC2[7]
+Dim 3%,WHFUT[2],VLIST,WHREDI[1],WHLBS[1]
+Rem {end dim.prwh.i}
+Rem {begin src/inc/dim.pups.i}
+Dim 1%,PUPSTRAN,PUPSUNIT,PUPSNONSTOCK,PUPSLMTBL
+Dim 2%,PUPSPO,PUPSPOL,PUPSORD,PUPSORDL,PUPSOTYP,PUPSDATE,PUPSTIME
+Dim 2%,PUPSPORT
+Dim 3%,PUPSOCST[1],PUPSNCST[1]
+Dim PUPSPROD$[12],PUPSUSER$[10]
+Rem {end dim.pups.i}
+dim 3%,rec_poline
+PASSINFO[0] = 1
+intco=stat[2]
+
+Let blank$=" ",blank$
+
+
+
+DEBUG = 0!  STAT
+STAT = 0
+STAT[1] = 0
+
+! openfiles 
+if not (ch[0]) ! cntrl file
+	ctlc = OpenFile(9999,intCo) \ If ctlc = -1 Error 42 !control 
+else
+	let ctlc=abs(ch[0])
+endif
+if not (ch[1]) ! purchase order header  #60
+	 Ch_Poh = openfile(2416,intCo) \ If Ch_Poh = -1 Error 42     !"po header file
+else
+	ch_poh=abs(ch[1])
+endif
+if not (ch[2]) ! po lines #61
+	Ch_PoL = openfile(2432,intCo) \ If Ch_Pol = -1 Error 42     !"po lines file
+else
+	let ch_pol=abs(ch[2])
+endif
+if not (ch[3]) ! order header #62
+	 Ch_Roh = openfile(1840,intCo) \ If Ch_Roh = -1 Error 42     !order  header file
+else
+	let ch_roh=ch[3]
+endif
+if not (ch[4]) ! order lines #68
+	ch_rol=OpenFile(1888,intCo) \ If Ch_rol = -1 Error 42 ! order line
+else
+	let ch_rol=ch[4]
+endif
+if not (ch[5]) ! product file #64
+	 Ch_Prod = OpenFile(1792,intCo) \ If Ch_Prod = -1 Error 42  !product file 
+else
+	let ch_prod=ch[5]
+endif
+if not (ch[6]) ! product warehouse #65
+	Ch_PrWh = OpenFile(1744,intCo) \ If Ch_PrWh = -1 Error 42  !"product warehouse file
+else
+	let ch_prwh=ch[6]
+endif
+If not (ch[7]) ! customer file
+	ch_cust=OpenFile(1808,intCo) \ If Ch_cust = -1 Error 42 ! customer file
+else
+	let ch_cust=ch[7]
+endif
+If not (ch[8]) ! order total
+	 Ch_Rot = openfile(1872,intCo) \ If Ch_Rot = -1 Error 42     !"order total file
+else      
+	let ch_rot=ch[8]
+endif
+Ch_PUPS = openfile(9951,intCo) \ If Ch_PUPS = -1 Error 42     !"purchase order cost update file
+sqlChan = OpenMySQLMirror(e$)
+! end openning files ! 
+Mat Read #ctlc,61,0;P61$;
+let tmpflag=0
+if p61$[2,2]="Y" let tmpflag=99 ! copy po cost both load and gl
+if p61$[2,2]="G" let tmpflag=99 ! copy only gl cost
+if p61$[2,2]="L" let tmpflag=99 ! copy only load
+!If P61$[2,2] <> "Y" And P61$[2,2] <> "G" And P61$[2,2] <> "L" Goto outend:
+if not (tmpflag) goto outend: ! no po to sales order cost update
+mat read #ctlc,52,60;P8$;
+Mat Read #ctlc,19,50;P9$;
+Mat Read #ctlc,182,4;NSLTBL;
+Mat Read #ctlc,60,50;P60$;
+Rem need user name and apoupso flag ---------------------------------------------------
+Useraccess$=userid$
+!ch_usrctl = OpenFile(-9988,intCo) \ If ch_usrctl = -1 Error 42 !usr control 
+!ch_usrport = OpenFile(-9989,intCo) \ If ch_usrport = -1 Error 42 ! user port 
+!Read #CH_USRPORT,Spc(6);SCR1;
+!If SCR1 = -1 Let APOUPSO = 1;USERACCESS$ = "SUPERUSER" Else Let APOUPSO = 0
+!If SCR1 > 0
+!  Read #CH_USRCTL,SCR1,200;UCA2;
+ ! Call Logic(1,128,UCA2,APOUPSO)
+!  Mat Read #CH_USRCTL,SCR1,260;USERACCESS$;
+!End If 
+!Close #CH_USRPORT
+!CLOSE #CH_USRCTL
+apoupso=99
+
+MAIN: Rem
+Gosub INIT
+If Not(STAT) Gosub DO_UPDATE
+
+Goto OutEnd
+
+
+DO_UPDATE: Rem
+let ponetcost=pol4[0] ! 
+IF P61$[136,136]="Y" and plcurrfact<>0 and olcurrfact<>0 and plcurrfact<>olcurrfact ! multcurr with diff factors
+	if plcurrid<>0 and olcurrid<>0 and plcurrid=olcurrdid ! have currency id and the po and sales order are the same
+		if ponetcost<>0
+			Cnvtu[0]=0;cnvtu[1]=pol1[5];cnvtu[2]=2
+			CNVTA=ponetcost \ gosub L_20000 ! NET COST
+			let cnvcu[0]=1; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=plcurrfact
+			call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert up  to original currency $
+			let amount=(cnvca[0])
+			let cnvcu[0]=2; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=olcurrfact
+			call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert down  to current currency $
+			let amount=(cnvca[0])
+			CNVTU[0] = pol1[5];CNVTU[1] = 0;CNVTU[2] = 6 ! to base no round was =2
+			CNVTA=amount \ gosub L_20000 
+			let ponetcost=amount
+		endif
+	endif
+endif
+If POL1[5] <> UN[2] And (POL1[5] = -2 Or UN[2]= - 2) ! po<>so um<> & in lot um
+  If POL3[2] <> 0 ! must have qty
+    If POL1[5] = -2 ! po has lot costing and sales order does not
+      ponetcost = ponetcost / POL3[2]
+    Else ! sales order has lot costing and po does not
+      ponetcost = POL4[7]
+    End If 
+  End If 
+End If 
+PUPSNONSTOCK = L3[0]
+PUPSOCST[0] = L7[7]
+PUPSNCST[0] = ponetcost
+PUPSOCST[1] = L5[1]
+let tmpflag=0
+if p61$[2,2]="Y" let tmpflag=99
+if p61$[2,2]="G" let tmpflag=99
+!If P61$[2,2] = "Y" Or P61$[2,2] = "G"
+if tmpflag<>0
+  L7[7] = ponetcost
+Else 
+  PUPSNCST[0] = PUPSOCST[0]
+End If 
+let tmpflag=0
+if p61$[2,2]="Y" let tmpflag=99
+if p61$[2,2]="L" let tmpflag=99
+if lco[0]>=9 let tmpflag=0
+! If (P61$[2,2] = "Y" Or P61$[2,2] = "L") And  LCO[0] < 9
+if tmpflag<>0
+	PUPSNCST[1] = 0
+	okupd=0
+	if h5[7]=2 let okupd=99
+	if h5[7]=3 and p60$[22,22]="N" let okupd=99
+	if p61$[112,112]="Y" and w0[0]=2 let okupd=99
+	if h5[7]=1 and L3[1]=0 and p8$[4,4]="Y" and whmisc2[0]>0 and not(l3[0]) and milf<>0 let okupd=99 
+	if not (pupsnonstock) and okupd<>0 ! (h5[7] = 2 or(p60$[22,22]="N" and h5[7] = 3))
+		! CALC LOAD
+		PASS = 1
+		UPDPROD = 0
+		UPDPRWH = 0
+		Gosub GET_PROD
+		If P9$[32,32] = "Y" ! warehouse pricing
+      Gosub GET_PRWH
+      If WHLM[0]
+        WH = H4[2];LTBL = WHLM[0]
+        If Not(LTBL)
+          PASS = 0
+          PUPSTRAN = 1
+        Else 
+          Gosub CALC_LOAD
+          If REC_PRWH > 0
+            UPDPRWH = 1
+            W3[17] = CNVTA
+          End If 
+          LD1 = CNVTA
+        End If 
+      Else 
+        If W3[17]
+          LD1 = W3[17]
+        Else 
+          Goto NO_WHSE_LOAD1
+        End If 
+      End If 
+      If Not(LD1) Goto NO_WHSE_LOAD1
+    Else 
+NO_WHSE_LOAD1: Rem
+      If LM[0]
+        WH = 0;LTBL = LM[0]
+        If Not(LTBL)
+          PASS = 0
+          PUPSTRAN = 1
+        Else 
+          Gosub CALC_LOAD
+          If REC_PROD > 0
+            UPDPROD = 1
+            B[8] = CNVTA
+          End If 
+          LD1 = CNVTA
+        End If 
+      Else 
+        LD1 = B[8]
+      End If 
+    End If 
+    If PASS
+	  IF NOT(LD1) AND NOT (L5[1]) LET L5[1]=ponetcost
+      If Not(LD1) Let LD1 = L5[1]
+      L5[1] = LD1
+      If S3[11] = -3 And L7[2]
+        CHBASE = (S3[1] / L7[2])
+      Else 
+        CHBASE = S3[1]
+      End If 
+      If UN[2] <> -2
+        S3[12] = FNR(L7[4] * (L5[1] + CHBASE))
+        S3[13] = FNR(L7[2] * (L5[1] + CHBASE))
+      Else 
+        S3[12] = FNR(L5[1])
+        S3[13] = FNR(L5[1])
+      End If 
+      If LCO = -2
+        PUPSTRAN = 3
+      End If 
+      LCO = -1
+      Rem {begin src/inc/write.rol.i}
+      Mat Write #CH_ROL,REC_ROL,0;L2
+      Mat Write #CH_ROL,REC_ROL,8;L3
+      Mat Write #CH_ROL,REC_ROL,16;L4
+      Mat Write #CH_ROL,REC_ROL,32;L5
+      Mat Write #CH_ROL,REC_ROL,56;L6
+      Mat Write #CH_ROL,REC_ROL,80;L6$
+      Mat Write #CH_ROL,REC_ROL,140;L1$
+      Mat Write #CH_ROL,REC_ROL,160;L9
+      Mat Write #CH_ROL,REC_ROL,168;L7
+      Mat Write #CH_ROL,REC_ROL,246;PL
+      Mat Write #CH_ROL,REC_ROL,250;UN
+      Mat Write #CH_ROL,REC_ROL,256;S2
+      Mat Write #CH_ROL,REC_ROL,260;S3
+      Mat Write #CH_ROL,REC_ROL,368;MT$
+      Mat Write #CH_ROL,REC_ROL,370;S3$
+      Mat Write #CH_ROL,REC_ROL,404;OLM
+      Mat Write #CH_ROL,REC_ROL,446;EUN
+      Mat Write #CH_ROL,REC_ROL,452;UNF
+      Mat Write #CH_ROL,REC_ROL,494;LCO
+      Mat Write #CH_ROL,REC_ROL,502;CST
+      Mat Write #CH_ROL,REC_ROL,508;LTAX1
+      Mat Write #CH_ROL,REC_ROL,514;CTWT
+      Mat Write #CH_ROL,REC_ROL,518;INVNO
+      Mat Write #CH_ROL,REC_ROL,538;LTAX2
+      Mat Write #CH_ROL,REC_ROL,542;QPB
+      Write #CH_ROL,REC_ROL,548;LPRINTED
+      Write #CH_ROL,REC_ROL,550;OWHS
+      Write #CH_ROL,REC_ROL,552;LP_DATE
+      Write #CH_ROL,REC_ROL,556;LP_TIME
+      Write #CH_ROL,REC_ROL,564;ROL0;
+	  Mat Write #ch_rol,rec_rol,624;olcurrid;
+	  Mat Write #ch_rol,rec_rol,626;olcurrfact;
+      Rem {end write.rol.i}
+    End If 
+    If UPDPROD
+      Rem {begin src/inc/write.prod.i}
+      Mat Write #CH_PROD,REC_PROD,0;A$
+      Mat Write #CH_PROD,REC_PROD,156;B
+      Mat Write #CH_PROD,REC_PROD,256;A
+      Mat Write #CH_PROD,REC_PROD,460;A1
+      Mat Write #CH_PROD,REC_PROD,508;A2
+      Mat Write #CH_PROD,REC_PROD,512;PFU1
+      Mat Write #CH_PROD,REC_PROD,554;PFU2
+      Mat Write #CH_PROD,REC_PROD,596;PRPARC
+      Mat Write #CH_PROD,REC_PROD,620;LM
+      Mat Write #CH_PROD,REC_PROD,624;PR_PO
+      Mat Write #CH_PROD,REC_PROD,628;AGEDAY
+      Write #CH_PROD,REC_PROD,630;LLC
+      Mat Write #CH_PROD,REC_PROD,632;PSN$
+      Mat Write #CH_PROD,REC_PROD,652;PSN
+      Mat Write #CH_PROD,REC_PROD,660;U2
+      Mat Write #CH_PROD,REC_PROD,664;LBSORD
+      Mat Write #CH_PROD,REC_PROD,670;U4
+      Write #CH_PROD,REC_PROD,678;U3
+      Mat Write #CH_PROD,REC_PROD,684;U3$
+      Mat Write #CH_PROD,REC_PROD,744;HZ$
+      Mat Write #CH_PROD,REC_PROD,834;A3
+      Mat Write #CH_PROD,REC_PROD,846;PFTB
+      Write #CH_PROD,REC_PROD,854;UPCT
+      Mat Write #CH_PROD,REC_PROD,856;C1$
+      Mat Write #CH_PROD,REC_PROD,894;PR_C4
+      Mat Write #CH_PROD,REC_PROD,938;PF_LOAD2
+      Mat Write #CH_PROD,REC_PROD,944;PR_A2$
+      Mat Write #CH_PROD,REC_PROD,974;PFCO
+      Mat Write #CH_PROD,REC_PROD,990;PLV
+      Mat Write #CH_PROD,REC_PROD,1002;PLC
+      Mat Write #CH_PROD,REC_PROD,1018;PFN
+      Mat Write #CH_PROD,REC_PROD,1030;STK
+      Mat Write #CH_PROD,REC_PROD,1048;FDT
+      Mat Write #CH_PROD,REC_PROD,1056;PRFLG$
+      Mat Write #CH_PROD,REC_PROD,1066;PRBASE
+      Mat Write #CH_PROD,REC_PROD,1068;PRMKUP
+      Mat Write #CH_PROD,REC_PROD,1084;PRMKUPTYP$
+      Mat Write #CH_PROD,REC_PROD,1088;FUT
+      Mat Write #CH_PROD,REC_PROD,1100;PRPARC2
+      Mat Write #CH_PROD,REC_PROD,1108;PRREDI
+      Mat Write #CH_PROD,REC_PROD,1120;PIC$
+      Mat Write #CH_PROD,REC_PROD,1270;PRD0
+      Mat Write #CH_PROD,REC_PROD,1282;PRIML$
+      Mat Write #CH_PROD,REC_PROD,1294;PRD1
+      Mat Write #CH_PROD,REC_PROD,1304;PRD2;
+      Rem {end write.prod.i}
+	  !
+  	  if sqlChan >= 0 ! MySQL enabled and channel opened
+	  	  e = prod_UpdateSQLFromDL4(e$, intCo, A$[140,151], sqlChan, ch_prod)
+		  if e <> 1 ! returns the number of records add/updated/deleted
+			error 11000 ! do bad update stuff
+		  end if
+	  end if
+	  !
+    Else 
+      Unlock #CH_PROD
+    End If 
+    If UPDPRWH
+      Rem {begin src/inc/write.prwh.i}
+      Mat Write #CH_PRWH,REC_PRWH,0;W1$
+      Mat Write #CH_PRWH,REC_PRWH,32;W1
+      Mat Write #CH_PRWH,REC_PRWH,38;W2
+      Mat Write #CH_PRWH,REC_PRWH,78;W3
+      Mat Write #CH_PRWH,REC_PRWH,228;W5
+      Mat Write #CH_PRWH,REC_PRWH,384;WHPARC
+      Write #CH_PRWH,REC_PRWH,396;WHLPOOL
+      Mat Write #CH_PRWH,REC_PRWH,400;WCOMM$
+      Write #CH_PRWH,REC_PRWH,404;FCWGT
+      Mat Write #CH_PRWH,REC_PRWH,420;W0
+      Mat Write #CH_PRWH,REC_PRWH,428;WH7
+      Mat Write #CH_PRWH,REC_PRWH,444;WH8
+      Mat Write #CH_PRWH,REC_PRWH,540;WH9
+      Mat Write #CH_PRWH,REC_PRWH,696;W7
+      Mat Write #CH_PRWH,REC_PRWH,756;WH3$
+      Mat Write #CH_PRWH,REC_PRWH,780;WHLV
+      Write #CH_PRWH,REC_PRWH,798;WHRPLN
+      Mat Write #CH_PRWH,REC_PRWH,800;WHMISC
+      Mat Write #CH_PRWH,REC_PRWH,842;WHLM
+      Mat Write #CH_PRWH,REC_PRWH,846;WHMISC2
+      Write #CH_PRWH,REC_PRWH,894;RESTRICTED
+      Mat Write #CH_PRWH,REC_PRWH,896;WHFUT
+      Mat Write #CH_PRWH,REC_PRWH,914;WHFDT
+      Write #CH_PRWH,REC_PRWH,922;VLIST
+      Mat Write #CH_PRWH,REC_PRWH,928;WHFLG$
+      Write #CH_PRWH,REC_PRWH,938;WHBASE
+      Mat Write #CH_PRWH,REC_PRWH,940;WHMKUP
+      Mat Write #CH_PRWH,REC_PRWH,956;WHMKUPTYP$
+      Mat Write #CH_PRWH,REC_PRWH,960;WHPARC2
+      Mat Write #CH_PRWH,REC_PRWH,968;WHREDI
+      Mat Write #CH_PRWH,REC_PRWH,980;WHLBS;
+      Rem {end write.prwh.i}
+    Else 
+      Unlock #CH_PRWH
+    End If 
+  Else 
+    If Not(PUPSNONSTOCK) And Not(H5[7] = 2 Or H5[7] = 3) Let PUPSTRAN = 2
+    If PUPSNONSTOCK
+      If NSLTBL
+        ! CHNL = ! just seems to get the channel number but doesn't open the file --- nonstock lines
+	! NEED LOADMARKUP TABLE FILE
+	nsch[0]=ctlc
+        NSCH[1] = 0 ! load markup table- CHNL -- not opened
+        NSCH[2] = CH[4] ! order line file
+        PARM[1] = NSLTBL
+        PARM[2] = REC_ROL
+        PARM[3] = H5[7]
+        NSCOST = ponetcost
+        NSSTAT = 1
+	!!! does not handle non-stock items !!!
+        Call "nsload.dl4",NSCH[],PARM[],NSCOST,NSSTAT
+        L5[1] = NSCOST
+      Else 
+        L5[1] = ponetcost
+      End If 
+      If UN[2] <> -2
+        S3[12] = FNR(L7[4] * L5[1])
+        S3[13] = FNR(L7[2] * L5[1])
+      Else 
+        S3[12] = FNR(L5[1])
+        S3[13] = FNR(L5[1])
+      End If 
+    End If 
+  End If 
+Else 
+  PUPSNCST[1] = PUPSOCST[1]
+End If 
+Gosub EXCEPTION
+Rem {begin src/inc/write.rol.i}
+Mat Write #CH_ROL,REC_ROL,0;L2
+Mat Write #CH_ROL,REC_ROL,8;L3
+Mat Write #CH_ROL,REC_ROL,16;L4
+Mat Write #CH_ROL,REC_ROL,32;L5
+Mat Write #CH_ROL,REC_ROL,56;L6
+Mat Write #CH_ROL,REC_ROL,80;L6$
+Mat Write #CH_ROL,REC_ROL,140;L1$
+Mat Write #CH_ROL,REC_ROL,160;L9
+Mat Write #CH_ROL,REC_ROL,168;L7
+Mat Write #CH_ROL,REC_ROL,246;PL
+Mat Write #CH_ROL,REC_ROL,250;UN
+Mat Write #CH_ROL,REC_ROL,256;S2
+Mat Write #CH_ROL,REC_ROL,260;S3
+Mat Write #CH_ROL,REC_ROL,368;MT$
+Mat Write #CH_ROL,REC_ROL,370;S3$
+Mat Write #CH_ROL,REC_ROL,404;OLM
+Mat Write #CH_ROL,REC_ROL,446;EUN
+Mat Write #CH_ROL,REC_ROL,452;UNF
+Mat Write #CH_ROL,REC_ROL,494;LCO
+Mat Write #CH_ROL,REC_ROL,502;CST
+Mat Write #CH_ROL,REC_ROL,508;LTAX1
+Mat Write #CH_ROL,REC_ROL,514;CTWT
+Mat Write #CH_ROL,REC_ROL,518;INVNO
+Mat Write #CH_ROL,REC_ROL,538;LTAX2
+Mat Write #CH_ROL,REC_ROL,542;QPB
+Write #CH_ROL,REC_ROL,548;LPRINTED
+Write #CH_ROL,REC_ROL,550;OWHS
+Write #CH_ROL,REC_ROL,552;LP_DATE
+Write #CH_ROL,REC_ROL,556;LP_TIME
+Write #CH_ROL,REC_ROL,564;ROL0;
+Mat Write #ch_rol,rec_rol,624;olcurrid
+Mat Write #ch_rol,rec_rol,626;olcurrfact
+Rem {end write.rol.i}
+Unlock #CH_ROH
+S9[2] = REC_ROH
+! If P61$[2,2] = "Y" Or P61$[2,2] = "L" ! 
+let tmpflag=0
+if p61$[2,2]="Y" let tmpflag=99
+if p61$[2,2]="L" let tmpflag=99
+if tmpflag<>0
+	If REC[3] > 0 ! READ THE ORDER HEADER RECORD # 
+		Rec_roh=rec[3]
+		!Swap 2,"mx031d"
+		!Chain Write S9,PASSINFO
+		! ORDERTOTAL !
+		Mat Read #CH_ROH,REC_ROH,0;H0;
+		REC_ROT=h0[3]
+		Mat Read #ch_rot,REC_ROT,0;T1         
+		Mat Read #ch_rot,REC_ROT,8;T2         
+		Mat Read #ch_rot,REC_ROT,168;MCODE    
+		Mat Read #ch_rot,REC_ROT,208;MCHARGE  
+		Mat Read #ch_rot,REC_ROT,328;TOT      
+		Mat Read #ch_rot,REC_ROT,358;MCTXBL   
+		Mat Read #ch_rot,REC_ROT,378;DCLVL;   
+		let keycust$=" ",keycust$
+		let keycust$[1,6]=h0[4] using "######"
+		Search #ch_cust,2,1;Keycust$,rec_cust,E
+		if e return
+		Mat Read #ch_cust,rec_cust,544;CFIN
+		CHNL = 99                                                   
+		CHAN[0] = ctlc
+		CHAN[1] = 0                                              
+		CHAN[2] = 0 ! zone
+		CHAN[3] = ch_prod
+		CHAN[4] = 0! commodity code
+		CHAN[5] = ch_cust ! cust        
+		CHAN[6] = ch_prwh
+		CHAN[7] = 0 ! ch_ros
+		CHAN[8] = ch_roh
+		CHAN[9] = ch_rot! ch_rot
+		CHAN[10] = ch_rol                                                                              
+		CHAN[11] = 0
+		CHAN[12] = 0! custtax
+		CHAN[13] = 0 !ch_slsm
+		CHAN[14] = 0 !ch_tax            
+		CHAN[15] = 0 ! ch_prlt
+		CHAN[16] = 0 !ch_ordl
+		CHAN[17] = ch_ccodes    
+		PARAM[0] = 1    ! credit check inquiry - set to Y for existing order                                                             
+		PARAM[1] = 0    ! do credit check   - set to N - updating costs only                                                        
+		PARAM[2] = 1    ! exception     - set to Y to check gp/cost exceptions                                                      
+		PARAM[3] = 1    ! write total                                                        
+		PARAM[4] = 1    ! update order total in customer's file                                                       
+		If P60$[40,40] = "S" Let PARAM[4] = 1                                     
+		PARAM[5] = 0    ! clear manual fields = N                                                          
+		PARAM[6] = 0    ! clear cash filed =N 
+		PARAM[9] = 99	! delivery charge  
+		PARAM[10] = 99! ar term misc cost charge   - bypass 
+		S9[4] = 208                                                               
+		R5 = 0! rec_cust
+		H1 = REC_ROH
+		V1 = 0 ! REC_SLSM     
+		! SAVE ORIGINAL VALUES
+		let orgcost=fnr(t2[14])
+		let orgamt=fnr(t2[24])
+		let orgfreight=fnr(T2[5])
+		LET orgother=fnr(t2[6])
+		let tmp3=t2[21]
+		For ctr = 1 To 12                       
+			oldholdcodeflag[ctr] = Sgn(Fra(tmp3 / 2))
+			tmp3 = Int(tmp3 / 2)                  
+		Next ctr
+		Call "ORDERTOTAL",S9[],H1,PARAM[],CHAN[],T1[],T2[],MCODE[],MCHARGE[],TOT[],MCTXBL[],DCLVL,R5,V1,CFIN[] 
+		Mat Read #ch_rot,REC_ROT,8;T2;
+		let tmp3=t2[21]
+		For ctr = 1 To 12                       
+			holdcodeflag[ctr] = Sgn(Fra(tmp3 / 2))
+			tmp3 = Int(tmp3 / 2)                  
+		Next ctr
+		if oldholdcodeflag[1]<>holdcodeflag[1] ! credit 
+			if fnr(t2[24])<=orgamt  ! amount is less than or equal
+				let holdcodeflag[1]=oldholdcodeflag[1] 
+			endif
+		endif
+		if oldholdcodeflag[2]<>holdcodeflag[2] ! gp exception
+			if fnr(t2[24])=orgamt and t2[14]=fnr(orgcost)
+				let holdcodeflag[2]=oldholdcodeflag[2]
+			else
+				if fnr(t2[24])=orgamt and oldholdcodeflag[2]=0 and holdcodeflag[2]<>0
+					if fnr(orgamt-orgcost)<=fnr(t2[24]-t2[14]) ! original gp is less than new gp
+						let holdcodeflag[2]=oldholdcodeflag[2]
+					endif
+				endif
+			endif
+		endif
+		if fnr(orgamt)=Fnr(t2[24]) and fnr(orgcost)=fnr(t2[14])
+			for ctr=3 to 12
+				if oldholdcodeflag[ctr]<>holdcodeflag[ctr]
+					let holdcodeflag[ctr]=oldholdcodeflag[ctr]
+				endif
+			next ctr
+		endif
+		tmp3 = 0                                            
+		For ctr = 0 To 11                                   
+				If holdcodeflag[ctr + 1] Let tmp3 = tmp3 + 2 ^ ctr
+		Next ctr                                            
+		t2[21] = tmp3
+		Mat Write #ch_rot,REC_ROT,8;T2;
+	End If 
+endif
+Return 
+CALC_LOAD: Rem
+PREC[0] = REC_PROD
+PREC[2] = FNR(Abs((L6[4] * L7[2]) / A[5]))
+If L6[4] And L6[4] <> A[6] ! line lbs different from prod file lbs
+  PREC[3] = L6[4]
+Else 
+  PREC[3] = 0
+End If 
+CNVTA = ponetcost
+SCR = - H5[7]
+Call "MXLOAD5.DL4",SCR,WH,LTBL,PREC[],CNVTA,STAT[2],E$,RSTR$
+BCF = PREC[2]
+Return 
+EXCEPTION: Rem
+PUPSPO = POH0[2]
+PUPSPOL = POL1[2]
+PUPSORD = H0[7]
+PUPSORDL = L3[2]
+PUPSOTYP = H5[7]
+PUPSPROD$ = L1$[1,12]
+PUPSDATE = Tim(6)
+PUPSTIME = Tim(11) * 10000 + Tim(12) * 100 + Tim(13)
+PUPSPORT = Rec[10] ! Spc(6)
+PUPSUSER$ = USERACCESS$+blank$ 
+PUPSNONSTOCK = L3[0]
+PUPSUNIT = UN[2]
+If PUPSNONSTOCK
+  PUPSNCST[1] = L5[1]
+  PUPSLMTBL = NSLTBL
+Else 
+  PUPSNCST[1] = L5[1]
+  PUPSLMTBL = LTBL
+End If 
+If PUPSNONSTOCK ! convert to costing unit of measure
+  Gosub L_30000
+  If PUPSOCST[0] ! old gl cost
+    CNVTU[0] = 0;CNVTU[1] = UN[2];CNVTU[2] = 2
+    CNVTA = PUPSOCST[0]
+    Gosub L_20000
+    PUPSOCST[0] = AMOUNT
+  End If 
+  If PUPSOCST[1] ! old load cost
+    CNVTU[0] = 0;CNVTU[1] = UN[2];CNVTU[2] = 2
+    CNVTA = PUPSOCST[1]
+    Gosub L_20000
+    PUPSOCST[1] = AMOUNT
+  End If 
+  If PUPSNCST[0] ! new gl cost
+    CNVTU[0] = 0;CNVTU[1] = UN[2];CNVTU[2] = 2
+    CNVTA = PUPSNCST[0]
+    Gosub L_20000
+    PUPSNCST[0] = AMOUNT
+  End If 
+  If PUPSNCST[1] ! new load cost
+    CNVTU[0] = 0;CNVTU[1] = UN[2];CNVTU[2] = 2
+    CNVTA = PUPSNCST[1]
+    Gosub L_20000
+    PUPSNCST[1] = AMOUNT
+  End If 
+End If 
+PUPS$ = " ",PUPS$
+PUPS$ = PUPSPO Using "######"
+PUPS$[7] = PUPSPOL Using "######"
+PUPS$[13] = PUPSDATE Using "######"
+PUPS$[19] = PUPSTIME Using "######"
+E = 2 \ Search #CH_PUPS,1,0;PUPS$,REC_PUPS,E
+if e goto outend:
+Rem {begin src/inc/write.pups.i}
+Mat Write #CH_PUPS,REC_PUPS,0;PUPSPO
+Mat Write #CH_PUPS,REC_PUPS,4;PUPSPOL
+Mat Write #CH_PUPS,REC_PUPS,8;PUPSORD
+Mat Write #CH_PUPS,REC_PUPS,12;PUPSORDL
+Mat Write #CH_PUPS,REC_PUPS,16;PUPSOTYP
+Mat Write #CH_PUPS,REC_PUPS,20;PUPSPROD$
+Mat Write #CH_PUPS,REC_PUPS,32;PUPSOCST
+Mat Write #CH_PUPS,REC_PUPS,44;PUPSNCST
+Mat Write #CH_PUPS,REC_PUPS,56;PUPSTRAN
+Mat Write #CH_PUPS,REC_PUPS,58;PUPSDATE
+Mat Write #CH_PUPS,REC_PUPS,62;PUPSTIME
+Mat Write #CH_PUPS,REC_PUPS,66;PUPSPORT
+Mat Write #CH_PUPS,REC_PUPS,70;PUPSUSER$
+Mat Write #CH_PUPS,REC_PUPS,80;PUPSUNIT
+Mat Write #CH_PUPS,REC_PUPS,82;PUPSNONSTOCK
+Mat Write #CH_PUPS,REC_PUPS,84;PUPSLMTBL;
+Rem {end write.pups.i}
+Search #CH_PUPS,4,1;PUPS$,REC_PUPS,E 
+If E Goto outend:
+PUPS$[1,6] = PUPSORD Using "######"
+PUPS$[7,12] = PUPSORDL Using "######"
+Search #CH_PUPS,4,2;PUPS$,REC_PUPS,E 
+If E Goto outend:
+PUPS$ = PUPSDATE Using "######"
+PUPS$[7] = PUPSTIME Using "######"
+PUPS$[13] = PUPSPO Using "######"
+PUPS$[19] = PUPSPOL Using "######"
+Search #CH_PUPS,4,3;PUPS$,REC_PUPS,E
+If E goto outend:
+Return 
+
+INIT: Rem
+STAT = 0
+If Not(REC[1]) Let STAT = 2;STAT[1] = 1
+If Not(REC[2]) Let STAT = 2;STAT[1] = 2
+If Not(STAT)
+  If REC[1] > 0
+    REC_POHEAD = REC[1]
+    Rem {begin src/inc/read.pohead.i}
+    Mat Read #ch_poh,REC_POHEAD,0;POH0;
+    Mat Read #ch_poh,REC_POHEAD,24;POH$;
+    Mat Read #ch_poh,REC_POHEAD,106;POH1$;
+    Mat Read #ch_poh,REC_POHEAD,222;POH3;
+    Mat Read #ch_poh,REC_POHEAD,242;POH4;
+    Mat Read #ch_poh,REC_POHEAD,250;POH8;
+    Mat Read #ch_poh,REC_POHEAD,310;POH;
+    Mat Read #ch_poh,REC_POHEAD,330;POH1;
+    Mat Read #ch_poh,REC_POHEAD,350;POH9;
+    Mat Read #ch_poh,REC_POHEAD,428;ST$;
+    Mat Read #ch_poh,REC_POHEAD,442;POH2$;
+    Mat Read #ch_poh,REC_POHEAD,482;POH5;
+    Mat Read #ch_poh,REC_POHEAD,504;POH6;
+    Mat Read #ch_poh,REC_POHEAD,528;POH7;
+    Rem {end read.pohead.i}
+  Else 
+    REC_POHEAD = 0
+    SCRATCH$ = " ",SCRATCH$
+    For SCR = 1 To 6
+      SCRATCH$ = SCR Using "##"
+      SCRATCH$[3] = Abs(REC[1]) Using "######"
+      Search #ch_poh,2,1;SCRATCH$,REC_POHEAD,E
+      If E goto outend ! sales order does not exist
+      If Not(E)
+        SCR = 6
+      End If 
+    Next SCR
+    If REC_POHEAD
+      Rem {begin src/inc/read.pohead.i}
+      Mat Read #ch_poh,REC_POHEAD,0;POH0;
+      Mat Read #ch_poh,REC_POHEAD,24;POH$;
+      Mat Read #ch_poh,REC_POHEAD,106;POH1$;
+      Mat Read #ch_poh,REC_POHEAD,222;POH3;
+      Mat Read #ch_poh,REC_POHEAD,242;POH4;
+      Mat Read #ch_poh,REC_POHEAD,250;POH8;
+      Mat Read #ch_poh,REC_POHEAD,310;POH;
+      Mat Read #ch_poh,REC_POHEAD,330;POH1;
+      Mat Read #ch_poh,REC_POHEAD,350;POH9;
+      Mat Read #ch_poh,REC_POHEAD,428;ST$;
+      Mat Read #ch_poh,REC_POHEAD,442;POH2$;
+      Mat Read #ch_poh,REC_POHEAD,482;POH5;
+      Mat Read #ch_poh,REC_POHEAD,504;POH6;
+      Mat Read #ch_poh,REC_POHEAD,528;POH7;
+      Rem {end read.pohead.i}
+    Else 
+      STAT = 2
+      STAT[1] = 1
+    End If 
+  End If 
+  If STAT Return 
+  If REC[2] > 0
+    REC_POLINE = REC[2]
+    Rem {begin src/inc/read.poline.i}
+    Mat Read #ch_pol,REC_POLINE,0;POL1;
+    Mat Read #ch_pol,REC_POLINE,12;POL2;
+    Mat Read #ch_pol,REC_POLINE,24;POL3;
+    Mat Read #ch_pol,REC_POLINE,66;POL1$;
+    Mat Read #ch_pol,REC_POLINE,186;POL;
+    Mat Read #ch_pol,REC_POLINE,222;POL0;
+    Mat Read #ch_pol,REC_POLINE,232;POL4;
+    Mat Read #ch_pol,REC_POLINE,376;POMISC;
+    Mat Read #ch_pol,REC_POLINE,382;POL5;
+    Mat Read #ch_pol,REC_POLINE,442;POL6;
+	Mat Read #ch_pol,rec_poline,548;PLCURRID;
+	Mat Read #ch_pol,rec_poline,550;PLCURRFACT;
+    Rem {end read.poline.i}
+  Else 
+    SCRATCH$ = " ",SCRATCH$
+    SCRATCH$ = POH0[2] Using "######"
+    SCRATCH$[7] = Abs(REC[2]) Using "###"
+    Search #ch_pol,2,1;SCRATCH$,REC_POLINE,E
+    If E goto outend ! line does not exist do not update
+    If Not(E)
+      Rem {begin src/inc/read.poline.i}
+      Mat Read #ch_pol,REC_POLINE,0;POL1;
+      Mat Read #ch_pol,REC_POLINE,12;POL2;
+      Mat Read #ch_pol,REC_POLINE,24;POL3;
+      Mat Read #ch_pol,REC_POLINE,66;POL1$;
+      Mat Read #ch_pol,REC_POLINE,186;POL;
+      Mat Read #ch_pol,REC_POLINE,222;POL0;
+      Mat Read #ch_pol,REC_POLINE,232;POL4;
+      Mat Read #ch_pol,REC_POLINE,376;POMISC;
+      Mat Read #ch_pol,REC_POLINE,382;POL5;
+      Mat Read #ch_pol,REC_POLINE,442;POL6;
+	  Mat Read #ch_pol,rec_poline,548;PLCURRID;
+	  Mat Read #ch_pol,rec_poline,550;PLCURRFACT;
+      Rem {end read.poline.i}
+      If POL4[10] = 0 Or POL4[11] = 0
+        STAT = 4
+      End If 
+      If REC[3] = 0 Let REC[3] = POL4[10]
+      If REC[4] = 0 Let REC[4] = POL4[11]
+    Else 
+      STAT = 2;STAT[1] = 2
+    End If 
+  End If 
+  If STAT Return 
+  If REC[3] > 0
+    REC_ROH = REC[3]
+    Rem {begin src/inc/read.roh.i}
+    Mat Read #CH_ROH,REC_ROH,0;H0
+    Mat Read #CH_ROH,REC_ROH,52;H3
+    Mat Read #CH_ROH,REC_ROH,56;TOT_SELL
+    Mat Read #CH_ROH,REC_ROH,64;LOCKPORT
+    Mat Read #CH_ROH,REC_ROH,66;V0$
+    Mat Read #CH_ROH,REC_ROH,78;H4
+    Mat Read #CH_ROH,REC_ROH,84;H0$
+    Mat Read #CH_ROH,REC_ROH,104;H5
+    Mat Read #CH_ROH,REC_ROH,172;ST3
+    Mat Read #CH_ROH,REC_ROH,272;H1$
+    Mat Read #CH_ROH,REC_ROH,278;SLSM
+    Mat Read #CH_ROH,REC_ROH,318;SCOM
+    Mat Read #CH_ROH,REC_ROH,348;SMER
+    Mat Read #CH_ROH,REC_ROH,378;SCST
+    Mat Read #CH_ROH,REC_ROH,408;H6
+    Mat Read #CH_ROH,REC_ROH,444;HMAT$
+    Mat Read #CH_ROH,REC_ROH,446;P0$
+    Mat Read #CH_ROH,REC_ROH,466;HFAX
+    Mat Read #CH_ROH,REC_ROH,474;HSTI
+    Mat Read #CH_ROH,REC_ROH,482;H2
+    Mat Read #CH_ROH,REC_ROH,486;OWHT
+    Mat Read #CH_ROH,REC_ROH,490;OWHT1
+    Mat Read #CH_ROH,REC_ROH,498;TOTGL
+    Mat Read #CH_ROH,REC_ROH,504;PICKBY
+    Mat Read #CH_ROH,REC_ROH,512;OREF
+    Rem {end read.roh.i}
+  Else 
+    If Abs(REC[3]) <> POL4[10] Or REC[3] = 0
+      If REC[3] = 0
+        STAT = 4
+      Else 
+        STAT = 2;STAT[1] = 3
+      End If 
+    Else 
+      SORD = Abs(REC[3])
+      SCRATCH$ = " ",SCRATCH$
+      scratch$[3,8]=sord using "######"      ! set order #
+      for ctr=1 to 5
+	let scratch$[1,2]=ctr using "##"
+	search #ch_roh,2,1;scratch$,rec_roh,e
+	if not (e) goto foundso:
+      next ctr 
+      REC_ROH = 0
+      foundso: ! found the sales order           
+      
+      If REC_ROH = 0
+        STAT[0] = 2;STAT[1] = 3
+      Else 
+        SCR = SCRATCH$[1,2]
+        If SCR < 5
+          Rem {begin src/inc/read.roh.i}
+          Mat Read #CH_ROH,REC_ROH,0;H0
+          Mat Read #CH_ROH,REC_ROH,52;H3
+          Mat Read #CH_ROH,REC_ROH,56;TOT_SELL
+          Mat Read #CH_ROH,REC_ROH,64;LOCKPORT
+          Mat Read #CH_ROH,REC_ROH,66;V0$
+          Mat Read #CH_ROH,REC_ROH,78;H4
+          Mat Read #CH_ROH,REC_ROH,84;H0$
+          Mat Read #CH_ROH,REC_ROH,104;H5
+          Mat Read #CH_ROH,REC_ROH,172;ST3
+          Mat Read #CH_ROH,REC_ROH,272;H1$
+          Mat Read #CH_ROH,REC_ROH,278;SLSM
+          Mat Read #CH_ROH,REC_ROH,318;SCOM
+          Mat Read #CH_ROH,REC_ROH,348;SMER
+          Mat Read #CH_ROH,REC_ROH,378;SCST
+          Mat Read #CH_ROH,REC_ROH,408;H6
+          Mat Read #CH_ROH,REC_ROH,444;HMAT$
+          Mat Read #CH_ROH,REC_ROH,446;P0$
+          Mat Read #CH_ROH,REC_ROH,466;HFAX
+          Mat Read #CH_ROH,REC_ROH,474;HSTI
+          Mat Read #CH_ROH,REC_ROH,482;H2
+          Mat Read #CH_ROH,REC_ROH,486;OWHT
+          Mat Read #CH_ROH,REC_ROH,490;OWHT1
+          Mat Read #CH_ROH,REC_ROH,498;TOTGL
+          Mat Read #CH_ROH,REC_ROH,504;PICKBY
+          Mat Read #CH_ROH,REC_ROH,512;OREF
+          Rem {end read.roh.i}
+        Else 
+          STAT[0] = 3
+        End If 
+      End If 
+    End If 
+  End If 
+  If STAT Return 
+  If REC[4] > 0
+    REC_ROL = REC[4]
+    Rem {begin src/inc/read.rol.i}
+    Mat Read #CH_ROL,REC_ROL,0;L2
+    Mat Read #CH_ROL,REC_ROL,8;L3
+    Mat Read #CH_ROL,REC_ROL,16;L4
+    Mat Read #CH_ROL,REC_ROL,32;L5
+    Mat Read #CH_ROL,REC_ROL,56;L6
+    Mat Read #CH_ROL,REC_ROL,80;L6$
+    Mat Read #CH_ROL,REC_ROL,140;L1$
+    Mat Read #CH_ROL,REC_ROL,160;L9
+    Mat Read #CH_ROL,REC_ROL,168;L7
+    Mat Read #CH_ROL,REC_ROL,246;PL
+    Mat Read #CH_ROL,REC_ROL,250;UN
+    Mat Read #CH_ROL,REC_ROL,256;S2
+    Mat Read #CH_ROL,REC_ROL,260;S3
+    Mat Read #CH_ROL,REC_ROL,368;MT$
+    Mat Read #CH_ROL,REC_ROL,370;S3$
+    Mat Read #CH_ROL,REC_ROL,404;OLM
+    Mat Read #CH_ROL,REC_ROL,446;EUN
+    Mat Read #CH_ROL,REC_ROL,452;UNF
+    Mat Read #CH_ROL,REC_ROL,494;LCO
+    Mat Read #CH_ROL,REC_ROL,502;CST
+    Mat Read #CH_ROL,REC_ROL,508;LTAX1
+    Mat Read #CH_ROL,REC_ROL,514;CTWT
+    Mat Read #CH_ROL,REC_ROL,518;INVNO
+    Mat Read #CH_ROL,REC_ROL,538;LTAX2
+    Mat Read #CH_ROL,REC_ROL,542;QPB
+    Read #CH_ROL,REC_ROL,548;LPRINTED
+    Read #CH_ROL,REC_ROL,550;OWHS
+    Read #CH_ROL,REC_ROL,552;LP_DATE
+    Read #CH_ROL,REC_ROL,556;LP_TIME
+    Read #CH_ROL,REC_ROL,564;ROL0
+	Mat Read #ch_rol,rec_rol,624;olcurrid
+	Mat Read #ch_rol,rec_rol,626;olcurrfact
+    Rem {end read.rol.i}
+  Else 
+    If Abs(REC[4]) <> POL4[11]
+      STAT = 2;STAT[1] = 4
+    Else 
+      SCRATCH$ = " ",SCRATCH$
+      SCRATCH$ = H0[7] Using "######"
+      SCRATCH$[7] = Abs(REC[4]) Using "###"
+      Search #CH_ROL,2,1;SCRATCH$,REC_ROL,E
+      If E goto outend: ! line does not exist
+      If Not(E)
+        Rem {begin src/inc/read.rol.i}
+        Mat Read #CH_ROL,REC_ROL,0;L2
+        Mat Read #CH_ROL,REC_ROL,8;L3
+        Mat Read #CH_ROL,REC_ROL,16;L4
+        Mat Read #CH_ROL,REC_ROL,32;L5
+        Mat Read #CH_ROL,REC_ROL,56;L6
+        Mat Read #CH_ROL,REC_ROL,80;L6$
+        Mat Read #CH_ROL,REC_ROL,140;L1$
+        Mat Read #CH_ROL,REC_ROL,160;L9
+        Mat Read #CH_ROL,REC_ROL,168;L7
+        Mat Read #CH_ROL,REC_ROL,246;PL
+        Mat Read #CH_ROL,REC_ROL,250;UN
+        Mat Read #CH_ROL,REC_ROL,256;S2
+        Mat Read #CH_ROL,REC_ROL,260;S3
+        Mat Read #CH_ROL,REC_ROL,368;MT$
+        Mat Read #CH_ROL,REC_ROL,370;S3$
+        Mat Read #CH_ROL,REC_ROL,404;OLM
+        Mat Read #CH_ROL,REC_ROL,446;EUN
+        Mat Read #CH_ROL,REC_ROL,452;UNF
+        Mat Read #CH_ROL,REC_ROL,494;LCO
+        Mat Read #CH_ROL,REC_ROL,502;CST
+        Mat Read #CH_ROL,REC_ROL,508;LTAX1
+        Mat Read #CH_ROL,REC_ROL,514;CTWT
+        Mat Read #CH_ROL,REC_ROL,518;INVNO
+        Mat Read #CH_ROL,REC_ROL,538;LTAX2
+        Mat Read #CH_ROL,REC_ROL,542;QPB
+        Read #CH_ROL,REC_ROL,548;LPRINTED
+        Read #CH_ROL,REC_ROL,550;OWHS
+        Read #CH_ROL,REC_ROL,552;LP_DATE
+        Read #CH_ROL,REC_ROL,556;LP_TIME
+        Read #CH_ROL,REC_ROL,564;ROL0
+		Mat Read #ch_rol,rec_rol,624;olcurrid
+	    Mat Read #ch_rol,rec_rol,626;olcurrfact
+        Rem {end read.rol.i}
+      Else 
+        STAT = 2;STAT[1] = 4
+      End If 
+    End If 
+  End If 
+  milf=0
+  if p61$[112,112]="Y" and l3[0]=0
+	  gosub get_prwh:
+	  if w0[0]=2 return ! do not reorder flag occasional/order to order 
+  endif
+  if h5[7]=1 and L3[1]=0 and p8$[4,4]="Y" and whmisc2[0]>0 and not(l3[0]) 
+			gosub get_prwh:
+			milf=getmillflg(e$,intco,ch_prwh,L1$[1,12],l4[3],h5[7])
+			if milf>0 ! it is - back order all per dd! need to check if mill item
+				RETURN
+			endif
+		let milf=0
+  ENDIF
+  If H5[7] <> 2 And H5[7] <> 3 And L3[0] = 0
+    STAT = 6
+    Return 
+  End If 
+  If L3[0] = 0 And H5[7] = 3 And P60$[22,22] = "Y" ! indirect update stock
+    STAT = 6
+    Return 
+  End If 
+End If 
+Return  ! end of init
+
+GET_PROD: Rem
+If Not(L3[0])
+  If L4[0]
+    REC_PROD = L4[0]
+    Rem {begin src/inc/read.prod.i}
+    Mat Read #CH_PROD,REC_PROD,0;A$
+    Mat Read #CH_PROD,REC_PROD,156;B
+    Mat Read #CH_PROD,REC_PROD,256;A
+    Mat Read #CH_PROD,REC_PROD,460;A1
+    Mat Read #CH_PROD,REC_PROD,508;A2
+    Mat Read #CH_PROD,REC_PROD,512;PFU1
+    Mat Read #CH_PROD,REC_PROD,554;PFU2
+    Mat Read #CH_PROD,REC_PROD,596;PRPARC
+    Mat Read #CH_PROD,REC_PROD,620;LM
+    Mat Read #CH_PROD,REC_PROD,624;PR_PO
+    Mat Read #CH_PROD,REC_PROD,628;AGEDAY
+    Read #CH_PROD,REC_PROD,630;LLC
+    Mat Read #CH_PROD,REC_PROD,632;PSN$
+    Mat Read #CH_PROD,REC_PROD,652;PSN
+    Mat Read #CH_PROD,REC_PROD,660;U2
+    Mat Read #CH_PROD,REC_PROD,664;LBSORD
+    Mat Read #CH_PROD,REC_PROD,670;U4
+    Read #CH_PROD,REC_PROD,678;U3
+    Mat Read #CH_PROD,REC_PROD,684;U3$
+    Mat Read #CH_PROD,REC_PROD,744;HZ$
+    Mat Read #CH_PROD,REC_PROD,834;A3
+    Mat Read #CH_PROD,REC_PROD,846;PFTB
+    Read #CH_PROD,REC_PROD,854;UPCT
+    Mat Read #CH_PROD,REC_PROD,856;C1$
+    Mat Read #CH_PROD,REC_PROD,894;PR_C4
+    Read #CH_PROD,REC_PROD,938;PF_LOAD2
+    Mat Read #CH_PROD,REC_PROD,944;PR_A2$
+    Mat Read #CH_PROD,REC_PROD,974;PFCO
+    Mat Read #CH_PROD,REC_PROD,990;PLV
+    Mat Read #CH_PROD,REC_PROD,1002;PLC
+    Mat Read #CH_PROD,REC_PROD,1018;PFN
+    Mat Read #CH_PROD,REC_PROD,1030;STK
+    Mat Read #CH_PROD,REC_PROD,1048;FDT
+    Mat Read #CH_PROD,REC_PROD,1056;PRFLG$
+    Mat Read #CH_PROD,REC_PROD,1066;PRBASE
+    Mat Read #CH_PROD,REC_PROD,1068;PRMKUP
+    Mat Read #CH_PROD,REC_PROD,1084;PRMKUPTYP$
+    Mat Read #CH_PROD,REC_PROD,1088;FUT
+    Mat Read #CH_PROD,REC_PROD,1100;PRPARC2
+    Mat Read #CH_PROD,REC_PROD,1108;PRREDI
+    Mat Read #CH_PROD,REC_PROD,1120;PIC$
+    Mat Read #CH_PROD,REC_PROD,1270;PRD0
+    Mat Read #CH_PROD,REC_PROD,1282;PRIML$
+    Mat Read #CH_PROD,REC_PROD,1294;PRD1
+    Mat Read #CH_PROD,REC_PROD,1304;PRD2
+    Rem {end read.prod.i}
+  Else 
+    SCRATCH$ = " ",SCRATCH$
+    SCRATCH$[1,12] = L1$[1,12]
+    Search #CH_PROD,2,1;SCRATCH$,REC_PROD,E \ If E goto outend: ! product does not exist
+    If Not(E)
+      Rem {begin src/inc/read.prod.i}
+      Mat Read #CH_PROD,REC_PROD,0;A$
+      Mat Read #CH_PROD,REC_PROD,156;B
+      Mat Read #CH_PROD,REC_PROD,256;A
+      Mat Read #CH_PROD,REC_PROD,460;A1
+      Mat Read #CH_PROD,REC_PROD,508;A2
+      Mat Read #CH_PROD,REC_PROD,512;PFU1
+      Mat Read #CH_PROD,REC_PROD,554;PFU2
+      Mat Read #CH_PROD,REC_PROD,596;PRPARC
+      Mat Read #CH_PROD,REC_PROD,620;LM
+      Mat Read #CH_PROD,REC_PROD,624;PR_PO
+      Mat Read #CH_PROD,REC_PROD,628;AGEDAY
+      Read #CH_PROD,REC_PROD,630;LLC
+      Mat Read #CH_PROD,REC_PROD,632;PSN$
+      Mat Read #CH_PROD,REC_PROD,652;PSN
+      Mat Read #CH_PROD,REC_PROD,660;U2
+      Mat Read #CH_PROD,REC_PROD,664;LBSORD
+      Mat Read #CH_PROD,REC_PROD,670;U4
+      Read #CH_PROD,REC_PROD,678;U3
+      Mat Read #CH_PROD,REC_PROD,684;U3$
+      Mat Read #CH_PROD,REC_PROD,744;HZ$
+      Mat Read #CH_PROD,REC_PROD,834;A3
+      Mat Read #CH_PROD,REC_PROD,846;PFTB
+      Read #CH_PROD,REC_PROD,854;UPCT
+      Mat Read #CH_PROD,REC_PROD,856;C1$
+      Mat Read #CH_PROD,REC_PROD,894;PR_C4
+      Read #CH_PROD,REC_PROD,938;PF_LOAD2
+      Mat Read #CH_PROD,REC_PROD,944;PR_A2$
+      Mat Read #CH_PROD,REC_PROD,974;PFCO
+      Mat Read #CH_PROD,REC_PROD,990;PLV
+      Mat Read #CH_PROD,REC_PROD,1002;PLC
+      Mat Read #CH_PROD,REC_PROD,1018;PFN
+      Mat Read #CH_PROD,REC_PROD,1030;STK
+      Mat Read #CH_PROD,REC_PROD,1048;FDT
+      Mat Read #CH_PROD,REC_PROD,1056;PRFLG$
+      Mat Read #CH_PROD,REC_PROD,1066;PRBASE
+      Mat Read #CH_PROD,REC_PROD,1068;PRMKUP
+      Mat Read #CH_PROD,REC_PROD,1084;PRMKUPTYP$
+      Mat Read #CH_PROD,REC_PROD,1088;FUT
+      Mat Read #CH_PROD,REC_PROD,1100;PRPARC2
+      Mat Read #CH_PROD,REC_PROD,1108;PRREDI
+      Mat Read #CH_PROD,REC_PROD,1120;PIC$
+      Mat Read #CH_PROD,REC_PROD,1270;PRD0
+      Mat Read #CH_PROD,REC_PROD,1282;PRIML$
+      Mat Read #CH_PROD,REC_PROD,1294;PRD1
+      Mat Read #CH_PROD,REC_PROD,1304;PRD2
+      Rem {end read.prod.i}
+    End If 
+  End If 
+End If 
+Return 
+GET_PRWH: Rem PROD WHSE
+whmisc2[0]=0
+If Not(L3[0])
+  If REC[6]
+    Rem {begin src/inc/read.prwh.i}
+    Mat Read #CH_PRWH,REC_PRWH,0;W1$
+    Mat Read #CH_PRWH,REC_PRWH,32;W1
+    Mat Read #CH_PRWH,REC_PRWH,38;W2
+    Mat Read #CH_PRWH,REC_PRWH,78;W3
+    Mat Read #CH_PRWH,REC_PRWH,228;W5
+    Mat Read #CH_PRWH,REC_PRWH,384;WHPARC
+    Read #CH_PRWH,REC_PRWH,396;WHLPOOL
+    Mat Read #CH_PRWH,REC_PRWH,400;WCOMM$
+    Read #CH_PRWH,REC_PRWH,404;FCWGT
+    Mat Read #CH_PRWH,REC_PRWH,420;W0
+    Mat Read #CH_PRWH,REC_PRWH,428;WH7
+    Mat Read #CH_PRWH,REC_PRWH,444;WH8
+    Mat Read #CH_PRWH,REC_PRWH,540;WH9
+    Mat Read #CH_PRWH,REC_PRWH,696;W7
+    Mat Read #CH_PRWH,REC_PRWH,756;WH3$
+    Mat Read #CH_PRWH,REC_PRWH,780;WHLV
+    Read #CH_PRWH,REC_PRWH,798;WHRPLN
+    Mat Read #CH_PRWH,REC_PRWH,800;WHMISC
+    Mat Read #CH_PRWH,REC_PRWH,842;WHLM
+    Mat Read #CH_PRWH,REC_PRWH,846;WHMISC2
+    Read #CH_PRWH,REC_PRWH,894;RESTRICTED
+    Mat Read #CH_PRWH,REC_PRWH,896;WHFUT
+    Mat Read #CH_PRWH,REC_PRWH,914;WHFDT
+    Read #CH_PRWH,REC_PRWH,922;VLIST
+    Mat Read #CH_PRWH,REC_PRWH,928;WHFLG$
+    Read #CH_PRWH,REC_PRWH,938;WHBASE
+    Mat Read #CH_PRWH,REC_PRWH,940;WHMKUP
+    Mat Read #CH_PRWH,REC_PRWH,956;WHMKUPTYP$
+    Mat Read #CH_PRWH,REC_PRWH,960;WHPARC2
+    Mat Read #CH_PRWH,REC_PRWH,968;WHREDI
+    Mat Read #CH_PRWH,REC_PRWH,980;WHLBS
+    Rem {end read.prwh.i}
+  Else 
+    SCRATCH$ = " ",SCRATCH$
+    SCRATCH$[1,12] = L1$[1,12]
+    SCRATCH$[13,14] = H4[2] Using "##"
+    Search #CH_PRWH,2,1;SCRATCH$,REC_PRWH,E \ If E goto outend:
+    If Not(E)
+      Rem {begin src/inc/read.prwh.i}
+      Mat Read #CH_PRWH,REC_PRWH,0;W1$
+      Mat Read #CH_PRWH,REC_PRWH,32;W1
+      Mat Read #CH_PRWH,REC_PRWH,38;W2
+      Mat Read #CH_PRWH,REC_PRWH,78;W3
+      Mat Read #CH_PRWH,REC_PRWH,228;W5
+      Mat Read #CH_PRWH,REC_PRWH,384;WHPARC
+      Read #CH_PRWH,REC_PRWH,396;WHLPOOL
+      Mat Read #CH_PRWH,REC_PRWH,400;WCOMM$
+      Read #CH_PRWH,REC_PRWH,404;FCWGT
+      Mat Read #CH_PRWH,REC_PRWH,420;W0
+      Mat Read #CH_PRWH,REC_PRWH,428;WH7
+      Mat Read #CH_PRWH,REC_PRWH,444;WH8
+      Mat Read #CH_PRWH,REC_PRWH,540;WH9
+      Mat Read #CH_PRWH,REC_PRWH,696;W7
+      Mat Read #CH_PRWH,REC_PRWH,756;WH3$
+      Mat Read #CH_PRWH,REC_PRWH,780;WHLV
+      Read #CH_PRWH,REC_PRWH,798;WHRPLN
+      Mat Read #CH_PRWH,REC_PRWH,800;WHMISC
+      Mat Read #CH_PRWH,REC_PRWH,842;WHLM
+      Mat Read #CH_PRWH,REC_PRWH,846;WHMISC2
+      Read #CH_PRWH,REC_PRWH,894;RESTRICTED
+      Mat Read #CH_PRWH,REC_PRWH,896;WHFUT
+      Mat Read #CH_PRWH,REC_PRWH,914;WHFDT
+      Read #CH_PRWH,REC_PRWH,922;VLIST
+      Mat Read #CH_PRWH,REC_PRWH,928;WHFLG$
+      Read #CH_PRWH,REC_PRWH,938;WHBASE
+      Mat Read #CH_PRWH,REC_PRWH,940;WHMKUP
+      Mat Read #CH_PRWH,REC_PRWH,956;WHMKUPTYP$
+      Mat Read #CH_PRWH,REC_PRWH,960;WHPARC2
+      Mat Read #CH_PRWH,REC_PRWH,968;WHREDI
+      Mat Read #CH_PRWH,REC_PRWH,980;WHLBS
+      Rem {end read.prwh.i}
+    End If 
+  End If 
+End If 
+Return 
+
+
+
+
+L_20000: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+If CNVTU[2] = 3 Goto L_20120:
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[2] = 0 Goto L_20120:
+L_20120: Rem "====== unibasic 5+ logic
+Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+If CNVTU[2] = 0 Goto L_20160
+If FLAG Let E = FLAG \ Goto outend:
+AMOUNT = CNVTA
+L_20160: Return 
+
+L_30000: Rem ===== set units for conversions (nonstock version)
+A[6] = L6[4];A[5] = UNF[5] \ If Not(A[5]) Let A[5] = 1;UNF[5] = 1
+B[23] = L6[2];A1[3] = UNF[4] \ If Not(A1[3]) Let A1[3] = 1;UNF[4] = 1
+PFU1[0] = EUN[0];PFU1[1] = UN[0]
+PFU1[2] = UN[1];PFU1[3] = UN[2]
+PFU1[4] = EUN[1]
+PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+PFU1[8] = UN[0];PFU1[9] = UN[0];PFU1[10] = EUN[1]
+PFU1[11] = UN[2];PFU1[12] = UN[1]
+If Not(L3[0]) Goto L_30060
+PFU1[13] = UN[0];PFU1[16] = EUN[0];PFU1[17] = EUN[0]
+PFU1[15] = CTWT
+PFU1[18] = UN[0];PFU1[19] = UN[0]
+L_30060: PFU2[0] = UNF[0];PFU2[1] = UNF[1]
+PFU2[2] = UNF[2];PFU2[3] = UNF[3]
+PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+For X1 = 1 To 4
+  For X2 = 0 To X1 - 1
+    If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+  Next X2
+Next X1
+L_30099: Return 
+
+
+
+
+OUTEND: Rem
+if not (ch[0]) close #ctlc! cntrl file
+if not (ch[1]) close #ch_poh ! purchase order header  #60
+if not (ch[2]) close #ch_pol! po lines #61
+if not (ch[3]) close #ch_roh! order header #62
+if not (ch[4]) close #ch_rol ! order lines #68
+if not (ch[5]) close #ch_prod! product file #64
+if not (ch[6]) close #ch_prwh! product warehouse #65
+If not (ch[7]) close #ch_cust! customer file
+If not (ch[8]) close #ch_rot! order total
+Close #CH_PUPS
+if sqlChan >= 0 close #sqlChan
+End 

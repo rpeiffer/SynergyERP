@@ -1,0 +1,1297 @@
+! --- ORDCPINV
+! description Order copy in Invoice or Order Lines - get data to copy
+!
+! 1.0 mm/dd/yyyy change??
+!
+! loadsave -w -n 100,10 -o prog/dxport/ordcpinv.dl4 src/ordcpinv.src
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+! ONLY ONE COPY PER ORDER - EXTERNAL SUB TO DO THE COPY
+!
+!include structure,filehandler libs & default structure dims
+Include "src/inc/filecust.inc" ! custome
+include "src/inc/fileordhead.inc" ! combined ros,rot,roh
+include "src/inc/fileprod.inc" ! product file
+include "src/inc/filerolz.inc" ! order lines
+!include "src/inc/fileprtdefault.inc" ! port default
+!include "src/inc/filewhinfo.inc" ! warehouse
+!include "src/inc/filedivifle.inc" ! division file
+!
+!
+! *declare additional dl4 intrinsic subs & functions
+!
+Declare Intrinsic sub programdump,env,FindF
+Declare Intrinsic function findchannel
+!
+! *declare additional external libs & subs & functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Sub SubErr,GetDelimiters
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,JDate$,PDate$
+Declare External Sub getportdefault
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+External Lib "librasl.lib"
+Declare External Sub Allocordlot,chkwhrasl
+!
+! NOTES: Pass in data 
+!  chan[] - channels that are already OPENED!
+!  MODE=1 - copy from open order
+!  Mode=2 - copy from invoice history
+!  S9[] - other variables passed [1]=Order/Inv to COPY
+!  
+!  DList$ - pass back data for lines to add  [999,500] (999 lines), 1-20=prod, 21-31=qty ord, 32-39=UOM#
+!      [40,50]=Linerec copied (for roltag & nonstks)
+! **main procedure
+!Declare Sub none used
+!
+!
+! dim variables used by program
+!
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+External Sub ordcpinv(e$,Intco,chan[],S9[],rec_uac,rec_roh,returnStatus,Message$,DList$[],row,tmpcnt,mode,roh. as roh, ros. as ros, rot. as rot)
+!
+ try
+	Option String Redim is legal ! in case subs dim/use same names
+	!Enter CMNum,InvNum,Chan[],Hdata[],rec_uac,rec_roh,IntCo,returnStatus,Message$,mode
+	Dim F$[20],k$[60],tmp$[100]
+	Dim K1$[50],K2$[50],K3$[50],LPKey$[60],x1$[4]
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1000] ! ,Message$[500]
+	Dim 2%,Z1[8],Z,Rasl[2]
+	Dim 3%,R[99]
+	! from 241a
+	DIM 1%,IHCURRID,ILCURRID,3%,IHCURRFACT,ILCURRFACT
+	Dim 1%,OHCURRID,OLCURRID,3%,OHCURRFACT,OLCURRFACT
+	dim 1%,cnvcu[10],3%,cnvca[10],keycurr$[10],3%,rec_curr,currfact
+	dim 3%,dsp_extucost,dsp_extncost,dsp_extuprice,dsp_extnprice
+	Dim 1%,D,DL1,J0,J6,J2,J3,J4,J5,J8,J9[2],PD1[2],SZN,W,NW,HISTTYPE,SCR1,COID,NUM
+	Dim 1%,H3[1],H4[2],C2[2],C7[4],F1,C21[2],S6[1],F7,SHPLT,MCTXBL[9],TCTXBL[9]
+	Dim 1%,RECORDUSER,NUM,LOCKPORT,USERPORTSCR,PICKBY[1],ARMonth
+	Dim 1%,LOCKPORT,C11[3],OWHT[1],CH_WT,CH_WTH,FChan[99],CommissionSource
+	Dim 2%,DL[12],H00[12],KITCOPY,CTWT[1]
+	Dim 2%,H6[8],D8,D9[20],E,F2,X1[5],I1,V1,A0[3],SLSM[9],MCODE[9],D0,S5,TCODE[9]
+	Dim 2%,C1[12],H0[12],H5[16],S1[1],T1[1],ARDATE,SL2[4],INVDATE,I[4],LCO[1],H2[0]
+	Dim 2%,KITCOPY,OWHT1[1],Z,HFAX[1],ORIGSLSM,SLSLSM
+	Dim 3%,OREF[5],INVNO,X,IOREF[5],ch[20],lp1,N0
+	Dim 3%,J1,X2,SRN[5],T2[25],CFIN[8],A4,TOT_SELL,R[99],MCHARGE[9,1],TOT[4],TCHARGE[9,1],TTOT[4]
+	Dim 3%,CST,DLT,R77,TEMPORDER[1],U5$[50],CTNWGT
+	Dim 4%,X3,C111
+	Dim KEYSHIP$[50],2%,TAXCODE,TAXTYPE,1%,STAXCODE,3%,REC[99]
+	Dim 1%,WNOTEFLAG,TYPETERM,WINNOTE$[128],UNOTEDIR$[64],CMD$[256],UNAME$[64]
+	Dim P61$[256],TAXEX$[18],T$[20],1%,BILLTAX,2%,TAXRATE,BILLTAXTYPE
+	Dim J6$[30],J1$[50],J2$[20],J0$[15],J4$[50],J5$[80],J9$[50],A2$[50]
+	Dim C1$[117],C2$[25],C5$[20],S1$[118],S2$[20],P0$[20],V0$[12],AA2$[50]
+	Dim J7$[75],J$[50],X$[20],N$[30],A$[40],P9$[50],D9$[10],Prod$[20]
+	Dim RR$[200],R2$[200],R3$[11],HMAT$[2],P60$[50],UNIT$[4],F$[16]
+	Dim D$[8],R$[34],R1$[142],D6$[20],Z1$[50],SZONE$[10],D5$[28],RETVAL$[40]
+	Dim WARN$[40],KCWT$[40],CKCWT$[40],F1$[20],PRODDESC$[156]
+	Dim DL$[20],DL1$[20],K6$[50],CSZONE$[2],2%,R6,X6,OTC
+	Dim S$[20],SHIP$[14],SHIPVIA$[12],WNOTEDIR$[128],HOMEDIR$[64],SHCONTACT$[20]
+	Dim KEYWH$[20],WebStr$[1000],custom_customer$[30]
+	Dim 2%,ORGENTBY,ORGBILLTO,VV1,CSPLT[4],ORGDATEENTERED,ORGTIMEENTERED
+	Dim 3%,REC_PRWH
+	Dim 3%,R1[30],COMMSRVCHG
+	Dim 1%,PFU1[20],CNVTU[2],SR,SR,3%,PFU2[6],A[33],CNVTA,SplitFlag
+	Dim 1%,L3[3],S2[1],PL[1],UN[2],EUN[2]
+		Dim 2%,L2[1],L4[3],L6[5],L9[1]
+		Dim 3%,L5[3],L7[12],S3[17],OLM[6],UNF[6]
+		Dim L6$[60],L1$[20],S3$[33],MT$[2]
+		Dim 1%,SNH1
+		Dim 2%,SNH[1]
+		Dim SNH$[54]
+		Dim 1%,SN1[2]
+		Dim 2%,SN2[9]
+		Dim 2%,RS1[2],RS3[2]
+		Dim 3%,RS2[4],NSINVNO,NSFRT[2]
+		Dim RS1$[30],RS2$[30],RS3$[18],RS4$[50],nsuda$[120],B4K$[2]
+	Dim List$[50,1500],Blank$[200]
+	Blank$=" ",Blank$
+	!dim roh. as roh ! order header - PASSED
+	!dim ros. as ros ! order ship to file
+	!dim rot. as rot ! order total file
+	Def FNS(H) = Int(Abs(H) * 100) * .01 * Sgn(H) ! rounding to nearest penny
+	Def FNQ(H) = Int(Abs(H) * 10 ^ Q0[1] + .1) * 10 ^ - Q0[1] * Sgn(H) 
+	If rec_roh<=0 !  order - must exist to copy lines!
+		returnstatus=0
+		Message$="NO ORDER HEADER RECORD PASSED!"
+		goto cmpDone ! what if entry of new? Only on copy
+	Endif
+	Ch_ctrl=chan[0]
+	ch_roh=chan[1]
+	ch_ros=chan[2]
+	ch_rot=chan[3]
+	ch_rol=chan[4]
+	ch_nstk=chan[5]
+	ch_lpr=chan[6]
+	ch_slpr=OpenFile(-9982,IntCo) \ if ch_slpr=-1 Error 42
+	ch_ccode=chan[8]
+	ch_prod=chan[9]
+	ch_prwh=chan[10]
+
+	coid=IntCo;Comp=IntCo ! 
+	Read #ch_ctrl,2,106;RSTK; ! restock chrg
+	Read #CH_CTRL,0,182;INVDATE;
+	Read #CH_CTRL,0,120;ARMonth;
+	READ #CH_CTRL,0,108;ARDATE;
+	MAT READ #ch_ctrl,19,50;p9$;
+	mat read #ch_ctrl,60,50;p60$;
+	mat read #ch_ctrl,61,0;p61$;
+	mat read #ch_ctrl,115,60;CUSTOM_CUSTOMER$;
+	CUSTOM_CUSTOMER$=Ucase$(RTrim$(custom_customer$))
+	ch_usrctl=findchannel()
+	Ropen #CH_USRCTL,"cntrl/usercntrl"
+	mat read #ch_usrctl,rec_uac,336;A2$;
+	Close #ch_usrctl
+	!If A2$[26,26] = "Y" Let GENCM = 1 Else Let GENCM = 0
+	ReturnStatus=1
+	Message$="OK"
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	!If Rec_roh>0
+	!	read record #Ch_Roh,rec_roh,0;roh.;
+	!	read record #CH_ROS,roh.ShipRec,0;ros.;
+	!	read record #CH_ROT,roh.TotRec,0;rot.;
+	!Endif
+	!roh.InvNum=InvNum ! in case not written?
+	InvNum=roh.InvNum ! curr inv?
+	OrdNum=roh.ordnum ! curr ord
+	r[8]=rec_roh
+	r[9]=roh.ShipRec
+	r[10]=roh.TotRec
+	n0=S9[1] ! target to copy!
+    let ch_curr=0
+	if p61$[136,136]="Y"
+		ch_curr=OpenFile(-9712,IntCo) \ if ch_curr = -1 Error 42 
+	endif
+	If Mode=1 ! Open Order files to copy from?
+		ch_roh2=findchannel()
+		read #ch_ctrl,88,1840;f$;
+		ROPEN #CH_ROH2,f$
+		K$=" "
+		CROH_Loop: ! loop all orders
+		Search #CH_ROH2,3,1;K$,R,E 
+		If E = 2 Goto L_4500
+		if k$[1,2] > "8" if k$[1,2] < "13" let k$ = "15" \ Goto CROH_Loop ! bypass credits (don't copy them)
+		If K$[1,2] > "19" If K$[1,2] < "29" Let K$ = "30" \ Goto CROH_Loop ! BYPASS DELETE
+		X = K$[3,8] \ If X = roh.OrdNum Goto CROH_Loop ! ignore - curr order
+		if x=N0 goto L_4600 ! found the one to copy!
+		Goto CROH_Loop
+		L_4500: ! end of file - not found
+		ReturnStatus=0 ! web to offer ok/cancel
+		Message$="ORDER TO COPY "+Str$(N0)+" NOT ON FILE "
+		close #ch_roh2
+		goto cmpdone ! none found get out (NO ALLOW TO CONTINUE
+		L_4600: Close #CH_ROH2
+		s9[2]=r ! retain
+	Endif
+	if mode=2 ! check if Inv in history
+		! on to next check
+		ch_invh=findchannel()
+		read #ch_ctrl,88,1136;f$;
+		ROpen #ch_invh,f$
+		
+		L_10080: Rem ! "check history for it
+		K1$ = N0 Using "30##########"
+		Search #ch_invh,2,1;K1$,R,E  \ If E > 1 ERROR 11000 ! Gosub ERR_SEARCH
+		If E ! we do not check credits as we aren't copying them
+		  ReturnStatus=0
+		  Message$="Invoice "+Str$(N0)+" not found in history"
+		  try close #ch_invh else rem
+		  goto cmpdone ! L_10130 ! not found get out (no copy allowed!)
+		End If 
+		s9[2]=r
+	Endif ! of mode 2 - check if exists
+	goto CChk2done ! on file - continue (rem if ordtype check wanted)
+		! we may need to restrict types - so have 'em here
+		Read #ch_invh,R,16;Z; \ Mat Read #ch_invh,R,132;I;
+		HISTTYPE = I
+		L_10108: Rem "recheck if a ok
+		A_OK = 0
+		!Gosub OK_TO_COPY_CHECKS
+		OK_TO_COPY_CHECKS: Rem  A_OK=99  means it's ok to copy
+		If I = 15 Let Message$ = "Invoice is a bill & hold -- not allowed" \ Returnstatus=0 \ goto cchk2done 
+		If I = 16 Let Message$ = "Invoice is a transfer -- not allowed" \ ReturnStatus=0 \ goto cchk2done  
+		! If I=37 or I=36 Let Message$ = "Invoice is EVAP -- not allowed" \ ReturnStatus=0 \ goto cchk2done  
+		Read #ch_invh,R,82;W;
+		If Z <> roh.custnum Goto L_13160
+		!If W = H4[2] Gosub L_13100
+		If roh.wh and W <> roh.wh Goto L_13110
+		If (I = 7 Or I = 8) And I[4] <> roh.ConsWh Let roh.ConsWh = I[4] \ roh.OrdType = I  \ Goto L_13165
+		If I <> 21  Let A_OK = 99 \ goto cchk2done  ! native allows 22 but not 21?
+		Message$ = "INVOICE IS A REPAIR -- NOT ALLOWED" \ ReturnStatus=0 \ goto cchk2done  
+		!L_13100: J7$ = "WAREHOUSE ON C/M IS THE SAME AS INVOICE COPIED FROM" \ Gosub L_7600 \ goto cchk2done  
+		L_13110: ! whse diff - NATIVE PROMPTS WHICH WHSE TO USE
+		ReturnStatus=0 ! 0 - not a fail - just a warning
+		Message$="Warehouse # are different Inv="+Str$(W)+" CM="+Str$(roh.wh)
+		goto cchk2done  
+		L_13160: Rem customer code match warning
+		Message$ = "CUSTOMER CODES DO NOT MATCH" \ ReturnStatus=0
+		InvNum = Roh.OrdNum ! H0[7]
+		!If GENCM
+		!  WARN$ = "Customer Code Does Not Match"
+		!  Gosub WARN
+		!End If 
+		goto cchk2done  
+		L_13165: ! cont
+		If returnstatus<>1 goto cchk2done ! keep prev message/status
+		ReturnStatus=1 ! 
+		A_OK=99
+		Message$ = "ORDER TYPE AND CONSIGNMENT WAREHOUSE CHANGED TO MATCH HISTORY ENTRY" ! \ Gosub L_7600 \ goto cchk2done 
+		! continue with copy
+		CChk2done: ! checking complete - next
+		! If A_OK Goto L_10120 ! unrem is checking
+		
+		L_10120:! Print @0,23;"OK TO COPY FROM THIS INVOICE? (Y/<CR>) ";'CL';
+		! no mention of sending lines - left in jic
+		goto L_10130 ! bypass send lines back for selection (leave if ever needed!)
+		
+		!Input ""Z1$
+		!If GENCM If Z1$ = "" Let OREF[1] = H0[7] \ Goto L_3450
+		! ok - now generate a list of lines on Invoice
+		ch_invl=findchannel()
+		Read #ch_ctrl,88,1184;J5$[1,16]; \ Open #ch_invl,J5$ 
+		K$=" ",K$
+		K$=K1$[3]
+		Do
+			Search #ch_invl,3,1;K$,R,E
+			If E exit do
+			if k$[1,10]<>K1$[3,12] exit do
+			Mat Read #ch_invl,R,0;L2;
+			Mat Read #ch_invl,R,8;L3;
+			Mat Read #ch_invl,R,16;L4;
+			Mat Read #ch_invl,R,32;L5;
+			Mat Read #ch_invl,R,56;L6;
+			Mat Read #ch_invl,R,80;L6$;
+			Mat Read #ch_invl,R,140;L1$;
+			Mat Read #ch_invl,R,160;L9;
+			Mat Read #ch_invl,R,168;L7;
+			Mat Read #ch_invl,R,246;PL;
+			Mat Read #ch_invl,R,250;UN;
+			Mat Read #ch_invl,R,256;S2;
+			Mat Read #ch_invl,R,260;S3;
+			Mat Read #ch_invl,R,368;MT$;
+			Mat Read #ch_invl,R,370;S3$;
+			Mat Read #ch_invl,R,404;OLM;
+			Mat Read #ch_invl,R,446;EUN;
+			Mat Read #ch_invl,R,452;UNF;
+			Mat Read #ch_invl,R,494;LCO;
+			Mat Read #ch_invl,R,502;CST;
+			Mat Read #ch_invl,R,616;LP1;
+			Mat Read #ch_invl,R,622;CommissionSource;
+			Mat Read #ch_invl,r,624;ilcurrid;
+			Mat Read #ch_invl,r,626;ilcurrfact;
+			If L3[0] And S2[0] = 3 Goto chkcmln ! auto message add?
+				
+			If L7[4] = 0 And S2[0] <> 3 Goto LNDetlDone
+			If P61$[59,59] = "Y" And W <> H4[2] And L3[0] = 0 !
+			  KEYWH$ = " ",KEYWH$;KEYWH$[1,12] = L1$[1,12];KEYWH$[13] = H4[2] Using "##"
+			  Search #ch_prwh,2,1;KEYWH$,REC_PRWH,E
+			  If E goto LNDetlDone ! not valid - no list
+				
+			End If 
+			If P60$[24,24] = "Y" Let OLM[4] = OLM[5]
+			chkcmln: K3$ = " ",K3$ \ K3$[1,6] = CMNum Using "######"
+			K3$[7,10] = L3[2] Using "###" ! K$[11,14]
+			Search #ch_rol,2,1;K3$,R,E \ If E > 1 ERROR 11000 ! Gosub ERR_SEARCH
+			If Not(E) goto LNDetlDone ! line already on order
+			If L3[0] And S2[0] = 3 ! auto message add?
+				WebStr$=Str$(L3[2]),fdel$,"MSG",fdel$
+				WebStr$=webstr$,RTrim$(L6$[1,30]),fdel$,RTrim$(L6$[31,60]),fdel$
+				WebStr$=webstr$," ",fdel$," ",fdel$," ",fdel$," ",fdel$," ",fdel$ ! qo,qs,qum,p,pum
+				Webstr$=WebStr$," ",fdel$," ",fdel$," ",fdel$," ",fdel$ ! c,cum,t,w
+				List$[row]=WebStr$
+				row=row+1 \ If row > tmpcnt Let tmpcnt = expandarray(e$,List$[])
+				Goto LnDetlDone ! no other processing required
+			Endif
+			If Fra(L7[4]) Goto LNDetlDone ! No Fractional base
+			A[6] = L6[4];A[5] = UNF[5] \ If Not(A[5]) Let A[5] = 1;UNF[5] = 1
+			PFU1[0] = EUN[0];PFU1[1] = UN[0]
+			PFU1[2] = UN[1];PFU1[3] = UN[2]
+			PFU1[4] = EUN[1]
+			PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+			PFU1[8] = UN[0];PFU1[9] = UN[0];PFU1[10] = EUN[1]
+			PFU1[11] = UN[2];PFU1[12] = UN[1]
+			If L3[0]
+				PFU1[13] = UN[0];PFU1[16] = EUN[0];PFU1[17] = EUN[0]
+				PFU1[18] = UN[0];PFU1[19] = UN[0]
+			Endif
+			PFU2[0] = UNF[0];PFU2[1] = UNF[1]
+			PFU2[2] = UNF[2];PFU2[3] = UNF[3]
+			PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+			For X1 = 1 To 4
+			  For X2 = 0 To X1 - 1
+				If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+			  Next X2
+			Next X1
+			! set up line detl
+			WebStr$=Str$(L3[2]),fdel$,RTrim$(L1$[1,12]),fdel$
+			WebStr$=WebStr$,RTrim$(l6$[1,30]),fdel$,RTrim$(L6$[31,60]),fdel$
+			cnvtu[0]=0;cnvtu[1]=un[0];cnvtu[2]=1
+			Cnvta=L7[2] \ gosub L_20000
+			WebStr$=WebStr$,Str$(Amount),fdel$ ! qty ord
+			Cnvta=L7[4] \ gosub L_20000
+			WebStr$=WebStr$,Str$(Amount),fdel$ ! qty ship
+			tmp$=XUNIT$(un[0],ch_ccode)
+			WebStr$=Webstr$,RTrim$(tmp$),fdel$ ! qty u/m
+			Cnvtu[0]=0;cnvtu[1]=un[1];cnvtu[2]=2
+			CNVTA=OLM[3] \ gosub L_20000 ! NET PRICE 
+			if p61$[136,136]="Y" and ilcurrfact<>0 and amount<>0 !  
+				let cnvcu[0]=1
+				let cnvcu[1]=0
+				let cnvca[0]=amount
+				let cnvca[1]=ilcurrfact
+				call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$
+				let amount=fnq(cnvca[0])
+			endif
+			WebStr$=WebStr$,Str$(Amount),fdel$ ! price net olm[3]
+			tmp$=XUNIT$(un[1],ch_ccode)
+			WebStr$=Webstr$,RTrim$(tmp$),fdel$ ! price u/m
+			Cnvtu[0]=0;cnvtu[1]=un[2];cnvtu[2]=2
+			CNVTA=L5[1] \ gosub L_20000
+			if p61$[136,136]="Y" and  ilcurrfact<>0 and amount<>0 !  
+				let cnvcu[0]=1
+				let cnvcu[1]=0
+				let cnvca[0]=amount
+				let cnvca[1]=ilcurrfact
+				call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$
+				let amount=fnq(cnvca[0])
+			endif
+			WebStr$=WebStr$,Str$(Amount),fdel$ ! cost L5[1]
+			tmp$=XUNIT$(un[2],ch_ccode)
+			WebStr$=Webstr$,RTrim$(tmp$),fdel$ ! cost u/m
+			tmp$="N" \ if L6[5]>0 let tmp$="Y"
+			WebStr$=Webstr$,RTrim$(tmp$),fdel$ ! taxable
+			WebStr$=WebStr$,Str$(L4[3]),fdel$ ! whse
+			List$[row]=WebStr$
+			row=row+1 \ If row > tmpcnt Let tmpcnt = expandarray(e$,List$[])
+		LNDetlDone: ! finished - next
+		Loop
+		List$[row]=esdel$ ! if sending lines (maybe in the future)
+		! end of send lines back for selection
+
+		! If Not(GENCM) If Z1$ = "" Let OREF[1] = H0[7] \ Print Using "########";@9,11;OREF[1];
+		! List$[row]=esdel$
+		if ch_invh Try Close #ch_invh  Else Rem
+		! Try Close #ch_arh   Else Rem
+		if ch_invl Try close #CH_INVL  Else Rem
+	L_10130: ! after send lines - now the actual COPY
+	If Mode=2 ! do copy - inv hist - need hist files!!
+		! NW = roh.wh ! H4[2] - 02/10/12 - cm whse to inv whse!?
+		ch_invh=findchannel()
+		read #ch_ctrl,88,1136;f$;
+		ROpen #ch_invh,f$
+		Ch_invs=findchannel()
+		Read #ch_ctrl,88,1152;J5$[1,16]; \ Open #ch_invs,J5$ ! #37
+		ch_invt=findchannel()
+		Read #ch_ctrl,88,1168;J5$[1,16]; \ Open #ch_invt,J5$ ! #38
+		ch_invl=findchannel()
+		Read #ch_ctrl,88,1184;J5$[1,16]; \ Open #ch_invl,J5$ ! #33
+		CH_INVNS=findchannel()
+		J5$="4/SPRDDESCH"+Str$(COID) \ ROpen #ch_invns,J5$ ! #34
+		!CHNL = 99 \ Gosub GETCHAN \ CH_HIST_SN = CHNL
+		CH_HIST_SN = findchannel()
+		Read #ch_ctrl,88,2960;J5$[1,16]; \ Ropen #CH_HIST_SN,J5$
+	Else  ! mode 1 = order copy - set up chans to same
+		ch_invh=ch_roh
+		ch_invt=ch_rot
+		ch_invs=ch_ros
+		ch_invl=ch_rol
+		ch_invns=ch_nstk
+	Endif ! of open hist files
+		CH_SN = findchannel()
+		Read #ch_ctrl,88,416;J5$[1,16]; \ Open #CH_SN,J5$
+		CH_ORD_SN = findchannel()
+		Read #ch_ctrl,88,2944;J5$[1,16]; \ Open #CH_ORD_SN,J5$
+		J5$ = "3/CTWTQTY" + Str$(COID)
+		Call FindF(J5$,FOUND)
+		If FOUND
+		  CH_WT = findchannel()
+		  Open #CH_WT,J5$
+		  J5$ = "4/CTWTQTYH" + Str$(COID)
+		  Call FindF(J5$,FOUND) 
+		  If FOUND
+			CH_WTH = findchannel()
+			Ropen #CH_WTH,J5$
+		  Else 
+			CH_WTH = 0
+			Close #CH_WT
+			CH_WT = 0
+		  End If 
+		Else 
+		  CH_WT = 0;CH_WTH = 0
+		End If 
+		! first off read using pm variables! as that's what the routine uses!
+		Mat read #ch_roh,R[8];H0
+		Mat read #ch_roh,R[8],52;H3
+		read #ch_roh,R[8],56;TOT_SELL
+		Mat read #ch_roh,R[8],64;LOCKPORT
+		Mat read #ch_roh,R[8],66;V0$
+		Mat read #ch_roh,R[8],78;H4
+		Mat read #ch_roh,R[8],84;C5$
+		Mat read #ch_roh,R[8],104;H5
+		Mat read #ch_roh,R[8],278;SLSM
+		Mat read #ch_roh,R[8],408;H6
+		Mat read #ch_roh,R[8],444;HMAT$
+		Mat read #ch_roh,R[8],446;P0$
+		Mat read #ch_roh,R[8],466;HFAX
+		read #ch_roh,R[8],482;H2
+		Mat read #ch_roh,R[8],486;OWHT
+		Mat read #ch_roh,R[8],490;OWHT1
+		Mat read #ch_roh,R[8],504;PICKBY;
+		Mat read #ch_roh,R[8],512;OREF;
+		Mat read #ch_roh,R[8],568;COMMSRVCHG
+		Mat read #ch_roh,R[8],548;CSPLT;
+		Mat read #ch_roh,R[8],598;SplitFlag;
+		Mat Read #ch_roh,r[8],624;ohcurrid;
+		Mat Read #ch_roh,r[8],626;ohcurrfact;
+		R[10]=h0[3]
+		Rem read  TOTALS
+		Mat read #ch_rot,R[10],0;T1
+		Mat read #ch_rot,R[10],8;T2
+		Mat read #ch_rot,R[10],168;MCODE
+		Mat read #ch_rot,R[10],208;MCHARGE
+		Mat read #ch_rot,R[10],358;MCTXBL
+		Mat read #ch_rot,R[10],328;TOT;
+		read #ch_rot,R[10],400;INVNO;
+		R[9]=h0[2]
+		Rem SHIPTO
+		Mat read #ch_ros,R[9],0;S1
+		Mat read #ch_ros,R[9],8;S1$
+		Mat read #ch_ros,R[9],126;S2$
+		read #ch_ros,R[9],146;S5
+		Mat read #ch_ros,R[9],150;S6
+		Mat read #ch_ros,R[9],154;SRN;
+		read #ch_ros,R[9],190;INVNO;
+
+		ORGBILLTO = roh.billto ! H0[1]
+		ORGENTBY = roh.EntBy ! H5[0]
+        ORGDATEENTERED=H5[15]
+        ORGTIMEENTERED=H5[16]
+
+		Z1[0] = roh.ordnum;Z1[1] = roh.invnum
+		Z1[2] = roh.orddate;Z1[3] = roh.SlsmNum;Z1[4] = roh.ShipType
+		! If S9[7]=1 goto L_10410 ! already did a header copy! (for if user selects multiple lines)
+		let R=S9[2] ! record found above!
+
+		goto L_10410 ! BYPASS - HEADER STAYS THE SAME!!!!
+
+		! read history invoice using PM vars to replace them
+		Mat Read #ch_invh,R;H0;
+		Mat Read #ch_invh,R,52;H3;
+		Read #ch_invh,R,446;P0$;
+		Read #ch_invh,R,66;V0$;
+		Mat Read #ch_invh,R,78;H4;
+		Read #ch_invh,R,84;C5$;
+		Mat Read #ch_invh,R,104;H5;
+		Mat Read #ch_invh,R,278;SLSM;
+		Read #ch_invh,R,482;H2;
+		Read #ch_invh,R,494;OWHT1[1];
+		Mat Read #ch_invh,R,512;IOREF;
+		Mat Read #ch_invh,R,568;COMMSRVCHG;
+		Mat read #ch_invh,R,548;CSPLT;
+		Mat read #ch_invh,R,598;SplitFlag;
+        Mat Read #ch_invh,r,624;ihcurrid;
+		Mat Read #ch_invh,r,628;ihcurrfact;
+		! another quick check
+		If H5[7] = 15 Let Message$ = "Invoice is a bill & hold -- not allowed" \ Returnstatus=0 \ goto cpldone 
+		If h5[7] = 16 Let Message$ = "Invoice is a transfer -- not allowed" \ ReturnStatus=0 \ goto cpldone
+		If H5[7]= 21 Let Message$="Invoice is a Repair -- not allowed" \ returnstatus=0 \ goto cpldone
+		! If H5[7]=37 or H5[7]=36 Let Message$="Invoice is EVAP -- not allowed" \ returnstatus=0 \ goto cpldone
+		If H0[4]<>roh.custnum let Message$ = "CUSTOMER CODES DO NOT MATCH" \ ReturnStatus=0 \ goto cpldone
+		
+		If Not(IOREF[2]) Let IOREF[2] = H0[7]
+		H0 = roh.status ! 90 ! keep same
+		H0[1] = ORGBILLTO
+		H5[0] = ORGENTBY
+		h5[15]=ORGDATEENTERED
+		h5[16]=ORGTIMEENTERED
+		If H5[7] = 4 Or H5[7] = 15 Let H5[7] = 1
+		if h5[7]=36 or h5[7]=37 let s9[6]=0 ! recalc comm!
+		H0[7] = Z1[0]
+		H0[8] = INVDATE
+		H0[9] = Z1[2]
+		H3[1] = Z1[4]
+		! H4[2] = NW ! inv whse becomes cm whse - 02/10/12
+		H5[1] = 0
+		H5[2] = 0
+		OREF[3] = IOREF[3] ! orig ord
+		if custom_customer$<>"MORRISETTE" let OREF[2] = IOREF[2] ! orig ord
+		If s9[6]=1 ! copy commrate
+			H5[3] = 1 ! commiss override
+			H5[10] = 1 ! cm from invhist
+		Else ! no copy
+			Let H5[3]=0;Slsm[5]=0 ! "don't copy comm %
+			Let H5[10]=0 ! "not copied
+			Let ORef[2]=0 ! "to show not complete copy (and to recalc commission!)
+		Endif
+		if h5[7]=36 or h5[7]=37 ! EVAP - curr or last month
+			Mat Read #ch_invt,IOREF[5],8;T2;
+			Let X$=T2[25] Using "&&&&&&&&&";X=x$[8,9] ! "accept ar month
+			Let X1[1]=x$[2,3] ! "accepted Ar year - Hist Invoice
+			Let X$=ARDate Using "&&&&&&";X1[2]=X$[1,2] ! "curr AR Year
+			If X=ARMonth and X1[1]=X1[2] ! "this month and AR Year
+				Let H3[1]=16 ! "curr month EVAP
+			Else
+				Let H3[1]=15 ! "prev month EVAP
+			Endif
+		Endif
+		If H0[11] <> Z1[3] Let J1 = H0[11];H0[11] = Z1[3] \ Gosub L_6800 \ H0[11] = J1
+		Gosub L_8800 ! write header
+		Mat Read #ch_invs,IOREF[4],0;S1;
+		Mat Read #ch_invs,IOREF[4],8;S1$;
+		Mat Read #ch_invs,IOREF[4],126;S2$;
+		Read #ch_invs,IOREF[4],146;S5;
+		Mat Read #ch_invs,IOREF[4],150;S6;
+		Mat Read #ch_invs,IOREF[4],154;SRN;
+		S1[0] = 32
+		S1[1] = Z1[0]
+		Gosub L_8940 ! write shipto
+		Mat Read #ch_invt,IOREF[5],0;T1;
+		Mat Read #ch_invt,IOREF[5],8;T2;
+		Mat Read #ch_invt,IOREF[5],168;MCODE;
+		Mat Read #ch_invt,IOREF[5],208;MCHARGE; \ Mat Read #ch_invt,IOREF[5],358;MCTXBL;
+		Mat Read #ch_invt,IOREF[5],328;TOT;
+		T1[0] = 22
+		If RSTK Let TMP[0] = T2[4];TMP[1] = 0 Else Let TMP[0] = T2[4];TMP[1] = T2[6]
+		T1[1] = Z1[0]
+		For X = 0 To 25 \ T2[X] = 0 \ Next X
+		For X = 0 To 9 \ TCODE[X] = MCODE[X];MCODE[X] = 0;TCHARGE[X,0] = MCHARGE[X,0];MCHARGE[X,0] = 0;TCHARGE[X,1] = MCHARGE[X,1];MCHARGE[X,1] = 0;TCTXBL[X] = MCTXBL[X];MCTXBL[X] = 0 \ Next X
+		For X = 0 To 4 \ TTOT[X] = TOT[X];TOT[X] = 0 \ Next X
+		T2[12] = 0 \ T2[13] = 0
+		T2[21] = 0
+		Gosub L_8900 ! write totals
+		Rem PUT CORRECT REC # IN SORDFLEH(DONE AGAIN LATER- THIS ONE FOR RECOVERY)
+		H0[2] = R[9]
+		H0[3] = R[10]
+		Mat Write #ch_roh,R[8];H0;
+		! ============= no header changes =========
+
+		L_10410: Rem "============================================= do line items
+		KITCOPY = 0;numline=0
+		Z1$ = N0 Using "##########"
+		K1$ = " ",K1$;K1$ = N0 Using "##########"
+		if mode=1 ! orders!!
+			Z1$ = N0 Using "######"
+			K1$ = " ",K1$;K1$ = N0 Using "######"
+		endif
+		L_10425: ! Print @0,23;"ENTER LINE # TO COPY, ''ALL'' OR  0: WHEN DONE: ";'CL';
+		! Input ""J1$
+		! Call dxget("CPLINE",tmp$) ! passed in s9[8]
+		J1$=Str$(S9[8]) ! UCase$(RTrim$(tmp$))
+		if s9[8]=-1 let j1$="ALL"
+		let j1$="ALL" !	ALWAYS COPY ALL LINES? (leave s9[8] incase needed)
+		If J1$ = "0" Goto L_10930 ! done with line copy (no lines selected)
+		L_10440: ! Line loop here!
+		If J1$ = "ALL"
+		  
+		  Search #ch_invl,3,1;K1$,R,E \ If E > 2 ERROR 11000 ! Gosub ERR_SEARCH
+		  If E  Goto L_10930
+		  if mode=2 if K1$[1,10] <> Z1$ goto L_10930
+		  if mode=1 if K1$[1,6] <> Z1$ goto L_10930
+		  J1 = 0 ! no single line copied
+		Else  ! single line copy
+		  J1 = J1$;K1$[11,13] = J1 Using "###"
+		  if mode=1 let k1$[7,9] = J1 Using "###"
+		  Search #ch_invl,2,1;K1$,R,E \ If E > 1 ERROR 11000 ! Gosub ERR_SEARCH
+		  If E !Let J7$ = "LINE DOESN'T EXIST" \ Gosub L_7600 \ Goto L_10410
+			Returnstatus=0
+			Message$="LINE NOT FOUND!"
+			goto cpldone
+		  Endif
+		End If 
+		! personally I like the send product,qty,umrec back so serpordl can re-price etc!
+		Mat Read #ch_invl,R,0;L2;
+		Mat Read #ch_invl,R,8;L3;
+		Mat Read #ch_invl,R,16;L4;
+		Mat Read #ch_invl,R,32;L5;
+		Mat Read #ch_invl,R,56;L6;
+		Mat Read #ch_invl,R,80;L6$;
+		Mat Read #ch_invl,R,140;L1$;
+		Mat Read #ch_invl,R,160;L9;
+		Mat Read #ch_invl,R,168;L7;
+		Mat Read #ch_invl,R,246;PL;
+		Mat Read #ch_invl,R,250;UN;
+		Mat Read #ch_invl,R,256;S2;
+		Mat Read #ch_invl,R,260;S3;
+		Mat Read #ch_invl,R,368;MT$;
+		Mat Read #ch_invl,R,370;S3$;
+		Mat Read #ch_invl,R,404;OLM;
+		Mat Read #ch_invl,R,446;EUN;
+		Mat Read #ch_invl,R,452;UNF;
+		Mat Read #ch_invl,R,494;LCO;
+		Mat Read #ch_invl,R,502;CST;
+		Mat Read #ch_invl,R,616;LP1;
+		Mat Read #ch_invl,R,622;CommissionSource;
+		Mat Read #ch_invl,r,624;ilcurrid;
+		Mat Read #ch_invl,r,626;ilcurrfact;
+		If L3[0] And S2[0] = 3 Goto L_10580 ! auto message add?
+		If L7[2] <= 0 And J1 > 0 ! single line
+			ReturnStatus=0
+			Message$="LINE IS ZERO ORDERED..COULD NOT COPY"
+			goto cpldone
+		Endif
+		If L7[2] <= 0 And S2[0] <> 3 Goto L_10440 ! no order qty and not message line - next!
+		If P61$[59,59] = "Y" And W <> H4[2] And L3[0] = 0 !does whse allow product?
+		  KEYWH$ = " ",KEYWH$;KEYWH$[1,12] = L1$[1,12];KEYWH$[13] = H4[2] Using "##"
+		  Search #ch_prwh,2,1;KEYWH$,REC_PRWH,E
+		  If E
+			!J7$ = "Product " + L1$[1,12] + " Not Valid For Warehouse"
+			!Gosub L_7600
+			returnstatus=0
+			Message$="Product " + L1$[1,12] + " Not Valid For Warehouse"
+			If J1 ! single line
+			  Goto cpldone ! L_10425
+			Else 
+			  !Signal 3,10
+			  Goto L_10440 ! next
+			End If 
+		  End If 
+		End If 
+		
+		L_10580: ! check if line on order already
+		K3$ = " ",K3$ \ K3$[1,6] = Z1[0] Using "######"
+		K3$[7,10] = K1$[11,14]
+		if mode=1 let k3$[7,10]=k1$[7,9]+" "
+		Search #ch_rol,2,1;K3$,R,E \ If E > 1 ERROR 11000 ! Gosub ERR_SEARCH
+		If Not(E) If J1$ = "ALL" Goto L_10440 ! already there - bypass
+		If Not(E) ! single line
+			!Let J7$ = "LINE ALREADY COPIED" \ Gosub L_7600 \ Goto L_10410
+			ReturnStatus=0
+			Message$="LINE ALREADY COPIED"
+			goto cpldone
+		Endif
+		If Fra(L7[2]) Gosub L_10980 \ Goto L_10440 ! broken base - bypass
+		if l3[0] and l7[2]<=0 goto L_10440 ! bypass messg and nonstk with no order!
+		! Plan: can send back to serpordl the following
+		! this way serpordl can re-price/recost, whse, cpicheck, tax, commission, etc
+		! as it is already there!! instead of duplicating and maintaining two places!
+		! TTLPRODS - number of line items DList$[0,1-5]
+		! PRODID# (1-ttl) - product id DList$[#,1-12]
+		! QTY# (1-ttl) - Quantity ordered in SellUM Dlist$[#,15-25] (########.##)
+		! UM# (1-ttl) - Qty ordered Sell UM Rec # DList$[#,26-30] 
+		! LineRec  - Line rec copied DList$[31,40]
+		! Optional:
+		! SHIPQTY# (1-ttl) in sellum
+		! BOQTY# (1-ttl) in sellum
+		! SUBSTFLG# (1-ttl) - 0/1 is a substitute 0=N, 1=Y
+		! LTYPE# (1-ttl) - NSTK, STK, etc DList$[41,45]
+		! if LType=NSTK 
+		!    also LPFLE# - c=cust, s=shiplist last price file DList$[46,46]
+		!    and LPREC# - the last price record DList$[50,59]
+		A[6] = L6[4];A[5] = UNF[5] \ If Not(A[5]) Let A[5] = 1;UNF[5] = 1
+		PFU1[0] = EUN[0];PFU1[1] = UN[0]
+		PFU1[2] = UN[1];PFU1[3] = UN[2]
+		PFU1[4] = EUN[1]
+		PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+		PFU1[8] = UN[0];PFU1[9] = UN[0];PFU1[10] = EUN[1]
+		PFU1[11] = UN[2];PFU1[12] = UN[1]
+		If Not(L3[0]) Goto L_30060
+		PFU1[13] = UN[0];PFU1[16] = EUN[0];PFU1[17] = EUN[0]
+		PFU1[18] = UN[0];PFU1[19] = UN[0]
+		L_30060: PFU2[0] = UNF[0];PFU2[1] = UNF[1]
+		PFU2[2] = UNF[2];PFU2[3] = UNF[3]
+		PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+		For X1 = 1 To 4
+		  For X2 = 0 To X1 - 1
+			If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+		  Next X2
+		Next X1
+		prod$=L1$[1,12]
+		if l3[0] let prod$=s3$[1,20]
+		if rtrim$(prod$)="" let prod$=l1$[1,12]
+		if l3[0] and l7[2]>0 ! nonstk
+			gosub getlprrec
+			if lprec<=0 ! have to straight copy? ! goto L_10440 ! no lp rec - bypass?
+			Endif ! for any setup
+		endif
+		CNVTA = L7[2];CNVTU[0] = 0;CNVTU[1] = un[0];CNVTU[2] = 1
+		Gosub L_20000
+		QtyOrd = AMOUNT ! in sell UM (UN[0])
+		numline=numline+1
+		Dlist$[0]=Str$(numline)
+		tmp$=prod$+blank$
+		tmp$[21]=Qtyord using "########.##"+Blank$
+		tmp$[32]=Str$(UN[0])+Blank$ ! sell um
+		tmp$[40]=Str$(R)+Blank$ ! line rec #
+		tmp$[51]="STK"+blank$ ! as default
+		If l3[0] ! nonstock (qty check already done)
+			tmp$[51]="NSTK"+Blank$
+			if lprec<=0 let tmp$[51]="CNSTK"+Blank$ ! signal to copy nonstock line
+			tmp$[56,56]=x1$ ! type c or s
+			tmp$[60]=Str$(LPRec)+blank$
+		Endif
+		! so up to 70 used - 71+ to 500 remains
+		DList$[numline]=tmp$ ! move in to return string
+		goto FinLineCpy ! done - create in serpordl!!!
+		! we are not creating lines here as it is required to treat the new lines as if they
+		! were entered in serpordl for the first time
+		! IE: New price/cost, tax, inventory, etc
+		E = 2;R=0
+		Search #ch_rol,1,0;K3$,R,E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+		L2[0] = 12;L2[1] = Z1[0]
+		L7[0] = 0 \ L7[1] = 0 \ L7[3] = 0
+		L7[2] = L7[4];rec_rol=R
+		L4[3] = H4[2] ! all lines same whse as header
+		if p61$[136,136]="Y"
+			let olcurrid=ohcurrid
+			let olcurrfact=ohcurrfact
+		endif
+		if p61$[136,136]="Y" and olcurrfact<>0 and ilcurrfact<>0 and olcurrfact<>ilcurrfact ! currency is same factor
+			if olcurrid<>0 and ilcurrid<>0 and ilcurrid=olcurrid ! same currency 
+				If olm[3]<>0 ! net price
+					Cnvtu[0]=0;cnvtu[1]=un[1];cnvtu[2]=2
+					CNVTA=OLM[3] \ gosub L_20000 ! NET PRICE  ! go from base to pricing um 
+					let cnvcu[0]=1; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=ilcurrfact
+					call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert up  to original currency $
+					let amount=(cnvca[0])
+					let cnvcu[0]=2; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=olcurrfact
+					call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert down  to current currency $
+					let amount=(cnvca[0])
+					CNVTU[0] = un[1];CNVTU[1] = 0;CNVTU[2] = 6 ! to base no round was =2
+					CNVTA=amount \ gosub L_20000 
+					let olm[3]=amount
+				endif
+				If L5[2]<>0 ! UNIT price
+					Cnvtu[0]=0;cnvtu[1]=un[1];cnvtu[2]=2
+					CNVTA=L5[2] \ gosub L_20000 ! UNIT PRICE  ! go from base to pricing um 
+					let cnvcu[0]=1; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=ilcurrfact
+					call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert up  to original currency $
+					let amount=(cnvca[0])
+					let cnvcu[0]=2; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=olcurrfact
+					call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert down  to current currency $
+					let amount=(cnvca[0])
+					CNVTU[0] = un[1];CNVTU[1] = 0;CNVTU[2] = 6 ! to base no round was =2
+					CNVTA=amount \ gosub L_20000 
+					let L5[2]=amount
+				endif
+				If L7[8]<0 ! PRICE UPCHARGE BY AMOUNT
+					Cnvtu[0]=0;cnvtu[1]=un[1];cnvtu[2]=2
+					CNVTA=abs(L7[8])\ gosub L_20000 ! UNIT PRICE  ! go from base to pricing um 
+					let cnvcu[0]=1; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=ilcurrfact
+					call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert up  to original currency $
+					let amount=(cnvca[0])
+					let cnvcu[0]=2; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=olcurrfact
+					call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert down  to current currency $
+					let amount=(cnvca[0])
+					CNVTU[0] = un[1];CNVTU[1] = 0;CNVTU[2] = 6 ! to base no round was =2
+					CNVTA=amount \ gosub L_20000 
+					let L7[8]=-(abs(amount))
+				endif
+
+				If L5[1]<>0 ! unit cost
+					Cnvtu[0]=0;cnvtu[1]=un[2];cnvtu[2]=2
+					CNVTA=L5[1] \ gosub L_20000 ! ! go from base to cost um 
+					let cnvcu[0]=1; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=ilcurrfact
+					call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert up  to original currency $
+					let amount=cnvca[0]
+					let cnvcu[0]=2; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=olcurrfact
+					call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert down  to current currency $
+					let amount= cnvca[0]
+					CNVTU[0] = un[2];CNVTU[1] = 0;CNVTU[2] = 6 ! to base no round was =2
+					CNVTA=amount \ gosub L_20000 
+					let L5[1]=amount
+				endif
+				If L7[7]<>0 ! GL Cost
+					Cnvtu[0]=0;cnvtu[1]=un[2];cnvtu[2]=2
+					CNVTA=L7[7] \ gosub L_20000 !  ! go from base to costing um 
+					let cnvcu[0]=1; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=ilcurrfact
+					call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert up  to original currency $
+					let cnvcu[0]=2; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=olcurrfact
+					let amount=(cnvca[0])
+					call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert down  to current currency $
+					let amount=(cnvca[0])
+					CNVTU[0] = un[2];CNVTU[1] = 0;CNVTU[2] = 6 ! to base no round was =2
+					CNVTA=amount \ gosub L_20000 
+					let L7[7]=amount
+				endif
+				If ROLO[0]<0 ! GL Cost
+					Cnvtu[0]=0;cnvtu[1]=un[2];cnvtu[2]=2
+					CNVTA=ABS(ROLO[0]) \ gosub L_20000 !  ! go from base to costing um 
+					let cnvcu[0]=1; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=ilcurrfact
+					call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert up  to original currency $
+					let cnvcu[0]=2; cnvcu[1]=1; cnvca[0]=amount ;cnvca[1]=olcurrfact
+					let amount=(cnvca[0])
+					call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$ ! convert down  to current currency $
+					let amount=(cnvca[0])
+					CNVTU[0] = un[2];CNVTU[1] = 0;CNVTU[2] = 6 ! to base no round was =2
+					CNVTA=amount \ gosub L_20000 
+					let ROLO[0]=-(ABS(amount))
+				endif
+			endif
+		endif
+		Rem SET unit gl cost
+		if l7[7]<>0 and l3[1]=1 let l7[7]=0 ! unit gl cost and stock update flag is Y
+		
+		If Not(L7[7])
+		  If L7[4] Let L7[7] = L7[10] / L7[4]
+		  If P61$[73,73] = "Y" And L3[0] = 0 And L3[1] = 0 ! check if a catch weight item
+			Mat Read #ch_prod,L4[0],0;PRODDESC$;
+			If PRODDESC$[127,127] = "Y"
+			  If S3[4]
+				L7[7] = L7[10] / S3[4]
+				A[5] = UNF[5];A[6] = L6[4]
+				CNVTA = L7[7];CNVTU[0] = -3;CNVTU[1] = 0;CNVTU[2] = 2
+				Gosub L_20000
+				L7[7] = AMOUNT
+			  End If 
+			End If 
+		  End If 
+		End If 
+		IF L7[7]<>0 AND L7[10]=0 LET L7[7]=0	
+		If H3[1] = 3 ! pricing error = no cost
+		  L3[1] = 0
+		End If 
+		IF H3[1]=2 ! CM TYPE 2 DEFECTIVE MERCH - check update stock flag
+			IF P61$[131,131]="N"
+				let l3[1]=0
+			else
+				if p61$[131,131]="Y" and not(l3[0])
+					let l3[1]=1 
+				endif
+			endif
+		endif				
+		If P61$[46,46] = "Y" If H3[1] = 3 !"cct156742
+		  L5[1] = 0;S3[1] = 0;LCO[0] = 0;LCO[1] = 0;CST = 0
+		  S3[12] = 0;S3[13] = 0
+		End If 
+			
+		if L1$[17,20]="    " or L1$[17,17]="" ! Missing Commod?
+			If Not(L3[0]) ! product
+				Mat read #ch_prod,L4[0],0;Proddesc$;
+				Let L1$[17,20]=Proddesc$[152,155]
+			Else ! nonstk
+				Let L1$[17,20]="MISC" ! needs something else?
+			Endif
+		Endif
+		if l1$[17,20]="MACH" or l1$[17,20]="TIME" or l1$[17,20]="LABR"
+			LET L3[1]=0 ! set stock update flag to N
+		endif
+		If L1$[14,16] = "KIT" Let KITCOPY = KITCOPY + 1
+		L1$[14,16]="   " ! ALWAYS REM KIT FLAG!!
+		If H5[7]=37 and H3[1]=16 ! "EVAP Ship - NO Price (Curr Mo C/M ONLY)
+			Let L5[2]=0;OLM[3]=0;L5[0]=0;S3[0]=0;L5[3]=0;OLM[4]=0
+			Let L6[1]=0;L7[1]=0;L6[0]=0;L7[8]=0;OLM[5]=0;OLM[6]=0
+		Endif
+		If H5[7]=36 and H3[1]=16 ! "EVAP Billing - NO Cost (curr mth cm only)
+			Let L5[1]=0;L7[7]=0;LCO[0]=0;LCO[1]=0;CST=0
+			Let S3[1]=0;L7[10]=0;S3[12]=0;S3[13]=0;UNF[6]=0
+		Endif
+		Mat Write #ch_rol,R,0;L2;
+		Mat Write #ch_rol,R,8;L3;
+		Mat Write #ch_rol,R,16;L4;
+		Mat Write #ch_rol,R,32;L5;
+		Mat Write #ch_rol,R,56;L6;
+		Mat Write #ch_rol,R,80;L6$;
+		Mat Write #ch_rol,R,140;L1$;
+		Mat Write #ch_rol,R,160;L9;
+		Mat Write #ch_rol,R,168;L7;
+		Mat Write #ch_rol,R,246;PL;
+		Mat Write #ch_rol,R,250;UN;
+		Mat Write #ch_rol,R,256;S2;
+		Mat Write #ch_rol,R,260;S3;
+		Mat Write #ch_rol,R,368;MT$;
+		Mat Write #ch_rol,R,370;S3$;
+		Mat Write #ch_rol,R,404;OLM;
+		Mat Write #ch_rol,R,446;EUN;
+		Mat Write #ch_rol,R,452;UNF;
+		Mat Write #ch_rol,R,494;LCO;
+		Mat Write #ch_rol,R,502;CST;
+		Write #ch_rol,R,518;INVNO;
+		Write #ch_rol,R,616;LP1;
+		Write #ch_rol,R,622;CommissionSource;
+		Mat Write #ch_rol,r,624;olcurrid;
+		Mat Write #ch_rol,r,626;olcurrfact;
+		
+		Search #ch_rol,4,1;K3$,R,E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+		If L3[0] Goto L_10740
+		K3$ = " ",K3$;K3$[1,6] = L4[0] Using "######"
+		K3$[7,12] = Z1[0] Using "######"
+		K3$[13,16] = K1$[11,14]
+		Search #ch_rol,4,2;K3$,R,E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+		L_10740: If Not(L3[0]) Goto L_10915
+		If S2[0] = 3 Goto L_10915
+		If (H5[7] = 21 Or H5[7] = 22) And L3[2] <= 0 Goto L_10915
+		! now got non-stock in history or order based on Mode !!
+		k3$=" ",k3$;k3$=k1$ ! same key as inv line
+		Search #ch_invns,2,1;k3$,r[34],e \ if e>1 Error 11000
+		if e ! not found - pre-upgrade?
+			LET RS3[0]=0;RS3[1]=0;RS3[2]=0;RS4$=" ",RS4$ ! BUYER AND HAZ - USE INV HIST
+			LET NSINVNO=0;NSFRT[2]=0
+			LET NSUDA$=" ",NSUDA$;B4K$="  " ! NEW UDA - USE INV HIST
+		Else 
+			! redo order vars - only need the nonstk file only data
+			MAT READ #ch_invns,r[34],120;RS3;
+			MAT READ #ch_invns,r[34],132;RS4$;
+			MAT READ #ch_invns,r[34],190;NSFRT;
+			MAT READ #ch_invns,r[34],208;NSUDA$;
+		Endif
+		RS1[0] = Z1[0]
+		RS1[1] = L3[2]
+		RS1[2] = R
+		RS1$ = L6$[1,30]
+		RS2$ = L6$[31,60]
+		RS2[0] = L3[3]
+		RS2[1] = L7[4]
+		RS2[2] = L5[1]
+		RS2[3] = L5[2]
+		RS2[4] = L5[3]
+		! RS3[0] = 0;RS3[1] = 0;RS3[2] = 0;RS4$ = " ",RS4$
+		B4K$="  ";NSINVNO=0  ! always clear these!
+		K2$ = " ",K2$ \ K2$[1,6] = Z1[0] Using "######"
+		K2$[7,10] = K1$[11,14]
+		E = 2 \ Search #ch_nstk,1,0;K2$,R,E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+		CNVTU[0] = 0;CNVTU[1] = UN[0];CNVTU[2] = 5;CNVTA = RS2[1] \ Gosub L_20000 \ RS2[1] = AMOUNT
+		CNVTU[2] = 2;CNVTA = RS2[2] \ Gosub L_20000 \ RS2[2] = AMOUNT
+		CNVTA = RS2[3] \ Gosub L_20000 \ RS2[3] = AMOUNT
+		Mat Write #ch_nstk,R,0;RS1;
+		Mat Write #ch_nstk,R,12;RS1$;
+		Mat Write #ch_nstk,R,42;RS2$;
+		RS2[1] = - RS2[1];RS2[2] = - RS2[2];RS2[3] = - RS2[3];RS2[4] = - RS2[4]
+		Mat Write #ch_nstk,R,72;RS2;
+		RS3$[1,12] = L1$[1,12]
+		RS3$[13,16] = L1$[17,20]
+		Write #ch_nstk,R,102;RS3$;
+		Mat Write #ch_nstk,R,120;RS3;
+		Mat Write #ch_nstk,R,132;RS4$;
+		MAT WRITE #CH_NSTK,R,182;NSINVNO;
+		MAT WRITE #CH_NSTK,R,188;B4K$;
+		mat write #ch_nstk,R,190;NSFRT;
+		MAT WRITE #CH_NSTK,R,208;NSUDA$;
+		!x$=" ",x$
+		!mat write #ch_nstk,r,188;x$; ! store spaces
+		Search #ch_nstk,4,1;K2$,R,E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+		L4[0] = R
+		Write #ch_rol,RS1[2],16;L4[0];
+		Let R=RS1[2] ! RESET line rec
+		L_10915: Rem " Done with Non-Stocks
+		! Rec_rol=R ! use instead of R (set upon get record)
+		! create sordlot now? - lets
+		!call programdump("tmp/cmcpinv1!","")
+		If L3[0]=0 and L3[1]=1 ! it's a product
+			whi=0
+			Call ChkWhRasl(e$,intco,Ch_ctrl,WHI,L4[3],RASL[])
+			if rasl[0]=0 ! not rasl
+				CH[0]=CH_ROH;Rec[0]=R[8] ! REC_ROH
+				CH[1]=CH_ROL;Rec[1]=REC_ROL
+				CH[2]=0;rasl=0     ! no sordlot/rasl            
+				CH[3]=0;atype=1 ! no sprodlot/type = credit
+				Call Allocordlot(e$,intCo,AType,Ch[],Rec[],Rasl,Status)
+				!call programdump("tmp/cmcpinv2!","")
+				E$=""
+			Else ! use mxrasl5
+				clear rec[] ! used like s9[]
+				Rec[2]=R[8];Rec[3]=4;Rec[4]=243 ! determine program #?
+				Rec[12]=REC_ROL ! PASS THE LINE JUST UPDATED (new single line mxrasl5)?
+				SLTC=OpenFile(2320,intCo) \ If SLTC = -1 Error 42 !ordlot
+				PLTC=OpenFile(2528,intCo) \ If PLTC = -1 Error 42 !sprodlot
+				FChan[0]=1;FChan[1]=Ch_prod;FCHan[2]=ch_roh;FChan[3]=ch_rol
+				FChan[4]=0;FChan[5]=ch_ccode;FChan[6]=PLTC;FChan[7]=0
+				FChan[8]=SLTC;FChan[9]=0
+				! Call dxsave(0,"/tmp/jcs.txt!")
+				Call "MXRASL5.DL4",intco,Ch_ctrl,Rec[],FChan[]
+				try close #sltc else rem
+				try close #pltc else rem
+			Endif ! rasl 0 / 1
+		Endif
+		
+		Gosub COPY_SN
+		If UN[1] = -3 Or UN[2] = -3 ! "catch weight price or cost
+		  Gosub COPY_CTNWGT
+		End If 
+		! above bypassed as we do not create line in this program!!
+
+		FinLineCpy: ! can copy tag file here!!! (that's all it does!)
+		! if s9[6]=1 gosub copy_tagfile ! do in serpordl (as line # may differ!!)
+		Message$=message$+"LINE "+Str$(L3[2])+" COPIED SUCCESSFULLY  "
+		
+		If J1$ = "ALL" Goto L_10440 ! let numline=numline+1 \ Goto L_10440
+		!J7$ = "LINE COPIED SUCCESSFULLY" \ Gosub L_7600 \ Goto L_10410
+		! below is single line copy
+		goto cpldone !  L_10930 ! cpldone ! L_10410
+		Rem "============================================= reset certain fields
+		!! NOT USED - NO HEADER CHANGES!!
+		H0[2] = R[9]
+		H0[3] = R[10]
+		Mat Write #ch_roh,R[8];H0;
+		S9[0] = Z1[0]
+		! if ot 8/16 - need additional - do at end as ALL LINES UPDATED
+		if (H5[7]=8 or H5[7]=16) and not(rasl[0]) ! needs the "to" whse set (just in case)
+			Clear CH[] ! files MUST BE OPEN!!
+			CH[0]=Ch_prod;CH[1]=ch_roh;CH[2]=ch_rol
+			SLTC=OpenFile(2320,intCo) \ If SLTC = -1 Error 42 !ordlot
+			PLTC=OpenFile(2528,intCo) \ If PLTC = -1 Error 42 !sprodlot
+			CH[3]=SLTC;CH[4]=PLTC
+			clear REC[] ! used like s9[]
+			REC[2]=R[8] \ if credit let REC[3]=4
+			call "mx201lcon5.dl4",intco,Ch_ctrl,REC[],CH[] ! do to whse
+			try close #SLTC Else Rem
+			try close #PLTC Else Rem
+		Endif
+
+		L_10930: ! done
+
+		If KITCOPY > 0
+		  !Print 'CS';@9,5;"      WARNING!! THE INVOICE COPIED HAS "
+		  !Print @9,6;
+		  Message$=message$+"INVOICE COPIED HAS "
+		  If KITCOPY = 1 Message$=Message$+"A SINGLE KIT LINE"
+		  If KITCOPY > 1 Message$=Message$+Str$(KITCOPY)+" KIT LINES"
+		  !Print ".  IF INVENTORY IS TO BE RETURNED,"
+		  !Print @9,7;"PLEASE BE AWARE THE KIT BILL OF MATERIAL SEQUENCE"
+		  !Print @9,8;"LINES ARE NOT COPIED.  THERE ARE SEVERAL REASONS FOR"
+		  !Print @9,9;"THIS.  FOR EXAMPLE, UNLESS YOU DISASSEMBLE THE KIT,"
+		  !Print @9,10;"(WHICH WOULD NOT BE POSSIBLE FOR CHEMICALS) IT"
+		  !Print @9,11;"WOULD NOT BE CORRECT TO HAVE THE SEQUENCE LINES."
+		  !Print @9,12;"PLEASE SEE THE PERSON THAT DOES KITS FOR GUIDANCE"
+		  !Print @9,13;"ON HOW TO PROCEED."
+		  !Print @9,14;"PRESS <CR> TO CONTINUE";
+		  !Input ""J1$
+		  message$=message$+" KIT BOM LINES ARE NOT COPIED.  "
+		End If 
+		! re-read original structure for send back
+		Read record #CH_ROH,rec_roh,0;roh.
+		read record #ch_ros,h0[2],0;ros.
+		read record #ch_rot,h0[3],0;rot.
+		S9[4] = 2010
+		if j1$="ALL" let message$=message$+"COPIED "+Str$(NumLine)+" SUCCESSFULLY"
+		!Chain "MX243"
+		!Stop 
+		Goto CPLDone
+		L_6800: Rem "==================================== delete/insert dir #3
+		A$ = " ",A$;A$ = H0[11] Using "###";A$[4] = N0 Using "###### "
+		Search #ch_roh,5,3;A$,V1,E \ If E > 1 ERROR 11000 ! Gosub ERR_SEARCH
+		If E Goto L_6860
+		If V1 <> R[8] Let E = 1 \ ERROR 11000 ! Gosub ERR_SEARCH
+		L_6860: Rem "========================= insert slsm dir #3
+		V1 = R[8] \ J0 = ch_roh \ D = 3 \ A$ = " ",A$
+		A$ = " ",A$;A$ = J1 Using "###";A$[4] = N0 Using "###### "
+		Search #J0,4,D;A$,V1,E ! Gosub L_5050
+		if e ERROR 11000 ! gosub err_search
+		Return 
+		L_8800: Rem WRITE HEADER FILE
+		Mat Write #ch_roh,R[8];H0
+		Mat Write #ch_roh,R[8],52;H3
+		Write #ch_roh,R[8],56;TOT_SELL
+		Mat Write #ch_roh,R[8],64;LOCKPORT
+		If trim$(v0$)<>"" ! do not write a blank shipvia(keep orig)
+			Mat Write #ch_roh,R[8],66;V0$
+		Endif
+		Mat Write #ch_roh,R[8],78;H4
+		Mat Write #ch_roh,R[8],84;C5$
+		Mat Write #ch_roh,R[8],104;H5
+		Mat Write #ch_roh,R[8],278;SLSM
+		Mat Write #ch_roh,R[8],408;H6
+		Mat Write #ch_roh,R[8],444;HMAT$
+		Mat Write #ch_roh,R[8],446;P0$
+		Mat Write #ch_roh,R[8],466;HFAX
+		Write #ch_roh,R[8],482;H2
+		Mat Write #ch_roh,R[8],486;OWHT
+		Mat Write #ch_roh,R[8],490;OWHT1
+		PICKBY[0] = 0;PICKBY[1] = 0
+		Mat Write #ch_roh,R[8],504;PICKBY;
+		Mat Write #ch_roh,R[8],512;OREF;
+		Mat Write #ch_roh,R[8],568;COMMSRVCHG
+		Mat write #ch_roh,R[8],548;CSPLT
+		Mat write #ch_roh,R[8],598;SplitFlag;
+		Mat Write #ch_roh,r[8],624;Ohcurrid;
+		Mat Write #ch_roh,r[8],626;ohcurrfact;
+		Return 
+		L_8900: Rem WRITE  TOTALS
+		Mat Write #ch_rot,R[10],0;T1
+		Mat Write #ch_rot,R[10],8;T2
+		Mat Write #ch_rot,R[10],168;MCODE
+		Mat Write #ch_rot,R[10],208;MCHARGE \ Mat Write #ch_rot,R[10],358;MCTXBL
+		Mat Write #ch_rot,R[10],328;TOT;
+		Write #ch_rot,R[10],400;INVNO;
+		Return 
+		L_8940: Rem SHIPTO
+		Mat Write #ch_ros,R[9],0;S1
+		Mat Write #ch_ros,R[9],8;S1$
+		Mat Write #ch_ros,R[9],126;S2$
+		Write #ch_ros,R[9],146;S5
+		Mat Write #ch_ros,R[9],150;S6
+		Mat Write #ch_ros,R[9],154;SRN;
+		Write #ch_ros,R[9],190;INVNO;
+		Return
+		L_10980: Rem "Display message that this line contains broken base units.
+		UNIT$ = "Err "
+		If UN[0] = -1 Let UNIT$ = "CWT "
+		If UN[0] = -2 Let UNIT$ = "LOT "
+		If UN[0] = -3 Let UNIT$ = "LB  "
+		If UN[0] <= 0 Goto L_10986
+		Mat Read #ch_ccode,UN[0],10;UNIT$;
+		L_10986: !Window Open @1,10; Size 78,10; Using "BROKEN BASE UNIT"
+		!Print 'CS';@1,1;"This line contains a reference to a broken base unit";
+		!Print @1,3;"Line #";L3[2]; \ J$ = L1$ To " " \ J5$ = L6$[1,24] To " "
+		!Print Using "----#.#";L7[4];" ";UNIT$;" ";J$;" ";J5$;
+		!Print Using " $$$#.##"; Tab (58);L5[2]; \ Print Using " $$$$$#.##";L5[3];
+		!Print @1,5;"This line will NOT be copied. It must be entered manually.";
+		!Input @27,7;"Press <CR> to continue ";J$
+		!Window Close 
+		returnstatus=0
+		Message$=message$+"Line "+Str$(L3[2])+" has a broken base unit - NOT COPIED  "
+		Return 
+		COPY_SN: Rem copy the lines serial number info (if any)
+		K2$ = K1$
+		SN_HIST_LOOP: Search #CH_HIST_SN,3,1;K2$,REC_HIST_SN,E
+		If E = 2 Goto COPY_SN_OUT
+		If E ERROR 11000 ! Gosub ERR_SEARCH
+		If K2$[1,13] = K1$[1,13] !  found something
+		  Mat Read #CH_HIST_SN,REC_HIST_SN,0;SNH$
+		  Mat Read #CH_HIST_SN,REC_HIST_SN,54;SNH
+		  Mat Read #CH_HIST_SN,REC_HIST_SN,62;SNH1;
+		  RS4$ = " ",RS4$
+		  RS4$ = SNH$[25,54]
+		  Search #CH_SN,3,1;RS4$,REC_SN,E
+		  If E > 2 ERROR 11000 ! Gosub ERR_SEARCH
+		  If Not(E) And RS4$[1,30] = SNH$[25,54] ! serial number looking good so far
+			Mat Read #CH_SN,REC_SN,0;RS2$[1,24]
+			Read #CH_SN,REC_SN,284;X
+			Mat Read #CH_SN,REC_SN,290;SN1
+			Mat Read #CH_SN,REC_SN,298;SN2
+			If RS2$[1,12] = SNH$[1,12] And SN1[2] = 1 And X = OREF[1]
+			  RS4$ = " ",RS4$
+			  E = 2 \ Search #CH_ORD_SN,1,0;RS4$,REC_ORD_SN,E
+			  If E ERROR 11000 ! Gosub ERR_SEARCH
+			  SNH[0] = Z1[0] \ SNH[1] = REC_SN \ SNH1 = 1
+			  Mat Write #CH_ORD_SN,REC_ORD_SN,0;SNH$
+			  Mat Write #CH_ORD_SN,REC_ORD_SN,54;SNH
+			  Mat Write #CH_ORD_SN,REC_ORD_SN,62;SNH1;
+			  Write #CH_ORD_SN,REC_ORD_SN,64;INVNO;
+			  RS4$ = " ",RS4$
+			  RS4$[1,6] = Z1[0] Using "######"
+			  RS4$[7,9] = L3[2] Using "###"
+			  RS4$[10,39] = SNH$[25,54]
+			  RS4$[40] = ""
+			  Search #CH_ORD_SN,4,1;RS4$,REC_ORD_SN,E
+			  If E ERROR 11000 ! Gosub ERR_SEARCH
+			  RS4$ = " ",RS4$
+			  RS4$[1,30] = SNH$[25,54]
+			  RS4$[31,36] = L4[0] Using "######"
+			  Search #CH_ORD_SN,4,2;RS4$,REC_ORD_SN,E
+			  If E ERROR 11000 ! Gosub ERR_SEARCH
+			  SN1[2] = 5
+			  Mat Write #CH_SN,REC_SN,290;SN1;
+			End If 
+			Unlock #CH_SN
+		  End If 
+		  Goto SN_HIST_LOOP
+		End If 
+		COPY_SN_OUT: Return 
+		COPY_CTNWGT: Rem "CATCH weight Carton Weights Copy
+		If Not(CH_WT) Or Not(CH_WTH) Return 
+		KCWT$ = " ",KCWT$;KCWT$ = K1$[1,13]
+		K2$ = KCWT$[1,13] + "     "
+		CTNWGT_LOOP: Rem "
+		Search #CH_WTH,3,1;KCWT$,R[CH_WTH],E \ If E = 2 Goto CTNWGT_DONE
+		If E ERROR 11000 ! Gosub ERR_SEARCH
+		If KCWT$[1,13] <> K2$[1,13] Goto CTNWGT_DONE
+		Mat Read #CH_WTH,R[CH_WTH],0;CTWT;
+		Mat Read #CH_WTH,R[CH_WTH],8;CTNWGT;
+		E = 2;R[CH_WT] = 0;CKCWT$ = " ",CKCWT$
+		Search #CH_WT,1,0;CKCWT$,R[CH_WT],E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+		CKCWT$ = " ",CKCWT$;CKCWT$[1,6] = Z1[0] Using "######"
+		CKCWT$[7] = KCWT$[11]
+		Search #CH_WT,4,1;CKCWT$,R[CH_WT],E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+		CTWT[0] = Z1[0]
+		Mat Write #CH_WT,R[CH_WT],0;CTWT;
+		Mat Write #CH_WT,R[CH_WT],8;CTNWGT;
+		Write #CH_WT,R[CH_WT],14;INVNO;
+		Goto CTNWGT_LOOP
+		CTNWGT_DONE: Rem "done
+		Return
+		copy_tagfile: ! copy zline tag file
+		if mode=2 ! history
+			ITc = openfile(-9939,intco) \ if ITC=-1 Return ! no file - no copy
+		endif
+		RTC= OpenFile(9950,IntCo)
+		if RTC=-1 ! no file
+			Try Close #ITC Else Rem ! close ordtag before exit
+			RETURN ! no file - no copy
+		Endif
+		if mode=1 let itc=rtc ! both orders
+		chanfrom=0-ITC;chanto=RTC;ordfrom=OREF[1];linefrom=K1$[11,14]
+		ordto=Z1[0];lineto=l3[2]
+		Call "mxordtagcp.dl4",chanfrom,chanto,ordfrom,linefrom,ordto,lineto,L2[0],IntCo
+		Try Close #RTC Else Rem
+		Try Close #ITC Else Rem
+		Return
+		getlprrec: ! find last price on nonstock!
+		lprec=0 ! not found yet
+		! always try shiplist first
+		LPKey$=" ",LPKey$
+		LPKey$[1,6]=H0[4] using "######" ! 7,12=ship#
+		let x2=OWHT1[1] \ if P9$[44,44]<>"Y" let x2=0
+		stno=0
+		if srn[0]=2 LET STNO=SRN[1]
+		lpkey$[7,12]=STNO USING "&&&&&&"
+		LPkey$[13,17]=X2 Using "####"
+		let LPKey$[18]=Prod$
+		tmp$=LPKey$
+		Search #ch_slpr,2,1;lpkey$,lpr,e
+		If lpkey$[1,29]<>tmp$[1,29] let lpr=-1
+		If LPR<=0 let lpr=0
+		IF LPR ! found shiplist last price
+			let x1$="S";lprec=lpr
+			RETURN ! Found - no need to continue!
+		Endif
+		LPKey$=" ",LPKey$
+		LPKey$[1,6]=H0[4] using "######" ! 7,12=ship#
+		let x2=OWHT1[1] \ if P9$[44,44]<>"Y" let x2=0
+		LPkey$[7,10]=X2 Using "####"
+		let LPKey$[11]=Prod$
+		tmp$=LPKey$
+		Search #ch_lpr,2,1;lpkey$,lpr,e
+		If lpkey$[1,22]<>tmp$[1,22] let lpr=-1
+		If LPR<=0 let lpr=0
+		IF LPR let x1$="C";lprec=lpr ! found customer last price
+			
+		return
+		L_20000: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)
+		If CNVTU[2] = 3 Goto L_20050
+		If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+		If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+		If CNVTU[2] = 0 Goto L_20050
+		If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+		L_20050: ! always ub5+
+		L_20120: Rem "====== unibasic 5+ logic
+		Call "MXPRCONV5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,e$,rstr$
+		If CNVTU[2] = 0 Goto L_20160
+		If FLAG Let E = FLAG \ ERROR 11000 ! Gosub ERR_SEARCH
+		AMOUNT = CNVTA
+		L_20160: Return 
+		ERR_Search: ! so we'll know
+		ReturnStatus=0
+		If E=5 let X3=Err(8)
+		Message$="Search Error ",(E + (X3 * .001))
+		Message$ = Message$+"/ "+Str$(SPC(14))+" IN PROGRAM "
+		Message$=Message$+MSC$(4)
+		call programdump("tmp/cmcpinvse!","")
+		system "echo ''" + msc$(0)+" "+ Message$ + "'' >> files/1/erp.errlog"
+	CPLDone: ! Line copy complete
+	  if mode=2 ! if mode=1 these are order files!! DO NOT CLOSE
+		try Close #ch_invh  else rem 
+		try Close #ch_invs  else rem 
+		try Close #ch_invt  else rem
+		try Close #ch_invl  else rem ! \ Close #38 \ Close #39
+		try Close #ch_invns Else Rem
+	  endif
+		try close #ch_slpr else rem
+		try Close #CH_HIST_SN else rem
+		try Close #CH_SN  else rem
+		try Close #CH_ORD_SN else rem
+		If CH_WT try Close #CH_WT else rem
+		If CH_WTH try Close #CH_WTH else rem
+		if p61$[136,136]="Y"
+			if ch_curr<>0
+				try close #ch_curr else rem
+			endif
+		endif
+	! Endif ! of mode=2
+	CMPDone: ! done
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! ordcpinv

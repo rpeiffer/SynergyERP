@@ -1,0 +1,670 @@
+! 1.0 12/07/2009 - initial conversion
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp352.dl4 src/serp352.src 
+!
+! From the original code:
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+! include "src/inc/file?.inc"
+
+!
+! *declare additional dl4 intrinsic subs & functionsDeclare Intrinsic Sub InpBuf,String
+Declare Intrinsic Sub InpBuf,String
+! Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+!External Lib "ubsfunc.dl4"
+!Declare External Function openfile,pdate$,jdate$,Formatdate2$
+External Lib "librasl.lib"
+Declare External Sub chkwhrasl
+
+Declare sub whlocdet
+include "src/inc/filewhloc.inc" ! warehouse locations
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[500],tmp2$[1000],b$[200],tmp1$[100]
+dim blank$[50],locid$[6],keywhloc$[50],keywhloc2$[50],keyprlot$[50]
+b$=" ",b$
+dim message$[150],webstr$[2000],List$[100,2000]
+!
+! call dxopen()
+!
+! call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+Dim 1%,PL1[1],PD1[9],RASL[5]
+Dim 2%,R6,DIR,CHANNEL_
+Dim 3%,PL2[0]
+Dim PLOC$[18],K2$[50],A$[156],F$[16],K3$[50],K33$[50]
+Dim K333$[50],KPLOC$[50],Keyloc$[10]
+Dim K4$[40],P9$[50],BINM$[6],K6$[40]
+Dim N1$[4],N2$[118]
+DIM K_WHLOC$[60],WL$[30],p61$[256]
+dim custom_customer$[30]
+dim whloc. as whloc ! warehouse location
+Mat Read #1,19,50;P9$;
+mat read #1,61,0;p61$;
+mat read #1,115,60;custom_customer$;
+let custom_customer$=rtrim$(custom_customer$)
+if custom_Customer$="SWP"
+	if p61$[32,32]="M" let p61$[32,32]="Y" ! set material handling flag 
+endif
+blank$=" ",blank$
+RASL = 0 \ If P9$[41,41] = "Y" Or P9$[41,41] = "W" Let RASL = 9
+! open files
+FOR i=2 TO 8                        
+  READ f                            
+  IF f<>-1                           
+    READ #1,88,ABS(f);f$[1,16];     
+    IF f>0 OPEN #i,f$             
+    IF f<0 ROPEN #i,f$             
+  ENDIF                               
+NEXT i                               
+DATA 2736,-2528,-2000,-1088,-2432,-208,-2768
+ch_whloc=2 ! whlocation1   
+ch_prlot=3 ! sprodlot1     
+ch_rcpst=4 ! srcpst1       
+ch_polot=5 ! spolot1       
+ch_pol=6   ! spoflel1      
+ch_prloc=7 ! prodloc1 
+ch_whi=8 ! whinfo
+
+IF P61$[32,32]="Y"                      
+	LET f$="2/MHPUTAWAY"+str$(intco)         
+	ROPEN #10,f$                          
+	LET f$="2/MHRTYPE"+str$(intco)          
+    ROPEN #11,f$ 
+	ch_mhp =10  ! 2/MHPUTAWAY   
+    ch_mhr= 11  !2/mhrtype1  
+ENDIF                                   
+! end open files
+returnstatus=0
+message$="Error"
+! start select Action1
+
+select case action1$
+
+case "GETWHLIST" ! droplist of warehouse
+	returnstatus=1
+	Message$="OK"
+	gosub BuildWHDroplist
+	! status section
+	Message$=""
+
+case  "GETWHDET"
+	returnstatus=1
+	message$="OK"
+	call dxget("WHSE", tmp$) \ PL1[0] = tmp$
+	let whse=tmp$
+	If PL1[0] <= 0 Or PL1[0] > 99
+		let returnstatus=9
+		message$ = "Invalid warehouse entered!" 
+		goto endgetwhdet:
+	end if
+	IF P9$[41,41]="N"
+		let rasl=0
+	else
+		Call ChkWhRasl(e$,intCO,ch_cntrl,ch_whi,PL1[0],RASL[])
+	endif
+	gosub READ_WHS_CTRL:
+	endgetwhdet: !
+	
+	tmp$=bsdel$+"WhFlags"+fdel$+rdel$
+	tmp$=tmp$+"RASLFlag"+fdel$+"CurrKey"+fdel$+"MatFlag"+fdel$+rdel$
+	tmp$=tmp$+str$(RASL)+fdel$+keyloc$+fdel$+p61$[32,32]+fdel$+rdel$+esdel$
+	call addToStr(e$, rstr$, tmp$)
+
+case "MATLIST" ! droplist of material handling
+	let returnstatus=1
+	let message$="OK"
+	if p61$[32,32]<>"Y"
+		let returnstatus=0
+		let message$="Material Handling Is Not Available"
+	endif
+	call dxget("WHSE", tmp$) \ whse = tmp$
+	If whse <= 0 Or whse > 99
+		let returnstatus=0
+		message$ = "Invalid warehouse entered!" 
+	end if
+	gosub getmhputaway:
+	gosub getmhracktype:
+	
+
+
+case "ADD" ! add new location	if action1$ <> "GETLOCLIST"
+let returnstatus=1
+	let message$="OK"
+	call dxget("WHSE", tmp$) \ whse = tmp$
+	If whse <= 0 Or whse > 99
+		let returnstatus=0
+		message$ = "Invalid warehouse entered!" 
+		goto endlocadd:
+	end if
+	call dxget("LOCATION", tmp$)
+	LET locid$=ucase$(rtrim$(tmp$))+blank$
+	let keywhloc$=" ",keywhloc$
+	let keywhloc$[1,2]=whse using "##"
+	let keywhloc$[3,8]=locid$
+	search #ch_whloc,2,1;keywhloc$,rec_whloc,e
+	if e<>1
+		let returnstatus=0
+		let message$="Location Already On File "
+		goto endlocadd:
+	endif
+	clear whloc.
+	!!! Set-up defaults
+	!!! call to create variables
+	endlocadd: !
+	clear whloc.
+	if returnstatus<>0 let whloc.AllocOk=1
+	call whlocdet()
+
+case "EDIT" ! edit an existing location
+let returnstatus=1
+	let message$="OK"
+	call dxget("WHSE", tmp$) \ whse = tmp$
+	If whse <= 0 Or whse > 99
+		let returnstatus=0
+		message$ = "Invalid warehouse entered!" 
+		goto endlocedit:
+	end if
+	call dxget("LOCATION", tmp$)
+	LET locid$=ucase$(rtrim$(tmp$))+blank$
+	let keywhloc$=" ",keywhloc$
+	let keywhloc$[1,2]=whse using "##"
+	let keywhloc$[3,8]=locid$
+	search #ch_whloc,2,1;keywhloc$,rec_whloc,e
+	if e<>0
+		let returnstatus=0
+		let message$="Location Not on File "
+		clear whloc.
+		goto endlocedit:
+	else
+		read record #ch_whloc,rec_whloc;whloc.;
+	endif
+	endlocedit: ! end location edit
+	call whlocdet()
+
+Case "SAVE" ! save location
+	let returnstatus=1
+	let message$="OK"
+	call dxget("WHSE", tmp$) \ whse = tmp$
+	If whse <= 0 Or whse > 99
+		let returnstatus=0
+		message$ = "Invalid warehouse entered!" 
+		goto endlocsave:
+	end if
+	call dxget("LOCATION", tmp$)
+	LET locid$=ucase$(rtrim$(tmp$))+blank$
+	let newrecord=0
+	let keywhloc$=" ",keywhloc$
+	let keywhloc$[1,2]=whse using "##"
+	let keywhloc$[3,8]=locid$
+	search #ch_whloc,2,1;keywhloc$,rec_whloc,e
+	if e>1
+		let returnstatus=0
+		let message$="Location Not on File "
+		goto endlocsave:
+	endif
+    If not(e)
+		read record #ch_whloc,rec_whloc;whloc.
+		orgAllocOk=whloc.AllocOk
+	else
+		clear whloc.
+		let whloc.sOpen$=blank$ 
+		let whloc.Loc$=locid$+blank$
+		let whloc.comment$=blank$
+		let whloc.whse=whse 
+		let whloc.RackType$=blank$
+		let whloc.MHAisle$=blank$
+		let whloc.MHBin$=blank$
+		let whloc.MHTier$=blank$
+		let newrecord=99
+	endif
+	call dxget("MAXWGT", tmp$)
+	let tmp3=tmp$
+	if tmp3<0 or tmp3>999999
+		let returnstatus=0
+		let message$="Invalid Max Weight Entered "
+		goto endlocsave:
+	endif
+	let whloc.MaxWgt=tmp3	
+	call dxget("MAXCUBE", tmp$)
+	let tmp3=tmp$
+	if tmp3<0 or tmp3>9999.9
+		let returnstatus=0
+		let message$="Invalid Max Cube Entered "
+		goto endlocsave:
+	endif	
+	let whloc.MaxCube=tmp3
+    call dxget("COMMENT", tmp$)
+	let whloc.comment$=Ucase$(rtrim$(tmp$))+blank$
+
+	IF locid$[1,5]="STOCK" goto getallocunit:
+	if locid$[1,4]="NONE" goto getallocunit:
+	if locid$[1,4]="DOOR" goto getallocunit:
+	call dxget("ALLOCATE", tmp$)
+	let tmp3=tmp$
+	if ucase$(rtrim$(tmp$))="Y" let tmp3=1
+	whloc.AllocOk=tmp3
+	getallocunit: ! allocate unit
+	call dxget("ALLOCUNIT", tmp$)
+	let tmp$=ucase$(rtrim$(tmp$))
+	IF tmp$="W"
+		let whloc.AllocWhlOly=1
+	else 
+		IF tmp$="B"
+			let whloc.AllocWhlOly=-1
+		else
+			if tmp$="A"
+				let whloc.AllocWhlOly=0
+			else
+				let returnstatus=0
+				let message$="Invalid Allocate Unit"
+				goto endlocsave:
+			endif
+		endif
+	endif
+	call dxget("MULTPROD", tmp$)
+	let tmp3=tmp$
+	let whloc.multprod=tmp3
+	if ucase$(rtrim$(tmp$))="Y" let whloc.multprod=1
+	call dxget("RACKSTK", tmp$)
+	let whloc.RackStk=tmp$
+	if ucase$(rtrim$(tmp$))="Y" let whloc.rackstk=1
+                  
+	If p61$[32,32]="Y" ! material handling get additional field
+        call dxget("BINCAP", tmp$)
+		LET tmp3=tmp$
+		if tmp3<0 or tmp3>9999
+			let returnstatus=0
+			let message$="Bin Capacity must be between 0 and 9999"
+			goto endlocsave:
+		endif
+		let whloc.BinCap=tmp3
+		call dxget("PUTAWAYTBL", tmp$) 
+		whloc.PutawayTbl=tmp$ ! from drop list
+		call dxget("RACKTYPE", tmp$)
+		whloc.RackType$=ucase$(rtrim$(tmp$))+blank$ 
+		call dxget("PRIMARY", tmp$)
+		whloc.PrimOly=tmp$
+		if ucase$(rtrim$(tmp$))="Y" let whloc.rackstk=1
+		call dxget("BINHGT", tmp$)
+		let tmp3=tmp$
+		if tmp3<0 or tmp3>9999
+			let returnstatus=0
+			let message$="Invalid Bin Height Entered "
+			goto endlocsave:
+		endif
+		whloc.BinHgt=tmp3
+		call dxget("BINWID", tmp$)
+		let tmp3=tmp$
+		if tmp3<0 or tmp3>9999
+			let returnstatus=0
+			let message$="Invalid Bin Width Entered "
+			goto endlocsave:
+		endif
+		whloc.BinWdt=tmp3
+		call dxget("BINDEP", tmp$)
+		let tmp3=tmp$
+		if tmp3<0 or tmp3>9999
+			let returnstatus=0
+			let message$="Invalid Bin Depth Entered "
+			goto endlocsave:
+		endif
+		whloc.BinDepth=tmp3
+	endif
+	if newrecord=99
+		let e=2
+		search #ch_whloc,1,0;keywhloc$,rec_whloc,e
+		if e<>0
+			let message$="Error Creating New Location"
+			goto endlocsave:
+		endif
+		write record #ch_whloc,rec_whloc;whloc.;
+		let keywhloc$=" ",keywhloc$
+		let keywhloc$[1,2]=whse using "##"
+		let keywhloc$[3,8]=locid$
+		search #ch_whloc,4,1;keywhloc$,rec_whloc,e
+		if e<>0
+			let returnstatus=0
+			let message$="Error Adding Location Dir 1 "
+			goto endlocsave:
+		endif
+		let keywhloc2$=" ",keywhloc2$
+		let keywhloc2$[1,2]=whse using "##"
+		let keywhloc2$[3,3]=whloc.AllocOk using "#"
+		let keywhloc2$[4]=locid$ ! need a null at end of key
+		search #ch_whloc,4,2;keywhloc2$,rec_whloc,e
+		if e<>0
+			let returnstatus=0
+			let message$="Error Adding Location Dir 2"
+			goto endlocdelete:
+		endif
+	else
+		write record #ch_whloc,rec_whloc;whloc.;
+		! verify key change
+		if whloc.AllocOk<>orgAllocOk
+			let keywhloc2$=" ",keywhloc2$
+			let keywhloc2$[1,2]=whse using "##"
+			let keywhloc2$[3,3]=whloc.AllocOk using "#"
+			let keywhloc2$[4]=locid$ ! null at end of key
+			search #ch_whloc,4,2;keywhloc2$,rec_whloc,e
+			if e<>0
+				let returnstatus=0
+				let message$="Error Adding Location Dir 2"
+				goto endlocdelete:
+			endif
+			let keywhloc2$[3,3]=orgAllocOk using "#"
+			search #ch_whloc,5,2;keywhloc2$,rec_whloc,e
+			If e=1 !
+				let keywhloc2$[10,10]=" "
+				search #ch_whloc,5,2;keywhloc2$,rec_whloc,e
+			endif
+			if e<>0
+				let returnstatus=0
+				let message$="Error Deleting Location Dir 2"
+				goto endlocdelete:
+			endif
+		endif
+	endif	
+	endlocsave: ! 
+
+   
+ 
+Case "DELETE" ! delete location
+	let returnstatus=1
+	let message$="OK"
+	call dxget("WHSE", tmp$) \ whse = tmp$
+	If whse <= 0 Or whse > 99
+		let returnstatus=0
+		message$ = "Invalid warehouse entered!" 
+		goto endlocdelete:
+	end if
+	call dxget("LOCATION", tmp$)
+	LET locid$=ucase$(rtrim$(tmp$))+blank$
+	if locid$[1,5]="STOCK"
+		let returnstatus=0
+		let message$="Location May Not Be Deleted "
+		goto endlocdelete:
+	endif
+	if locid$[3,3]="@"
+		let returnstatus=0
+		let message$="Location May Not Be Deleted "
+		goto endlocdelete:
+	endif
+	let keywhloc$=" ",keywhloc$
+	let keywhloc$[1,2]=whse using "##"
+	let keywhloc$[3,8]=locid$
+	search #ch_whloc,2,1;keywhloc$,rec_whloc,e
+	if e<>0
+		let returnstatus=0
+		let message$="Location Not on File "
+		goto endlocdelete:
+	endif
+	! verify if in use in the prod lot
+	let keyprlot$=" ",keyprlot$
+	let keyprlot$[1,8]=keywhloc$[1,8]
+	search #ch_prlot,3,3;keyprlot$,rec_prlot,e
+	if not(e)
+		if keyprlot$[1,8]=keywhloc$[1,8]
+			let returnstatus=0
+			let message$="Location Is Currently in Use "
+			goto endlocdelete:
+		endif
+	endif
+	read record #ch_whloc,rec_whloc;whloc.;
+	!X3 = fileupdatewhloc(e$,ch_whloc,"d",rec_whloc,whloc.) ! delete sproddesc  ! delete 
+	!WWALLLLLLB
+	let keywhloc2$=" ",keywhloc2$
+	let keywhloc2$[1,2]=whse using "##"
+	let keywhloc2$[3,3]=whloc.AllocOk using "#"
+	let keywhloc2$[4]=locid$
+	search #ch_whloc,5,2;keywhloc2$,rec_whloc,e
+	if e=1
+		let keywhloc2$[10,10]=" "
+		search #ch_whloc,5,2;keywhloc2$,rec_whloc,e
+	endif
+	if e<>0
+		let returnstatus=0
+		let message$="Error Deleting Location in Dir 2 "
+		goto endlocdelete:
+	endif
+	search #ch_whloc,5,1;keywhloc$,rec_whloc,e
+	if e<>0
+		let returnstatus=0
+		let message$="Error Deleting Location in Dir 1 "
+		goto endlocdelete:
+	endif
+	let e=3
+	search #ch_whloc,1,0;keywhloc$,rec_whloc,e
+	endlocdelete: ! 
+endselect
+
+! end select case on Action 1
+! message should be set.  if we got here - we've got a good status
+!ReturnStatus=1
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call addToStr(e$,rstr$,webstr$)
+goto OutEnd:
+
+! ***********************************************************************
+! Nobody but us subroutines and exit code down here
+! ***********************************************************************
+
+!----------------------------------------------------------------------------
+! build initial drop list of existing warehouses
+!----------------------------------------------------------------------------
+BuildWHDroplist: !
+	! Add section header and column defs
+	tmp$=bsdel$+"WHDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$,rstr$,tmp$)
+	for i = 1 to 99
+		Mat Read #ch_whi,i-1;N1$
+		Mat Read #ch_whi,i-1,4;N2$
+		If N1$ > "    " ! if there is a WH desginator we have a defined record
+			tmp$=str$(i)+fdel$+str$(i)+" - "+rtrim$(n1$)+": "+rtrim$(n2$[1,30])+fdel$+rdel$
+			call addToStr(e$, rstr$, tmp$)
+		end if
+	next i
+	call addToStr(e$, rstr$, esdel$)
+Return
+!----------------------------------------------------------------------
+getmhputaway: ! build droplist of material handling putaway
+	! Add section header and column defs
+	dim keymhp$[50],mhd$[20],mha$[120],1%,mhwh,2%,mhtn
+	dim 3%                                                 
+	tmp$=bsdel$+"PutAwayTable"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$,rstr$,tmp$)
+	if p61$[32,32]="Y" ! material handling is on
+		tmp$="0"+fdel$+"None"+fdel$+rdel$
+		call addToStr(e$, rstr$, tmp$)
+		let keymhp$=" ",keymhp$
+		let keymhp$[1,2]=whse using "##"
+		do
+			search #ch_mhp,3,1;keymhp$,rec,e
+			if e<>0 exit do
+			let tmp3=keymhp$[1,2]
+			if tmp3<>whse exit do
+			mat read #ch_mhp,rec,2;mhtn;
+			mat read #ch_mhp,rec,6;mhd$;
+			tmp$=str$(mhtn)+fdel$+str$(mhtn)+" - "+rtrim$(mhd$)+fdel$+rdel$
+			call addToStr(e$, rstr$, tmp$)
+		loop
+	endif
+	call addToStr(e$, rstr$, esdel$)
+Return
+!----------------------------------------------------------------------------
+
+!----------------------------------------------------------------------
+getmhracktype: ! build droplist of material handling rack type        
+	dim keymhr$[50],mhrt$[14],1%,mhrtf[1]
+	dim 3%                                                 
+	tmp$=bsdel$+"RackType"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$,rstr$,tmp$)
+	if p61$[32,32]="Y" ! material handling is on
+		tmp$="    "+fdel$+"None"+fdel$+rdel$
+		call addToStr(e$, rstr$, tmp$)
+		let keymhr$=" ",keymhr$
+		do
+			search #ch_mhr,3,1;keymhr$,rec,e
+			if e<>0 exit do
+			mat read #ch_mhr,rec,0;mhrt$;
+			tmp$=mhrt$[1,4]+fdel$+mhrt$[1,4]+" - "+rtrim$(mhrt$[5,14])+fdel$+rdel$
+			call addToStr(e$, rstr$, tmp$)
+		loop
+	endif
+	call addToStr(e$, rstr$, esdel$)
+Return
+
+
+
+!----------------------------------------------------------------------------
+READ_WHS_CTRL: REM  
+ DIM K2$[50],1%,WCR_WLA[7],WCR_WL1[2],KEYLOC$[10]                             
+ LET K2$=" ",K2$                                   
+ LET K2$[1,2]=WHSE USING "##"                        
+ LET K2$[5,5]="@"                                  
+ SEARCH #CH_WHLOC,2,1;K2$,REC,E !\ IF E>1 GOSUB ERR_SEARCH:
+ IF NOT(E)                                         
+	MAT  READ #CH_WHLOC,REC,40;WCR_WL1;                    
+	MAT  READ #CH_WHLOC,REC,76;WCR_WLA;                                                              
+	LET KEYLOC$=""       
+	FOR X=1 TO WCR_WLA[3]   
+		LET KEYLOC$=KEYLOC$+"A"            
+	NEXT X                  
+	IF WCR_WL1[1]=2         
+		FOR X=1 TO WCR_WLA[4] 
+			LET KEYLOC$=KEYLOC$+"B"        
+		NEXT X                
+		FOR X=1 TO WCR_WLA[5] 
+			LET KEYLOC$=KEYLOC$+"T"          
+		NEXT X                
+	ENDIF                   
+	IF WCR_WL1[1]=3         
+		FOR X=1 TO WCR_WLA[5] 
+			LET KEYLOC$=KEYLOC$+"T"         
+		NEXT X                
+		FOR X=1 TO WCR_WLA[4] 
+			LET KEYLOC$=KEYLOC$+"B"          
+		NEXT X                
+	ENDIF
+ENDIF 
+return
+
+
+
+
+!----------------------------------------------------------------------------
+! Get bin mask from whinfo
+!----------------------------------------------------------------------------
+GetBinMask: !
+	R5 = PL1[0] - 1
+	If R5 < 0
+		BINM$ = "AAAAAA"
+	else
+		Mat Read #5,R5,862;BINM$;
+		For I = 1 To 6
+			If BINM$[I,I] = "" Or BINM$[I,I] = " " Let BINM$[I,I] = "A"
+		Next I
+	end if
+Return
+! ------------------------------------------------------------------------
+Sub Whlocdet() 
+! 
+try
+	clear list$[]
+	List$[0]=bsdel$,"WhseLocDet",fdel$
+	webstr$=""                         
+	webstr$=webstr$+"WHSE", fdel$      
+	webstr$=webstr$+"LOCATION", fdel$  
+	webstr$=webstr$+"MAXWGT", fdel$    
+	webstr$=webstr$+"MAXCUBE", fdel$   
+	webstr$=webstr$+"COMMENT", fdel$   
+	webstr$=webstr$+"ALLOCATE", fdel$  
+	webstr$=webstr$+"ALLOCUNIT", fdel$ 
+	webstr$=webstr$+"MULTPROD", fdel$  
+	webstr$=webstr$+"RACKSTK", fdel$   
+	! for material handling            
+	webstr$=webstr$+"BINCAP", fdel$    
+	webstr$=webstr$+"PUTAWAYTBL", fdel$
+	webstr$=webstr$+"RACKTYPE", fdel$ 
+	webstr$=webstr$+"PRIMARY", fdel$  
+	webstr$=webstr$+"BINHGT", fdel$   
+	webstr$=webstr$+"BINWID", fdel$   
+	webstr$=webstr$+"BINDEP", fdel$
+	webstr$=webstr$+"ALLOCFLAG",fdel$
+    List$[1]=WebStr$
+	row=2   
+	if returnstatus<>0
+		webstr$=""                               
+		let webstr$=webstr$+str$(whse)+fdel$   ! whse         
+		let webstr$=webstr$+ucase$(rtrim$(locid$))+fdel$   ! location     
+		let webstr$=webstr$+str$(whloc.maxwgt)+fdel$  ! max wgt 
+		let webstr$=webstr$+str$(whloc.maxcube)+fdel$ ! max cude 
+		let webstr$=webstr$+rtrim$(whloc.comment$)+fdel$ ! comment
+		let tmp$="N"                                   
+		if whloc.AllocOk<>0 let tmp$="Y"               
+		let webstr$=webstr$+tmp$+fdel$  ! allocate               
+		let tmp$="A"                                   
+		if whloc.AllocWhlOly=1 let tmp$="W"            
+		if whloc.AllocWhlOly=-1 let tmp$="B"           
+		let webstr$=webstr$+tmp$+fdel$  ! allocunit               
+		let tmp$="N"                                   
+		if whloc.multprod<>0 let tmp$="Y"              
+		let webstr$=webstr$+tmp$+fdel$   ! multprod              
+		let tmp$="N"                                   
+		if whloc.RackStk<>0 let tmp$="Y"               
+		let webstr$=webstr$+tmp$+fdel$  ! rackstk
+		
+		! material handling                            
+		webstr$=webstr$+str$(whloc.BinCap)+fdel$       ! bincap 
+		webstr$=webstr$+str$(whloc.PutawayTbl)+fdel$   ! putaway
+		webstr$=webstr$+rtrim$(whloc.RackType$)+fdel$  ! racktype
+		let tmp$="N"                                
+		if whloc.PrimOly<>0 let tmp$="Y"            
+		let webstr$=webstr$+tmp$+fdel$   ! primary            
+		!let tmp$="N"                                
+		!if  whloc.rackstk<>0 let tmp$="Y"           
+		!webstr$=webstr$+tmp$+fdel$                  
+		webstr$=webstr$+str$(whloc.BinHgt)+fdel$  ! binhgt  
+		webstr$=webstr$+str$(whloc.BinWdt)+fdel$  ! binwid
+		webstr$=webstr$+str$(whloc.BinDepth)+fdel$! bindept
+		let tmp$="Y"                                
+		IF locid$[1,5]="STOCK" let tmp$="N"         
+		if locid$[1,4]="NONE" let tmp$="N"          
+		if locid$[1,4]="DOOR" let tmp$="N"          
+		let webstr$=webstr$+tmp$+fdel$  ! allocflag
+		
+		list$[row]=webstr$
+		row=row+1
+		webstr$=""
+	endif
+	list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+else
+	! this is a remark
+end try
+end sub ! whlocdet
+! 
+! ------------------------------------------------------------------------
+
+OUTEND: Rem EXIT ROUTINE
+call setoutput(e$,rstr$)
+Close
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end

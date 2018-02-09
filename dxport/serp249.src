@@ -1,0 +1,819 @@
+! serp249.dl4
+!
+! Invoice History Sales Scan (PM program 249)
+!
+! 1.0 04/27/2009
+!  
+! loadsave -w -n 100,10 -o prog/dxport/serp249.dl4 src/serp249.src
+!
+!
+include "src/copyright.inc"
+! internal files needed
+
+Include "src/inc/fileccodes.inc" ! u/m file
+Include "src/inc/filecommhead.inc" ! commodity
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+Include "src/inc/filewhinfoz.inc" ! wh info file (rec 0 fix)
+include "src/inc/fileprtdefault.inc" ! port default
+Include "src/inc/fileinvhead.inc" ! roh,ros,rot files
+Include "src/inc/fileinvl.inc" ! lines
+Include "src/inc/filecust.inc" ! customer
+Include "src/inc/fileshiplist.inc" ! shiplist
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$,buildsort
+Declare External Function ChkAltItem$,formatdate2$,getuidrec
+Declare External Sub UserCntrl,getportdefault
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "libcustlist.lib"
+Declare External Sub CustList
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,UMDList
+Declare External Function getpravail,getumrec,ChkPrdUM
+
+External Lib "libprodwh.lib"
+Declare External Function getWhAvail
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+! internal subs/functions 
+
+Declare Intrinsic sub programdump,env,Logic,FindF
+Declare Intrinsic Sub DateToJulian,JulianToDate,Stringsearch
+Declare Intrinsic Function findchannel
+
+Declare Sub Openfiles,updatelog,getcust,ScanHist
+Declare Sub SetPRtoRol,sndline
+Declare Function chkdatefrmt$,check4mtch
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[3000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200],Custom_customer$[30]
+	Dim Prod$[12],IKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],HKey$[60]
+	Dim Key2$[64],KCM$[50],K1$[50],Mode$[2],Cust$[10]
+	Dim TUID$[10],UCA2$[50],STKEY1$[60],stkey2$[60]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2],UCA5[10]
+	Dim 2%,Q0[1],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim 1%,X1[9],2%,CurDate,custno
+	Dim 2%,x2[9],sysdate,Vend,DOTp
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR,SHR,SDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99],Chans[20]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/p249.log" ! fields for DEBUG
+
+	DEF FNR(H)=INT(ABS(H)*100+.5)*.01*SGN(H)
+	
+	Dim umc. as ccodes ! u/m file
+	Dim PR. as prod ! product file
+	Dim PW. as prodwhse ! prodwhse file
+	Dim WHI. as whinfo ! wh info file
+	Dim comd. as commhead ! commodity
+	dim prt. as prtdefault ! port defaults
+	dim cust. as cust ! customer
+	dim sl. as shiplist 
+	dim ihh. as invh ! hist head
+	dim ish. as invs ! hist ship
+	dim ith. as invt ! hist totals
+	dim ilh. as invl ! hist lines
+
+	! call dxopen() ! already done in menu
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp249"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action2$=UCase$(Action2$)
+	ACtion2$=RTrim$(Action2$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	GAct=0 ! action not found
+	if debugdetail
+		dmsg$="SERP249 ACTION1 "+action1$
+		If Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	
+
+	MAT  READ #CTLC,3,172;SysDate;
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	MAT READ #1,115,60;CUSTOM_CUSTOMER$;
+	CUSTOM_CUSTOMER$=UCASE$(TRIM$(CUSTOM_CUSTOMER$))
+	
+	Call OpenFiles() ! open any/all files
+	Mat Read #CTLC,115,40;Q0;
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	DEF FNP(X)=SGN(X)*(INT(ABS(X)*10^Q0[1]+.5)/10^Q0[1])
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	TUID$=UserID$+Blank$
+	If Len(TUID$)>10 let TUID$[11]=""
+	Call UserCntrl(TUID$,UCA2$,UCA5[],status,intCo)
+	Let COST_LEV[0]=UCA5[0]
+	Let COST_LEV[1]=UCA5[1]
+	Let COST_LEV[2]=UCA5[2]
+	Let COST_LEV[3]=UCA5[3]
+	Let COMM_LEV=UCA5[4]
+	let rec_uac=GetUIDRec(e$,IntCo,TUID$)
+	call GetPortDefault(e$,IntCO,TUID$,portnum,rec_uac,prt.) ! get port default
+	tmp$=Tim(8) using "&&"
+	tmp$[3]=TIM(9) using "&&"
+	tmp$[5]=TIM(10) using "&&"
+	CurDate=tmp$[1,6] ! yymmdd
+	ReturnStatus=0
+	Message$="ACTION1 NOT FOUND"
+	select case action1$
+	case "CUSTSEARCH" ! Customer scan						doc=SHScan-CustScan.doc
+		!
+		Let ReturnStatus=1
+		Message$="OK"
+		Call CustList(e$,IntCo,List$[],maxcnt,ctlc,cuc,debugdetail,dblog$,UserId$)
+		If E$<>""
+		  Let ReturnStatus=0
+		  Message$=E$
+		Endif
+		call AddToStr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Customer Search sent "+Message$ \ Call updatelog(debug)
+		Endif
+		GAct=1 ! okay
+		! end of prodsearch
+	case "SYSFLAGS" ! send up flags							doc=SHScan-GetSysFlags.doc
+		GAct=1 ! ok
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		List$[0]=bsdel$,"SYSFLAGS",fdel$
+		Webstr$="COSTLEV",fdel$,"DFDATE",fdel$
+		List$[1]=webstr$
+		TMP$=Str$(cost_lev[1])
+		Webstr$=tmp$[1,1],fdel$
+		x2=tim(6)-365 ! now 1 yr ! was 180 ! 6 months ago
+		tmp$=JDATE$(X2)
+		tmp$[4,5]="01" ! always begin of month!
+		webstr$=webstr$,tmp$,fdel$ ! default date 6 months ago
+		List$[2]=webstr$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		
+		! send scan List
+		Clear list$[]
+		List$[0]=bsdel$,"SCANLIST",fdel$
+		List$[1]="ID",fdel$,"DESC",fdel$
+		List$[2]="1",fdel$,"DESCRIPTION",fdel$
+		List$[3]="2",fdel$,"ITEM CODE",fdel$
+		List$[4]="3",fdel$,"COMMODITY",fdel$
+		List$[5]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		
+		if debugdetail
+			dmsg$="System Flags & droplists sent "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of sysflags
+	case "GETCUST" ! get cust)								doc=SHScan-GetCust.doc
+		! get cust name
+		
+		Call DXGet("CUSTID",tmp$)
+		X2=tmp$
+		Cust$=X2 Using "######"
+		If X2<>0 Call GetCust()
+		If cur<0
+			ReturnStatus=0
+			Message$="CUSTOMER "+Cust$+" NOT FOUND"
+			Goto CustInv
+		Endif
+		If x2=0 
+			clear cust. ! no specific customer
+			Cust.Name$="ALL CUSTOMERS"
+		Endif
+		CustNo=Cust$
+		Clear List$[]
+		List$[0]=bsdel$,"CUSTNAME",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$
+		List$[2]=Cust$,fdel$,RTrim$(Cust.Name$),fdel$
+		List$[3]=esdel$
+		ReturnStatus=1
+		Message$="OK"
+		call AddToStr(e$,rstr$,List$[])
+		!
+		CustInv: ! customer invalid
+		if debugdetail
+			dmsg$="Customer sent "+Cust$+" "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of getcust
+	case "SHPSCAN" ! Shiplist list							doc=SHScan-GetCustShiplists.doc
+		Call DXGet("CUSTID",tmp$)
+		X2=tmp$
+		Cust$=X2 Using "######"
+		if x2<>0 Call GetCust()
+		If cur<0
+			ReturnStatus=0
+			Message$="CUSTOMER "+Cust$+" NOT FOUND"
+			Goto CustSLInv
+		Endif
+		CustNo=Cust$
+		Clear List$[]
+		tmpcnt=maxcnt
+		List$[0]=bsdel$,"SHIPSEARCH",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$,"ADDRESS1",fdel$,"CITY",fdel$,"STATE",fdel$
+		Row=2
+		If x2<>0
+			Key1$=" ",key1$
+			key1$=Cust$+Blank$
+			Key1$[7]=""
+			do
+				slr=FileGetshiplist(e$,SLC,">",1,Key1$,sl.)
+				if slr<0 exit do
+				if Key1$[1,6]<>Cust$ exit do
+				Webstr$=Key1$[8,13],fdel$,RTrim$(sl.Name$),fdel$
+				Webstr$=WebStr$,RTrim$(sl.Address$),fdel$
+				Webstr$=WebStr$,RTrim$(sl.City$),fdel$,SL.State$,fdel$
+				List$[row]=webstr$
+				row=row+1
+				If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			loop
+		Endif ! of custid sent
+		List$[row]=esdel$ ! all done
+		
+		ReturnStatus=1
+		Message$="OK"
+		call AddToStr(e$,rstr$,List$[])
+		!
+		CustSLInv: ! customer invalid
+		if debugdetail
+			dmsg$="Customer ShipList sent "+Cust$+" "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of SHPSCAN
+	
+	case "SCANLINES" ! wants the list						doc=SHScan-GetSlsDetails.doc
+		! call dxsave(0,"tmp/jcs249.txt!")
+		ReturnStatus=1
+		Message$="OK"
+		call Scanhist()
+		call AddToStr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Scan details sent "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of Scanlines
+	end select
+
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+
+  if debugdetail
+		dmsg$="End of Program serp249" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC=OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	CCC=OpenFile(-1728,IntCo) \ IF CCC=-1 Error 42 ! u/m file
+	CMC=OpenFile(-2288,IntCo) \ if CMC=-1 Error 42 ! commodity
+	PRC=OpenFile(-1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(-1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	WHI=OpenFile(-2768,IntCo) \ if whi=-1 Error 42 ! wh info file (rec 0 fix)
+	CUC=OpenFile(-1808,IntCo) \ if cuc=-1 Error 42 ! customer
+	SLC=OpenFile(-2112,IntCo) \ if slc=-1 Error 42 ! shiplist
+	INVH=OpenFile(-1136,IntCo) \ if invh=-1 Error 42 ! hist head
+	INVS=OpenFile(-1152,IntCo) \ if invs=-1 Error 42 ! hist ship
+	INVT=OpenFile(-1168,IntCo) \ if invt=-1 Error 42 ! hist ttls
+	INVL=OpenFile(-1184,IntCo) \ if invl=-1 Error 42 ! hist lines
+	INVK=OpenFile(-9994,IntCo) \ if invk=-1 Error 42 ! hist key
+ 	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+Userid$+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Function chkDateFrmt$(DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY
+! if not make it MM/DD/YYYY
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE" or DIn$="0"
+	  Let DOut$=UCase$(DIn$)
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function DOut$ ! chkDateFrmt$
+! 
+!--------------------------------------------------------------------
+Sub GetCust()
+! get Customer data - 
+! PASS IN CUST$
+  Try
+	Dim Ckey$[60]
+	Dim 2%,PRTYPE
+	Dim 3%,CUR
+	ckey$=" ",cKey$
+	cKey$=Cust$
+	
+		CUR=filegetcust(e$,CUC,"=",1,CKey$,cust.)
+		If CUR<0
+			clear cust.
+			cust.Name$="CUSTOMER NOT FOUND"+Blank$
+		Endif
+
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetCust
+!--------------------------------------------------------------------
+Sub ScanHist()
+! scan inv history for matches
+  try
+	dim Wrd1$[20],Wrd2$[20],Wrd3$[20],Swrd$[60]
+	Dim SFld$[65],D1$[20],D2$[20],HRef$[40]
+	dim 3%
+	Smin=tim(12);Ssec=tim(13)
+	call dxget("CUSTID",tmp$)
+	X2=tmp$
+	Cust$=X2 Using "######"
+	if x2<>0 Call GetCust()
+	If cur<0
+		ReturnStatus=0
+		Message$="CUSTOMER "+Cust$+" NOT FOUND"
+		Goto CustSHInv
+	Endif
+	CustNo=Cust$
+	Clear List$[]
+	tmpcnt=maxcnt
+	call dxget("SCANDIR",tmp$)
+	tmp$=UCase$(RTrim$(tmp$))
+	If tmp$<>"F" And TMP$<>"B"
+		ReturnStatus=0
+		Message$="INVALID SCAN DIRECTION"
+		goto CustSHInv
+	Endif
+	SMode=3 \ if tmp$="B" let Smode=6
+	call dxget("SDATE",tmp$)
+	tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+	LOrdDate=tmp1$[3,8] ! drop to yymmdd
+	D1$=LOrdDate Using "&&&&&&"
+	Call DateToJulian(1,D1$,D2$,F)
+	JLDate=D2$ \ if LOrdDate=0 let JLDate=0
+	! ADDED 01/2014 - CHUNKING DATA
+	call dxget("CURKEY1",tmp$)
+	let stkey1$=RTrim$(tmp$) ! header
+	call dxget("CURKEY2",tmp$)
+	let stkey2$=RTrim$(tmp$) ! line
+
+	call dxget("SHOSHIP",tmp$)
+	tmp$=UCase$(RTrim$(tmp$))
+	If tmp$<>"Y" And TMP$<>"N"
+		ReturnStatus=0
+		Message$="INVALID SHIP RESPONSE"
+		goto CustSHInv
+	Endif
+	SShip=0 \ if tmp$="Y" let SShip=1
+	call dxget("SHIPID",tmp$)
+	X2=tmp$
+	if x2<0 or x2>999999 or fra(x2)
+		ReturnStatus=0
+		Message$="INVALID SHIP LIST NUMBER"
+		goto CustSHInv
+	Endif
+	ShipId=x2
+	call dxget("SRCHFLD",tmp$)
+	x2=tmp$  ! 1 = Desc, 2 = ItemCode, 3 = commodity
+	if x2<>1 and x2<>2 and x2<>3
+		ReturnStatus=0
+		Message$="INVALID SEARCH ON NUMBER"
+		goto CustSHInv
+	Endif
+	Srchon=x2
+	call dxget("SRCHMTCH",tmp$)
+	tmp$=UCase$(RTrim$(tmp$))
+	If tmp$<>"A" And TMP$<>"O"
+		ReturnStatus=0
+		Message$="INVALID SEARCH MATCH RESPONSE"
+		goto CustSHInv
+	Endif
+	SMtch=3 \ if tmp$="O" let SMtch=1
+	call dxget("MTCHEXCT",tmp$)
+	tmp$=UCase$(RTrim$(tmp$))
+	if srchon=1 let tmp$="N" ! cannot match 20 char to 60!!!
+	If tmp$<>"Y" And TMP$<>"N"
+		ReturnStatus=0
+		Message$="INVALID MATCH EXACT RESPONSE"
+		goto CustSHInv
+	Endif
+	EMatch=0 \ if tmp$="Y" let EMatch=1
+	call dxget("SWORD1",tmp$)
+	Wrd1$=RTrim$(tmp$)
+	call dxget("SWORD2",tmp$)
+	Wrd2$=RTrim$(tmp$)
+	call dxget("SWORD3",tmp$)
+	Wrd3$=RTrim$(tmp$)
+	Numwrds=0
+	if wrd1$>" " let numwrds=numwrds+1
+	if wrd2$>" " let numwrds=numwrds+1
+	if wrd3$>" " let numwrds=numwrds+1
+	if custno=0 and numwrds=0 ! ??? all? - not gonna happen on web!
+		X3=tim(6)-JLDate
+		if x3>30 ! 1 month is max for all
+			ReturnStatus=0
+			Message$="CANNOT SEND WHOLE FILE FOR TIME REQUESTED!"
+			goto CustSHInv
+		Endif
+	Endif
+	maxrecs=1000 ! max per chunk
+	! we're starting ! 
+	List$[0]=bsdel$,"SSDETAIL",fdel$
+	Webstr$="CUSTID",fdel$,"CUSTNAME",fdel$,"SHIPTO",fdel$
+	Webstr$=Webstr$,"PRODID",fdel$,"KIT",fdel$,"DESC1",fdel$,"DESC2",fdel$,"COMM",fdel$
+	Webstr$=Webstr$,"TYPE",fdel$,"REFNUM",fdel$,"REFDATE",fdel$
+	webstr$=webstr$,"SHIP",fdel$,"PRICE",fdel$,"COST",fdel$
+	Webstr$=WebStr$,"GPDOL",fdel$,"GPPRCT",fdel$,"CUTINFO",fdel$
+	List$[1]=webstr$
+	row=2
+	IKey$=" ",IKey$
+	If CustNo ! using hh
+		let IKey$[1,6]=CustNo Using "######"
+		Schn=INVH
+	Else ! using hhk dir 2 = INVDate (julian), Type, Refno
+		let IKey$[1,6]=JLDATE Using "######"
+		Schn=INVK
+	Endif
+	If Smode=6  ! backwards
+		if custno=0 let IKey$[1,6]="}}}}}}"
+		let IKey$[7]="}}}}}}"
+	Endif
+	if stkey1$<>"" ! starting
+		IF CUSTNO=0 ! julian date in hhkey
+			if len(stkey1$)<18 ! spaces stripped  jjjjjjttiiiiiiiiii
+				! lucky that no 10 digit invs & jdate is 4-5 digits
+				let x3[1]=stkey1$[1,8] ! jdate/type
+				let x3[2]=stkey1$[9] ! inv #
+				let stkey1$=x3[1] using "########"
+				let stkey1$[9]=x3[2] using "##########"
+			Endif
+		Else ! customer in sinvflehh
+			if len(stkey1$)<16 ! spaces stripped cccccciiiiiiiiii
+				! tougher as customer # could be from 1-6 digits
+				tmp$=LTrim$(stkey1$) ! trim beginning spaces
+				pos0=0;pos1=1
+				search tmp$[pos1]," ",pos0
+				let x3[1]=tmp$[1,pos0] 
+				let x3[2]=tmp$[pos0+1]
+				let stkey1$=X3[1] using "######"
+				let stkey1$[7]=X3[2] using "##########"
+			endif
+		Endif
+		let ikey$=Stkey1$
+		if smode=6 let GOB=1 else let GOB=0 ! let ikey$=ikey$+"}}" 
+		let smode=2 ! exact (we're on this one!)
+		if len(stkey2$)<13 ! stripped spaces (ignore trailing space!)
+			tmp$=LTrim$(stkey2$) ! trim beginning spaces
+			pos0=0;pos1=1
+			search tmp$[pos1]," ",pos0
+			let x3[1]=tmp$[1,pos0] 
+			let x3[2]=tmp$[pos0+1]
+			let stkey2$[1,10]=X3[1] using "##########"
+			let stkey2$[11,13]=X3[2] using "###"
+			let stkey2$[14]="" ! so next finds this key
+		endif
+	endif
+	Do
+		Search #SChn,smode,2;IKey$,R[2],E   ! IT'S QUICKER WITH SEARCH INSTEAD OF "fileget"
+		if e exit do
+		if smode=2 and gob let smode=6;gob=0 ! not on first one anymore
+		if smode=2 let smode=3
+		if custno ! using hh
+			x2=ikey$[1,6]
+			if x2<>custno exit do
+		Else ! using hhk
+			x2=ikey$[1,6]
+			if x2<JLDate Exit do ! pass start (backwards)
+		Endif
+		Read Record #INVH,R[2],0;ihh.;
+		R[3]=ihh.ShipRec
+		read record #INVS,R[3],0;ish.;
+		R[4]=ihh.TotRec
+		read record #INVT,R[4],0;ith.;
+		D1$=ihh.InvDate using "&&&&&&"
+		Call DateToJulian(1,D1$,D2$,F)
+		JIDate=D2$
+		if JLdate if JLDate>JIDate goto nxtinvc
+		if shipid>0 if ish.ShipCode<>Shipid goto nxtinvc
+		If CustNo=0
+			cust$=ihh.CustNum using "######"
+			call getcust()
+		Endif
+		Key2$=" ",Key2$
+		If SCHn=INVH let HRef$[1,10]=IKey$[7,16]
+		if SChn=INVK let HRef$[1,10]=IKey$[9,18]
+		if stkey2$<>"" ! send line key
+			let href$=stkey2$
+			clear stkey2$ ! so doesn't set on next invc!
+		ELSE
+			LET HREF$[11]=BLANK$
+		Endif
+		Key2$=HRef$
+	  HLLoop: ! history line loop
+		Search #INVL,3,1;Key2$,R[6],E \ if e>1 goto nxtinvc
+		if key2$[1,10]<>HRef$[1,10] goto nxtinvc
+		READ RECORD #invl,R[6],0;ilh.;
+		ZLine=0 \ if ilh.LineType=3 let ZLine=1
+		NonStk=ilh.NStkItem \ if Zline let NonStk=1 ! jic
+		if NOT(ilh.NumOut) or ilh.LineType=0 let ilh.NumOut=1
+		if ilh.LineType=3 goto HLLoop ! bpprod
+		clear pr.
+		if custom_customer$<>"ZEPHYR" if Not(NonStk) ! zephyr may have deleted!!
+			PRR=ilh.PDRecNum
+			Read record #PRC,PRR,0;pr.;
+		Endif
+		call SetPRtoRol()
+	 BPProd: ! bypass prod stuff
+		tmp$=RTrim$(ilh.ComdtyCode$)
+		if tmp$="" ! no commod - gotta have it!
+			if not(nonstk) let tmp$=RTrim$(pr.ComdtyCode$)
+			if nonstk let tmp$="MISC"
+		Endif
+		ILH.ComdtyCode$=tmp$
+		Clear SFld$
+		If SrchOn=1 let Sfld$=RTrim$(ilh.Desc1$)+" "+RTrim$(ilh.Desc2$)
+		if srchOn=2 let SFld$=RTrim$(ilh.ProdCode$)
+		if srchon=3 let SFld$=RTrim$(ilh.ComdtyCode$)
+		IF numwrds>0
+			numfnd=0
+			if wrd1$>" "
+				Swrd$=Wrd1$
+				pass=check4mtch(sfld$,swrd$)
+				if pass>0 let numfnd=numfnd+1
+			Endif
+			if wrd2$>" "
+				Swrd$=Wrd2$
+				pass=check4mtch(sfld$,swrd$)
+				if pass>0 let numfnd=numfnd+1
+			Endif
+			if wrd3$>" "
+				Swrd$=Wrd3$
+				pass=check4mtch(sfld$,swrd$)
+				if pass>0 let numfnd=numfnd+1
+			Endif
+			if smtch=1 and numfnd>0 call sndline()
+			if smtch>1 and numfnd=numwrds call sndline()
+		Else ! no words - send it
+			call sndline()
+		Endif
+		if row>maxrecs ! 2499 ! ------------- PUT A LIMIT ON? (time out issue) (addtostr: 20 secs per 3800)
+			returnstatus=5 ! 0
+			!Message$="MAXMIMUM ROWS REACHED. "+Str$(row)
+			message$="CURKEY1="+IKey$+"&CURKEY2="+Key2$+"&"
+			exit do 
+		Endif
+		cmin=tim(12);csec=tim(13)
+		Sttim=((smin*60)+ssec)
+		Crtim=((cmin*60)+csec)
+		if cmin<smin let crtim=crtim+3600 ! hour change
+		!emin=cmin-smin \ if emin<0 let emin=emin+60
+		!esec=csec-ssec \ if esec<0 let esec=esec+60
+		esec=crtim-sttim
+		emin=int(esec/60)
+		if esec>80 ! was 140 ! emin>=2 and esec>=20 ! 2 min, 20 sec elapsed - SEND IT NOW!
+			if row>2 or stkey1$<>""
+				returnstatus=5 
+				message$="CURKEY1="+IKey$+"&CURKEY2="+Key2$+"&"
+			else
+				returnstatus=0 ! we are done! - if 2m 20s - get out now!
+				Message$="No more lines found before time out.  Please adjust criteria."
+				!"TIME OUT @ "+str$(emin)+"m "+Str$(ESEC-(emin*60))+"s"
+			endif
+			exit do 
+		Endif
+		Goto HLLoop ! next line
+	NxtInvc: ! bypass
+	Loop
+	List$[row]=ESDEL$
+	CustSHInv: ! finito
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! ScanHist
+!--------------------------------------------------------------------
+Sub SetPRtoRol()
+! set up prod (PR.) with line values (stock & NonStock)
+ Try
+	Dim 1%,PFU1[20]
+	Dim 3%,PFU2[6]
+	IF ZLINE GOTO L30099:                                          
+	LET pr.LbsUnit=ilh.LbsUnit;pr.LbsFact=ilh.WgtFactor
+	IF NOT(pr.LbsUnit) LET pr.LbsUnit=1;ilh.WgtFactor=1    
+	LET pr.CubicFeet=ilh.CubeUnit;pr.CubicFtFactor=ilh.CubeFactor
+	IF NOT(pr.CubicFtFactor) LET pr.CubicFtFactor=1;ilh.CubeFactor=1
+	LET pr.BaseUM=ilh.UMBase;pr.UM2=ilh.UMSell                     
+	LET pr.UM3=ilh.UMPrice;pr.UM4=ilh.UMCost                               
+	LET pr.UM5=ilh.UMPurch                                          
+	LET pr.UM6=0;pr.UM7=0;pr.UM8=0                               
+	LET pr.UMStkDefault=ilh.UMSell;Pr.UMSellDefault=ilh.UMSell;pr.UMPurchDefault=ilh.UMPurch             
+	LET pr.UMCostDefault=ilh.UMCost;pr.UMPriceDefault=ilh.UMPrice                              
+	IF NOT(NonSTK) GOTO L30060:                                   
+	LET pr.UMPrdtnDefault=ilh.UMSell;pr.UMUpChrg=ilh.UMBase;pr.UMBrknQty=ilh.UMBase              
+	IF pr.UMCostDefault=-3 OR pr.UMPriceDefault=-3 ! "Catch Wgt Itm N/S              
+		LET pr.CatchWgtItm=-3;ilh.CatchWgtItem=pr.CatchWgtItm                                 
+	ELSE                                                            
+		LET pr.CatchWgtItm=0;ilh.CatchWgtItem=0                                         
+	ENDIF                                                           
+	LET pr.UMPack=ilh.UMSell;pr.UMSize=ilh.UMSell                               
+	L30060: LET pr.UM2Fact=ilh.SellFactor;pr.UM3Fact=ilh.PriceFactor                     
+	LET pr.UM4Fact=ilh.CostFactor;pr.UM5Fact=ilh.PurchFactor                              
+	LET pr.UM6Fact=0;pr.UM7Fact=0;pr.UM8Fact=0 
+	! below gets rid of dupes - not easy with names - so load into pfu1,pfu2
+	PFU1[0]=pr.BaseUM
+	pfu1[1]=pr.UM2;PFU2[0]=pr.UM2Fact
+	Pfu1[2]=pr.UM3;pfu2[1]=pr.UM3Fact
+	pfu1[3]=pr.UM4;pfu2[2]=pr.UM4Fact
+	pfu1[4]=pr.UM5;pfu2[3]=pr.UM5Fact
+	FOR X1=1 TO 4                                                   
+		FOR X2=0 TO X1-1                                              
+			IF PFU1[X1]=PFU1[X2] LET PFU1[X1]=0;PFU2[X1-1]=0            
+		NEXT X2                                                       
+	NEXT X1 
+	! now reload checked um's to names
+	pr.BaseUM=PFU1[0]
+	pr.UM2=pfu1[1];pr.UM2Fact=PFU2[0]
+	pr.UM3=Pfu1[2];pr.UM3Fact=pfu2[1]
+	pr.UM4=pfu1[3];pr.UM4Fact=pfu2[2]
+	pr.UM5=pfu1[4];pr.UM5Fact=pfu2[3]
+L30099: ! finito
+	
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! SetPRtoRol
+! 
+!--------------------------------------------------------------------
+Function check4mtch(sfld$,swrd$)
+! look for word in string
+  Try
+	PASS=0
+	tmp$=UCase$(Sfld$)
+	tmp1$=UCase$(SWrd$) ! match case on both
+	if ematch
+		if tmp$=tmp1$ let pass=1
+	Else ! search it
+		Call stringSearch(tmp$,tmp1$,pass)
+		! search tmp$[1],tmp1$,pass ! ub way (dl4 too!)
+		If Pass<0 let Pass=0
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end Function Pass ! check4mtch
+! 
+!--------------------------------------------------------------------
+Sub SndLine()
+! send this line
+  Try
+	Dim QUM$[4]
+	if custno=0 ! all custs - show customer
+		Webstr$=Str$(IHH.CustNum),fdel$,RTrim$(Cust.Name$),fdel$
+	Else ! no need
+		WebStr$=Str$(IHH.CustNum),fdel$,fdel$ ! cust NO name
+	Endif
+	If SShip ! show shipto
+		iF ISH.ShipEdit=0 Webstr$=webstr$,"SAME",fdel$             
+		iF ISH.ShipEdit=1 Webstr$=webstr$,"SHIPLIST # ",Str$(ish.ShipCode),fdel$
+		iF ISH.ShipEdit=2 Webstr$=webstr$,"SHIPLIST # ",Str$(ish.ShipCode),fdel$
+		iF ISH.ShipEdit=4 Webstr$=webstr$,"CUSTOMER ",Str$(ish.ShipCust),fdel$  
+		iF ISH.ShipEdit=5 Webstr$=webstr$,"MANUAL ENTRY",fdel$     
+	Else ! no shipto
+		Webstr$=webstr$,fdel$
+	Endif
+	Webstr$=webstr$,RTrim$(ilh.ProdCode$),fdel$,RTrim$(ilh.KitDesignation$),fdel$
+	Webstr$=webstr$,RTrim$(ilh.Desc1$),fdel$,RTrim$(ilh.Desc2$),fdel$
+	webstr$=webstr$,RTrim$(ilh.ComdtyCode$),fdel$ ! commod code
+	X3=ihh.InvNum;tmp$="INV"
+	if ihh.status=31 let x3=ihh.OrdNum;tmp$="C/M"
+	webstr$=webstr$,tmp$,fdel$,Str$(X3),fdel$ ! type / Num
+	tmp$="01/01/1900"
+	if ihh.InvDate let tmp$=PDate$(ihh.Invdate)
+	Webstr$=webstr$,tmp$,fdel$ ! inv date
+	cnvtu[0]=0;cnvtu[1]=ilh.umsell;cnvtu[2]=1
+	CNVTA=ilh.QtyShip
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	tmp$=XUnit$(ilh.umsell,ccc)
+	QSOLD=X3;QUM$=tmp$
+	x3=x3*ilh.NumOut ! does it on 249!?
+	webstr$=webstr$,LTrim$(X3 using QMask$)," ",tmp$,fdel$ ! qty sold
+	cnvtu[0]=0;cnvtu[1]=ilh.umprice;cnvtu[2]=2
+	! Does this need the Cutting calc? let's not do it
+	CNVTA=ilh.NetPrice
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	tmp$=XUnit$(ilh.umprice,ccc)
+	webstr$=webstr$,LTrim$(X3 using PMask$)," ",tmp$,fdel$ ! NET Price
+	DPrice=x3
+	netcost = Ilh.UnitCost
+	If ilh.LoadUpchrg <> 0
+	  If ilh.LoadUpchrg > 0 Let netcost = netcost + (netcost * (ilh.LoadUpchrg/100))                                                                      
+	  If ilh.LoadUpchrg < 0 Let netcost = netcost + Abs(ilh.LoadUpchrg)     
+	End If
+	cnvtu[0]=0;cnvtu[1]=ilh.umcost;cnvtu[2]=2
+	CNVTA=netcost
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	tmp$=XUnit$(ilh.umCost,ccc)
+	if cost_lev[1]=0 let x3=0 ! NO LOAD COST
+	webstr$=webstr$,LTrim$(X3 using PMask$)," ",tmp$,fdel$ ! NET Cost
+	cnvtu[0]=0;cnvtu[1]=ilh.UMPRICE;cnvtu[2]=2
+	CNVTA=netcost
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	DNCost=x3 ! cost in price u/m for GP (so same um)
+	GPD=DPrice-DNCost \ if cost_lev[1]=0 GPD=0
+	Webstr$=webstr$,LTrim$(GPD using PMask$),fdel$ ! GP $
+	X3=0
+	if DPrice let x3=FNR(((DPrice-DNCost)/DPrice)*100)
+	Webstr$=webstr$,LTRim$(X3 Using PMask$),"%",fdel$ ! gp %
+	IF ilh.LineType=1 or ilh.LineType=2 ! cut
+		Webstr$=webstr$,"CUT ",Str$(ILH.NumOut)," OUT FROM "
+		webstr$=webstr$,LTrim$(QSOLD Using QMask$)," ",QUM$,fdel$
+	Else
+		Webstr$=webstr$,fdel$
+	Endif
+	List$[row]=Webstr$
+	Let row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! SndLine
+! 
+!--------------------------------------------------------------------

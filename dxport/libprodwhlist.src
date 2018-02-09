@@ -1,0 +1,1566 @@
+! libprodwlist.lib
+!
+! supporting library of product warehouse - all from PWSALES file
+!
+! 1.0 11/14/07 new
+! 1.5 05/07/2008 revised prod & prodwhse struct
+!
+! loadsave -w -n 100,10 -o prog/dxport/libprodwhlist.lib src/libprodwhlist.src
+!
+include "src/copyright.inc"
+!
+! sub & functions for list library
+!
+!  S   ProdWHUsage		creates a list of 24 month usages adj
+!  S   ProdWHHistory	creates a list of 24 month EOM OH,AvgCost,Usages,forecast
+!  S   ProdWHSrvLvl		creates a list of 24 month Service Levels
+!  S   ProdWHSales		creates a list of 24 month Sales
+!  S   ProdWHCostChg	creates a list of cost changes (flag driven)
+!  S   ProdWhCostHst	creates a list of cost history (flag driven)
+!
+include "src/inc/fileprod.inc" ! product
+include "src/inc/fileprodwhse.inc" ! product warehouse
+include "src/inc/filepwsales.inc" ! product warehouse sales
+include "src/inc/filecosthist.inc" ! cost history
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters,ADDTOSTR
+!
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+!
+External Lib "libprodwh.lib"
+Declare External Function getwhavail
+!
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+!
+External Lib "ubsfunc.dl4"
+Declare External Function FormatDate$,OpenFile,JDate$,PDate$
+Declare External Sub UserCntrl
+!
+Declare Intrinsic Sub Env,DateToJulian,JulianToDate
+!
+!
+!--------------------------------------------------------------------
+External Sub ProdWHUsage(e$,WHRec,List$[],maxcnt,CCC,CTLC,PWSC,PR. as prod,WH. as prodwhse)
+  !
+  ! Creates a product Warehouse Usage display
+  !
+  ! e$         : error message
+  ! WHRec      : product warehouse record #
+  ! List$[]    : usage list - 24 month
+  ! maxcnt     : maximum # of lines in list
+  ! CCC        : u/m codes channel
+  ! CTLC       : control channel
+  ! PWSC       : product warehouse sales
+  ! PR.        : product record data
+  ! WH.        : product warehouse record data
+  !
+  try
+    !
+	Def FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01) 
+	!
+    dim 1%,tmp1,CNVTU[2],ARMonth,ARYear,DMth[25],BOYMonth
+	dim 1%,x,x7,x8,x9,Dir
+	dim 2%,tmp2,tmpcnt,ARDate,Q0[1]
+    dim 3%,tmp3,CNVTA,PWSRec,W5[25],W9[25],WhEst[25]
+	dim 3%,S1[12],S2[12],Z5[25],Z9[25]
+    !
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[600],Message$[200]
+	dim ProdKey$[64],SearKey$[64],M9$[200],ZH3$[25]
+	dim Mode$[3],P9$[50],P60$[50],P61$[256]
+	Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5]
+	dim StatusDesc$[10],qum$[4],Unit$[4],X$[20]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M32$[6] \ M32$="###.##"
+	dim M70$[8] \ M70$="----,--#"
+    !
+	dim PWS. as pwsales ! prod whse sales
+	!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+
+	!
+	Mat Read #CTLC,19,50;P9$; ! system flags
+	Mat Read #CTLC,60,50;P60$; ! add'l flags
+	Mat Read #CTLC,61,0;P61$; ! add'l flags
+	Mat Read #CTLC,115,40;Q0; ! decimals
+	Mat Read #CTLC,0,108;ARDate; ! current sales/ar date
+	READ #CTLC,0,120;ARMONTH;
+	READ #CTLC,51,74;BOYMONTH;
+
+	Let Dec$="#",Dec$;Qmask$="--------#"                                         
+	If Q0[0] Let Qmask$="--------#.",Dec$[1,Q0[0]]         !qty mask      
+	If Q0[1] Let Pmask$="-----------#.",Dec$[1,Q0[1]]     !price mask        
+	Let Emask$="-$$$$$$$$$$$$.##"  !ext. price mask
+	LET M9$="January  February March    April    May      June     "    
+	LET M9$=M9$,"July     August   SeptemberOctober  November December "
+	Let X$=ARDate Using "&&&&&&"
+	Let tmp1=X$[1,2]
+	If tmp1<68 let ARYear=tmp1+2000 Else Let ARYear=tmp1+1900
+    !
+	clear List$[]
+	row=0;tmpcnt=maxcnt
+	! 
+	! SET up a list of fiscal months (<0 equals not there yet)
+	FOR X=0 TO 25 \ LET DMTH[X]=X \ NEXT X                    
+	LET X7=BOYMONTH;X8=0;X9=0                                   
+	FOR I=1 TO 12                                               
+		IF NOT(X9) LET DMTH[I]=X7 ELSE  LET DMTH[I]=0-X7       
+		IF NOT(X8) LET DMTH[I+13]=X7+13 ELSE  LET DMTH[I+13]=X7
+		IF X7=ARMONTH LET X8=1;X9=1                               
+		LET X7=X7+1 \ IF X7=13 LET X7=1                           
+	NEXT I
+	
+	! set up headers
+	List$[row]=bsdel$,"USAGE",fdel$
+	row=row+1
+	WebStr$="ID",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	WebStr$=WH.ProdCode$,WH.Whse using M2$ ! always send prod & whse # for ID
+	WebStr$=WebStr$,fdel$ ! add endoffield
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$ ! "endofsection
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$=bsdel$,"USAGEDATA",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="Month",fdel$,"Year",fdel$,"Actual",fdel$
+	WebStr$=WebStr$,"Adjusted",fdel$,"Reason",fdel$,"Estimated",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+	If WHRec>0
+	  !
+	  Mode$="=";Dir=1
+	  SearKey$=WH.ProdCode$,WH.Whse using M2$
+	  PWSRec=filegetpwsales(e$,PWSC,Mode$,Dir,SearKey$,PWS.) ! get prod whse sales
+	  if PWSRec<0 clear PWS.
+	  !
+	  ! Move into vars for display - we use w5[], w9[] & S1/S2[] (0 & 13 NOT USED!)
+	  W5[0]=WH.UnitSlsCurYear1;W5[1]=WH.UnitSlsCurYear2;W5[2]=WH.UnitSlsCurYear3
+	  W5[3]=WH.UnitSlsCurYear4;W5[4]=WH.UnitSlsCurYear5;W5[5]=WH.UnitSlsCurYear6
+	  W5[6]=WH.UnitSlsCurYear7;W5[7]=WH.UnitSlsCurYear8;W5[8]=WH.UnitSlsCurYear9
+	  W5[9]=WH.UnitSlsCurYear10;W5[10]=WH.UnitSlsCurYear11;W5[11]=WH.UnitSlsCurYear12
+	  W5[12]=WH.UnitSlsCurYear13;W5[13]=WH.UnitSlsLstYear1;W5[14]=WH.UnitSlsLstYear2
+	  W5[15]=WH.UnitSlsLstYear3;W5[16]=WH.UnitSlsLstYear4;W5[17]=WH.UnitSlsLstYear5
+	  W5[18]=WH.UnitSlsLstYear6;W5[19]=WH.UnitSlsLstYear7;W5[20]=WH.UnitSlsLstYear8
+	  W5[21]=WH.UnitSlsLstYear9;W5[22]=WH.UnitSlsLstYear10;W5[23]=WH.UnitSlsLstYear11
+	  W5[24]=WH.UnitSlsLstYear12;W5[25]=WH.UnitSlsLstYear13
+	  W9[0]=WH.AdjUnitSlsCurYr1;W9[1]=WH.AdjUnitSlsCurYr2;W9[2]=WH.AdjUnitSlsCurYr3
+	  W9[3]=WH.AdjUnitSlsCurYr4;W9[4]=WH.AdjUnitSlsCurYr5;W9[5]=WH.AdjUnitSlsCurYr6
+	  W9[6]=WH.AdjUnitSlsCurYr7;W9[7]=WH.AdjUnitSlsCurYr8;W9[8]=WH.AdjUnitSlsCurYr9
+	  W9[9]=WH.AdjUnitSlsCurYr10;W9[10]=WH.AdjUnitSlsCurYr11;W9[11]=WH.AdjUnitSlsCurYr12
+	  W9[12]=WH.AdjUnitSlsCurYr13;W9[13]=WH.AdjUnitSlsLstYr1;W9[14]=WH.AdjUnitSlsLstYr2
+	  W9[15]=WH.AdjUnitSlsLstYr3;W9[16]=WH.AdjUnitSlsLstYr4;W9[17]=WH.AdjUnitSlsLstYr5
+	  W9[18]=WH.AdjUnitSlsLstYr6;W9[19]=WH.AdjUnitSlsLstYr7;W9[20]=WH.AdjUnitSlsLstYr8
+	  W9[21]=WH.AdjUnitSlsLstYr9;W9[22]=WH.AdjUnitSlsLstYr10;W9[23]=WH.AdjUnitSlsLstYr11
+	  W9[24]=WH.AdjUnitSlsLstYr12;W9[25]=WH.AdjUnitSlsLstYr13
+	  S1[0]=PWS.Spare3;S1[1]=PWS.JanDecForecast1;S1[2]=PWS.JanDecForecast2
+	  S1[3]=PWS.JanDecForecast3;S1[4]=PWS.JanDecForecast4;S1[5]=PWS.JanDecForecast5
+	  S1[6]=PWS.JanDecForecast6;S1[7]=PWS.JanDecForecast7;S1[8]=PWS.JanDecForecast8
+	  S1[9]=PWS.JanDecForecast9;S1[10]=PWS.JanDecForecast10;S1[11]=PWS.JanDecForecast11
+	  S1[12]=PWS.JanDecForecast12;S2[0]=PWS.Spare4;S2[1]=PWS.LyJanDecForecast1
+	  S2[2]=PWS.LyJanDecForecast2;S2[3]=PWS.LyJanDecForecast3;S2[4]=PWS.LyJanDecForecast4
+	  S2[5]=PWS.LyJanDecForecast5;S2[6]=PWS.LyJanDecForecast6;S2[7]=PWS.LyJanDecForecast7
+	  S2[8]=PWS.LyJanDecForecast8;S2[9]=PWS.LyJanDecForecast9;S2[10]=PWS.LyJanDecForecast10
+	  S2[11]=PWS.LyJanDecForecast11;S2[12]=PWS.LyJanDecForecast12
+	  
+	  ! Set up for list
+	  ! MOVE INTO TEMP VARS (dmth[x] holds pointer for actual month #
+		LET ZH3$=" ",ZH3$                                   
+		FOR X=0 TO 25                                       
+		  LET Z5[X]=0;Z9[X]=0                               
+		  IF DMTH[X]>=0   ! <0 means no bucket
+			LET Z5[X]=W5[DMTH[X]];Z9[X]=W9[DMTH[X]]     
+			IF X<>0 And X<>13
+				LET X1=DMTH[X]
+				IF X1>=1 And X1<25
+					IF X1>12 LET X1=X1-1                            
+					LET ZH3$[X,X]=WH.UseAdjReasons$[X1,X1]
+				Endif ! of month=1 to 24 ONLY
+			Endif ! 0 & 13 NOT USED
+		  ENDIF ! of valid month
+		NEXT X 
+	  ! move s1/s2 into whest
+	  LET X7=BOYMONTH
+		FOR I=0 TO 12 ! set up ty
+		  IF I LET WHEst[I]=s1[X7] ELSE  LET WHEST[0]=S1[0]
+		  IF I And X7=ARMONTH LET I=13
+		  IF I LET X7=X7+1 \ IF X7=13 LET X7=1
+		NEXT I
+		LET X7=BOYMONTH;X8=0
+		FOR I=0 TO 12 ! now set up LY
+		  IF NOT(I)
+			  LET WHEST[0+13]=S2[0]
+		  Else
+			  IF NOT(X8) LET WHest[I+13]=S2[X7] ELSE  LET WHest[I+13]=S1[X7]
+		  Endif
+		  IF I And X7=ARMONTH LET X8=1
+		  IF I LET X7=X7+1 \ IF X7=13 LET X7=1
+		NEXT I
+	  ! U/M & CONVERSION
+	  Let UMD=PR.UMPurchDefault ! it uses purchasing default UM in 369
+	  QUM$=xunit$(UMD,ccc) ! u/m
+	  CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1
+
+	  For Mth=1 to 12 ! as its 12 months - first TY then LY
+	    Let PMth=Dmth[Mth] \ if pmth<0 let PMth=ABS(PMth)
+		tmp$=M9$[PMth*9-8,PMth*9]
+		WebStr$=RTrim$(tmp$),fdel$ ! month
+		!If BOYMonth=1 Let tmp1=ARYear
+		!IF BOYMONTH<>1 And BOYMONTH>PMTH Let tmp1=ARYear-1
+		!IF BOYMONTH<>1 And BOYMONTH<=PMTH Let tmp1=ARyear
+		!WebStr$=WebStr$,Str$(tmp1),fdel$ ! year
+		Webstr$=WebStr$,"CURRENT",fdel$ ! year
+		CNVTA=Z5[mth]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$)," ",QUM$,fdel$ ! usage actual & UM
+		CNVTA=Z9[Mth]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$)," ",QUM$,fdel$ ! usage adjusted & UM
+		tmp$=ZH3$[Mth,Mth] ! adjusted reason
+		WebStr$=WebStr$,tmp$,fdel$
+		CNVTA=WHEst[Mth] ! est in a month#
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$)," ",QUM$,fdel$ ! Forecast & UM
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Next Mth
+
+		! now last year - will always be in 14-25 of the temps
+	  For Mth=1 to 12
+		Let PMth=Dmth[Mth] \ if pmth<0 let PMth=ABS(PMth)
+		tmp$=M9$[PMth*9-8,PMth*9]
+		WebStr$=RTrim$(tmp$),fdel$ ! month
+		!If BOYMonth=1 Let tmp1=ARYear-1
+		!IF BOYMONTH<>1 And BOYMONTH>PMTH Let tmp1=ARYear-2
+		!IF BOYMONTH<>1 And BOYMONTH<=PMTH Let tmp1=ARyear-1
+		!WebStr$=WebStr$,Str$(tmp1),fdel$ ! year
+		Webstr$=WebStr$,"PREVIOUS",fdel$ ! year
+		CNVTA=Z5[mth+13]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$)," ",QUM$,fdel$ ! usage actual & UM
+		CNVTA=Z9[Mth+13]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$)," ",QUM$,fdel$ ! usage adjusted & UM
+		tmp$=ZH3$[Mth+13,Mth+13] ! adjusted reason (14-25)
+		WebStr$=WebStr$,tmp$,fdel$
+		CNVTA=WHEst[Mth+13] ! est in a month# so is like 14-25
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$)," ",QUM$,fdel$ ! Forecast & UM
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Next Mth
+	Endif
+	! done
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHUsage
+!
+!--------------------------------------------------------------------
+External Sub ProdWHHistory(e$,WHRec,List$[],maxcnt,CCC,CTLC,PWSC,intCo,PR. as prod,WH. as prodwhse)
+  !
+  ! Creates a product Warehouse EOM OH,Cost & Usage display
+  !
+  ! e$         : error message
+  ! WHRec	   : product warehouse record #
+  ! List$[]    : usage list - 24 month
+  ! maxcnt     : maximum # of lines in list
+  ! CCC        : u/m codes channel
+  ! CTLC       : control channel
+  ! PWSC       : product warehouse sales
+  ! intCo		: Company #
+  ! PR.        : product record data
+  ! WH.        : product warehouse record data
+  !
+  try
+    !
+	Def FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01) 
+	!
+    dim 1%,tmp1,CNVTU[2],ARMonth,ARYear,DMth[25],BOYMonth
+	dim 1%,x,x7,x8,x9,Flag,Dir
+	dim 2%,tmp2,tmpcnt,ARDate,Q0[1]
+    dim 3%,tmp3,CNVTA,PWSRec,W5[25],WHOH[25],WHAC[25],WhEst[25]
+	dim 3%,S1[12],S2[12],Z5[25],PWOH[12],PWOHL[12],PWAVG[12],PWAVGL[12]
+    !
+	Dim 1%,FndUID,UA5[10],Cost_Lev[3] ! vars for call usercntrl
+	Dim UserID$[8],UA2$[50],TUID$[10] ! vars for call usercntrl
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[600],Message$[200]
+	dim ProdKey$[64],SearKey$[64],M9$[200],ZH3$[25]
+	dim Mode$[3],P9$[50],P60$[50],P61$[256]
+	Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5]
+	dim StatusDesc$[10],qum$[4],Unit$[4],X$[20]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M32$[6] \ M32$="###.##"
+	dim M70$[8] \ M70$="----,--#"
+	Dim 3%
+    !
+	dim PWS. as pwsales ! prod whse sales
+	!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	!! get costlev
+	Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	let TUID$=UserID$+"          " ! set up temp var
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max as usercntrl is 10 chars vs 8 for .net
+	If TUID$[1,10]<>"          " !  no blank users!
+	  Call UserCntrl(TUID$,UA2$,UA5[],FndUID,intCo)
+	  If FndUID=0 ! means found it, =1 is not found
+	    Cost_Lev[0]=UA5[0];Cost_Lev[1]=UA5[1] ! avg / load
+		Cost_Lev[2]=UA5[2];Cost_Lev[3]=UA5[3] ! PO / base
+	  Endif ! if not found would be zeroes from dim
+	Endif
+	!
+	Mat Read #CTLC,19,50;P9$; ! system flags
+	Mat Read #CTLC,60,50;P60$; ! add'l flags
+	Mat Read #CTLC,61,0;P61$; ! add'l flags
+	Mat Read #CTLC,115,40;Q0; ! decimals
+	Mat Read #CTLC,0,108;ARDate; ! current sales/ar date
+	READ #CTLC,0,120;ARMONTH;
+	READ #CTLC,51,74;BOYMONTH;
+
+	Let Dec$="#",Dec$;Qmask$="--------#";Flag=0
+	If Q0[0] Let Qmask$="--------#.",Dec$[1,Q0[0]]         !qty mask      
+	If Q0[1] Let Pmask$="-----------#.",Dec$[1,Q0[1]]     !price mask        
+	Let Emask$="-$$$$$$$$$$$$.##"  !ext. price mask
+	LET M9$="January  February March    April    May      June     "    
+	LET M9$=M9$,"July     August   SeptemberOctober  November December "
+	Let X$=ARDate Using "&&&&&&"
+	Let tmp1=X$[1,2]
+	If tmp1<68 let ARYear=tmp1+2000 Else Let ARYear=tmp1+1900
+    !
+	clear List$[]
+	row=0;tmpcnt=maxcnt
+	! SET up a list of months(fiscal order) that point to actual Var
+	FOR X=0 TO 25 \ LET DMTH[X]=0 \ NEXT X                    
+	let x7=armonth
+	FOR I=1 TO 12   
+		let dmth[i]=x7
+		let dmth[i+13]=x7+13
+		let x7=x7-1 \ if X7=0 let X7=12
+	NEXT I
+	! set up headers
+	List$[row]=bsdel$,"HISTORY",fdel$
+	row=row+1
+	WebStr$="ID",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	WebStr$=WH.ProdCode$,WH.Whse using M2$ ! always send prod & whse # for ID
+	WebStr$=WebStr$,fdel$ ! add endoffield
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$ ! "endofsection
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$=bsdel$,"HISTDATA",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="Month",fdel$,"Year",fdel$,"EOM On Hand",fdel$
+	WebStr$=WebStr$,"EOM Avg Cost",fdel$,"Actual Usage",fdel$,"Estimated Usage",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+	If WHRec>0
+	  !
+	  Mode$="=";Dir=1
+	  SearKey$=WH.ProdCode$,WH.Whse using M2$
+	  PWSRec=filegetpwsales(e$,PWSC,Mode$,Dir,SearKey$,PWS.) ! get prod whse sales
+	  if PWSRec<0 clear PWS.
+	  !
+	  ! Instead of having each variable as a separate name - we will for ease of use..
+	  ! Move into vars for display - we use w5[], PWOH[], PWAVG[] & S1/S2[] (0 & 13 NOT USED!)
+	  W5[0]=WH.UnitSlsCurYear1;W5[1]=WH.UnitSlsCurYear2;W5[2]=WH.UnitSlsCurYear3
+	  W5[3]=WH.UnitSlsCurYear4;W5[4]=WH.UnitSlsCurYear5;W5[5]=WH.UnitSlsCurYear6
+	  W5[6]=WH.UnitSlsCurYear7;W5[7]=WH.UnitSlsCurYear8;W5[8]=WH.UnitSlsCurYear9
+	  W5[9]=WH.UnitSlsCurYear10;W5[10]=WH.UnitSlsCurYear11;W5[11]=WH.UnitSlsCurYear12
+	  W5[12]=WH.UnitSlsCurYear13;W5[13]=WH.UnitSlsLstYear1;W5[14]=WH.UnitSlsLstYear2
+	  W5[15]=WH.UnitSlsLstYear3;W5[16]=WH.UnitSlsLstYear4;W5[17]=WH.UnitSlsLstYear5
+	  W5[18]=WH.UnitSlsLstYear6;W5[19]=WH.UnitSlsLstYear7;W5[20]=WH.UnitSlsLstYear8
+	  W5[21]=WH.UnitSlsLstYear9;W5[22]=WH.UnitSlsLstYear10;W5[23]=WH.UnitSlsLstYear11
+	  W5[24]=WH.UnitSlsLstYear12;W5[25]=WH.UnitSlsLstYear13
+	  S1[0]=PWS.Spare3;S1[1]=PWS.JanDecForecast1;S1[2]=PWS.JanDecForecast2
+	  S1[3]=PWS.JanDecForecast3;S1[4]=PWS.JanDecForecast4;S1[5]=PWS.JanDecForecast5
+	  S1[6]=PWS.JanDecForecast6;S1[7]=PWS.JanDecForecast7;S1[8]=PWS.JanDecForecast8
+	  S1[9]=PWS.JanDecForecast9;S1[10]=PWS.JanDecForecast10;S1[11]=PWS.JanDecForecast11
+	  S1[12]=PWS.JanDecForecast12;S2[0]=PWS.Spare4;S2[1]=PWS.LyJanDecForecast1
+	  S2[2]=PWS.LyJanDecForecast2;S2[3]=PWS.LyJanDecForecast3;S2[4]=PWS.LyJanDecForecast4
+	  S2[5]=PWS.LyJanDecForecast5;S2[6]=PWS.LyJanDecForecast6;S2[7]=PWS.LyJanDecForecast7
+	  S2[8]=PWS.LyJanDecForecast8;S2[9]=PWS.LyJanDecForecast9;S2[10]=PWS.LyJanDecForecast10
+	  S2[11]=PWS.LyJanDecForecast11;S2[12]=PWS.LyJanDecForecast12
+	  PWOH[0]=PWS.SpareYtd;PWOH[1]=PWS.JanEomOnhand;PWOH[2]=PWS.FebEomOnhand
+	  PWOH[3]=PWS.MarEomOnhand;PWOH[4]=PWS.AprEomOnhand;PWOH[5]=PWS.MayEomOnhand
+	  PWOH[6]=PWS.JunEomOnhand;PWOH[7]=PWS.JulEomOnhand;PWOH[8]=PWS.AugEomOnhand
+	  PWOH[9]=PWS.SepEomOnhand;PWOH[10]=PWS.OctEomOnhand;PWOH[11]=PWS.NovEomOnhand
+	  PWOH[12]=PWS.DecEomOnhand
+	  PWOHL[0]=PWS.Spare;PWOHL[1]=PWS.LyJanEomOnhand;PWOHL[2]=PWS.LyFebEomOnhand
+	  PWOHL[3]=PWS.LyMarEomOnhand;PWOHL[4]=PWS.LyAprEomOnhand;PWOHL[5]=PWS.LyMayEomOnhand
+	  PWOHL[6]=PWS.LyJunEomOnhand;PWOHL[7]=PWS.LyJulEomOnhand;PWOHL[8]=PWS.LyAugEomOnhand
+	  PWOHL[9]=PWS.LySepEomOnhand;PWOHL[10]=PWS.LyOctEomOnhand;PWOHL[11]=PWS.LyNovEomOnhand
+	  PWOHL[12]=PWS.LyDecEomOnhand
+	  PWAVG[0]=PWS.Spare1;PWAVG[1]=PWS.JanEomAvgCost;PWAVG[2]=PWS.FebEomAvgCost
+	  PWAVG[3]=PWS.MarEomAvgCost;PWAVG[4]=PWS.AprEomAvgCost;PWAVG[5]=PWS.MayEomAvgCost
+	  PWAVG[6]=PWS.JunEomAvgCost;PWAVG[7]=PWS.JulEomAvgCost;PWAVG[8]=PWS.AugEomAvgCost
+	  PWAVG[9]=PWS.SepEomAvgCost;PWAVG[10]=PWS.OctEomAvgCost;PWAVG[11]=PWS.NovEomAvgCost
+	  PWAVG[12]=PWS.DecEomAvgCost
+	  PWAVGL[0]=PWS.Spare2;PWAVGL[1]=PWS.LyJanEomAvgCost;PWAVGL[2]=PWS.LyFebEomAvgCost
+	  PWAVGL[3]=PWS.LyMarEomAvgCost;PWAVGL[4]=PWS.LyAprEomAvgCost;PWAVGL[5]=PWS.LyMayEomAvgCost
+	  PWAVGL[6]=PWS.LyJunEomAvgCost;PWAVGL[7]=PWS.LyJulEomAvgCost;PWAVGL[8]=PWS.LyAugEomAvgCost
+	  PWAVGL[9]=PWS.LySepEomAvgCost;PWAVGL[10]=PWS.LyOctEomAvgCost;PWAVGL[11]=PWS.LyNovEomAvgCost
+	  PWAVGL[12]=PWS.LyDecEomAvgCost
+	  ! Set up for list
+	  ! MOVE INTO TEMP VARS (dmth[x] holds pointer for actual month #
+		
+		FOR X=0 TO 25                                       
+		  LET Z5[X]=0
+		  !IF DMTH[X]>=0   ! <0 means no bucket
+			LET Z5[X]=W5[DMTH[X]]			
+		  !ENDIF ! of valid month
+		NEXT X 
+	  ! move s1/s2 into whest
+	  LET X7=BOYMONTH
+		FOR I=0 TO 12 ! set up ty
+		  IF I 
+			LET WHEst[I]=s1[X7];WHOH[I]=PWOH[x7];WHAC[I]=PWAVG[X7]
+		  ELSE
+			LET WHEST[0]=S1[0];WHOH[0]=PWOH[0];WHAC[0]=PWAVG[0]
+		  EndIf
+		  IF I And X7=ARMONTH ! pwsalesinq uses current prod/whse for current month
+		    LET WHOH[I]=WH.QtyOnHand
+		    If P9$[32,32]="Y" And WH.CostAvg LET WHAC[I]=WH.CostAvg Else Let WHAC[I]=PR.CostAvg
+			LET I=13
+		  Endif
+		  IF I LET X7=X7+1 \ IF X7=13 LET X7=1
+		NEXT I
+		LET X7=BOYMONTH;X8=0
+		FOR I=0 TO 12 ! now set up LY
+		  IF NOT(I)
+			  LET WHEST[0+13]=S2[0];WHOH[0+13]=PWOHL[0];WHAC[13]=PWAVGL[0]
+		  Else
+			  IF NOT(X8) ! its LY
+			    LET WHest[I+13]=S2[X7]
+				WHOH[I+13]=PWOHL[X7]
+				WHAC[I+13]=PWAVGL[X7]
+			  ELSE ! from TY
+			    LET WHest[I+13]=S1[X7]
+				WHOH[I+13]=PWOH[X7]
+				WHAC[I+13]=PWAVG[X7]
+			  ENDIF
+		  Endif
+		  IF I And X7=ARMONTH LET X8=1
+		  IF I LET X7=X7+1 \ IF X7=13 LET X7=1
+		NEXT I
+	  ! U/M & CONVERSION
+	  Let UMD=PR.UMPurchDefault ! it uses purchasing default UM in 369
+	  QUM$=xunit$(UMD,ccc) ! u/m
+	  ! CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1 ! (not all qtys!)
+	  For Mth=1 to 12 ! as its 12 months - first TY then LY
+	    Let PMth=Dmth[Mth] \ if pmth<0 let PMth=ABS(PMth)
+		tmp$=M9$[PMth*9-8,PMth*9]
+		WebStr$=RTrim$(tmp$),fdel$ ! month
+		if (armonth+1-mth)>0
+			tmp1=aryear
+		else
+			tmp1=aryear-1
+		endif
+		WebStr$=WebStr$,Str$(tmp1),fdel$ ! year
+		CNVTA=WHOH[mth];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$)," ",QUM$,fdel$ ! EOM OnHand & UM
+		CNVTA=WHAC[Mth];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=2
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		If Cost_Lev[0]>0 ! avg cost level
+			WebStr$=WebStr$,LTrim$(tmp3 Using PMask$)," ",QUM$,fdel$ ! EOM Avg Cost & UM
+		Else ! no cost
+			WebStr$=WebStr$," ",fdel$ ! blank cost&um
+		Endif
+		CNVTA=Z5[mth];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$)," ",QUM$,fdel$ ! Usage & UM
+		CNVTA=WHEst[Mth];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$)," ",QUM$,fdel$ ! Forecast & UM
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Next Mth
+
+		! now last year - will always be in 14-25 of the temps
+	  For Mth=1 to 12
+		Let PMth=Dmth[Mth] \ if pmth<0 let PMth=ABS(PMth)
+		tmp$=M9$[PMth*9-8,PMth*9]
+		WebStr$=RTrim$(tmp$),fdel$ ! month
+		if (armonth+1-mth)>0
+			tmp1=aryear-1
+		else
+			tmp1=aryear-2
+		endif
+		WebStr$=WebStr$,Str$(tmp1),fdel$ ! year
+		CNVTA=WHOH[mth+13];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$)," ",QUM$,fdel$ ! EOM OnHand & UM
+		CNVTA=WHAC[Mth+13];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=2
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		If Cost_Lev[0]>0 ! avg cost level
+			WebStr$=WebStr$,LTrim$(tmp3 Using PMask$)," ",QUM$,fdel$ ! EOM Avg Cost & UM
+		Else ! no cost
+			WebStr$=WebStr$," ",fdel$ ! blank cost&um
+		Endif
+		CNVTA=Z5[mth+13];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$)," ",QUM$,fdel$ ! Usage & UM
+		CNVTA=WHEst[Mth+13];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$)," ",QUM$,fdel$ ! Forecast & UM
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Next Mth
+	Endif
+	! done
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHHistory
+!
+!--------------------------------------------------------------------
+External Sub ProdWHSrvLvl(e$,WHRec,List$[],maxcnt,CCC,CTLC,PWSC,PR. as prod,WH. as prodwhse)
+  !
+  ! Creates a product Warehouse Service Level display
+  !
+  ! e$         : error message
+  ! WHRec      : product warehouse record #
+  ! List$[]    : usage list - 24 month
+  ! maxcnt     : maximum # of lines in list
+  ! CCC        : u/m codes channel
+  ! CTLC       : control channel
+  ! PWSC       : product warehouse sales
+  ! PR.        : product record data
+  ! WH.        : product warehouse record data
+  !
+  try
+    !
+	Def FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01) 
+	!
+    dim 1%,tmp1,CNVTU[2],ARMonth,ARYear,DMth[25],BOYMonth
+	dim 1%,I,x,x7,x8,x9,Dir,PMth
+	dim 2%,tmp2,tmpcnt,ARDate,Q0[1]
+    dim 3%,tmp3,CNVTA,PWSRec,SLOrd[25],SLShp[25]
+	dim 3%,S1[12,1],S2[12,1]
+    !
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[600],Message$[200]
+	dim ProdKey$[64],SearKey$[64],M9$[200],ZH3$[25]
+	dim Mode$[3],P9$[50],P60$[50],P61$[256]
+	Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5]
+	dim StatusDesc$[10],qum$[4],Unit$[4],X$[20]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M82$[11] \ M82$="-------#.##"
+	dim M80$[8] \ M80$="-------#"
+    !
+	dim PWS. as pwsales ! prod whse sales
+	!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+
+	!
+	Mat Read #CTLC,19,50;P9$; ! system flags
+	Mat Read #CTLC,60,50;P60$; ! add'l flags
+	Mat Read #CTLC,61,0;P61$; ! add'l flags
+	Mat Read #CTLC,115,40;Q0; ! decimals
+	Mat Read #CTLC,0,108;ARDate; ! current sales/ar date
+	READ #CTLC,0,120;ARMONTH;
+	READ #CTLC,51,74;BOYMONTH;
+
+	Let Dec$="#",Dec$;Qmask$="--------#"                                         
+	If Q0[0] Let Qmask$="--------#.",Dec$[1,Q0[0]]         !qty mask      
+	If Q0[1] Let Pmask$="-----------#.",Dec$[1,Q0[1]]     !price mask        
+	Let Emask$="-$$$$$$$$$$$$.##"  !ext. price mask
+	LET M9$="January  February March    April    May      June     "    
+	LET M9$=M9$,"July     August   SeptemberOctober  November December "
+	Let X$=ARDate Using "&&&&&&"
+	Let tmp1=X$[1,2]
+	If tmp1<68 let ARYear=tmp1+2000 Else Let ARYear=tmp1+1900
+    !
+	clear List$[]
+	row=0;tmpcnt=maxcnt
+	! SET up a list of months(fiscal order) that point to actual Var
+	FOR X=0 TO 25 \ LET DMTH[X]=X \ NEXT X                    
+	LET X7=BOYMONTH;X8=0;X9=0                                   
+	FOR I=1 TO 12                                               
+		IF NOT(X9) LET DMTH[I]=X7 ELSE  LET DMTH[I]=0-X7       
+		IF NOT(X8) LET DMTH[I+13]=X7+13 ELSE  LET DMTH[I+13]=X7
+		IF X7=ARMONTH LET X8=1;X9=1                               
+		LET X7=X7+1 \ IF X7=13 LET X7=1                           
+	NEXT I
+	! set up headers
+	List$[row]=bsdel$,"SERVICELEVEL",fdel$
+	row=row+1
+	WebStr$="ID",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	WebStr$=WH.ProdCode$,WH.Whse using M2$ ! always send prod & whse # for ID
+	WebStr$=WebStr$,fdel$ ! add endoffield
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$ ! "endofsection
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$=bsdel$,"SRVLVLDATA",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="Month",fdel$,"Year",fdel$,"Lines Ordered",fdel$
+	WebStr$=WebStr$,"Lines Shipped",fdel$,"ServLvl Percent",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+	If WHRec>0
+	  !
+	  Mode$="=";Dir=1
+	  SearKey$=WH.ProdCode$,WH.Whse using M2$
+	  PWSRec=filegetpwsales(e$,PWSC,Mode$,Dir,SearKey$,PWS.) ! get prod whse sales
+	  if PWSRec<0 clear PWS.
+	  !
+	  ! Instead of having each variable as a separate name - we will for ease of use..
+	  ! Move into vars for display - we use S1[] & s2[]
+	  S1[0,0]=PWS.Spare5;S1[0,1]=PWS.Spare6 ! ytd? - not used
+	  S1[1,0]=PWS.JanDecServLevel1;S1[1,1]=PWS.JanDecServLevel2 ! 0=ship, 1=ord
+	  S1[2,0]=PWS.JanDecServLevel3;S1[2,1]=PWS.JanDecServLevel4 ! Feb ship/ord
+	  S1[3,0]=PWS.JanDecServLevel5;S1[3,1]=PWS.JanDecServLevel6 ! Mar
+	  S1[4,0]=PWS.JanDecServLevel7;S1[4,1]=PWS.JanDecServLevel8 ! apr
+	  S1[5,0]=PWS.JanDecServLevel9;S1[5,1]=PWS.JanDecServLevel10 ! may
+	  S1[6,0]=PWS.JanDecServLevel11;S1[6,1]=PWS.JanDecServLevel12 ! june
+	  S1[7,0]=PWS.JanDecServLevel13;S1[7,1]=PWS.JanDecServLevel14 ! jul 0=ship, 1=ord
+	  S1[8,0]=PWS.JanDecServLevel15;S1[8,1]=PWS.JanDecServLevel16 ! aug ship/ord
+	  S1[9,0]=PWS.JanDecServLevel17;S1[9,1]=PWS.JanDecServLevel18 ! sep
+	  S1[10,0]=PWS.JanDecServLevel19;S1[10,1]=PWS.JanDecServLevel20 ! oct
+	  S1[11,0]=PWS.JanDecServLevel21;S1[11,1]=PWS.JanDecServLevel22 ! nov
+	  S1[12,0]=PWS.JanDecServLevel23;S1[12,1]=PWS.JanDecServLevel24 ! dec
+	  S2[0,0]=PWS.Spare7;S2[0,1]=PWS.Spare8 ! ytd? - not used
+	  S2[1,0]=PWS.LyJanDecSrvLvl1;S2[1,1]=PWS.LyJanDecSrvLvl2 ! 0=ship, 1=ord
+	  S2[2,0]=PWS.LyJanDecSrvLvl3;S2[2,1]=PWS.LyJanDecSrvLvl4 ! Feb ship/ord
+	  S2[3,0]=PWS.LyJanDecSrvLvl5;S2[3,1]=PWS.LyJanDecSrvLvl6 ! Mar
+	  S2[4,0]=PWS.LyJanDecSrvLvl7;S2[4,1]=PWS.LyJanDecSrvLvl8 ! apr
+	  S2[5,0]=PWS.LyJanDecSrvLvl9;S2[5,1]=PWS.LyJanDecSrvLvl10 ! may
+	  S2[6,0]=PWS.LyJanDecSrvLvl11;S2[6,1]=PWS.LyJanDecSrvLvl12 ! june
+	  S2[7,0]=PWS.LyJanDecSrvLvl13;S2[7,1]=PWS.LyJanDecSrvLvl14 ! jul 0=ship, 1=ord
+	  S2[8,0]=PWS.LyJanDecSrvLvl15;S2[8,1]=PWS.LyJanDecSrvLvl16 ! aug ship/ord
+	  S2[9,0]=PWS.LyJanDecSrvLvl17;S2[9,1]=PWS.LyJanDecSrvLvl18 ! sep
+	  S2[10,0]=PWS.LyJanDecSrvLvl19;S2[10,1]=PWS.LyJanDecSrvLvl20 ! oct
+	  S2[11,0]=PWS.LyJanDecSrvLvl21;S2[11,1]=PWS.LyJanDecSrvLvl22 ! nov
+	  S2[12,0]=PWS.LyJanDecSrvLvl23;S2[12,1]=PWS.LyJanDecSrvLvl24 ! dec
+	  ! now move into a temp var for sending
+	  ! move s1/s2 into SLord slshp in fiscal year order
+	  LET X7=BOYMONTH
+		FOR I=0 TO 12 ! set up ty
+		  IF I 
+			LET SLOrd[I]=s1[X7,1]
+			Let SLShp[I]=S1[X7,0]
+		  ELSE
+			LET SLOrd[0]=S1[0,1];SLShp[0]=S1[0,0]
+		  Endif
+		  IF I And X7=ARMONTH LET I=13
+		  IF I LET X7=X7+1 \ IF X7=13 LET X7=1
+		NEXT I
+		LET X7=BOYMONTH;X8=0
+		FOR I=0 TO 12 ! now set up LY
+		  IF NOT(I)
+			  LET SLOrd[0+13]=S2[0,1];SLShp[0+13]=S2[0,0]
+		  Else
+			  IF NOT(X8) ! use LY
+				LET SLShp[I+13]=S2[X7,0]
+				Let SLOrd[I+13]=S2[X7,1]
+			  ELSE ! from ty (after curr ar mnth)
+				LET SLShp[I+13]=S1[X7,0]
+				Let SLOrd[I+13]=S1[X7,1]
+			  Endif
+		  Endif
+		  IF I And X7=ARMONTH LET X8=1
+		  IF I LET X7=X7+1 \ IF X7=13 LET X7=1
+		NEXT I
+	  ! U/M & CONVERSION - not needed as its numbers, not qty/price/cost
+	  Let UMD=PR.UMPurchDefault ! it uses purchasing default UM in 369
+	  QUM$=xunit$(UMD,ccc) ! u/m
+	  CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1
+
+	  For Mth=1 to 12 ! as its 12 months - first TY then LY
+	    Let PMth=Dmth[Mth] \ if pmth<0 let PMth=ABS(PMth)
+		tmp$=M9$[PMth*9-8,PMth*9]
+		WebStr$=RTrim$(tmp$),fdel$ ! month
+		!If BOYMonth=1 Let tmp1=ARYear
+		!IF BOYMONTH<>1 And BOYMONTH>PMTH Let tmp1=ARYear-1
+		!IF BOYMONTH<>1 And BOYMONTH<=PMTH Let tmp1=ARyear
+		!WebStr$=WebStr$,Str$(tmp1),fdel$ ! year
+		Webstr$=WebStr$,"CURRENT",fdel$ ! year
+		WebStr$=WebStr$,LTrim$(SLOrd[mth] Using M80$),fdel$ ! ordered
+		WebStr$=WebStr$,LTrim$(SLShp[mth] Using M80$),fdel$ ! shipped
+		tmp3=0 ! below from pwsalesinq ([month,0]=ship  [month,1]=order)
+		!  IF SRVLVL[MONTH,1] PRINT  USING "---#.##%";@66,MONTH+7;(SRVLVL[MONTH,0]/SRVLVL[MONTH,1])*100;
+		If SLOrd[mth] ! had orders
+		  Let tmp3=FNR((SLShp[mth]/SLOrd[mth])*100)
+		  WebStr$=WebStr$,LTrim$(tmp3 Using M82$),"%",fdel$ ! Percent
+		Else ! no order
+		  If SLShp[mth] Let WebStr$=WebStr$," ",fdel$ ! no percent possible - send blank
+		  If Not(SLShp[mth]) Let WebStr$=WebStr$,LTrim$(tmp3 Using M82$),"%",fdel$ ! Percent (zero)
+		Endif
+	  	List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Next Mth
+
+	  ! now last year - will always be in 14-25 of the temps
+	  For Mth=1 to 12
+		Let PMth=Dmth[Mth] \ if pmth<0 let PMth=ABS(PMth)
+		tmp$=M9$[PMth*9-8,PMth*9]
+		WebStr$=RTrim$(tmp$),fdel$ ! month
+		!If BOYMonth=1 Let tmp1=ARYear-1
+		!IF BOYMONTH<>1 And BOYMONTH>PMTH Let tmp1=ARYear-2
+		!IF BOYMONTH<>1 And BOYMONTH<=PMTH Let tmp1=ARyear-1
+		!WebStr$=WebStr$,Str$(tmp1),fdel$ ! year
+		Webstr$=WebStr$,"PREVIOUS",fdel$ ! year
+		WebStr$=WebStr$,LTrim$(SLOrd[mth+13] Using M80$),fdel$ ! ordered
+		WebStr$=WebStr$,LTrim$(SLShp[mth+13] Using M80$),fdel$ ! shipped
+		tmp3=0  ! below from pwsalesinq ([month,0]=ship  [month,1]=order)
+		!  IF SRVLVL[MONTH,1] PRINT  USING "---#.##%";@66,MONTH+7;(SRVLVL[MONTH,0]/SRVLVL[MONTH,1])*100;
+		If SLOrd[mth+13] ! had orders
+		  Let tmp3=FNR((SLShp[mth+13]/SLOrd[mth+13])*100)
+		  WebStr$=WebStr$,LTrim$(tmp3 Using M82$),"%",fdel$ ! Percent
+		Else ! no order
+			If SLShp[mth+13] let WebStr$=WebStr$," ",fdel$ ! no percent possible - send blank
+			If Not(SLShp[mth+13]) Let WebStr$=WebStr$,LTrim$(tmp3 Using M82$),"%",fdel$ ! Percent (zero)
+		Endif
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Next Mth
+	Endif
+	! done
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHSrvLvl
+!
+!--------------------------------------------------------------------
+External Sub ProdWHSales(e$,WHRec,List$[],maxcnt,CCC,CTLC,PWSC,IntCo,PR. as prod,WH. as prodwhse)
+  !
+  ! Creates a product Warehouse Usage display
+  !
+  ! e$         : error message
+  ! WHRec      : product warehouse record #
+  ! List$[]    : Sales list - 24 month (TY/LY)
+  ! maxcnt     : maximum # of lines in list
+  ! CCC        : u/m codes channel
+  ! CTLC       : control channel
+  ! PWSC       : product warehouse sales
+  ! intCo		: Company #
+  ! PR.        : product record data
+  ! WH.        : product warehouse record data
+  !
+  try
+    !
+	Def FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01) 
+	!
+    dim 1%,tmp1,CNVTU[2],ARMonth,ARYear,DMth[25],BOYMonth
+	dim 1%,x,x7,x8,x9,Dir
+	dim 2%,tmp2,tmpcnt,ARDate,Q0[1]
+    dim 3%,tmp3,CNVTA,PWSRec,T9[3]
+	dim 3%,S1[12,2],S2[12,2],Z1[12,2],Z2[12,2]
+    !
+	Dim 1%,FndUID,UA5[10],Cost_Lev[3] ! vars for call usercntrl
+	Dim UserID$[8],UA2$[50],TUID$[10] ! vars for call usercntrl
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[600],Message$[200]
+	dim ProdKey$[64],SearKey$[64],M9$[200],ZH3$[25]
+	dim Mode$[3],P9$[50],P60$[50],P61$[256]
+	Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5]
+	dim StatusDesc$[10],Sum$[4],Unit$[4],X$[20]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M32$[6] \ M32$="###.##"
+	dim M70$[8] \ M70$="----,--#"
+	Dim 3%
+    !
+	dim PWS. as pwsales ! prod whse sales
+	!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	!! get costlev
+	Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	let TUID$=UserID$+"          " ! set up temp var
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max as usercntrl is 10 chars vs 8 for .net
+	If TUID$[1,10]<>"          " !  no blank users!
+	  Call UserCntrl(TUID$,UA2$,UA5[],FndUID,intCo)
+	  If FndUID=0 ! means found it, =1 is not found
+	    Cost_Lev[0]=UA5[0];Cost_Lev[1]=UA5[1] ! avg / load
+		Cost_Lev[2]=UA5[2];Cost_Lev[3]=UA5[3] ! PO / base
+	  Endif ! if not found would be zeroes from dim
+	Endif
+	!
+	Mat Read #CTLC,19,50;P9$; ! system flags
+	Mat Read #CTLC,60,50;P60$; ! add'l flags
+	Mat Read #CTLC,61,0;P61$; ! add'l flags
+	Mat Read #CTLC,115,40;Q0; ! decimals
+	Mat Read #CTLC,0,108;ARDate; ! current sales/ar date
+	READ #CTLC,0,120;ARMONTH;
+	READ #CTLC,51,74;BOYMONTH;
+
+	Let Dec$="#",Dec$;Qmask$="----------#"                                         
+	If Q0[0] Let Qmask$="----------#.",Dec$[1,Q0[0]]         !qty mask      
+	If Q0[1] Let Pmask$="-----------#.##" ! ,Dec$[1,Q0[1]]     !price mask        
+	Let Emask$="-$$$$$$$$$$$$.##"  !ext. price mask
+	LET M9$="January  February March    April    May      June     "    
+	LET M9$=M9$,"July     August   SeptemberOctober  November December "
+	Let X$=ARDate Using "&&&&&&"
+	Let tmp1=X$[1,2]
+	If tmp1<68 let ARYear=tmp1+2000 Else Let ARYear=tmp1+1900
+    !
+	clear List$[]
+	row=0;tmpcnt=maxcnt
+	! 
+	! SET up a list of fiscal months (<0 equals not there yet)
+	FOR X=0 TO 25 \ LET DMTH[X]=X \ NEXT X                    
+	LET X7=BOYMONTH;X8=0;X9=0                                   
+	FOR I=1 TO 12                                               
+		IF NOT(X9) LET DMTH[I]=X7 ELSE  LET DMTH[I]=0-X7       
+		IF NOT(X8) LET DMTH[I+13]=X7+13 ELSE  LET DMTH[I+13]=X7
+		IF X7=ARMONTH LET X8=1;X9=1                               
+		LET X7=X7+1 \ IF X7=13 LET X7=1                           
+	NEXT I
+	
+	! set up headers
+	List$[row]=bsdel$,"WHSESALES",fdel$
+	row=row+1
+	WebStr$="ID",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	WebStr$=WH.ProdCode$,WH.Whse using M2$ ! always send prod & whse # for ID
+	WebStr$=WebStr$,fdel$ ! add endoffield
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$ ! "endofsection
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$=bsdel$,"Current Year Sales",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="Month",fdel$,"UNIT SALES",fdel$,"U/M",fdel$
+	WebStr$=WebStr$,"NET SALES",fdel$,"COST OF SALES",fdel$,"GP %",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+	If WHRec>0
+	  !
+	  Mode$="=";Dir=1
+	  SearKey$=WH.ProdCode$,WH.Whse using M2$
+	  PWSRec=filegetpwsales(e$,PWSC,Mode$,Dir,SearKey$,PWS.) ! get prod whse sales
+	  if PWSRec<0 clear PWS.
+	  !
+	 ! move names into z1[],z2[] so we can use variables instead of Names
+		
+		Let z1[0,0]=PWS.YtdUnitSales;z1[0,1]=PWS.YtdSales;z1[0,2]=PWS.YtdCost
+		Let Z1[1,0]=PWS.JanUnCost1;z1[1,1]=PWS.JanUnCost2;z1[1,2]=PWS.JanUnCost3
+		let z1[2,0]=PWS.FebUnCost1;z1[2,1]=PWS.FebUnCost2;z1[2,2]=PWS.FebUnCost3
+		let z1[3,0]=PWS.MarUnCost1;z1[3,1]=PWS.MarUnCost2;z1[3,2]=PWS.MarUnCost3
+		let z1[4,0]=PWS.AprUnCost1;z1[4,1]=PWS.AprUnCost2;z1[4,2]=PWS.AprUnCost3
+		let z1[5,0]=PWS.MayUnCost1;z1[5,1]=PWS.MayUnCost2;z1[5,2]=PWS.MayUnCost3
+		let z1[6,0]=PWS.JunUnCost1;z1[6,1]=PWS.JunUnCost2;z1[6,2]=PWS.JunUnCost3
+		let z1[7,0]=PWS.JulUnCost1;z1[7,1]=PWS.JulUnCost2;z1[7,2]=PWS.JulUnCost3
+		let z1[8,0]=PWS.AugUnCost1;z1[8,1]=PWS.AugUnCost2;z1[8,2]=PWS.AugUnCost3
+		let z1[9,0]=PWS.SepUnCost1;z1[9,1]=PWS.SepUnCost2;z1[9,2]=PWS.SepUnCost3
+		let z1[10,0]=PWS.OctUnCost1;z1[10,1]=PWS.OctUnCost2;z1[10,2]=PWS.OctUnCost3
+		let z1[11,0]=PWS.NovUnCost1;z1[11,1]=PWS.NovUnCost2;z1[11,2]=PWS.NovUnCost3
+		let z1[12,0]=PWS.DecUnCost1;z1[12,1]=PWS.DecUnCost2;z1[12,2]=PWS.DecUnCost3
+		Let z2[0,0]=PWS.LytdUnitSales;z2[0,1]=PWS.LytdSales;z2[0,2]=PWS.LytdCost
+		Let z2[1,0]=PWS.LyJanUnCost1;z2[1,1]=PWS.LyJanUnCost2;z2[1,2]=PWS.LyJanUnCost3
+		let z2[2,0]=PWS.LyFebUnCost1;z2[2,1]=PWS.LyFebUnCost2;z2[2,2]=PWS.LyFebUnCost3
+		let z2[3,0]=PWS.LyMarUnCost1;z2[3,1]=PWS.LyMarUnCost2;z2[3,2]=PWS.LyMarUnCost3
+		let z2[4,0]=PWS.LyAprUnCost1;z2[4,1]=PWS.LyAprUnCost2;z2[4,2]=PWS.LyAprUnCost3
+		let z2[5,0]=PWS.LyMayUnCost1;z2[5,1]=PWS.LyMayUnCost2;z2[5,2]=PWS.LyMayUnCost3
+		let z2[6,0]=PWS.LyJunUnCost1;z2[6,1]=PWS.LyJunUnCost2;z2[6,2]=PWS.LyJunUnCost3
+		let z2[7,0]=PWS.LyJulUnCost1;z2[7,1]=PWS.LyJulUnCost2;z2[7,2]=PWS.LyJulUnCost3
+		let z2[8,0]=PWS.LyAugUnCost1;z2[8,1]=PWS.LyAugUnCost2;z2[8,2]=PWS.LyAugUnCost3
+		let z2[9,0]=PWS.LySepUnCost1;z2[9,1]=PWS.LySepUnCost2;z2[9,2]=PWS.LySepUnCost3
+		let z2[10,0]=PWS.LyOctUnCost1;z2[10,1]=PWS.LyOctUnCost2;z2[10,2]=PWS.LyOctUnCost3
+		let z2[11,0]=PWS.LyNovUnCost1;z2[11,1]=PWS.LyNovUnCost2;z2[11,2]=PWS.LyNovUnCost3
+		let z2[12,0]=PWS.LyDecUnCost1;z2[12,1]=PWS.LyDecUnCost2;z2[12,2]=PWS.LyDecUnCost3
+	  
+		! Now adjust for fiscal years INTO S1[] & S2[] (taken from 102m program)
+		LET X7=BOYMONTH
+		FOR I=0 TO 12
+		  FOR X6=0 TO 2
+		   IF I LET S1[I,X6]=Z1[X7,X6] ELSE  LET S1[0,X6]=Z1[0,X6]
+		  NEXT X6
+		  IF I IF X7=ARMONTH LET I=13
+		  IF I LET X7=X7+1 \ IF X7=13 LET X7=1
+		NEXT I
+		LET X7=BOYMONTH;X8=0
+		FOR I=0 TO 12
+		  FOR X6=0 TO 2
+		    IF NOT(I)
+			  LET S2[0,X6]=Z2[0,X6]
+		    Else
+			  IF NOT(X8) LET S2[I,X6]=Z2[X7,X6] ELSE  LET S2[I,X6]=Z1[X7,X6]
+			endif
+		  NEXT X6
+		  IF I IF X7=ARMONTH LET X8=1
+		  IF I LET X7=X7+1 \ IF X7=13 LET X7=1
+		NEXT I
+	  ! U/M & CONVERSION
+	  Let UMD=PR.UMSellDefault ! it uses purchasing default UM in 369
+	  SUM$=xunit$(UMD,ccc) ! u/m
+	  T9[0]=0;T9[1]=0;T9[2]=0 ! ytd variables
+
+	  For Mth=1 to 12 ! as its 12 months - first TY then LY
+	    Let PMth=Dmth[Mth] \ if pmth<0 let PMth=ABS(PMth)
+		tmp$=M9$[PMth*9-8,PMth*9]
+		WebStr$=RTrim$(tmp$),fdel$ ! month
+		If BOYMonth=1 Let tmp1=ARYear
+		IF BOYMONTH<>1 And BOYMONTH>PMTH Let tmp1=ARYear-1
+		IF BOYMONTH<>1 And BOYMONTH<=PMTH Let tmp1=ARyear
+		! WebStr$=WebStr$,Str$(tmp1),fdel$ ! year (not used-jic)
+		CNVTA=S1[mth,0];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$),fdel$ ! Qty Sold
+		WebStr$=WebStr$,SUM$,fdel$ ! sell default uom
+		CNVTA=S1[Mth,1];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=2
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! Sales Dollars
+		CNVTA=S1[Mth,2];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=2
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		If Cost_Lev[1]>0 ! load cost level
+		 WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! Cost
+		 tmp3=0
+		 If s1[Mth,1]<>0 let tmp3=FNR(((S1[Mth,1]-S1[Mth,2])/S1[Mth,1])*100)
+		 WebStr$=WebStr$,LTrim$(tmp3 Using "----#.##"),"%",fdel$ ! GP %
+		Else ! no cost/gp
+		 WebStr$=WebStr$," ",fdel$," ",fdel$ ! blank cost/gp
+		Endif
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		LET T9=T9+S1[Mth,0];T9[1]=T9[1]+S1[Mth,1];T9[2]=T9[2]+S1[Mth,2]
+	  Next Mth
+	  ! send YTD totals
+	  Mth=0;S1[0,0]=T9;S1[0,1]=T9[1];S1[0,2]=T9[2] ! move in actuals
+		WebStr$="YTD Total",fdel$
+		CNVTA=S1[mth,0];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$),fdel$ ! "qty
+		WebStr$=WebStr$,SUM$,fdel$ ! u o m
+		CNVTA=S1[Mth,1];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=2
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! dollars
+		CNVTA=S1[Mth,2];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=2
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		If Cost_Lev[1]>0 ! load cost level
+		 WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! cost
+		 tmp3=0
+		 If s1[Mth,1]<>0 let tmp3=FNR(((S1[Mth,1]-S1[Mth,2])/S1[Mth,1])*100)
+		 WebStr$=WebStr$,LTrim$(tmp3 Using "----#.##"),"%",fdel$
+		Else ! no cost/gp
+		 WebStr$=WebStr$," ",fdel$," ",fdel$ ! blank cost/gp
+		Endif
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		List$[row]=esdel$ ! end of section
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+		! Headings for Last Year Section
+		WebStr$=bsdel$,"Last Year Sales",fdel$
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		WebStr$="Month",fdel$,"UNIT SALES",fdel$,"U/M",fdel$
+		WebStr$=WebStr$,"NET SALES",fdel$,"COST OF SALES",fdel$,"GP %",fdel$
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		! okay now load strings for LAST YEAR
+		T9[0]=0;T9[1]=0;T9[2]=0
+	  For Mth=1 to 12
+		Let PMth=Dmth[Mth] \ if pmth<0 let PMth=ABS(PMth)
+		tmp$=M9$[PMth*9-8,PMth*9]
+		WebStr$=RTrim$(tmp$),fdel$ ! month
+		If BOYMonth=1 Let tmp1=ARYear-1
+		IF BOYMONTH<>1 And BOYMONTH>PMTH Let tmp1=ARYear-2
+		IF BOYMONTH<>1 And BOYMONTH<=PMTH Let tmp1=ARyear-1
+		! WebStr$=WebStr$,Str$(tmp1),fdel$ ! year (not sent - just in case)
+		CNVTA=S2[mth,0];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$),fdel$ ! Qty Sold
+		WebStr$=WebStr$,SUM$,fdel$ ! sell default uom
+		CNVTA=S2[Mth,1];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=2
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! Sales Dollars
+		CNVTA=S2[Mth,2];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=2
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		If Cost_Lev[1]>0 ! load cost level
+		 WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! Cost
+		 tmp3=0
+		 If s2[Mth,1]<>0 let tmp3=FNR(((S2[Mth,1]-S2[Mth,2])/S2[Mth,1])*100)
+		 WebStr$=WebStr$,LTrim$(tmp3 Using "----#.##"),"%",fdel$ ! GP %
+		Else ! no cost/gp
+		 WebStr$=WebStr$," ",fdel$," ",fdel$ ! blank cost/gp
+		Endif
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		LET T9=T9+s2[Mth,0];T9[1]=T9[1]+s2[Mth,1];T9[2]=T9[2]+s2[Mth,2]
+	  Next Mth
+	  ! send ytd totals
+	  Mth=0;s2[0,0]=T9;s2[0,1]=T9[1];s2[0,2]=T9[2] ! move in actuals
+		WebStr$="YTD Total",fdel$
+		CNVTA=S2[mth,0];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=1
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using QMask$),fdel$ ! "qty
+		WebStr$=WebStr$,Sum$,fdel$ ! unit of measure
+		CNVTA=S2[Mth,1];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=2
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! dollars
+		CNVTA=S2[Mth,2];CNVTU[0]=0;CNVTU[1]=UMD;CNVTU[2]=2
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		If Cost_Lev[1]>0 ! load cost level
+		 WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! cost
+		 tmp3=0
+		 If s2[Mth,1]<>0 let tmp3=FNR(((s2[Mth,1]-s2[Mth,2])/s2[Mth,1])*100)
+		 WebStr$=WebStr$,LTrim$(tmp3 Using "----#.##"),"%",fdel$
+		Else ! no cost/gp
+		 WebStr$=WebStr$," ",fdel$," ",fdel$ ! blank cost/gp
+		Endif
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif ! valid wh rec
+	! done
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHSales
+!
+!--------------------------------------------------------------------
+External Sub ProdWHCostChg(e$,WHRec,List$[],maxcnt,CCC,CTLC,intCo,PR. as prod,WH. as prodwhse)
+  !
+  ! Creates a product or Warehouse Cost Change display
+  !
+  ! e$         : error message
+  ! WHRec      : product warehouse record #
+  ! List$[]    : Data list
+  ! maxcnt     : maximum # of lines in list
+  ! CCC        : u/m codes channel
+  ! CTLC       : control channel
+  ! intCo		: company #
+  ! PR.        : product record data
+  ! WH.        : product warehouse record data
+  !
+  try
+    !
+	Def FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01) 
+	!
+    dim 1%,tmp1,CNVTU[2]
+	dim 1%,x,x7,x8,x9,Dir
+	dim 2%,tmp2,tmpcnt,CJDate,Q0[1]
+    dim 3%,tmp3,CNVTA,CCost[20],CDate[20]
+    !
+	Dim 1%,FndUID,UA5[10],Cost_Lev[3] ! vars for call usercntrl
+	Dim UserID$[8],UA2$[50],TUID$[10] ! vars for call usercntrl
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[600],Message$[200]
+	dim ProdKey$[64],SearKey$[64],M9$[200],ZH3$[25]
+	dim Mode$[3],P9$[50],P60$[50],P61$[256]
+	Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5]
+	dim StatusDesc$[10],Cum$[4],Unit$[4],X$[20]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M32$[6] \ M32$="###.##"
+	dim M70$[8] \ M70$="----,--#"
+	Dim 3%
+    !
+	dim PWS. as pwsales ! prod whse sales
+	!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	!! get costlev
+	Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	let TUID$=UserID$+"          " ! set up temp var
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max as usercntrl is 10 chars vs 8 for .net
+	If TUID$[1,10]<>"          " !  no blank users!
+	  Call UserCntrl(TUID$,UA2$,UA5[],FndUID,intCo)
+	  If FndUID=0 ! means found it, =1 is not found
+	    Cost_Lev[0]=UA5[0];Cost_Lev[1]=UA5[1] ! avg / load
+		Cost_Lev[2]=UA5[2];Cost_Lev[3]=UA5[3] ! PO / base
+	  Endif ! if not found would be zeroes from dim
+	Endif
+	!
+	Mat Read #CTLC,19,50;P9$; ! system flags
+	Mat Read #CTLC,60,50;P60$; ! add'l flags
+	Mat Read #CTLC,61,0;P61$; ! add'l flags
+	Mat Read #CTLC,115,40;Q0; ! decimals
+	CJDate=Tim(6) ! todays date julian
+
+	Let Dec$="#",Dec$;Qmask$="--------#"                                         
+	If Q0[0] Let Qmask$="--------#.",Dec$[1,Q0[0]]         !qty mask      
+	If Q0[1] Let Pmask$="-----------#.",Dec$[1,Q0[1]]     !price mask        
+	Let Emask$="-$$$$$$$$$$$$.##"  !ext. price mask
+	!
+	clear List$[]
+	row=0;tmpcnt=maxcnt
+	! 
+	! set up headers
+	List$[row]=bsdel$,"COSTCHANGES",fdel$
+	row=row+1
+	WebStr$="ID",fdel$,"WPFlag",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	WebStr$=WH.ProdCode$,WH.Whse using M2$ ! always send prod & whse # for ID
+	WebStr$=WebStr$,fdel$,P9$[32,32],fdel$ ! add Whse Pricing flag & endoffield
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$ ! "endofsection
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$=bsdel$,"Cost Data",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="CostType",fdel$,"Cost",fdel$
+	WebStr$=WebStr$,"UM",fdel$,"DateChanged",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	! U/M & CONVERSION
+	Let UMD=PR.UMCostDefault ! it uses costing default UM
+	CUM$=xunit$(UMD,ccc) ! u/m
+	If P9$[32,32]<>"Y" or WHRec<0 ! not whse pricing
+		Let CCost[1]=PR.PrevBaseCost;CDate[1]=PR.DateBaseChg
+		Let CCost[2]=PR.CostBase;CDate[2]=CJDate
+		Let CCost[3]=PR.PendBaseCost;CDate[3]=PR.PendBaseDate
+		Let CCost[4]=PR.PrevLastCost;CDate[4]=PR.DateLastCostChg
+		Let CCost[5]=PR.CostPO;CDate[5]=CJDate
+		Let CCost[6]=PR.PendLastCost;CDate[6]=PR.PendLastCostDate
+		Let CCost[7]=PR.PrevLoadCost;CDate[7]=PR.DateLoadCstChg
+		Let CCost[8]=PR.PendLoadCost;CDate[8]=CJDate
+		Let CCost[9]=PR.PrevLoad2Cost;CDate[9]=PR.DateLoad2Chg
+		Let CCost[10]=PR.PendLoad2Cost;CDate[10]=CJDate
+	Else ! whse pricing
+	    Let CCost[1]=WH.PrevBaseCost;CDate[1]=WH.DateBaseChg
+		Let CCost[2]=WH.CostBase;CDate[2]=CJDate
+		If CCost[2]<=0 Let CCost[2]=PR.CostBase
+		Let CCost[3]=WH.PendBaseCost;CDate[3]=WH.PendBaseDate
+		Let CCost[4]=WH.PrevPOCost;CDate[4]=WH.DatePOCostChg
+		Let CCost[5]=WH.CostLastPo;CDate[5]=CJDate
+		If CCost[5]<=0 Let CCost[5]=PR.CostPO
+		Let CCost[6]=WH.PendPOCost;CDate[6]=WH.PendPOCostDate
+		Let CCost[7]=WH.PrevLoadCost;CDate[7]=WH.DateLoadChg
+		Let CCost[8]=WH.PendLoadCost;CDate[8]=CJDate
+		Let CCost[9]=WH.PrevLoad2Cost;CDate[9]=WH.DateLoad2Chg
+		Let CCost[10]=WH.PendLoad2Cost;CDate[10]=CJDate
+	Endif
+	Let Cnvtu[0]=0;Cnvtu[1]=UMD;Cnvtu[2]=2 ! all are cost converts to costing UM
+	If CCost[1] and cost_lev[3]>0 ! prev base cost
+		WebStr$="PREVIOUS BASE COST",fdel$
+		CNVTA=CCost[1]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=PDate$(CDate[1]) ! to mm/dd/yyyy
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	If (CCost[1] Or CCost[3]) and cost_lev[3]>0 ! pend or prev base - send current
+		WebStr$="CURRENT BASE COST",fdel$
+		CNVTA=CCost[2]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		!tmp2=CDate[2]
+		!tmp1$=tmp2 using "&&&&&"
+		!Call JulianToDate(5,tmp1$,tmp$,F) ! returns mm/dd/yyyy
+		tmp$=JDate$(CDate[2]) ! mm/dd/yyyy
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	If CCost[3] and cost_lev[3]>0 ! pend base cost
+		WebStr$="FUTURE BASE COST",fdel$
+		CNVTA=CCost[3]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=PDate$(CDate[3]) ! to mm/dd/yyyy
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	If CCost[4] and cost_lev[2]>0 ! prev po
+		WebStr$="PREVIOUS PO COST",fdel$
+		CNVTA=CCost[4]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=PDate$(CDate[4]) ! to mm/dd/yyyy
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	IF (CCost[4] or CCost[6]) and cost_lev[2]>0 ! pend or prev po cost - Send current
+		WebStr$="CURRENT PO COST",fdel$
+		CNVTA=CCost[5]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=JDate$(CDate[5]) ! mm/dd/yyyy
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	If CCost[6] and cost_lev[2]>0 ! pend po cost
+		WebStr$="FUTURE PO COST",fdel$
+		CNVTA=CCost[6]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=Pdate$(CDate[6]) ! to mm/dd/yyyy
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	If CCost[7] and cost_lev[1]>0 ! prev load
+		WebStr$="PREVIOUS LOAD COST",fdel$
+		CNVTA=CCost[7]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=Pdate$(CDate[7]) ! to MM/DD/YYYY
+		If CDate[7]<=0 Let tmp$=" "
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	If CCost[8] and cost_lev[1]>0 ! pend load
+		WebStr$="FUTURE LOAD COST",fdel$
+		CNVTA=CCost[8]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=JDate$(CDate[8]) ! mm/dd/yyyy
+		if CDate[8]<=0 Let tmp$=" "
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	If CCost[9] and cost_lev[1]>0 ! prev redi
+		WebStr$="PREVIOUS REDI COST",fdel$
+		CNVTA=CCost[9]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=Pdate$(CDate[9]) ! to mm/dd/yyyy
+		if CDate[9]<=0 Let tmp$=" "
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	If CCost[10] and cost_lev[1]>0 ! pend redi
+		WebStr$="FUTURE REDI COST",fdel$
+		CNVTA=CCost[10]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=JDate$(CDate[10]) ! mm/dd/yyyy
+		if CDate[10]<=0 Let tmp$=" "
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	! done
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	! now send base/po for chart
+	WebStr$=bsdel$,"BASE COST",fdel$ ! section for Base Cost
+	  List$[row]=WebStr$ \ row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  WebStr$="CostType",fdel$,"Cost",fdel$
+	  WebStr$=WebStr$,"UM",fdel$,"DateChanged",fdel$
+      List$[row]=WebStr$ \ row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Let Cnvtu[0]=0;Cnvtu[1]=UMD;Cnvtu[2]=2 ! all are cost converts to costing UM
+	If CCost[1] and cost_lev[3]>0 ! prev base cost
+		WebStr$="PREVIOUS BASE COST",fdel$
+		CNVTA=CCost[1]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		!tmp$=formatdate$(CDate[1] using "20&&####")
+		tmp$=PDate$(CDate[1]) ! to mm/dd/yyyy
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	If (CCost[1] Or CCost[3]) and cost_lev[3]>0 ! pend or prev base - send current
+		WebStr$="CURRENT BASE COST",fdel$
+		CNVTA=CCost[2]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=JDate$(CDate[2]) ! mm/dd/yyyy
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	If CCost[3] and cost_lev[3]>0 ! pend base cost
+		WebStr$="FUTURE BASE COST",fdel$
+		CNVTA=CCost[3]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=Pdate$(CDate[3]) ! mm/dd/yyyy
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	  !
+	  List$[row]=esdel$ \ row=row+1  ! end of section
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  WebStr$=bsdel$,"PO COST",fdel$ ! section for PO/Last Cost
+	  List$[row]=WebStr$ \ row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  WebStr$="CostType",fdel$,"Cost",fdel$
+	  WebStr$=WebStr$,"UM",fdel$,"DateChanged",fdel$
+      List$[row]=WebStr$ \ row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	!
+	If CCost[4] and cost_lev[2]>0 ! prev po
+		WebStr$="PREVIOUS PO COST",fdel$
+		CNVTA=CCost[4]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=Pdate$(CDate[4]) ! mm/dd/yyyy
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	IF (CCost[4] or CCost[6]) and cost_lev[2]>0 ! pend or prev po cost - Send current
+		WebStr$="CURRENT PO COST",fdel$
+		CNVTA=CCost[5]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=JDate$(CDate[5]) ! mm/dd/yyyy
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	If CCost[6] and cost_lev[2]>0 ! pend po cost
+		WebStr$="FUTURE PO COST",fdel$
+		CNVTA=CCost[6]
+		tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$
+		WebStr$=WebStr$,CUM$,fdel$ ! u/m
+		tmp$=Pdate$(CDate[6]) ! mm/dd/yyyy
+		WebStr$=WebStr$,tmp$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	! done
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHCostChg
+!
+!--------------------------------------------------------------------
+External Sub ProdWHCostHst(e$,Whse,List$[],maxcnt,CCC,CTLC,intCo,rstr$,PR. as prod)
+  !
+  ! Creates a product or Warehouse Cost Change display
+  !
+  ! e$         : error message
+  ! Whse       : Warehouse # (0=main prod)
+  ! List$[]    : Data list
+  ! maxcnt     : maximum # of lines in list
+  ! CCC        : u/m codes channel
+  ! CTLC       : control channel
+  ! intCo		: company #
+  ! PR.        : product record data
+ Try
+	Def FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01) 
+	!
+    dim 1%,tmp1,CNVTU[2]
+	dim 1%,x,x7,x8,x9,Dir
+	dim 2%,tmp2,tmpcnt,CJDate
+	Dim 2%,Q0[1],D9[5],PFU2[6],sysdate,sjdate
+    dim 3%,tmp3,CNVTA,CCost[20],CDate[20]
+    !
+	Dim 1%,FndUID,UA5[10],Cost_Lev[3] ! vars for call usercntrl
+	Dim UserID$[8],UA2$[50],TUID$[10] ! vars for call usercntrl
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20] ! ,rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[600],Message$[200]
+	dim ProdKey$[64],SearKey$[64],M9$[200],ZH3$[25]
+	dim Mode$[3],P9$[50],P60$[50],P61$[256]
+	Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5]
+	dim StatusDesc$[10],Cum$[4],Unt$[4],X$[20]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M32$[6] \ M32$="###.##"
+	dim M70$[8] \ M70$="----,--#"
+	Dim 3%
+	read #CTLC,3,172;sysdate;
+	Read #CTLC,19,50;P9$; 
+	Read #CTLC,60,50;P60$; 
+	Read #CTLC,61,0;P61$;
+	Mat Read #CTLC,115;D9;  
+	Mat Read #CTLC,115,40;Q0;
+	if p9$[32,32]<>"Y" let whse=0 ! no whse specific changes!!
+	Let Dec$="#",Dec$;Qmask$="---,---,--#"                                         
+	If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask      
+	If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask        
+	Let Emask$="-$$$,$$$,$$$,$$$.##"  !ext. price mask
+    !
+	dim PCH. as costhist ! prod whse Cost history
+	!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	! set time frame (1 year on display)
+	tmpcnt=maxcnt
+	clear List$[]
+	ReturnStatus = 1
+	Message$="OK";sholot=0
+	tmp$=Sysdate using "&&&&&&"
+	Call DateToJulian(1,tmp$,tmp1$,F)
+	if f let tmp1$=Str$(Tim(6))
+	sjdate=tmp1$ ! use system date
+	maxjdate=0 ! max date (0=all)
+	shoyrs=1 ! send max yrs of data - per committee 1 year as default
+	call dxget("MAXTM",TMP$)
+	x2=tmp$ ! ;X2=1
+	if x2>0 and x2<=99 let shoyrs=x2
+	let maxjdate=sjdate-Int(shoyrs*365) ! show # yrs back
+	if maxjdate<0 let maxjdate=0
+	Call dxget("CSTTYPE",tmp$)
+	let CHType=tmp$ ! in case ! what cost changed (0-10)
+	! we'll send the droplists (type & TIME)
+	List$[0]=bsdel$,"TYPES",fdel$
+	List$[1]="CSTTYPE",fdel$,"DESC",fdel$
+	List$[2]="0",fdel$,"0: ALL TYPES",fdel$
+	List$[3]="1",fdel$,"1: LOAD COST",fdel$
+	List$[4]="2",fdel$,"2: LOAD 2 COST",fdel$
+	List$[5]="3",fdel$,"3: PO COST",fdel$
+	List$[6]="4",fdel$,"4: NET PO COST",fdel$
+	List$[7]="5",fdel$,"5: BASE COST",fdel$
+	List$[8]="6",fdel$,"6: AVG COST",fdel$
+	List$[9]="8",fdel$,"8: LOAD TBL 1",fdel$
+	List$[10]="9",fdel$,"9: LOAD TBL 2",fdel$
+	List$[11]="10",fdel$,"10: LST REC NET",fdel$
+	List$[12]=esdel$
+	call addtostr(e$,rstr$,List$[])
+	Clear List$[]
+	List$[0]=bsdel$,"TIMEFRAME",fdel$
+	List$[1]="MAXTM",fdel$,"DESC",fdel$
+	List$[2]=".25",fdel$,"3 Months",fdel$
+	List$[3]=".5",fdel$,"6 Months",fdel$
+	List$[4]="1",fdel$,"1 year",fdel$
+	List$[5]="2",fdel$,"2 years",fdel$
+	List$[6]=esdel$
+	call addtostr(e$,rstr$,List$[])
+	Clear List$[]
+	List$[0]=bsdel$,"COSTHISTORY",FDEL$
+	tmp$="DATE",fdel$,"TIME",fdel$,"USERID",fdel$
+	tmp$=tmp$,"TYPE",fdel$,"OLDCOST",fdel$,"OLDUM",fdel$,"FACTOR",fdel$
+	tmp$=tmp$,"NEWCOST",fdel$,"COSTUM",fdel$,"SOURCE",fdel$
+	List$[1]=tmp$
+	row=2
+	PCH=OpenFile(-9920,IntCo) \ if PCH=-1 goto CHDone
+	ProdKey$=Pr.ProdCode$+Blank$
+	prodkey$[13]="" ! cut to length
+	SearKey$=prodkey$
+	let searkey$[13,14]=Whse Using "##"
+	Let Searkey$[15]="}}}}}" ! start at newest to oldest
+	Do
+		PCR=filegetcosthist(e$,PCH,"<",1,searkey$,pch.)
+		if PCR<0 exit do
+		if searkey$[1,12]<>Prodkey$[1,12] exit do
+		x2=searkey$[13,14]
+		if x2<>whse goto bpcrec ! whether 0 or not
+		if row>20 and pch.CDate<maxjdate exit do ! before lowest
+		If CHType and pch.CType<>CHType goto BPCRec ! not type wanted
+		! ok - set it up
+		tmp$=JDate$(pch.CDate)
+		Webstr$=tmp$,fdel$ ! date
+		tmp$=pch.CTime using "&&&&&&" ! hhmmss
+		x$=tmp$[1,2]+":"+tmp$[3,4]+":"+tmp$[5,6]
+		webstr$=webstr$,x$,fdel$ ! time
+		webstr$=webstr$,RTrim$(pch.AccessCode$),fdel$
+		x2=pch.CType
+		tmp$=Str$(X2)+": "
+		If X2 = 1 tmp$=tmp$+ "LOAD COST"
+		If X2 = 2 tmp$=tmp$+ "LOAD 2 COST"
+		If X2 = 3 tmp$=tmp$+ "PO COST"
+		If X2 = 4 tmp$=tmp$+ "NET PO COST"
+		If X2 = 5 tmp$=tmp$+ "BASE COST"
+		If X2 = 6 tmp$=tmp$+ "AVG COST"
+		If X2 = 8 tmp$=tmp$+ "LOAD TBL 1"
+		If X2 = 9 tmp$=tmp$+ "LOAD TBL 2"
+		If X2 = 10 tmp$=tmp$+ "LST REC NET"
+		webstr$=webstr$,tmp$,fdel$ ! type
+		If X2 = 8 Or X2 = 9 ! tables - not costs
+		  if x2=8 ! lt 1
+			OLD_COST = pch.OldLoadTbl1
+			NEW_COST = pch.NewLoadTbl1
+		  Endif ! lt 1
+		  If x2=9 ! lt 2
+			OLD_COST = pch.OldLoadTbl2
+			NEW_COST = pch.NewLoadTbl2
+		  Endif ! lt 2
+		  UNT$ = "    "
+		Else ! costs
+			CNVTU[0]=0;CNVTU[1]=PR.UMCostDefault;CNVTU[2]=2
+			CNVTA=pch.OldCost
+			Old_Cost=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			cnvta=pch.NewCost
+			New_Cost=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			if PR.UMCostDefault=-1 let unt$="CWT"
+			if PR.UMCostDefault=-2 let unt$="LOT"
+			if PR.UMCostDefault=-3 let unt$="LB"
+			if PR.UMCostDefault>0
+				read #CCC,PR.UMCostDefault,10;UNT$;
+			Endif
+		End If
+		webstr$=webstr$,LTrim$(Old_Cost using PMask$),fdel$
+		tmp$=XUnit$(pch.CostUm,ccc)
+		Webstr$=webstr$,RTrim$(tmp$),fdel$ ! cost um when changed
+		webstr$=webstr$,LTrim$(pch.CstUmFactor Using M70$),fdel$
+		webstr$=webstr$,LTrim$(New_Cost Using PMask$),fdel$
+		Webstr$=webstr$,RTrim$(UNT$),fdel$
+		! may be extras (rounding of base)
+		if old_cost=New_Cost and RTrim$(tmp$)=RTrim$(UNT$) goto BPCRec
+		tmp$=pch.Source$+" "+pch.sOpen$ ! sometimes in both
+		webstr$=webstr$,RTrim$(tmp$),fdel$ ! source
+		List$[row]=webstr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	BPCRec: ! bypass it
+	Loop
+	CHDone: ! finished - callee adds to string
+	List$[row]=esdel$
+	If PCH>0 close #PCH
+ else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHCostHst
+!
+!--------------------------------------------------------------------

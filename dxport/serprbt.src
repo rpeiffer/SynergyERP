@@ -1,0 +1,3222 @@
+! serprbt.dl4
+!
+! Rebate Contracts (PM program 87)
+! Enter/edit Header & Lines
+!
+! 1.0 06/19/2008 12/06/2010 - add rebate staging option 
+!
+! loadsave -w -n 100,10 -o prog/dxport/serprbt.dl4 src/serprbt.src
+!
+! THE WEB USES REBATE LINE TYPE 3 for ALL PRODUCTS
+! PM REBATE TYPES= 1:Product, 2:Commodity ONLY, 5:Cost Group
+! So - check & convert needed to make type 3 = type 1 w/"#  " prod code
+!
+include "src/copyright.inc"
+! internal files needed
+Include "src/inc/filea80vm.inc" ! Vendor
+Include "src/inc/fileccodes.inc" ! u/m file
+Include "src/inc/filecommhead.inc" ! commodity
+Include "src/inc/filecust.inc" ! customer
+Include "src/inc/filecustcat.inc" ! customer ctgy
+Include "src/inc/filecustcontz.inc" ! customer / contract (fix for rbt/contr)
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+Include "src/inc/fileprtypefle.inc" ! Price type file
+Include "src/inc/filercontracthz.inc" ! Rebate Contract Header (MANUAL DIR 2/3)
+Include "src/inc/filerebatedtlz.inc" ! Rebate Lines (fixed for diff prodtypes)
+Include "src/inc/filerebtnotes.inc" ! Rebate Notes (MANUAL ADD!)
+Include "src/inc/filewhinfoz.inc" ! wh info file (rec 0 fix)
+Include "src/inc/filecostgrp.inc" ! cost group file
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+Declare External Function ChkAltItem$,formatdate2$
+Declare External Sub UserCntrl,LogAccess
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,UMDList
+Declare External Function getpravail,getumrec,ChkPrdUM
+
+External Lib "libcustlist.lib"
+Declare External Sub CustList
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "ubsvendlist.dl4"
+Declare External Sub VendList
+
+External Lib "librbttabs.lib"
+Declare External Sub RCOPN,RCCLS,CNCTR,COCTR
+
+! internal subs/functions 
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian,JulianToDate
+Declare Intrinsic Function findchannel
+
+Declare Sub Updatelog,OpenFiles,rbtscan,rbthead,GetVend,GetCust,GetProd
+Declare Sub GetNotes,GetCCust,UptNotes,UptCusts,DelCCont,EdtCCont,UpdtCRHC
+Declare Sub UpdtCHdr,GetRProd,UpdtLine,SendLBox,CopyContr,RbtLines
+Declare Sub shostaged,custaddc
+Declare Function NStkUMT$,NStkTUM,GetRTDesc$,GetCTDesc$,GetCBDesc$
+Declare Function chkDateFrmt$,Chktxtfld,chkprdwhsev
+
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200],X$[20]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],RKey$[60],Cust$[6]
+	Dim sfld$[5],bcdata$[5],F$[20],k5$[60],a2$[50]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2],A5[10]
+	Dim 2%,Q0[1],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim 1%,X1[9],Chans[20],OnlyInquiry  ! for only inquiry-right now back end function
+	Dim 2%,ContrNo,x2[9],JDate[5]
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/rbt.log" ! fields for DEBUG
+	dim custom_customer$[30],pmask1$[20]
+	Dim Vend. as a80vm ! Vendor
+	Dim umc. as ccodes ! u/m file
+	Dim comd. as commhead ! commodity
+	Dim cgrp. as costgrp ! cost group
+	Dim cust. as cust ! customer
+	Dim ccat. as custcat ! customer ctgy
+	Dim ccnt. as custcont ! customer / contract
+	Dim PR. as prod ! product file
+	Dim PW. as prodwhse ! prodwhse file
+	Dim PT.	as prtypefle ! Price type file
+	Dim RCH. as rcontracth ! Rebate Contract Header (MANUAL DIR 2/3)
+	Dim RD. as rebatedtl ! Rebate Lines
+	Dim RNT. as rebtnotes ! rebate Notes(Have to MANUALLY ADD!)
+	Dim WHI. as whinfo ! wh info file
+
+	call dxopen()
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$)
+	call LogAccess(e$)
+	!call dxsave(0,"tmp/rbtstrt.txt!")
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serprbt"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	mat read #ctlc,115,60;custom_customer$;
+	Custom_customer$=UCase$(Trim$(custom_customer$))
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	GAct=0 ! action not found
+	if debugdetail
+		dmsg$="SERPRBT ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$
+		Call updatelog(debug)
+	Endif
+	call dxget("STAGED",tmp$)
+	stage=0 \ IF UCase$(RTrim$(tmp$))="Y" let stage=1
+	Call OpenFiles() ! open any/all files
+	if nostgfle ! file(s) missing - no go
+		message$="REBATE STAGING NOT AVAILABLE"
+		returnstatus=0
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		if debugdetail
+			dmsg$=message$ \ Call updatelog(debug)
+		Endif
+		goto p087Done ! program is NOW DONE!
+	Endif
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	let pmask1$="-----------#.###" ! for rutherford #233353
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	call Usercntrl(UserId$,A2$,A5[],fnd,IntCo)
+	onlyinquiry=0 \ if a2$[49,49]="I" LET onlyinquiry=1
+	! inquire contracts only userid$ usercntrl a2$[49,49]="I" (DEVEL-UB)
+	! STAGED DIFFERENCES:
+	! 1. NO NEW CONTRACTS - ONLY EXISTING
+	! 2. NO VENDOR # CHANGE
+	! 3. EDIT TRACKING FILE
+	! 4. NO COPY OPTION
+	! 
+	! call dxsave(0,"tmp/rbtsin.txt!")
+	select case action$
+		case "OINQFLAG" ! needs flag now					doc=Rbt-GetOInqFlag.doc
+			returnstatus=1
+			message$="OK"
+			Clear List$[]
+			List$[0]=bsdel$,"OINQFLAG",fdel$
+			List$[1]="ID",fdel$,"FLAG",fdel$
+			tmp$="N" \ if onlyinquiry let tmp$="Y"
+			List$[2]="ONLYINQ",fdel$,tmp$,fdel$
+			List$[3]=esdel$
+			call AddToStr(e$,rstr$,List$[])
+			!
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			if debugdetail
+				dmsg$="Only Inquiry flag sent "+Message$ \ Call updatelog(debug)
+			Endif
+			GAct=1 ! okay
+			! end of OINQFLAG
+		case "DROPLIST" !   send droplists  ! all droplists happen
+		!
+		If Action1$="UMDROPLIST" !							doc= RBT-umdroplist.doc
+			Call DXGet("PRODID",prod$) \ prod$=UCase$(prod$)
+			Prod$=Prod$+Blank$ \ If Len(Prod$)>12 let Prod$[13]=""
+			ProdKey$=Prod$
+			! If Prodkey$[1,6]<>"COMMD "
+				PrR=filegetprod(e$,PRC,"=",1,ProdKey$,PR.) ! product mode=2 dir=1
+				If PRR>0
+					let NonStk=0
+				Else ! is a commodity or # ALLPROD?
+					PRR=0;nonstk=1
+				Endif
+			if debugdetail
+				dmsg$="UMDROPLIST PROD= "+prodkey$ \ Call updatelog(debug)
+			Endif
+			!
+			! initialize status
+		  If PrR<0 ! Product record not found
+			 clear PR.
+			 ReturnStatus=0
+			 Message$="Error, Product not found"
+		  else ! continue with list
+			E$="" ! clear message
+			tmp$=" " ! is passed
+			If Not(NonStk)
+				Call UMDList(e$,tmp$,PRC,PRR,List$[],IntCo,Pr.) ! in libprod.lib
+			Else ! nonstk - send Default List
+				Clear List$[]
+				List$[0]=bsdel$,"UMLIST",fdel$
+				List$[1]="ID",fdel$,"UM",fdel$,"FACTOR",FDEL$,"Default",fdel$
+				lIST$[2]="1",fdel$,"STKG",fdel$,"",fdel$,"",fdel$ 
+				List$[3]="2",fdel$,"SELL",fdel$,"",fdel$,"",fdel$ 
+				List$[4]="3",fdel$,"PURC",fdel$,"",fdel$,"",fdel$  
+				List$[5]="4",fdel$,"COST",fdel$,"",fdel$,"",fdel$
+				List$[6]="5",fdel$,"PRCE",fdel$,"",fdel$,"",fdel$
+				List$[7]=esdel$ ! end of section
+			Endif
+			Let ReturnStatus=1
+			Message$="OK"
+			If E$<>""
+			  Let ReturnStatus=0
+			  Message$=E$
+			Endif
+		  Endif ! valid prod
+		  if debugdetail
+				dmsg$="UMDROPLIST sent "+message$ \ Call updatelog(debug)
+		  Endif
+		Endif ! action1=umdroplist
+		!
+		If Action1$="WHSELIST" ! zero=none?					doc=rbt-whsedroplist.doc
+			Let ReturnStatus=1
+			Message$="OK";e$=""
+			Clear List$[]
+			clear field$[]
+			tmpcnt=maxcnt
+			tmp$=Action1$ ! section header
+			Call filedroplistwhinfoz(e$,list$[],tmpcnt,WHI,tmp$,Field$[],"0") ! "0"=none)
+			if e$<>"" Let Message$=e$;ReturnStatus=0
+			if debugdetail
+				dmsg$="WHSELIST Sent "+Message$ \ Call updatelog(debug)
+			Endif
+		Endif ! whselist
+		If Action1$="CTGYLIST" ! for copying into rebate	doc=rbt=ctgydroplist.doc
+			Let ReturnStatus=1
+			Message$="OK";e$=""
+			Clear List$[]
+			tmpcnt=maxcnt
+			tmp$=Action1$
+			Call filedroplistcustcat(e$,list$[],tmpcnt,CTC,tmp$)
+			if e$<>"" Let Message$=e$;ReturnStatus=0
+			if debugdetail
+				dmsg$="CTGYLIST Sent "+Message$ \ Call updatelog(debug)
+			Endif
+		Endif ! ctgylist
+		If Action1$="PRTYPELIST" ! for adding to rebate		doc=rbt-prtypedroplist.doc
+			Let ReturnStatus=1
+			Message$="OK";e$=""
+			Clear List$[]
+			tmpcnt=maxcnt
+			tmp$=Action1$
+			Call filedroplistprtypefle(e$,list$[],tmpcnt,PTC,tmp$)
+			if e$<>"" Let Message$=e$;ReturnStatus=0
+			if debugdetail
+				dmsg$="PriceType LIST Sent "+Message$ \ Call updatelog(debug)
+			Endif
+		Endif ! prtypelist
+		If Action1$="VENDLIST" ! for rbt header(or is a scan?)   doc=rbt-vendorlist.doc
+			Let ReturnStatus=1
+			Message$="OK";e$=""
+			Call DXGet("STEXT",tmp$) ! Search text
+			ProdKey$=UCase$(tmp$)
+			Call DXGet("STYPE",tmp$) ! search type
+			sfld$=Tmp$ ! 1=name, 2=contact, 3=city, 4=state, 5=zip
+			if sfld$="" let SFld$="1" ! name is default
+			bcdata$="1" ! 1=begin, 2=contains?
+			Key1$="" ! starting?
+			Call DXGet("VENDID",tmp$)
+			Vend=tmp$
+			Clear List$[]
+			tmpcnt=maxcnt
+			! Clear Field$[]
+			
+			! Call filedroplista80vm(e$,list$[],tmpcnt,VNC,"VENDORLIST",field$[],2,ProdKey$) ! NO TITLE,FLD, BY NAME, START
+			Call VendList(intCo,tmpcnt,ProdKey$,bcdata$,sfld$, Key1$, vend, list$[])
+			! if e$<>"" Let Message$=e$;ReturnStatus=0
+			if debugdetail
+				dmsg$="VENDLIST Sent "+Message$ \ Call updatelog(debug)
+			Endif
+		Endif ! vendlist
+		If Action1$="OPTLIST" ! option list for line fields    doc=rbt-getrbtlineopts.doc
+			!
+			Let ReturnStatus=1
+			Message$="OK"
+			Call SendLBox()
+			if debugdetail
+				dmsg$="OPTBOXLIST sent "+message$ \ Call updatelog(debug)
+			Endif
+			!
+		Endif ! of send option boxes
+		If Action1$="COMMDLIST" ! commodity list			doc=Rbt-CommodityList.doc
+			Let ReturnStatus=1
+			Message$="OK";e$=""
+			Call DXGet("STEXT",tmp$) ! start at
+			ProdKey$=UCase$(tmp$)
+			Clear List$[]
+			tmpcnt=maxcnt
+			Clear Field$[]
+			Call filedroplistcommhead(e$,list$[],tmpcnt,CMC,"COMMODITYLIST",field$[],1,ProdKey$)
+			if debugdetail
+				dmsg$="COMMODITY LIST sent "+message$ \ Call updatelog(debug)
+			Endif
+		Endif
+		If Action1$="CSTGRPLIST" ! cost group list			doc=Spc-CostGroupList.doc
+			Let ReturnStatus=1
+			Message$="OK";e$=""
+			Call DXGet("STEXT",tmp$) ! start at
+			ProdKey$=UCase$(tmp$)
+			Clear List$[]
+			tmpcnt=maxcnt
+			Clear Field$[]
+			Call filedroplistcostgrp(e$,list$[],tmpcnt,CGC,"CSTGRPLIST",field$[],1,ProdKey$)
+			if debugdetail
+				dmsg$="COST GROUP LIST sent "+message$ \ Call updatelog(debug)
+			Endif
+		Endif ! of cost group list
+
+		! end of droplists
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		If Action1$="VENDLIST" ! needs a end of section
+			call AddToStr(e$,rstr$,esdel$)
+		Endif
+		!
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		GAct=1 ! okay
+		!
+	case "PRODSEARCH" ! product scan						doc = rbt-prodscan.doc
+		!
+		Let ReturnStatus=1
+		Message$="OK"
+		X2=0 ! normal scan
+		Call ProdList(e$,IntCo,List$[],maxcnt,ctlc,prc,pwc,x2,debugdetail,dblog$,UserId$)
+		If E$<>""
+		  Let ReturnStatus=0
+		  Message$=E$
+		Endif
+		call AddToStr(e$,rstr$,List$[])
+		!
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		if debugdetail
+			dmsg$="Product Search sent "+Message$ \ Call updatelog(debug)
+		Endif
+		GAct=1 ! okay
+		! end of prodsearch
+	case "RBTSEARCH" ! rebate scan							doc=rbt-rebatescan.doc
+		!
+		Call RbtScan() ! will handle all
+		GAct=1 ! okay
+		! end of rbtsearch
+	case "CUSTSEARCH" ! customer Scan						doc=Rbt-CustScan.doc
+		!
+		Let ReturnStatus=1
+		Message$="OK"
+		
+		Call CustList(e$,IntCo,List$[],maxcnt,ctlc,cuc,debugdetail,dblog$,UserId$)
+		If E$<>""
+		  Let ReturnStatus=0
+		  Message$=E$
+		Endif
+		call AddToStr(e$,rstr$,List$[])
+		!
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		if debugdetail
+			dmsg$="Customer Search sent "+Message$ \ Call updatelog(debug)
+		Endif
+		GAct=1 ! okay
+		! end of custsearch
+	case "GETREBTH" ! rebate header							doc=rbt-getrbthead.doc
+		! sends header & Lines
+		Call Rbthead() ! handles all
+		GAct=1 ! okay
+		! end of getrebth
+	case "GETREBTL" ! rebate lines							doc=rbt-getexistrbtlines.doc
+		! Separate option to reget all lines
+		ReturnStatus=1
+		Message$="OK"
+		Call DXGet("CONTRID",tmp$)
+		ContrNo=tmp$
+		if debugdetail
+			dmsg$="Get Lines for Contract "+Str$(ContrNo) \ Call updatelog(debug)
+		Endif
+		If ContrNo<=0 Or ContrNo>999999
+			Message$="INVALID CONTRACT NUMBER"
+			ReturnStatus=0
+			Goto GERLDone
+		Endif
+		RKey$=" ",RKey$
+		RKey$=ContrNo Using "######"
+		RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+		If RHR<=0 ! not found - web to ask if new?
+			ReturnStatus=0
+			Message$="CONTRACT NOT FOUND"
+			Goto GERLDone
+		Endif
+		! get lines now
+		Call RbtLines() ! adds to rstr
+		GERLDone: ! finished
+		!
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		if debugdetail
+			dmsg$="Get Lines complete "+message$ \ Call updatelog(debug)
+		Endif
+		GAct=1 ! okay
+		! finished - get existing lines
+	case "GETCUST" ! customer name							doc=rbt-getcustomer.doc
+		! get cust name
+		Call DXGet("CONTRID",tmp$)
+		ContrNo=tmp$
+		Call DXGet("CUSTID",tmp$)
+		X2=tmp$
+		Cust$=X2 Using "######"
+		Call GetCust()
+		RKey$=Cust$+ContrNo Using "######"
+		RHR=filegetrcontracthz(e$,RHC,"=",2,RKey$,rch.)
+		Clear List$[]
+		List$[0]=bsdel$,"CUSTNAME",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$,"EXIST",fdel$
+		tmp$="N"
+		If RHR>0 let tmp$="Y"
+		List$[2]=Cust$,fdel$,RTrim$(Cust.Name$),fdel$,tmp$,fdel$
+		List$[3]=esdel$
+		ReturnStatus=1
+		Message$="OK"
+		call AddToStr(e$,rstr$,List$[])
+		!
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		if debugdetail
+			dmsg$="Customer Lookup sent "+Message$ \ Call updatelog(debug)
+		Endif
+		GAct=1 ! okay
+		! end of GetCust
+	case "GETPRTYPE" ! price type							doc=rbt-getprctype.doc
+		! get Price type
+		Call DXGet("PRTYPE",tmp$)
+		X2=tmp$
+		Cust$="PT"+X2 Using "###"+Blank$ ! as PTNNNb (6 chars)
+		Call GetCust() ! if starts with PT - gets Price type
+		Clear List$[]
+		List$[0]=bsdel$,"PRICETYPE",fdel$
+		List$[1]="ID",fdel$,"DESC",fdel$
+		List$[2]=Cust$[3,5],fdel$,RTrim$(Cust.Name$),fdel$ ! sent back as Customer Name
+		List$[3]=esdel$
+		ReturnStatus=1
+		Message$="OK"
+		call AddToStr(e$,rstr$,List$[])
+		!
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		if debugdetail
+			dmsg$="Price Type Lookup sent "+Message$ \ Call updatelog(debug)
+		Endif
+		GAct=1 ! okay
+		! end of GetPRType
+	case "GETVENDOR" ! price type							doc=rbt-getvendor.doc
+		! get Vendor Name
+		Call DXGet("VENDID",tmp$)
+		X2=tmp$
+		Vend=X2
+		Call GetVend() 
+		Clear List$[]
+		List$[0]=bsdel$,"VENDOR",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$
+		List$[2]=Str$(Vend),fdel$,RTrim$(Vend.Name$),fdel$
+		List$[3]=esdel$
+		ReturnStatus=1
+		Message$="OK"
+		call AddToStr(e$,rstr$,List$[])
+		!
+		IF VEND<=0 
+			RETURNSTATUS=0
+			MESSAGE$="VENDOR IS REQUIRED"
+		Endif
+		If VNR<0
+			returnstatus=0
+			Message$="VENDOR NOT FOUND!"
+		Endif
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		if debugdetail
+			dmsg$="Vendor Name Lookup sent "+Message$ \ Call updatelog(debug)
+		Endif
+		GAct=1 ! okay
+		! end of GetVendor
+	case "RBTNOTES" ! notes									doc=rbt-getrbtnotes.doc
+		!
+		call GetNotes()
+		GAct=1 ! okay
+		! end of notes
+	case "RBTCUSTS" ! customers   doc=rbt-getrbtcusts.doc
+		! list of custs on a contract
+		call GetCCust()
+		GAct=1 ! okay
+		! end of custs
+	case "UPDTNOTES" ! notes submitted						doc=rbt-submitrbtnotes.doc
+		! (ADD KEYS IN PROGRAM) AS NO MESSAGENO IN FILE
+		if onlyinquiry ! no submit
+			returnstatus=0
+			message$="Inquiry only - no update"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto P087Done
+		Endif
+		call UptNotes()
+		GAct=1 ! okay
+		! end of update notes
+	case "UPDTCUST" ! Update customer/ctgy/pricetype (a/e/d)   doc=rbt-submitrbtcust.doc
+		! (ADD KEYS IN PROGRAM) AS NO CUSTOMER IN FILE
+		if onlyinquiry ! no submit
+			returnstatus=0
+			message$="Inquiry only - no update"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto P087Done
+		Endif
+		call UptCusts()
+		GAct=1 ! okay
+		! end of customer add
+	CASE "UPDTHDR","UPDTLDT" ! update the header		doc=rbt-submitrbtheader.doc
+		! UPDATE the header data  add 05/21				Rbt-SubmitRHFLDates.doc
+		! SubmitRHFLDates = submit and force line dates to header dates.
+		if onlyinquiry ! no submit
+			returnstatus=0
+			message$="Inquiry only - no update"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto P087Done
+		Endif
+		Call UpdtCHdr()
+		GAct=1 ! okay
+		! end of header update
+	case "GETRLINE" ! get a rebate line #					doc=rbt-getrbtline.doc
+		! based on rbt/product
+		call GetRProd()
+		GAct=1 ! okay
+		! end of
+	case "UPDTLINE" ! update the line						doc=rbt-submitrbtline.doc
+		! send in all data
+		if onlyinquiry ! no submit
+			returnstatus=0
+			message$="Inquiry only - no update"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto P087Done
+		Endif
+		call UpdtLine()
+		GAct=1 ! okay
+		! end of
+	case "COPYCONTR" ! copy from a contr into this one		doc=Rbt-CopyContract.doc
+		! both must exist already
+		if onlyinquiry ! no submit
+			returnstatus=0
+			message$="Inquiry only - no copy"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto P087Done
+		Endif
+		Call CopyContr()
+		GAct=1 ! okay
+		! end of copycontr
+	case "CUSTADDC" ! add a customer to when a cust			doc=Rbt-CustAddc.doc
+		GACT=1 ! ok
+		if onlyinquiry ! no submit
+			returnstatus=0
+			message$="Inquiry only - no copy"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto P087Done
+		Endif
+		! prompt for new cust & existing cust
+		! go thru and add new whenever existing is on a contract
+		Call custaddc()
+		! end of custaddc
+	case "RELOPEN" ! tab for Related Open Contracts   doc=Rbt-RelContrOpen.doc
+		if stage ! no reports
+			returnstatus=0
+			message$="Option not available for Staged"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto P087Done
+		Endif
+		! send data - 
+		call RCOPN(e$,IntCo,List$[],maxcnt,chans[],UserId$)
+		! writes to rstr - 
+		GACT=1 ! okay
+		! end of RELOpen
+	case "RELEXPD" ! tab for Related Contracts Expired  doc=Rbt-RelContrExprd.doc
+		! send data - 
+		if stage ! no reports
+			returnstatus=0
+			message$="Option not available for Staged"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto P087Done
+		Endif
+		call RCCLS(e$,IntCo,List$[],maxcnt,chans[],UserId$)
+		! writes to rstr - 
+		GACT=1 ! okay
+		! end of RELExpd
+	case "NONCONTR" ! Customers not on any contract
+		! sends data to rstr$
+		if stage ! no reports
+			returnstatus=0
+			message$="Option not available for Staged"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto P087Done
+		Endif
+		Call CNCTR(e$,IntCo,List$[],maxcnt,chans[],UserId$)
+		GACT=1 ! okay
+		! end of NONCONTR
+	case "ONOCONTR" ! custs on other contracts
+		! sends data to rstr$
+		if stage ! no reports
+			returnstatus=0
+			message$="Option not available for Staged"
+			! status section
+			call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+			call AddToStr(e$,rstr$,WebStr$)
+			call SetOutPut(e$,rstr$)
+			goto P087Done
+		Endif
+		Call COCTR(e$,IntCo,List$[],maxcnt,chans[],UserId$)
+		GACT=1 ! okay
+		! end of ONOCONTR
+	case "STGTRACK" ! show tracking
+		! show created/updated?
+		call shostaged()
+		GACT=1
+		! end of stgtrack
+	! next case
+	End Select
+  If GAct=0 ! did not have a good (re)action
+	if debugdetail
+		dmsg$="ACTION NOT FOUND" \ Call updatelog(debug)
+	Endif
+	ReturnStatus=0
+	Message$="ACTION NOT FOUND"
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+  Endif
+  P087Done: ! we are finished
+  if debugdetail
+		dmsg$="End of Program SERPRBT" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    NoStgfle=0 ! see if all files there!!
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	VNC=OpenFile(-2400,IntCo) \ If VNC=-1 Error 42 ! Vendor
+	CCC=OpenFile(-1728,IntCo) \ IF CCC=-1 Error 42 ! u/m file
+	CMC=OpenFile(-2288,IntCo) \ if CMC=-1 Error 42 ! commodity
+	CUC=OpenFile(-1808,IntCo) \ If CUC=-1 Error 42 ! customer
+	CTC=OpenFile(-2096,IntCO) \ IF CTC=-1 Error 42 ! customer ctgy
+	CGC=OpenFile(-9916,IntCo) \ if CGC=-1 Error 42 ! Cost Group
+	CH_VTG=OpenFile(-1120,IntCo) \ if ch_vtg=-1 Error 42 ! vendtag
+	if not(stage)
+		CNC=OpenFile(9957,IntCo) \ if cnc=-1 Error 42 ! customer / contract
+	Else
+		CNC=findchannel()
+		f$="2/stgrbcustcnt"+str$(IntCo)
+		try open #CNC,f$ Else Let Nostgfle=3
+	Endif
+	PRC=OpenFile(-1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(-1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	PTC=OpenFile(-752,IntCo) \ If PTC=-1 Error 42 ! Price type file
+	if not(stage)
+		RHC=OpenFile(304,IntCo) \ If RHC=-1 Error 42 ! Rebate Contract Header (MANUAL DIR 2/3)
+		RDC=OpenFile(320,IntCo) \ If RDC=-1 Error 42 ! Rebate Lines
+		RNC=OpenFile(9956,IntCo) \ if RNC=-1 Error 42 ! Rebate Notes
+	Else ! staged has diff names (same layout)
+		RHC=findchannel()
+		f$="3/stgrbheader"+str$(IntCo)
+		try open #RHC,f$ Else let NoStgfle=1
+		RDC=findchannel()
+		f$="3/stgrbdetail"+str$(IntCo)
+		Try Open #RDC,F$ Else Let NoStgfle=2
+		RNC=findchannel()
+		F$ = "2/stgrbnotes" + Str$(IntCo)
+		try Open #RNC,F$ Else Let Nostgfle=4
+		SRBTRK=findchannel()
+		f$="3/stgrbtrack"+Str$(IntCo)
+		try open #SRBTRK,f$ Else Let Nostgfle=5
+	Endif 
+	WHI = OpenFile(-2768,IntCo) \ if whi = -1 Error 42 ! wh info file (rec 0 fix)
+	Chans[0]=CTLC;Chans[1]=CCC;Chans[2]=CMC;Chans[3]=CUC
+	Chans[4]=PRC;Chans[5]=PWC;Chans[6]=PTC;Chans[7]=RHC
+	Chans[8]=RDC;Chans[9]=VNC
+ 	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub 
+	if stage let dmsg$="STAGE "+dmsg$ ! so know its not live files
+	System "echo ''" + msc$(0) + " UID "+Userid$+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Sub RbtScan()
+! do a list based on selected type
+  Try
+	Dim STKey$[60],Wrk$[60]
+	Dim 1%,Sfld1$[40],Sfld2$[40]
+	Dim 1%,SType,fld
+	Dim 2%,Cust,Vend
+	Dim 3%,maxrow,s3[5]
+	ReturnStatus=1
+	Message$="OK"
+	maxrow=2000 ! set to max per list before "more" flag
+	Call DXGet("STYPE",tmp$)
+	tmp$=UCase$(tmp$)
+	Stype=-1
+	! If tmp$="CONTRACT" let stype=1
+	! if tmp$="CUST/CONTR" Let stype=2
+	! if tmp$="CONTR/CUST" let stype=3
+	! if tmp$="VEND/CONTR" let stype=4
+	! was decided only two types of scan - Contract or Customer
+	!If tmp$="CUSTOMER" LET stype=2 ! OLD WAY
+	!If tmp$="CONTRACT" LET stype=1 ! OLD WAY
+	!if tmp$="VENDOR" let Stype=4 ! OLD WAY
+	! 03/2011 - decided to use filter as scan
+	! below are what's currently used - send full text
+	! stype=dir to use;fld=numeric of type;nums=0:txt,1=number,-1=date
+	if tmp$="CONTRACT" let stype=1;nums=1;fld=1
+	if tmp$="DESCRIPTION" let stype=1;nums=0;fld=2
+	if tmp$="VENDOR" let stype=4;nums=1;fld=3
+	if tmp$="VENDOR NAME" let stype=4;nums=0;fld=4
+	if tmp$="CUSTOMER-ID" let stype=2;nums=1;fld=5
+	if tmp$="CUSTOMER NAME" LET STYPE=2;nums=0;fld=6
+	IF TMP$[1,10]="START DATE" LET STYPE=1;nums=-1;fld=7
+	IF TMP$="VENDOR CON" LET STYPE=1;nums=0;fld=8
+	IF TMP$="VENDOR CON DESC" LET STYPE=1;nums=0;fld=9
+	if tmp$[1,8]="END DATE" let stype=1;nums=-1;fld=10
+	if tmp$="CONTACT" let stype=1;nums=0;fld=11
+	if stype=-1 ! not found
+		ReturnStatus=0
+		Message$="SCAN NOT FOUND"
+		!goto RScanDone ! send header/no data
+	Endif
+	Call DXGet("STTEXT",tmp$)
+	if nums ! is start/end
+	  if nums<>-1 ! not a date
+		s3=tmp$
+	  Else ! is a date
+		if tmp$="01/01/0001" let tmp$="" ! web none=
+		tmp$=chkDateFrmt$(tmp$)
+		if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+		tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy or mm/dd/yy to yyyymmdd
+		s3=tmp1$[3,8] ! just want yymmdd
+		if tmp$="" or tmp$="01/01/0001" let s3=700101
+		x$=S3 USING "&&&&&&"
+		Call DateToJulian(1,X$,X$,E)
+		if e let x$="0"
+		jdATE[1]=x$[1,5]
+		if tmp$="" or tmp$="01/01/0001" let jdate[1]=0
+	  Endif
+	Else ! is beg/contain (just the B or C
+		Sfld1$=UCase$(RTrim$(tmp$[1,1]))
+		if sfld1$<>"B" and sfld1$<>"C"
+			returnstatus=0
+			message$="No Begin or Contain sent"
+			!goto RScanDone ! send header/no data
+		Endif
+	Endif
+	Call dxget("ENTEXT",tmp$) ! ending or text to scan for
+	if nums ! it's end of start/end
+		if nums<>-1 ! not a date
+			s3[1]=tmp$
+			if tmp$="" let s3[1]=999999
+		  Else ! is a date
+			if tmp$="" or tmp$="01/01/0001" let tmp$=""
+			tmp$=chkDateFrmt$(tmp$)
+			if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+			tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy or mm/dd/yy to yyyymmdd
+			s3[1]=tmp1$[3,8] ! just want yymmdd
+			if tmp$="" or tmp$="01/01/0001" let s3[1]=591231
+			x$=S3[1] USING "&&&&&&"
+			Call DateToJulian(1,X$,X$,E)
+			if e let x$="99999"
+			if tmp$="" or tmp$="01/01/0001" let x$="99999"
+			jdATE[2]=x$[1,5]
+		  Endif
+	Else ! is text to look for
+		Sfld2$=UCase$(RTrim$(tmp$))
+	Endif
+	!If X3>0 and X3<999999 And Not(Fra(X3)) let STKey$=X3 Using "######"
+	if debugdetail
+		dmsg$="Start Rebate Scan "+Str$(FLD) \ Call updatelog(debug)
+	Endif
+
+	call dxget("CURKEY",tmp$) ! for the more option
+	STKey$=RTrim$(tmp$) ! will have leading space stripped!!?
+	if stkey$="" goto Startscan ! 1st time in?
+	if STYPE=1 ! CONTRACT ONLY
+		x2=stkey$
+		if x2>1 let x2=x2-1 ! so starts on one dropped!
+		stkey$=X2 using "######"
+	Else ! sb 12 chars
+	   ChkLenSt: ! 
+		if len(stkey$)<12 ! add back in to begin
+		  tmp$=" "+stkey$
+		  stkey$=tmp$
+		  goto chklenst
+		Endif
+		! ok now 12 - see if spaces in middle gone?
+		x2=stkey$[1,6];x2[1]=stkey$[7,12] ! default - both 6
+		for x=12 to 7 step -1
+			if stkey$[x,x]=" " ! found 1st space from end
+				x2=stkey$[1,x] ! first #
+				x2[1]=stkey$[x+1] ! second
+				x=0 ! end loop
+			Endif
+			! if none after 6 - it's a full 6 digit # ! use as is
+		Next x
+		let stkey$[1,6]=x2 using "######"
+		if x2[1]>0 let x2[1]=x2[1]-1
+		let stkey$[7,12]=x2[1] using "######"
+	Endif
+	StartScan: ! ok - let's go
+	Clear List$[]
+	tmpcnt=maxcnt
+	
+	List$[0]=bsdel$,"RBTLIST",fdel$
+	WebStr$="CONTR",fdel$,"START",fdel$,"ENDDATE",fdel$,"DESCRIPTION",fdel$
+	WebStr$=WebStr$,"VENDOR",fdel$,"VENDNAME",fdel$,"CUST",fdel$,"CUSTNAME",fdel$
+	webstr$=webstr$,"VNCONTR",fdel$,"VCDESC",fdel$,"CONTACT",fdel$
+	List$[1]=WebStr$
+	row=2
+	If ReturnStatus=0 Goto RBSDone ! fail entry phase
+	RKey$=STkey$
+	Do
+		RHR=filegetrcontracthz(e$,RHC,">",stype,RKey$,RCH.)
+		If RHR<0 Exit do
+		! do simple checks NOW
+		if fld=1 ! contr # only - contr dir
+			if rch.RebtContr<s3 goto RBskip
+			if rch.RebtContr>s3[1] exit do ! DONE!
+		Endif
+		if fld=3 ! vend # - vend/contr dir
+			Vend=rch.VendNum
+			if vend<s3 goto RBSkip
+			if vend>s3[1] exit do ! done
+		Endif
+		if fld=5 ! cust # - cust/contr dir
+			cust=rkey$[1,6]
+			if cust<s3 goto RBSkip
+			if cust>s3[1] exit do ! Done
+		Endif
+		if fld=7 ! date - Start date is checked I guess
+			X$=rch.DateStart using "&&&&&&"
+			Call DateToJulian(1,X$,X$,E)
+			if e let x$="0"
+			JDate[0]=x$[1,5]
+			if rch.DateStart=0 let jdate[0]=0
+			if JDate[0]<JDate[1] goto RBSkip
+			if JDate[0]>JDate[2] goto RBSkip
+		Endif
+		if fld=10 ! end date
+			X$=rch.DateEnd using "&&&&&&"
+			Call DateToJulian(1,X$,X$,E)
+			if e let x$="36525"
+			JDate[0]=x$[1,5]
+			if rch.DateEnd=0 let jdate[0]=36525
+			if JDate[0]<JDate[1] goto RBSkip
+			if JDate[0]>JDate[2] goto RBSkip
+		Endif
+		if fld=2 or fld=8 or fld=9 or fld=11 ! text within file
+			if fld=2 let wrk$=UCase$(RTrim$(rch.ContrDesc$))
+			if fld=8 let wrk$=UCase$(RTrim$(rch.VendContr$))
+			if fld=9 let wrk$=UCase$(RTrim$(rch.VendContrDesc$))
+			if fld=11 let wrk$=UCase$(RTrim$(rch.RebtCont$))
+			x1=chktxtfld(wrk$)
+			if not(x1) goto RBSKIP ! NO MATCH
+		Endif
+		WebStr$=Str$(rch.RebtContr),fdel$
+		tmp$="NONE"
+		if rch.DateStart let tmp$=PDate$(rch.DateStart)
+		webstr$=webStr$,tmp$,fdel$ ! Date Start
+		tmp$="NONE"
+		if rch.DateEnd let tmp$=PDate$(rch.DateEnd)
+		webstr$=webStr$,tmp$,fdel$ ! Date End
+		webstr$=webStr$,RTrim$(rch.ContrDesc$),fdel$ ! contr desc
+		if stype=1 or stype=4 ! contract or vendor
+			if stype=1 ! contract - check for row
+				if row>maxrow+1
+					returnstatus=5 ! special status to tell web MORE TO COME
+					message$="CURKEY="+RKey$+"&"
+					exit do ! goto rbsdone
+				Endif
+			Endif ! contr list
+			if stype=4 ! vendor
+				if vend<>rch.vendnum ! only on vendor change
+					if row>maxrow
+						returnstatus=5 ! special status to tell web MORE TO COME
+						message$="CURKEY="+RKey$+"&"
+						exit do ! goto rbsdone
+					Endif
+				Endif ! of vend diff
+			Endif ! of vend order
+		Endif ! of dir 1 or 4
+		Vend=rch.VendNum
+		Call GetVend()
+		if fld=4
+			wrk$=UCase$(RTrim$(vend.Name$))
+			x1=chktxtfld(wrk$)
+			if not(x1) goto RBSKIP ! NO MATCH
+		Endif
+		WebStr$=WebStr$,Str$(Vend),fdel$,RTrim$(vend.Name$),fdel$ ! vendor & Name
+		if stype=2 or stype=3
+			if stype=2 ! cust order
+				if cust$<>RKey$[1,6] ! diff cust - check rows
+					if row>maxrow
+						returnstatus=5 ! special status to tell web MORE TO COME
+						message$="CURKEY="+RKey$+"&"
+						Exit do ! goto rbsdone
+					Endif
+				Endif ! of cust diff
+				let cust$=RKey$[1,6]
+			Endif
+			if stype=3 ! contr/cust
+				if HLDCT<>rch.RebtContr ! diff contr - check rows
+					if row>maxrow
+						returnstatus=5 ! special status to tell web MORE TO COME
+						message$="CURKEY="+RKey$+"&"
+						Exit do ! goto rbsdone
+					Endif
+				Endif ! of cust diff
+				let cust$=RKey$[7,12] ! not used?
+				HLDCT=rch.RebtContr
+			Endif
+			Call GetCust()
+			if fld=6
+				wrk$=UCase$(RTrim$(cust.name$))
+				x1=chktxtfld(wrk$)
+				if not(x1) goto RBSKIP ! NO MATCH
+			Endif
+			WebStr$=WebStr$,Trim$(Cust$),fdel$,RTrim$(cust.name$),fdel$
+		Else ! no cust data
+			WebStr$=WebStr$,"",fdel$,"",fdel$ ! no cust or name
+		Endif
+		webstr$=webstr$,RTrim$(rch.VendContr$),fdel$ ! added
+		webstr$=webstr$,RTrim$(rch.VendContrDesc$),fdel$ ! added too
+		webstr$=webstr$,RTrim$(rch.RebtCont$),fdel$ ! contact
+		List$[row]=WebStr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		! if row>=9000 exit do ! over this causes time out & too large
+		RBSkip: ! not wanted - bypass
+	Loop
+	RBSDone: ! finished
+	if debugdetail
+		dmsg$="Scan complete NUM="+Str$(row-2)+" "+message$ \ Call updatelog(debug)
+	Endif
+	! done
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	!
+	RScanDone: ! finished
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! rbtscan
+! 
+!--------------------------------------------------------------------
+Sub Rbthead()
+! get rebate header data
+  Try
+	
+	Dim 1%,LType
+	Dim 2%
+	Dim 3%
+	ReturnStatus=1
+	Message$="OK"
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto GRHDone
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto GRHDone
+	Endif
+	if debugdetail
+		dmsg$="Get Header/Lines "+Str$(ContrNo)+" "+message$ \ Call updatelog(debug)
+	Endif
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"CONTRHEAD",fdel$
+	WebStr$="CONTR",fdel$,"START",fdel$,"ENDDATE",fdel$,"DESCRIPTION",fdel$
+	WebStr$=WebStr$,"VENDOR",fdel$,"VENDNAME",fdel$,"CONT",fdel$,"CONTPHONE",fdel$
+	WebStr$=WebStr$,"VCNUM",fdel$,"VCDESC",fdel$
+	List$[1]=WebStr$
+	row=2
+	WebStr$=Str$(rch.RebtContr),fdel$
+	tmp$="NONE"
+	if rch.DateStart let tmp$=PDate$(rch.DateStart)
+	webstr$=webStr$,tmp$,fdel$ ! Date Start
+	tmp$="NONE"
+	if rch.DateEnd let tmp$=PDate$(rch.DateEnd)
+	webstr$=webStr$,tmp$,fdel$ ! Date End
+	webstr$=webStr$,RTrim$(rch.ContrDesc$),fdel$ ! contr desc
+	Vend=rch.VendNum
+	Call GetVend()
+	WebStr$=WebStr$,Str$(Vend),fdel$,RTrim$(vend.Name$),fdel$ ! vendor & Name
+	WebStr$=WebStr$,RTrim$(rch.RebtCont$),fdel$,RTrim$(rch.ContPhone$),fdel$
+	webstr$=WebStr$,RTrim$(rch.VendContr$),fdel$,RTrim$(rch.VendContrDesc$),fdel$
+	List$[row]=WebStr$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$ ! end of section
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! do call to get lines
+	Call RBTLines() ! send lines ! restart List$[] & does addtoStr
+	! 
+	GRHDone: ! finished
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Get Header/Lines complete "+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! rbthead
+! 
+!--------------------------------------------------------------------
+Sub RbtLines()
+! separate call to get lines (in case of redisplay)
+  Try
+	Dim CMKey$[60],CGKey$[12]
+	Dim 3%,CMR,NumLines,CGR
+	Clear List$[]
+	Row=0 ! start load @ beginning of list
+	tmpcnt=maxcnt
+	NumLines=0
+	! i guess do lines
+	List$[row]=bsdel$,"CONTRLINE",fdel$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="PRODUCT",fdel$,"DESC1",fdel$,"DESC2",fdel$
+	WebStr$=WebStr$,"RBTCOST",fdel$,"TYPE",fdel$,"WHSE",fdel$
+	WebStr$=WebStr$,"RLTYPE",fdel$ ! rebate line type
+	List$[row]=WebStr$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	key1$=" ",key1$
+	Key1$=rch.RebtContr Using "######"
+	do
+		RDR=filegetrebatedtlz(e$,RDC,">",1,Key1$,RD.)
+		If RDR<0 Exit do
+		X2=key1$[1,6] \ if x2<>rch.RebtContr exit do
+		! do like 87 - a summary only
+		NumLines=NumLines+1
+		if rch.VendNum and rch.VendNum<>rd.VendNum ! like native - chk/update Vendor
+			rd.VendNum=rch.VendNum ! when it's listing them
+			E=0 ! always do change to update possible vendor change
+			E=fileupdaterebatedtlz(e$,RDC,"c",RDR,rd.) ! orig rec, new data
+			If E<0 Error 11000
+		Endif
+		type=rd.LineType
+		If type=2 ! commodity
+			CMKey$=rd.ProdCode$[1,4]
+			CMR=filegetcommhead(e$,CMC,"=",1,CMKey$,comd.)
+			clear pr.
+			pr.Desc1$=comd.CodeDescription$
+			pr.Desc2$=comd.Remarks$
+		End If ! commodity
+		If type=5 ! costgroup
+			CGKey$=rd.ProdCode$[1,12]
+			CGR=filegetcostgrp(e$,CGC,"=",1,CGKey$,cgrp.)
+			clear pr.
+			pr.Desc1$=cgrp.CGrpDesc$
+			pr.Desc2$="Cost Group"
+		End If
+		If type=1 ! a product type
+			If rd.ProdCode$[1,3]="#  " ! ALL PRODUCTS
+				clear pr.
+				pr.Desc1$="ALL PRODUCTS"
+				type=3 ! using 3 for the web (PM is a type 1)
+			Else
+				Prod$=rd.ProdCode$+Blank$
+				Call GetProd()
+			Endif
+		Endif ! of commod or prod
+		WebStr$=""
+		if type=2 let webStr$="*" ! add the * for commod
+		if type=5 let webstr$="-" ! cost group
+		WebStr$=WebStr$,RTrim$(rd.ProdCode$),fdel$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.Desc2$),fdel$
+		x3=rd.RbFactor
+		iF Type=1 and rd.RebateType=3 ! flat cost
+			if custom_customer$="RUTHERFORD" and abs(rd.rbfactor)<=.001
+				let x3=rd.rbfactor
+			else
+				Cnvtu[0]=0;Cnvtu[1]=rd.UMRebate;Cnvtu[2]=2
+				Cnvta=X3
+				X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			endif
+		Endif
+		if custom_customer$="RUTHERFORD" and rd.Rebatetype=3
+			WebStr$=WebStr$,LTrim$(ABS(x3) Using PMask1$),fdel$
+		else
+			WebStr$=WebStr$,LTrim$(ABS(x3) Using PMask$),fdel$
+		endif
+		if type=1 ! prod
+			if rd.RebateType=2 or rd.RebateType=3 ! flat?
+				tmp$=""
+				tmp$=XUNIT$(rd.UMRebate,ccc)
+				WebStr$=WebStr$,"/",RTrim$(tmp$),"  "
+			Endif
+		Else ! nonstk types
+			if rd.RebateType=2 or rd.RebateType=3 ! flat?
+				tmp$=""
+				tmp$=NStkUMT$(rd.UMRebate)
+				WebStr$=WebStr$,"/",RTrim$(tmp$),"  "
+			Endif
+		Endif
+		tmp$=""
+		If rd.RebateType=1 ! percent
+			if rd.RbFactor>=0 let tmp$="% DISCOUNT" ELSE let tmp$="% MARK UP"
+		Endif
+		if rd.RebateType=2 ! $ amount
+			If rd.RbFactor>=0 let tmp$="$ DISCOUNT" ELSE let tmp$="$ MARKUP"
+		Endif
+		If rd.RebateType=3 ! flat amount
+			let tmp$="FLAT COST"
+		Endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! end of type
+		WebStr$=WebStr$,Str$(rd.Whse),fdel$
+		WebStr$=WebStr$,STR$(type),fdel$ ! rebate line type (1-3)
+		List$[row]=WebStr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Loop
+	List$[row]=esdel$ ! end of section
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! finshed - calling routine to do status & Output
+	if debugdetail
+		dmsg$="Get Contract "+Str$(ContrNo)+" Lines="+Str$(NumLines)+" complete "+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! rbtLines
+! 
+!--------------------------------------------------------------------
+Sub GetVend()
+! get Vendor data
+  Try
+	Dim Vkey$[60]
+	Dim 3%,VNR
+	Vkey$=" ",VKey$
+	VKey$=Vend Using "######"
+	VNR=filegeta80vm(e$,VNC,"=",1,VKey$,vend.)
+	If VNR<0 
+		clear vend.
+		Vend.Name$="VENDOR NOT FOUND"+Blank$
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetVend
+! 
+!--------------------------------------------------------------------
+Sub GetCust()
+! get Customer data - 
+! PASS IN CUST$ - as it may hold "PT###"
+  Try
+	Dim Ckey$[60]
+	Dim 2%,PRTYPE
+	Dim 3%,CUR
+	ckey$=" ",cKey$
+	cKey$=Cust$
+	if Cust$[1,2]="PT" ! it's a pricetype field
+		Clear cust.
+		PRType=Cust$[3,6]
+		Read record #PTC,PRType,0;PT.;
+		iF Trim$(PT.DESC$)="" let pt.desc$="NOT ON FILE"
+		cust.Name$=pt.Desc$+Blank$
+	Else
+		CUR=filegetcust(e$,CUC,"=",1,CKey$,cust.)
+		If CUR<0
+			clear cust.
+			cust.Name$="CUSTOMER NOT FOUND"+Blank$
+		Endif
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetCust
+! 
+!--------------------------------------------------------------------
+Sub GetProd()
+! get Prod data - 
+! PASS IN Prod$ already checked for type=2 or "#  " (commod or allprod)
+  Try
+	tmp$=Prod$
+	tmp1$=ChkAltItem$(e$,intCo,tmp$)
+	If tmp1$<>"" let Prod$=tmp$ ! key was found
+	ProdKey$=Prod$
+	PRR=filegetprod(e$,PRC,"=",1,ProdKey$,pr.)
+	If PRR<0
+		clear pr.
+		pr.Desc1$="PRODUCT NOT FOUND"
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Getprod
+! 
+!--------------------------------------------------------------------
+Sub GetNotes()
+! notes from a files
+  Try
+	Dim RNKey$[60]
+	Dim 1%,LNno
+	Dim 2%
+	Dim 3%,RNR
+	ReturnStatus=1
+	Message$="OK"
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto GRNDone
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto GRNDone
+	Endif
+	if debugdetail
+		dmsg$="Get Rebate Notes "+Str$(ContrNo)+" "+message$ \ Call updatelog(debug)
+	Endif
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"CONTRNOTES",fdel$
+	List$[1]="NOTE",fdel$
+	row=2
+	RNKey$=" ",RNKey$
+	RNKey$=RKey$
+	Do
+		RNR=filegetrebtnotes(e$,RNC,">",1,RNKey$,rnt.)
+		If RNR<0 Exit do
+		X2=RNKey$[1,6] \ if x2<>ContrNo Exit do
+		List$[row]=RTrim$(rnt.Message$),fdel$ ! just send message (Line irrelevant?)
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Loop
+	
+	List$[row]=esdel$ ! end of section
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	GRNDone: ! finished
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Get Note Lines complete "+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Getnotes
+! 
+!--------------------------------------------------------------------
+Sub GetCCust()
+! get customers on the contract for list
+  Try
+	Dim KCust$[30],RRKey$[60],CCKey$[60]
+	Dim 2%
+	Dim 3%
+
+	ReturnStatus=1
+	Message$="OK"
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto CCHDone
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto CCHDone
+	Endif
+	if debugdetail
+		dmsg$="Get Customers on Contract "+Str$(ContrNo)+" "+message$ \ Call updatelog(debug)
+	Endif
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"CONTRCUST",fdel$
+	List$[1]="CUST",fdel$,"NAME",fdel$,"REFERENCE",fdel$,"REF",fdel$
+	Row=2
+	KCust$=" ",KCust$
+	KCust$=ContrNo Using "######"
+	Do
+		RHR=filegetrcontracthz(e$,RHC,">",3,KCust$,RCH.) ! dir3=contr & cust
+		if RHR<0 Exit Do
+		X2=kcust$[1,6] \ if x2<>ContrNo Exit do
+		Cust$=KCust$[7,12]
+		call getcust() ! get cust & name
+		cckey$=KCust$
+		CCR=filegetcustcontz(e$,CNC,"=",1,cckey$,ccnt.) ! CUSTOM VERSION (can ONLY get, NO UPDATE)
+		If CCR<=0 Clear ccnt.
+		Webstr$=Cust$,fdel$,RTrim$(cust.Name$),fdel$ ! cust or PT & name/desc
+		WebStr$=WebStr$,RTrim$(ccnt.Ccref$),fdel$ ! ref if any
+		tmp$="Y"
+		If Cust$[1,2]="PT" let tmp$="N"
+		WebStr$=WebStr$,tmp$,fdel$ ! Allow Ref field Y/N
+		List$[row]=WebStr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Loop
+
+	List$[row]=esdel$ ! end of section
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	CCHDone: ! finished
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Get Contract Customers complete "+message$ \ Call updatelog(debug)
+	Endif
+	
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetCCust
+! 
+!--------------------------------------------------------------------
+Sub UptNotes()
+! Notes are being sent back
+! WE UPDATE FILE/KEY IN THIS PROGRAM AS THERE ARE FILE/FIELD ISSUES
+! first: clear orig file, then add back in what was sent
+  Try
+	Dim NKey$[60],Note$[40]
+	Dim 1%,LineNo,ttllns
+	Dim 3%,RNR
+	ReturnStatus=1
+	Message$="OK"
+	!call dxsave(0,"tmp/rbtntin.txt!")
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto UNTDone
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto UNTDone
+	Endif
+	if debugdetail
+		dmsg$="Add Notes to Contract "+Str$(ContrNo)+" "+message$ \ Call updatelog(debug)
+	Endif
+	Call DXGet("TTLLNS",tmp$)
+	ttllns=tmp$
+	if ttllns<0 or ttllns>999
+		ReturnStatus=0
+		Message$="NUMBER OF LINES INVALID!"
+	Endif
+	! okay to allow zero (same as delete)
+	! so now delete original lines
+	NKey$=" ",NKey$
+	NKey$=ContrNo Using "######"
+	DNTLoop: ! delete notes loop
+	Search #RNC,3,1;NKey$,R[4],E \ if e=2 goto DNTDone
+	x2=NKey$[1,6] \ if x2<>contrno goto DNTDone
+	clear rnt. ! clear
+	Search #RNC,5,1;NKey$,R[3],E
+	If E or R[3]<>R[4]
+		Let e$="SEARCH ERROR "+Str$(E)+" DELETE RBTNOTES - SERPRBT"
+		Error 11000
+	Endif
+	Let E=3 ! return
+	Search #RNC,1,0;NKey$,R[4],E
+	If E 
+		Let e$="SEARCH ERROR "+Str$(E)+" RETURN RBTNOTES REC - SERPRBT"
+		Error 11000
+	Endif
+	Goto DNTLoop ! next for contract
+
+	DNTDone: ! Delete original notes done - now add in what's sent
+	If ttllns=0 Goto UNTDone ! was a delete
+	For LineNo=1 to ttllns
+		Call DXGet("RMSG"+Str$(LineNo),tmp$)
+		Note$=tmp$+Blank$
+		for x=1 to len(Note$) ! need to strip control chars - i guess
+			if note$[x,x]<" " or note$[x,x]>"~"
+				let note$[x,x]=" " ! replace with space?
+			Endif
+		Next x
+		clear rnt.
+		rnt.Contract=ContrNo
+		rnt.Message$=Note$
+		rnt.SpareNU$=Blank$[1,10]
+		If Trim$(Note$)="" Goto NxtLn ! no blank lines?
+		Let E=2;r[3]=0 ! get record
+		Search #RNC,1,0;NKey$,R[3],E
+		If E 
+			Let e$="SEARCH ERROR "+Str$(E)+" GET RBTNOTES REC - SERPRBT"
+			Error 11000
+		Endif
+		NKey$=" ",NKey$
+		NKey$=rnt.Contract Using "######"
+		NKey$[7]=LineNo Using "####" ! Note 4 digits
+		Write Record #RNC,R[3],0;rnt.;
+		Search #RNC,4,1;NKey$,R[3],E
+		If E 
+			Let e$="SEARCH ERROR "+Str$(E)+" INSERT RBTNOTES KEY - SERPRBT"
+			Error 11000
+		Endif
+	NxtLn: ! bypass blank note line
+	Next LineNo
+
+	UNTDone: ! finished
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Update Rebate Notes complete LNS="+Str$(ttllns)+" "+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! UptNotes
+! 
+!--------------------------------------------------------------------
+Sub UptCusts()
+! Custs are being added / sent back
+! WILL ALSO UPDATE THE CustCont file!
+! BOTH FILES UPDATED BY CODE IN THIS PROGRAM AS THERE ARE FILE FIELD ISSUES!
+! DIR 2 ON RCH = DIR 2 ON CUSTCONT
+! DIR 3 ON RCH = DIR 1 ON CUSTCONT
+  Try
+	Dim RKey2$[60],RKey3$[60],CKey1$[60],CKey2$[60]
+	Dim CRef$[10],KCust$[60]
+	Dim 1%,ACType,addel
+	Dim 2%,CustNo
+	Dim 3%,atfld
+
+	ReturnStatus=1
+	Message$="OK"
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto UCTDone
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto UCTDone
+	Endif
+	if debugdetail
+		dmsg$="Update Customers to Contract "+Str$(ContrNo)+" "+message$ \ Call updatelog(debug)
+	Endif
+	! get type of addition
+	ACType=-1 ! not valid
+	Call DXGet("ACTYPE",tmp$)
+	tmp$=UCase$(tmp$)
+	tmp$=RTrim$(tmp$) ! uppercase and trim
+	If tmp$="CUST" let actype=1 ! add a single cust
+	if tmp$="PTYPE" let actype=2 ! adding Price Type
+	if tmp$="CCTGY" let actype=3 ! adding a whole customer category
+	if debugdetail
+		dmsg$="Add Customers to Contract by "+tmp$ \ Call updatelog(debug)
+	Endif
+	If actype=-1 ! not a valid add type
+		ReturnStatus=0
+		Message$="TYPE NOT VALID"
+		goto UCTDone
+	Endif
+	! okay now DO IT
+	Call DXGet("ATFLD",tmp$) ! field for type
+	atfld=tmp$
+	if atfld<=0
+		ReturnStatus=0
+		Message$="ADD TYPE FIELD NOT VALID"
+		goto UCTDone
+	Endif
+	Call DXGet("CREF",tmp$)
+	CRef$=Trim$(tmp$) ! also sent a reference
+	Call DXGet("ADFLAG",tmp$) ! add or delete
+	! default if not passed is EDIT
+	TMP$=UCASE$(tmp$)
+	Addel=0 \ if tmp$="A" let addel=1
+	if tmp$="D" let addel=2
+	If actype=1 ! add/update a single customer
+		Cust$=Atfld Using "######"
+		call getcust()
+		If addel<>2 and cust.Name$[1,18]="CUSTOMER NOT FOUND"
+			ReturnStatus=0
+			Message$=RTrim$(Cust.Name$)
+			goto UCTDone ! bypass/do not add or edit (allow delete)
+		Endif
+		! one routine does it
+		If addel=2 ! delete - first from RCH
+			Call UpdtCRHC()
+			Call DelCCont()
+		Endif ! deleted from rhc key only and delete/return custcont
+		If addel<>2 ! add new or edit existing
+			Call UpdtCRHC()
+			Call EdtCCont()
+		Endif ! add new customer
+	Endif ! of add/edit single customer
+	If actype=2 ! Pricetype (only affects RHead) - no custcont update
+		Cust$="PT"+Atfld Using "###"+Blank$  ! PTCCC (5 digits)
+		Call UpdtCRHC()
+		! use std routine - No CCont update
+	Endif ! pricetype 
+	If actype=3 ! Cust catgy type
+		! atfld = Cust catgy
+		KCust$=" ",KCust$ ! thru every customer on file!
+		Do
+			CUR=filegetcust(e$,CUC,">",1,KCust$,cust.)
+			If CUR<=0 Exit do
+			If cust.CustomerCategory=Atfld ! matched - so do what they want
+				Cust$=KCust$ ! uses as cust$
+				if addel=2 ! delete from rch & delete/return CCont
+					Call UpdtCRHC()
+					Call DelCCont()
+				Endif ! deleted from rhc key only and delete/return custcont
+				If addel<>2 ! add new or edit existing
+					Call UpdtCRHC()
+					Call EdtCCont()
+				Endif ! add new customer from the catgy
+			Endif ! of matched catgy
+		Loop
+	Endif ! of cust ctgy type
+
+	UCTDone: ! finished
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Update Customers complete "+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! UptCusts
+! 
+!--------------------------------------------------------------------
+Sub DelCCont()
+! routine to delete the custcont file
+! of a Set up RCH key$ (RKey2$ & RKey3$)
+! CKey1$ & CKey2$ are already dimmed
+  Try
+	CKey2$=RKey2$ ! same dir both
+	Search #CNC,5,2;CKey2$,R[2],E
+	! allow not found
+	CKey1$=RKey3$ ! dir1=dir3
+	Search #CNC,5,1;CKey1$,r[2],e
+	If Not(E)
+		R=R[2];E=3
+		Search #CNC,1,0;CKey1$,R,E
+		if e
+			Let e$="SEARCH ERROR "+Str$(E)+" RETURN REC CCONT - SERPRBT"
+			Error 11000
+		Endif
+	Endif
+	! not found - ignore 
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DelCCont
+! 
+!--------------------------------------------------------------------
+Sub EdtCCont()
+! routine to Update the custcont file
+! of a set up RCH key$ (RKey2$ & RKey3$ from UPDTCRHC)
+! and depending on if ref is sent
+! CKey1$ & CKey2$ are already dimmed
+  Try
+	If CRef$<>"" ! only add to custcont if sent ref
+		CKey2$=RKey2$ ! same dir both
+		Search #CNC,2,2;CKey2$,R[2],E
+		If E=1 ! not found - add new
+			R=0;E=2
+			Search #CNC,1,0;CKey2$,R,E
+			If E
+				Let e$="SEARCH ERROR "+Str$(E)+" GET NEW CCONT REC - SERPRBT"
+				Error 11000
+			Endif
+			R[2]=R
+			Clear ccnt.
+			ccnt.ContrNum=ContrNo
+			ccnt.CustNum=Cust$
+			ccnt.ContrType=1 ! rebate (like rebateflag in 087a)
+			ccnt.Ccref$=CRef$+Blank$
+			ccnt.sOpen$=Blank$[1,10]
+			Write record #CNC,R[2],0;ccnt.;
+			Search #CNC,4,2;CKey2$,R[2],E
+			if e
+				Let e$="SEARCH ERROR "+Str$(E)+" INSERT DIR 2 CCONT - SERPRBT"
+				Error 11000
+			Endif
+		Endif ! of not found add it
+		Read record #CNC,R[2],0;ccnt.;
+		ccnt.Ccref$=CRef$+Blank$
+		Write record #CNC,R[2],0;ccnt.;
+		! do insert dir 1
+		CKey1$=RKey3$ ! dir1=dir3
+		Search #CNC,2,1;CKey1$,r[3],e
+		If E=1
+			R=R[2]
+			Search #CNC,4,1;cKey1$,R[2],E ! only insert - add new rec in dir 2
+			if e
+				Let e$="SEARCH ERROR "+Str$(E)+" INSERT DIR 1 CCONT - SERPRBT"
+				Error 11000
+			Endif
+		Endif
+	ELSE ! did not pass - see if add or edit
+		If Addel=0 ! it's edit - clear ccont if there
+			CKey2$=RKey2$ ! same dir both
+			Search #CNC,2,2;CKey2$,R[2],E
+			If E=0 ! ignore if not found
+				Read record #CNC,R[2],0;ccnt.;
+				ccnt.ContrType=1 ! rebate (like rebateflag in 087a)
+				ccnt.Ccref$=CRef$+Blank$
+				Write record #CNC,R[2],0;ccnt.;
+			Endif
+		Endif ! of clear on edit
+	Endif ! of has ref
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! EdtCCont
+! 
+!--------------------------------------------------------------------
+Sub UpdtCRHC()
+! routine to delete/add Customer dir's out of Rcontracth
+! passed cust$ & ContrNo with rkey2$ & RKey3$ dimmed
+! and addel=0:edit, 1=add, 2=del
+  Try
+	if addel=2 ! delete
+		RKey2$=Cust$+ContrNo Using "######"
+		Search #RHC,2,2;RKey2$,R[1],E
+		If Not(E) ! found it
+			Search #RHC,5,2;RKey2$,R,E
+			if e
+				Let e$="SEARCH ERROR "+Str$(E)+" DELETE RBTHD DIR 2 - SERPRBT"
+				Error 11000
+			Endif
+		Endif
+	
+		RKey3$=Contrno Using "######"
+		RKey3$[7]=Cust$
+		Search #RHC,2,3;RKey3$,R[3],E
+		If Not(E)
+			Search #RHC,5,3;RKey3$,R,E
+			if e
+				Let e$="SEARCH ERROR "+Str$(E)+" DELETE RBTHD DIR 3 - SERPRBT"
+				Error 11000
+			Endif
+		Endif
+		
+	Endif ! deleted from rhc key only - cannot return record!
+	If addel<>2 ! add new or edit existing
+		RKey2$=Cust$+ContrNo Using "######"
+		Search #RHC,2,2;RKey2$,R[1],E
+		If E=1 ! DID NOT found it
+			Let R=RHR ! header rec #
+			Search #RHC,4,2;RKey2$,R,E
+			if e
+				Let e$="SEARCH ERROR "+Str$(E)+" INSERT RBTHD DIR 2 - SERPRBT"
+				Error 11000
+			Endif
+		Endif
+		RKey3$=ContrNo Using "######"
+		RKey3$[7]=Cust$
+		Search #RHC,2,3;RKey3$,R[1],E
+		IF E=1 ! DID NOT found it
+			Let R=RHR ! header rec #
+			Search #RHC,4,3;RKey3$,R,E
+			if e
+				Let e$="SEARCH ERROR "+Str$(E)+" INSERT RBTHD DIR 3 - SERPRBT"
+				Error 11000
+			Endif
+		Endif ! ignore if did
+			
+	Endif ! add new customer
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! UpdtCRHC
+! 
+!--------------------------------------------------------------------
+Sub UpdtCHdr()
+! Update the fields in the Contract Header
+  Try
+	Dim RKey4$[60],Vend$[6],LKey$[60],NKey$[50]
+	Dim RKey2$[60],RKey3$[60],CKey1$[64],CKey2$[64]
+	Dim 1%,edtype,addel
+	Dim 2%,Vend,RDate[5]
+	Dim 3%
+
+	Dim orch. as rcontracth ! original header data (vend chg)
+	if onlyinquiry
+		returnstatus=0
+		message$="Inquiry only, no update"
+		goto UCHDone
+	Endif
+	Call DXGet("EDTYPE",tmp$) ! type of update
+	tmp$=UCase$(tmp$)
+	Tmp$=RTrim$(tmp$) ! uppercase and trimmed
+	Edtype=0 ! default=Edit
+	If tmp$="A" let edtype=1
+	If tmp$="D" let edtype=2
+	if stage and edtype=1 let edtype=0 ! no add in staged
+	ReturnStatus=1
+	Message$="OK"
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto UCHDone
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	ORHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,ORCH.)
+	If edtype<>1 and ORHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto UCHDone
+	Endif
+	If edtype=1 and ORHR>0 Let Edtype=0 ! already there - ITS AN EDIT
+	if debugdetail
+		If edtype=0 dmsg$="Edit"
+		if edtype=1 dmsg$="Add"
+		if edtype=2 dmsg$="Delete"
+		dmsg$=dmsg$+" Header of Contract "+Str$(ContrNo)+" "+message$ \ Call updatelog(debug)
+	Endif
+	If Edtype=2 ! do delete of contract & lines
+		! delete lines first, then custs(dir2&3), finally dir1&4, return rec
+		! so now delete notes lines
+		NKey$=" ",NKey$
+		NKey$=ContrNo Using "######"
+		DCNTLoop: ! delete notes loop
+		Search #RNC,3,1;NKey$,R[4],E \ if e=2 goto DCNTDone
+		x2=NKey$[1,6] \ if x2<>contrno goto DCNTDone
+		clear rnt. ! clear
+		Search #RNC,5,1;NKey$,R[3],E
+		If E or R[3]<>R[4]
+			Let e$="SEARCH ERROR "+Str$(E)+" DELETE RBTNOTES - SERPRBT"
+			Error 11000
+		Endif
+		Let E=3 ! return
+		Search #RNC,1,0;NKey$,R[4],E
+		If E 
+			Let e$="SEARCH ERROR "+Str$(E)+" RETURN RBTNOTES REC - SERPRBT"
+			Error 11000
+		Endif
+		Goto DCNTLoop ! next for contract
+
+		DCNTDone: ! Delete contract notes done
+		LKey$=" ",LKey$
+		LKey$=Contrno Using "######"
+		Do ! line loop
+			RDR=filegetrebatedtlz(e$,RDC,">",1,LKey$,rd.)
+			If rdR<=0 Exit do
+			X2=LKey$[1,6] \ if x2<>ContrNo Exit do
+			E=fileupdaterebatedtlz(e$,RDC,"d",rdR,rd.)
+			If E ! something happened
+				Let e$="SEARCH ERROR "+Str$(E)+" DELETE RBT LINES - SERPRBT"
+				Error 11000
+			Endif
+		Loop
+		! now loop rch dir 3 to get cust for delete
+		LKey$=" ",LKey$
+		LKey$=Contrno Using "######"
+		Do ! cust dirs loop
+			RHR=filegetrcontracthz(e$,RHC,">",3,LKey$,RCH.)
+			If RHR<=0 Exit do
+			X2=LKey$[1,6] \ if x2<>ContrNo Exit do
+			Cust$=LKey$[7,12]
+			addel=2 ! delete
+			Call UpdtCRHC()
+			Call DelCCont()
+		Loop
+		! okay - now delete dir4 & 1 /return
+		E=fileupdatercontracthz(e$,RHC,"d",ORHR,ORCH.)
+		If E ! something happened
+			Let e$="SEARCH ERROR "+Str$(E)+" DELETE RBT HEADER - SERPRBT"
+			Error 11000
+		Endif
+		if stage
+			LET K5$=Contrno USING "######"                           
+			stage_track_loop:! go thru tracking
+			SEARCH #SRBTRK,3,1;K5$,R5,E \ IF E GOTO done_with_stage:
+			LET X2=K5$[1,6] \ IF X2<>Contrno GOTO done_with_stage:
+			SEARCH #SRBTRK,5,1;K5$,R5,E \ IF E GOTO stage_track_loop:
+			goto stage_track_loop:
+			done_with_stage:!ALL DONE
+		end if
+		goto UCHDone ! done - don't get any passed info
+	Endif ! delete complete
+	rch.RebtContr=ContrNo
+	! now can get fields to update
+	Call DXGet("STDATE",tmp$)
+	tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy or mm/dd/yy to yyyymmdd
+	rch.DateStart=tmp1$[3,8] ! just want yymmdd
+	IF TMP$="" OR TMP$[1,4]="NONE" LET rch.DateStart=0
+	Call DXGet("ENDATE",tmp$)
+	tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	tmp1$=formatdate2$(tmp$) ! mm/dd/yy or mm/dd/yy to yyyymmdd
+	rch.DateEnd=tmp1$[3,8] ! ! just want yymmdd
+	If tmp$[1,4]="NONE" OR TMP$="" let rch.DateEnd=0
+	iF rch.dateend ! needs range check!!!
+		X$=rch.datestart using "&&&&&&"
+		Call DateToJulian(1,X$,X$,E)
+		If e let x$=" ",x$
+		Jdate[0]=x$[1,5]
+		x$=rch.dateend using "&&&&&&"
+		Call DateToJulian(1,X$,X$,E)
+		if e let x$=" ",x$
+		Jdate[1]=x$[1,5]
+		if jdate[1]<Jdate[0] ! end before starts
+			message$="Date Range is invalid"
+			returnstatus=0
+			Goto UCHDone
+		Endif
+	Endif
+	Call DXGet("VENDOR",tmp$)
+	rch.VendNum=tmp$
+	if stage ! staged no vendor change allowed
+		if ORCH.vendnum<>rch.vendnum
+			message$="You can't change staged file vendor number"
+			returnstatus=0
+			Goto UCHDone
+		Endif
+	Endif ! of staged - no vend chg
+	if not(stage)
+		If rch.vendnum=0
+			returnstatus=0
+			message$="Vendor ID is required"
+			goto UCHDone
+		Endif
+		Vend=rch.VendNum
+		Call GetVend()
+		if VNR<=0
+			returnstatus=0
+			message$="Vendor not found - Valid vendor required"
+			goto UCHDone
+		Endif
+	Endif
+	Call DXGet("CONTACT",tmp$)
+	rch.RebtCont$=tmp$+Blank$
+	Call DXGet("PHONE",tmp$)
+	rch.ContPhone$=tmp$+Blank$
+	Call DXGet("DESC",tmp$)
+	rch.ContrDesc$=tmp$+Blank$
+	Call DXGet("VCNUM",tmp$)
+	rch.VendContr$=tmp$+Blank$
+	Call DXGet("VCDESC",tmp$)
+	rch.VendContrDesc$=tmp$+Blank$
+	rch.Spare$=Blank$[1,10]
+	
+	If edtype=1 ! add contr header (no custs) - just hdr dir1&4
+		E=0;RHR=0
+		E=fileupdatercontracthz(e$,RHC,"a",RHR,rch.)
+		If E<0 ! something happened
+			Let e$="SEARCH ERROR "+Str$(E)+" ADD NEW RBT HEADER - SERPRBT"
+			Error 11000
+		Endif
+		RHR=E ! rec is passed in E
+	Endif
+	If edtype=0 ! edit - check for changes - vendor,dates chg
+		DT_Chg=0
+		if orch.DateStart<>rch.DateStart let dt_chg=1
+		if orch.DateEnd<>rch.DateEnd let dt_chg=1
+		! add task 44227 - force dates to agree with header
+		call dxget("FDTCHG",tmp$)
+		fdt_chg=0 \ if ucase$(RTrim$(tmp$))="Y" let fdt_chg=1
+		Vend=rch.VendNum
+		if vend<>orch.VendNum let vn_chg=1
+		if vend<>orch.VendNum Or orch.DateEnd<>rch.DateEnd ! changed it - do change update
+			!rch.=new data ORHR = orig rec
+			E=fileupdatercontracthz(e$,RHC,"C",ORHR,rch.)
+			If E ! something happened
+				Let e$="SEARCH ERROR "+Str$(E)+" CHANGE RBT HEADER - SERPRBT"
+				Error 11000
+			Endif
+			RHR=ORHR
+		Else ! can just write new fields
+			RHR=ORHR
+			! rch.=new data
+			Write record #RHC,RHR,0;rch.;
+		Endif
+		if fdt_chg or dt_chg or vn_chg ! on native ALWAYS Updates Line Dates (used to ask)
+			LKey$=" ",LKey$
+			LKey$=Contrno Using "######"
+			Do ! line loop
+				RDR=filegetrebatedtlz(e$,RDC,">",1,LKey$,rd.)
+				If rdR<=0 Exit do
+				X2=LKey$[1,6] \ if x2<>ContrNo Exit do
+				if dt_chg ! dates change
+					if rd.StartDate = orch.DateStart ! curr line=orig date
+						LET rd.StartDate=rch.DateStart ! START to NEW date
+					endif
+					if rd.CancelDate= orch.DateEnd ! curr line=orig date
+						LET rd.CancelDate=rch.DateEnd ! END to new date
+					endif
+				Endif ! of date change
+				if fdt_Chg ! force them to header
+					LET rd.StartDate=rch.DateStart ! START to NEW date
+					LET rd.CancelDate=rch.DateEnd ! END to new date
+				endif
+				if vn_chg
+					let rd.vendnum=rch.VendNum
+				Endif
+				! MAT  WRITE #2,R2,12;RB1;
+				E=fileupdaterebatedtlz(e$,RDC,"c",rdR,rd.)
+				If E ! something happened
+					Let e$="SEARCH ERROR "+Str$(E)+" UPDATE RBT LINES - SERPRBT"
+					Error 11000
+				Endif
+			Loop
+		Endif
+	Endif
+	UCHDone: ! finished
+	! call programdump("/tmp/rbtlog2!","")
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Update Contract Header complete "+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! UpdtCHdr
+! 
+!--------------------------------------------------------------------
+Sub GetRProd()
+! based on rbt,type,prod
+! send back info - new or existing
+  Try
+	Dim LKey$[60],CMKey$[60],Prdf$[12]
+	Dim RBUM$[4],SCUm$[4],CGKey$[12]
+	Dim 1%,Type
+	Dim 3%
+	
+	ReturnStatus=1
+	Message$="OK"
+	Clear List$[]
+	tmpcnt=maxcnt
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto GRLDone
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto GRLDone
+	Endif
+	Call DXGet("RTYPE",tmp$)
+	X2=tmp$
+	if x2=1 or x2=2 or x2=3 or x2=5 
+		! only types 1=prod,2=commod,3=ALL,5=costgroup
+		type=x2
+	Else
+		ReturnStatus=0
+		Message$="TYPE NOT VALID"
+		goto GRLDone
+	Endif
+	Call DXGet("PRODID",tmp$)
+	let prod$=UCase$(RTrim$(tmp$))+Blank$
+	if prod$[1,1]="*" let type=2
+	If prod$[1,3]="#  " let type=3
+	if prod$[1,1]="-" let type=5
+	If type=3 ! all prod (web option)
+		Prod$="#"+Blank$
+		Type=1 ! switch to PM type
+	Endif
+	if debugdetail
+		dmsg$="Get Contract Line "+Str$(ContrNo)+" T="+Str$(Type)+" "+prod$ \ Call updatelog(debug)
+	Endif
+  
+	! okay to go
+	List$[0]=bsdel$,"RBTLINE",fdel$
+	WebStr$="PRODID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+	WebStr$=WebStr$,"STDATE",fdel$,"ENDDATE",fdel$
+	WebStr$=WebStr$,"UMRBT",fdel$,"UMCOST",fdel$
+	WebStr$=WebStr$,"RBTTYPE",fdel$ ! ,"BASETYPE",fdel$
+	WebStr$=WebStr$,"RBTUDA",fdel$,"RBTUDANO",fdel$
+	WebStr$=WebStr$,"WHSE",fdel$,"COSTTYPE",fdel$
+	WebStr$=WebStr$,"COSTBASE",fdel$,"RBTFACT",fdel$
+	WebStr$=WebStr$,"COSTFACT",fdel$,"LASTBUY",fdel$
+	WebStr$=WebStr$,"QTYSOLD",fdel$,"RBTRECVD",FDEL$
+	WebStr$=WebStr$,"EXIST",fdel$,"RVNDFLG",fdel$
+	webstr$=webstr$,"PVNDFLG",fdel$
+	! ADD DESC OF TYPES?
+	! WebStr$=WebStr$,"RTDESC",fdel$,"CTDESC",fdel$,"CBDESC",fdel$
+	List$[1]=WebStr$
+	row=2
+	LKey$=" ",LKey$
+	LKey$[1,6]=ContrNo Using "######"
+	Prdf$=Prod$
+	if type=2 AND Prod$[1,1]<>"*" ! commod
+		Prdf$="*"+Prod$+Blank$
+	Endif
+	If type=2 and prod$[1,1]="*"
+		Prdf$=Prod$+Blank$
+		Prod$=Prdf$[2]
+	Endif
+	if type=5 AND Prod$[1,1]<>"-" ! costgroup
+		Prdf$="-"+Prod$+Blank$
+	Endif
+	If type=5 and prod$[1,1]="-"
+		Prdf$=Prod$+Blank$
+		Prod$=Prdf$[2]
+	Endif
+	if rtrim$(prod$)="" ! HAVE TO HAVE IT!!
+		returnstatus=0
+		if type=1 let message$="NO Product"
+		if type=2 let message$="NO Commodity"
+		if type=5 let message$="NO Cost Group"
+		message$=message$+" ID was sent"
+		goto GRLDone
+	Endif
+	LKey$[7,18]=Prdf$
+	LKey$[19]="" ! CUT TO LENGTH
+	RDR=filegetrebatedtlz(e$,RDC,"=",1,LKey$,RD.)
+	If RDR<=0 
+		If OnlyInquiry
+			returnstatus=0
+			message$="Inquiry only - Record not found"
+			goto GRLDone
+		Else
+			Clear rd.
+		Endif
+	Endif ! not found
+	NonStk=0
+	If type=1 ! prod desc
+		If Prod$[1,3]<>"#  " ! a normal product
+			tmp$=Prod$
+			tmp1$=ChkAltItem$(e$,intCo,tmp$)
+			If tmp1$<>"" let Prod$=tmp$ ! key was found
+			ProdKey$=Prod$
+			PRR=filegetprod(e$,PRC,"=",1,ProdKey$,pr.)
+			If PRR<=0
+				clear pr.
+				Pr.Desc1$="PRODUCT NOT FOUND"
+				returnstatus=0
+			Endif
+		Else ! it's all
+			clear pr.
+			Pr.Desc1$="ALL PRODUCTS"
+			NonStk=1
+		Endif
+	Endif
+	If type=2 ! commodity
+		Clear pr.
+		NonStk=1
+		CMKey$=Prod$[1,4]
+		CMR=filegetcommhead(e$,CMC,"=",1,CMKey$,comd.)
+		If CMR<=0 
+			Clear comd.
+			pr.Desc1$="COMMODITY NOT FOUND"
+			returnstatus=0
+		Else ! found - load pr.
+			pr.Desc1$=comd.CodeDescription$
+			pr.Desc2$=comd.Remarks$
+		Endif
+	Endif
+	If type=5 ! cost group
+		Clear pr.
+		NonStk=1
+		CGKey$=Prod$[1,12]
+		CGR=filegetcostgrp(e$,CGC,"=",1,CGKey$,cgrp.)
+		If CGR<=0 
+			Clear cgrp.
+			pr.Desc1$="COST GROUP NOT FOUND"
+			returnstatus=0
+		Else ! found - load pr.
+			pr.Desc1$=cgrp.CGrpDesc$
+			pr.Desc2$="Cost Group"
+		Endif
+	Endif
+	! existing list boxes (web hardcode?)
+	! REBATE TYPES: 1=%DISC(-=%MARKUP), 2=$DISC(-=MARKUP), 3=Flat
+	! SLSM COST: 1=%MARKUP(-=DISC), 2=$MARKUP(-=DISC), 3=FLAT, 3=STD
+	! COST BASE: 1=BASE, 2=LOAD, 3=LAST, 4=REBATE, 5=LOAD2(REDI)
+	! 
+	! load detail string
+	! Default if new
+	if returnstatus=0 ! bad id
+		message$=pr.desc1$
+		goto GRLDone
+	Endif
+	If RDR<=0
+		If NonStk
+			let rd.umrebate=11
+			let rd.umcost=11
+		Else
+			let rd.umrebate=pr.UMCostDefault
+			let rd.umcost=pr.UMCostDefault
+		Endif
+		let rd.StartDate=rch.DateStart
+		rd.CancelDate=rch.DateEnd
+	Endif
+	If rd.StartDate=0 and rch.DateStart<>0 let rd.StartDate=rch.DateStart
+	WebStr$=RTrim$(Prod$),fdel$
+	WebStr$=WebStr$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.Desc2$),FDEL$
+	tmp$="0"
+	If rd.StartDate let tmp$=PDate$(rd.StartDate)
+	tmp1$="NONE"
+	if rd.CancelDate let tmp1$=PDate$(rd.CancelDate)
+	WebStr$=WebStr$,tmp$,fdel$,tmp1$,fdel$ ! start/end dates
+	RBUM$=""
+	if Not(NonStk) and rd.UMRebate let RBUM$=XUnit$(rd.UMRebate,ccc)
+	if nonstk
+		x1=rd.UMRebate-7
+		If X1<=0 Let x1=1 ! as in 87
+		Tmp$=NStkUMT$(x1)
+		RBUM$=Tmp$
+	Endif
+	SCUm$=""
+	if Not(NonStk) and rd.UMCost let SCUm$=XUnit$(rd.UMCost,ccc)
+	if nonstk
+		x1=rd.UMCost-7
+		If X1<=0 Let x1=4 ! as in 87
+		tmp$=NStkUMT$(x1)
+		SCUM$=Tmp$
+	Endif
+	WebStr$=WebStr$,rbum$,fdel$,scum$,fdel$  ! um rbt, cost
+	WebStr$=WebStr$,Str$(rd.RebateType),fdel$ ! ,Str$(rd.BaseType),fdel$
+	WebStr$=WebStr$,RTrim$(rd.Rbuda2$),fdel$,Str$(rd.Uda1),fdel$
+	WebStr$=WebStr$,Str$(rd.Whse),fdel$,Str$(rd.CostType),fdel$
+	X3=rd.RbFactor
+	if Not(NonStk) and rd.RebateType=3 ! flat
+		if custom_customer$="RUTHERFORD" and abs(rd.rbfactor)<=.001
+				let x3=rd.rbfactor
+		else
+			cnvtu[0]=0;cnvtu[1]=rd.UMRebate;cnvtu[2]=2
+			Cnvta=X3
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			X3=Amount
+		endif
+	Endif
+	WebStr$=WebStr$,Str$(rd.CostBase),fdel$
+	if custom_customer$="RUTHERFORD" and rd.Rebatetype=3
+		webstr$=webstr$,LTrim$(x3 Using PMask1$),fdel$
+	else
+		webstr$=webstr$,LTrim$(x3 Using PMask$),fdel$
+	endif
+	tmp$="NONE"
+	If rd.LastBuyDate let tmp$=PDate$(rd.LastBuyDate)
+	x3=rd.CostFactor
+	if Not(NonStk) and rd.CostType=3 ! flat
+		cnvtu[0]=0;cnvtu[1]=rd.UMCost;cnvtu[2]=2
+		Cnvta=X3
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		X3=Amount
+	Endif
+	WebStr$=WebStr$,Ltrim$(X3 Using PMask$),fdel$,tmp$,fdel$
+	cnvtu[0]=0;cnvtu[1]=rd.UMQty;cnvtu[2]=1
+	Cnvta=rd.QtySinceStart
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	IF RD.UMQTY=0 and not(NonStk) let rd.umqty=PR.UMSellDefault
+	tmp$="" \ if Not(NonStk) and rd.UMQty let tmp$=XUnit$(rd.UMQty,ccc)
+	if NonStk Let Amount=rd.QtySinceStart;TMP$=""
+	WebStr$=WebStr$,LTrim$(Amount using QMask$),"/",tmp$,fdel$
+	WebStr$=WebStr$,LTrim$(rd.RebateSinceStart Using QMask$),FDEL$
+	tmp$="Y"
+	If RDR<=0 Let tmp$="N"
+	WebStr$=WebStr$,tmp$,fdel$ ! line exists Y/N
+	let tmp$="N" ! default = N (Rebate vendor<>Prod vendor
+	if rdr<=0 and type=1 and not(nonstk)
+		if pr.PrimVend<>rch.VendNum let tmp$="Y"
+	endif
+	webstr$=webstr$,tmp$,fdel$ ! vendor issue
+	tmp$="N" ! whse vend<>prod vendor
+	IF TYPE=1 and not(nonstk)
+		VNG=chkprdwhsev(prodkey$)
+		if VNG let tmp$="Y"
+	Endif
+	webstr$=webstr$,tmp$,fdel$ ! prim<>whse vendor
+	! send desc of types?
+	! tmp$=GetRTDesc$(rd.RebateType)
+	! Webstr$=WebStr$,RTrim$(tmp$),fdel$ ! rebate type
+	! tmp$=GetCTDesc$(rd.CostType)
+	! Webstr$=WebStr$,RTrim$(tmp$),fdel$ ! slsm cost type
+	! tmp$=GetCBDesc$(rd.CostBase)
+	! Webstr$=WebStr$,RTrim$(tmp$),fdel$ ! slsm cost base desc
+	List$[row]=WebStr$
+	row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$ ! end of section
+	Call AddToStr(e$,rstr$,List$[])
+	! 
+	GRLDone: ! finished
+	! call programdump("/tmp/rbtlog3!","")
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Get Contract "+Str$(ContrNo)+" Line complete "+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetRProd
+! 
+!--------------------------------------------------------------------
+Function NStkUMT$(X1)
+! translater NonStk UM to text (limit 4 chars)
+! stored in file as 8-12
+ Try
+	tmp$="ERR"
+	If x1=1 or x1=8 let tmp$="STKG"
+	If x1=2 or x1=9 let tmp$="SELL"
+	if x1=3 or x1=10 let tmp$="PURC"
+	if x1=4 or x1=11 let tmp$="COST"
+	if x1=5 or x1=12 let tmp$="PRCE"
+
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function tmp$ ! NStkUMT$
+! 
+!--------------------------------------------------------------------
+Sub UpdtLine()
+! receive back data - update file
+! 
+  Try
+	Dim LKey$[60],CMKey$[60],Prdf$[12]
+	Dim RBUM$[4],SCUm$[4],CGKey$[12]
+	Dim 1%,Type,edtype
+	Dim 3%
+	
+	Dim ORDL. as rebatedtl
+	Call DXGet("EDTYPE",tmp$) ! type of update
+	tmp$=UCase$(tmp$)
+	Tmp$=RTrim$(tmp$) ! uppercase and trimmed
+	Edtype=0 ! default=Edit
+	If tmp$="A" let edtype=1
+	If tmp$="D" let edtype=2
+	ReturnStatus=1
+	Message$="OK"
+	Clear List$[]
+	tmpcnt=maxcnt
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto URLDone
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto URLDone
+	Endif
+	Call DXGet("RTYPE",tmp$)
+	X2=tmp$
+	if x2=1 or x2=2 or x2=3 OR x2=5 
+		! only types 1=prod,2=commod,(3=ALL on web), 5=costgroup
+		type=x2
+	Else
+		ReturnStatus=0
+		Message$="TYPE NOT VALID"
+		goto URLDone
+	Endif
+	Call DXGet("PRODID",tmp$)
+	let prod$=UCase$(RTrim$(tmp$))+Blank$
+	if prod$[1,1]="*" let type=2
+	if prod$[1,1]="#" let type=3
+	if prod$[1,1]="-" let type=5
+	If type=3 ! all prods type
+		Let Prod$="#"+Blank$ ! switch to PM Code
+		Let Type=1 ! switch to PM type
+	Endif
+	if debugdetail
+		If edtype=0 dmsg$="Edit"
+		if edtype=1 dmsg$="Add"
+		if edtype=2 dmsg$="Delete"
+		dmsg$=dmsg$+" Contract Line "+Str$(ContrNo)+" T="+Str$(Type)+" "+prod$ \ Call updatelog(debug)
+	Endif
+
+	LKey$=" ",LKey$
+	LKey$[1,6]=ContrNo Using "######"
+	Prdf$=Prod$
+	if type=2 and prod$[1,1]<>"*" ! commod
+		Prdf$="*"+Prod$+Blank$
+	Endif
+	if type=2 and Prod$[1,1]="*" ! 
+		Prdf$=Prod$+Blank$
+		prod$=Prdf$[2]+Blank$
+	Endif
+	if type=5 and prod$[1,1]<>"-" ! costgroup
+		Prdf$="-"+Prod$+Blank$
+	Endif
+	if type=5 and Prod$[1,1]="-" ! 
+		Prdf$=Prod$+Blank$
+		prod$=Prdf$[2]+Blank$
+	Endif
+	if rtrim$(prod$)="" ! HAVE TO HAVE IT!!
+		returnstatus=0
+		if type=1 let message$="NO Product"
+		if type=2 let message$="NO Commodity"
+		if type=5 let message$="NO Cost Group"
+		message$=message$+" ID was sent"
+		goto URLDone
+	Endif
+	LKey$[7,18]=Prdf$
+	LKey$[19]="" ! CUT TO LENGTH
+	RDR=filegetrebatedtlz(e$,RDC,"=",1,LKey$,RD.)
+	If RDR<=0 Clear rd.
+	If RDR>0 Read Record #RDC,RDR,0;Ordl.; ! for change record
+	if edtype=1 and rdr>0 let edtype=0 ! found existing - chg to edit
+	NonStk=0
+	If type=2 or Prod$[1,3]="#  " let NonStk=1
+	If type=5 or Prod$[1,1]="-" let NonStk=1
+	If edtype=2 ! want a delete
+	  If rdr<0 goto URLDone ! no rec on delete
+	  E=0
+	  E=fileupdaterebatedtlz(e$,RDC,"d",RDR,rd.)
+	  If E
+		Let e$="SEARCH ERROR "+Str$(E)+" DELETE RBT LINE - SERPRBT"
+		Error 11000
+	  Endif
+	  Goto URLDone
+	Endif ! of delete
+		
+	Clear pr.
+	NonStk=0
+	If type=1 ! prod desc
+		If Prod$[1,3]<>"#  " ! a normal product
+			tmp$=Prod$
+			tmp1$=ChkAltItem$(e$,intCo,tmp$)
+			If tmp1$<>"" let Prod$=tmp$ ! key was found
+			ProdKey$=Prod$
+			PRR=filegetprod(e$,PRC,"=",1,ProdKey$,pr.)
+			If PRR<=0
+				clear pr.
+				Pr.Desc1$="PRODUCT NOT FOUND"
+				returnstatus=0
+			Endif
+		Else ! it's all
+			clear pr.
+			Pr.Desc1$="ALL PRODUCTS"
+			NonStk=1
+		Endif
+	Endif
+	If type=2 ! commodity
+		Clear pr.
+		NonStk=1
+		CMKey$=Prod$[1,4]
+		CMR=filegetcommhead(e$,CMC,"=",1,CMKey$,comd.)
+		If CMR<=0 
+			Clear comd.
+			pr.Desc1$="COMMODITY NOT FOUND"
+			returnstatus=0
+		Else ! found - load pr.
+			pr.Desc1$=comd.CodeDescription$
+			pr.Desc2$=comd.Remarks$
+		Endif
+	Endif
+	!If Type=3 ! size (um)
+	!		Clear pr.
+	!		x3=Prod$[5] ! key1$[12] ! s/b umrec
+	!		Read record #CCC,X3,0;umc.;
+	!		pr.desc1$=umc.Description$
+	!Endif
+	If type=5 ! cost group
+		Clear pr.
+		NonStk=1
+		CGKey$=Prod$[1,12]
+		CGR=filegetcostgrp(e$,CGC,"=",1,CGKey$,cgrp.)
+		If CGR<=0 
+			Clear cgrp.
+			pr.Desc1$="COST GROUP NOT FOUND"
+			returnstatus=0
+		Else ! found - load pr.
+			pr.Desc1$=cgrp.CGrpDesc$
+			pr.Desc2$="Cost Group"
+		Endif
+	Endif
+	if returnstatus=0
+		message$=pr.desc1$
+		goto URLDone
+	Endif
+	! okay to go
+	Rd.LineType=Type
+	rd.Contract=ContrNo
+	rd.VendNum=rch.VendNum
+	rd.ProdCode$=prod$
+	! do all gets
+	Call DXGet("STDATE",tmp$)
+	tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy or mm/dd/yy to yyyymmdd
+	rd.StartDate=tmp1$[3,8] ! just want yymmdd
+	IF TMP$="" OR TMP$[1,4]="NONE" LET RD.STARTDate=0
+	Call DXGet("ENDDATE",tmp$)
+	tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy or mm/dd/yy to yyyymmdd
+	rd.CancelDate=tmp1$[3,8] ! just want yymmdd
+	IF TMP$="" OR TMP$[1,4]="NONE" LET rd.CancelDate=0
+	iF rd.CancelDate ! needs range check!!!
+		X$=rd.StartDate using "&&&&&&"
+		Call DateToJulian(1,X$,X$,E)
+		If e let x$=" ",x$
+		Jdate[0]=x$[1,5]
+		x$=rd.CancelDate using "&&&&&&"
+		Call DateToJulian(1,X$,X$,E)
+		if e let x$=" ",x$
+		Jdate[1]=x$[1,5]
+		if jdate[1]<Jdate[0] ! end before starts
+			message$="Date Range is invalid"
+			returnstatus=0
+			Goto URLDone
+		Endif
+	Endif
+	Call DXGet("UMRBT",tmp$)
+	If Not(NonStk) let R=getumrec(e$,CCC,tmp$,IntCo,PR.)
+	If NonStk ! how 087a does it
+		R=NStkTUM(tmp$) ! returns as 8-12
+	Else
+		if r=0 
+			returnstatus=0
+			message$="Rebate UM Not found"
+			goto URLDone
+		Endif
+	Endif
+	rd.UMRebate=r
+	Call DXGet("UMCOST",tmp$)
+	If Not(NonStk) let R=getumrec(e$,CCC,tmp$,IntCo,PR.)
+	If NonStk ! how 087a does it
+		R=NStkTUM(tmp$) ! returns as 8-12
+	Else
+		if r=0 
+			returnstatus=0
+			message$="Cost UM Not found"
+			goto URLDone
+		Endif
+	Endif
+	rd.UMCost=r
+	Call DXGet("RBTTYPE",tmp$)
+	rd.RebateType=tmp$ ! s/b a number
+	if rd.RebateType<1 OR rd.RebateType>3
+		returnstatus=0
+		message$="Invalid Rebate Type (1-3)"
+		goto URLDone
+	Endif
+	Call DXGet("RBTUDA",tmp$)
+	rd.Rbuda2$=tmp$+Blank$
+	Call DXGet("RBTUDANO",tmp$)
+	rd.Uda1=tmp$
+	Call DXGet("WHSE",tmp$)
+	rd.Whse=tmp$
+	Call DXGet("COSTTYPE",tmp$)
+	rd.CostType=tmp$ ! s/b a number
+	if rd.RebateType<1 OR rd.RebateType>4
+		returnstatus=0
+		message$="Invalid Cost Type (1-4)"
+		goto URLDone
+	Endif
+	Call DXGet("COSTBASE",tmp$)
+	rd.CostBase=tmp$ ! s/b a number
+	if rd.CostBase<1 OR rd.CostBase>5
+		returnstatus=0
+		message$="Invalid Base Type (1-5)"
+		goto URLDone
+	Endif 
+	Call DXGet("RBTFACT",tmp$)
+	X3=tmp$
+	if not(nonstk) and rd.RebateType=3 ! flat
+		cnvtu[0]=rd.UMRebate;cnvtu[1]=0;cnvtu[2]=6 ! to base no round
+		Cnvta=X3
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		X3=Amount
+	Endif
+	x1=rd.RebateType;badfact=0
+	if x1=1 and (x3<-100 or x3>100) let badfact=1
+	if x1=3 and x3<0 LET badfact=1
+	if badfact
+		returnstatus=0
+		message$="Invalid Factor Entered"
+		goto URLDone
+	Endif
+	rd.RbFactor=x3
+	Call DXGet("COSTFACT",tmp$)
+	X3=tmp$
+	if not(nonstk) and rd.CostType=3 ! flat
+		cnvtu[0]=rd.UMCost;cnvtu[1]=0;cnvtu[2]=6 ! to base no round
+		Cnvta=X3
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		X3=Amount
+	Endif
+	x1=rd.CostType;badfact=0
+	if x1=1 and (x3<-100 or x3>100) let badfact=1
+	if x1=3 and x3<0 LET badfact=1
+	if badfact
+		returnstatus=0
+		message$="Invalid Cost Factor Entered"
+		goto URLDone
+	Endif
+	rd.CostFactor=x3
+	! blank out unused strings!
+
+	! data gotten
+	If RDR<=0 ! new
+		RDR=0
+		RDR=fileupdaterebatedtlz(e$,RDC,"a",RDR,rd.)
+		If RDR<0
+			Let e$="SEARCH ERROR "+Str$(Abs(RDR))+" INSERT RBT LINE - SERPRBT"
+			Error 11000
+		Endif ! >0 = record added
+	Else ! update/change
+		E=0 ! always do change to update possible vendor change
+		E=fileupdaterebatedtlz(e$,RDC,"c",RDR,rd.) ! orig rec, new data
+		If E<0
+			Let e$="SEARCH ERROR "+Str$(Abs(E))+" UPDATE RBT LINE - SERPRBT"
+			Error 11000
+		Endif
+	Endif
+	! call programdump("/tmp/rbtlog1!","")
+	URLDone: ! finished
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Update Contract "+Str$(ContrNo)+" Line complete "+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! UpdtLine()
+! 
+!--------------------------------------------------------------------
+Function NStkTUM(tmp$)
+! translater NonStk UM text to UM (limit 4 chars)
+! stored in file as 8-12
+ Try
+	X1=8 ! default
+	If tmp$="STKG" let x1=8
+	If tmp$="SELL" let x1=9
+	if tmp$="PURC" let x1=10
+	if tmp$="COST" let x1=11
+	if tmp$="PRCE" let x1=12
+
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function X1 ! NStkTUM
+! 
+!--------------------------------------------------------------------
+Function GetRTDesc$(x1)
+! translater - get desc for rebate type
+! REBATE TYPES: 1=%DISC(-=%MARKUP), 2=$DISC(-=MARKUP), 3=Flat
+
+ Try
+	tmp$=""
+	If x1=1 and rd.RbFactor>=0 let tmp$="% DISCOUNT"
+	if x1=1 and rd.RbFactor<0 let tmp$="% MARKUP"
+	If x1=2 and rd.RbFactor>=0 let tmp$="$ DISCOUNT"
+	if x1=2 and rd.RbFactor<0 let tmp$="$ MARKUP"
+	IF X1=3 Let tmp$="FLAT COST"
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function tmp$ ! GetRTDesc$
+! 
+!--------------------------------------------------------------------
+Function GetCTDesc$(x1)
+! translater - get desc for cost type
+! SLSM COST: 1=%MARKUP(-=DISC), 2=$MARKUP(-=DISC), 3=FLAT, 4=STD
+	
+ Try
+	tmp$=""
+	If x1=1 and rd.CostFactor<0 let tmp$="% DISCOUNT"
+	if x1=1 and rd.CostFactor>=0 let tmp$="% MARKUP"
+	If x1=2 and rd.CostFactor<0 let tmp$="$ DISCOUNT"
+	if x1=2 and rd.CostFactor>=0 let tmp$="$ MARKUP"
+	IF X1=3 Let tmp$="FLAT COST"
+	if x1=4 let tmp$="STANDARD"
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function tmp$ ! GetCTDesc$
+! 
+!--------------------------------------------------------------------
+Function GetCBDesc$(x1)
+! translater - get desc for slsm cost base
+! COST BASE: 1=BASE, 2=LOAD, 3=LAST, 4=REBATE, 5=LOAD2(REDI)
+ Try
+	tmp$=""
+	If x1=1 let tmp$="BASE COST"
+	if x1=2 let tmp$="LOAD COST"
+	If x1=3 let tmp$="LAST COST"
+	if x1=4 let tmp$="REBATE COST"
+	IF X1=5 Let tmp$="REDI COST"
+	
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function tmp$ ! GetCBDesc$
+! 
+!--------------------------------------------------------------------
+Sub SendLBox()
+! send the line list boxes
+ Try
+	Dim RUD$[28]
+	Mat read #ctlc,67,224;RUD$; ! uda labels
+	Clear List$[]
+	List$[0]=bsdel$,"RBTTYPELIST",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	row=2
+	List$[row]="1",fdel$,"1 - % DISCOUNT/MARKUP",fdel$
+	row=row+1
+	List$[row]="2",fdel$,"2 - $ DISCOUNT/MARKUP",fdel$
+	row=row+1
+	List$[row]="3",fdel$,"3 - FLAT COST",fdel$
+	row=row+1
+	List$[row]=esdel$ ! end of section
+	row=row+1
+
+	List$[row]=bsdel$,"SLSMCOSTLIST",fdel$
+	row=row+1
+	List$[row]="ID",fdel$,"DESC",fdel$
+	row=row+1
+	List$[row]="1",fdel$,"1 - % MARKUP/DISCOUNT",fdel$
+	row=row+1
+	List$[row]="2",fdel$,"2 - $ MARKUP/DISCOUNT",fdel$
+	row=row+1
+	List$[row]="3",fdel$,"3 - FLAT COST",fdel$
+	row=row+1
+	List$[row]="4",fdel$,"4 - USE STANDARD",FDEL$
+	row=row+1
+	List$[row]=esdel$ ! end of section
+	row=row+1
+
+	List$[row]=bsdel$,"COSTBASELIST",fdel$
+	row=row+1
+	List$[row]="ID",fdel$,"DESC",fdel$
+	row=row+1
+	List$[row]="1",fdel$,"1 - BASE COST",fdel$
+	row=row+1
+	List$[row]="2",fdel$,"2 - LOAD COST",fdel$
+	row=row+1
+	List$[row]="3",fdel$,"3 - LAST COST",fdel$
+	row=row+1
+	List$[row]="4",fdel$,"4 - REBATE COST",fdel$
+	row=row+1
+	List$[row]="5",fdel$,"5 - REDI COST",fdel$
+	row=row+1
+	List$[row]=esdel$ ! end of section
+	row=row+1
+
+	List$[row]=bsdel$,"SYSTEM",fdel$
+	row=row+1
+	List$[row]="ID",fdel$,"DESC",fdel$
+	row=row+1
+	List$[row]="WHSEFLAG",fdel$,P9$[32,32],fdel$
+	row=row+1
+	tmp$=RTrim$(RUD$[1,14])
+	If tmp$="" let tmp$="REBATES UDA1"
+	List$[row]="UDA1LBL",fdel$,tmp$,fdel$
+	row=row+1
+	tmp$=RTrim$(RUD$[15,28])
+	If tmp$="" let tmp$="REBATES UDA2"
+	List$[row]="UDA2LBL",fdel$,tmp$,fdel$
+	row=row+1
+	tmp$="N" \ if onlyinquiry let tmp$="Y"
+	List$[row]="ONLYINQ",fdel$,tmp$,fdel$
+	row=row+1
+	List$[row]=esdel$ ! end of section
+	row=row+1
+	! Call AddToStr(e$,rstr$,List$[]) ! add lists to string (NOT IF ACTION1 USED!)
+	
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SendLBox
+! 
+!--------------------------------------------------------------------
+Sub CopyContr()
+! pass 2 contracts + copy custs flag
+! will copy lines from one into other (and custs if flagged to)
+  Try
+	Dim Flnkey$[64],lnkey$[64],FRKey$[64]
+	Dim CRef$[10],CKey1$[64],CKey2$[64]
+	Dim RKey2$[64],RKey3$[64]
+	Dim 1%,CUCopy,addel
+	Dim 2%,FContrNo
+	Dim 3%,CRHR,XRDR,FRDR
+
+	Dim CRCH. as rcontracth ! check if copy from exists
+	Dim CRD. as rebatedtl ! copy of rebatedtl
+	if stage
+		returnstatus=0
+		message$="Copy option not available for staged rebates"
+		goto CCDone
+	Endif
+	ReturnStatus=1
+	Message$="OK"
+	if debugdetail
+		dmsg$="Copy Contract Start " \ Call updatelog(debug)
+	Endif
+	Call DXGet("CONTRID",tmp$)
+	ContrNo=tmp$
+	If ContrNo<=0 Or ContrNo>999999
+		Message$="INVALID CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto CCDone
+	Endif
+	RKey$=" ",RKey$
+	RKey$=ContrNo Using "######"
+	RHR=filegetrcontracthz(e$,RHC,"=",1,RKey$,RCH.)
+	If RHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="CONTRACT NOT FOUND"
+		Goto CCDone
+	Endif
+	Call DXGet("FRCONTRID",tmp$)
+	FContrNo=tmp$
+	If FContrNo<=0 Or FContrNo>999999
+		Message$="INVALID FROM CONTRACT NUMBER"
+		ReturnStatus=0
+		Goto CCDone
+	Endif
+	FRKey$=" ",FRKey$
+	FRKey$=FContrNo Using "######"
+	FRHR=filegetrcontracthz(e$,RHC,"=",1,FRKey$,CRCH.)
+	If FRHR<0 ! not found - web to ask if new?
+		ReturnStatus=0
+		Message$="FROM CONTRACT NOT FOUND"
+		Goto CCDone
+	Endif
+	Call DXGet("CPCUST",tmp$)
+	CUCopy=0 ! no
+	If tmp$="1" let CUCopy=1 ! yes
+	call DXGet("CPEXPLINE",tmp$) ! task 59484 - copy expired lines Y/N
+	CPELines=1 ! default (and previous way it work) = Y
+	if tmp$="0" let CPELines=0 ! no do not copy
+	! okay - copy lines from
+	FLNKey$=" ",FLNKey$
+	FLNKey$=FContrNo Using "######"
+	Do
+		FRDR=filegetrebatedtlz(e$,RDC,">",1,FLNKey$,RD.)
+		If FRDR<=0 Exit Do
+		X2=FLNKey$[1,6] \ if x2<>FContrNo Exit Do
+		! see if exists on to contr or not
+		LNKey$=FLNKey$
+		LNKey$[1,6]=ContrNo Using "######"
+		XRDR=filegetrebatedtlz(e$,RDC,"=",1,LNKey$,CRD.)
+		If XRDR<0 And XRDR<>-1 ! something happened
+			Let e$="SEARCH ERROR "+Str$(XRDR)+" CHK EXIST RBT LINES - SERPRBT"
+			Error 11000
+		Endif
+		! on any copy(add/exist) sets/clears fields
+		if not(CPELines) ! do not copy expired lines
+			if rd.CancelDate<>0 ! 0=no expire
+				LET TMP$=rd.CancelDate USING "&&&&&&"  ! yymmdd format                        
+				Call DateToJulian(1,tmp$,tmp$,e)
+				if e let tmp$="9",tmp$ ! bad date - copy it! (let them delete if needed)
+				LET TMP3=TMP$[1,5] 
+				if tim(6)>tmp3 goto LnNoCopy ! today>expire - bypass it
+			endif ! of has expire date
+		endif ! of no expire date copy
+		rd.Contract=ContrNo
+		rd.VendNum=RCH.VendNum
+		rd.StartDate=RCH.DateStart
+		rd.CancelDate=RCH.DateEnd
+		! LET RB1[3]=0;RB3[4]=0;RB3[5]=0;RB3[6]=0 ! on all
+		rd.LastBuyDate=0;rd.QtySinceStart=0
+		rd.RebateSinceStart=0;rd.SalesSinceStart=0
+		if xrdr>0 ! found - update fields
+			E=0
+			E=fileupdaterebatedtlz(e$,RDC,"c",XrdR,rd.) ! chg, oldrec, newdata
+			If E ! something happened
+				Let e$="SEARCH ERROR "+Str$(E)+" COPY EXIST RBT LINES - SERPRBT"
+				Error 11000
+			Endif
+		Else ! brand new record - should only if XRDR=-1 (not found)
+			E=0;rdr=0
+			E=fileupdaterebatedtlz(e$,RDC,"a",rdR,rd.) ! add, norec, newdata
+			If E<0 ! something happened
+				Let e$="SEARCH ERROR "+Str$(E)+" COPY NEW RBT LINES - SERPRBT"
+				Error 11000
+			Endif
+		Endif
+		LnNoCopy: ! bypass
+	Loop
+	! lines done - see if custs are copied
+	If CUCopy ! yes we are
+		FRkey$=" ",FRKey$
+		FRKey$=FContrNo Using "######"
+		Do
+			FRHR=filegetrcontracthz(e$,RHC,">",3,FRKey$,CRCH.)
+			if FRHR<=0 Exit Do
+			X2=FRKey$[1,6] \ if x2<>FContrNo Exit Do
+			! see if exist custcontr
+			! if PT### no ref? - so won't find
+			Search #CNC,2,1;FRKey$,R,E ! dir3=dir1 of ccont(contr/cust)
+			if Not(E)
+				Read record #cnc,r,0;ccnt.;
+			Else
+				Clear ccnt.
+			Endif
+			! set up for std routines - RHR is to Contract rec #
+			! ContrNo is to Contract #
+			CRef$=Trim$(ccnt.Ccref$) ! used in editccont
+			Addel=0 ! used in both - set to edit(same as add)
+			Cust$=FRKey$[7,12] ! uses cust$ in both
+			Call UpdtCRHC() ! standard routine
+			Call EdtCCont() ! update custcont file
+			! 
+		Loop
+		! done looping from custs
+	Endif ! of copy custs
+
+	! call programdump("/tmp/rbtlog4!","")
+	CCDone: ! finished
+	!
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if debugdetail
+		dmsg$="Copy Contract From "+Str$(FContrNo)+" TO "+Str$(ContrNo)+" "
+		if CUCopy let dmsg$=dmsg$+"COPY CUSTS  "
+		dmsg$=dmsg$+message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! CopyContr
+! 
+!--------------------------------------------------------------------
+Function chkDateFrmt$(DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY
+! if not make it MM/DD/YYYY
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE"
+	  Let DOut$=UCase$(DIn$)
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function DOut$ ! chkDateFrmt$
+! 
+!--------------------------------------------------------------------
+Sub shostaged()
+! show status from stgrbttracker
+  try
+	dim 2%,rbtrack[4]
+	! show what has bee copied
+	if not(stage) 
+		returnstatus=0
+		Message$="Not active"
+		goto go_back
+	Endif
+	nr=6
+	k5$=contract using "######"
+	contract_count:! let's see how many
+	search #SRBTRK,3,1;k5$,r20,e\if e goto display_copied:
+	x2=k5$[1,6] \ if x2<>contract goto display_copied:
+	nr=nr+1
+	goto contract_count:
+
+	display_copied:! let's show what's been copied
+	clear list$[]
+	if p61$[83,83]="Y"
+	list$[0]=bsdel$,"STAGED CREATED",fdel$
+	else
+	list$[0]=bsdel$,"STAGED UPDATED",fdel$
+	Endif
+	webstr$="CONTRACT",fdel$
+	webstr$=webstr$,"COMPANY",fdel$ ! flag controlled (p61$[84])
+	webstr$=webstr$,"DATE",fdel$
+	List$[1]=webstr$
+	row=2;tmpcnt=maxcnt
+	
+	k5$=contract using "######"
+	r=1
+	contract_loop:! let's see how many
+	search #SRBTRK,3,1;k5$,r20,e\if e goto stg_back:
+	x2=k5$[1,6]\ if x2<>contract goto stg_back:
+	mat read #SRBTRK,r20;rbtrack;
+	webstr$=""
+	if p61$[83,83]="Y"
+		webstr$=rbtrack[1] using "###### ",fdel$
+		if p61$[84,84]="Y"
+			Webstr$=webstr$,RBTRACK[3] using "CO ##",fdel$
+		Else
+			webstr$=webstr$,fdel$ ! none
+		end if
+		tmp$=""
+		x2=rbtrack[4] \ if x2 let tmp$=PDate$(x2)
+		webstr$=webstr$,x$,fdel$ !rbtrack[4]
+	end if
+	if p61$[83,83]<>"Y"
+		webstr$=fdel$ ! I guess no copy to
+		if p61$[84,84]="Y" 
+			Webstr$=webstr$,RBTRACK[3] using "CO ##",fdel$
+		Else
+			webstr$=webstr$,fdel$ ! none
+		end if
+		tmp$=""
+		x2=rbtrack[4] \ if x2 let tmp$=PDate$(x2)
+		webstr$=webstr$,x$,fdel$ !rbtrack[4]
+	end if
+	list$[row]=webstr$
+	row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	goto contract_loop:
+	stg_back: ! done
+	list$[row]=esdel$
+	call addtostr(e$,rstr$,List$[])
+	go_back:! get back where we were
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! shostaged
+! 
+!--------------------------------------------------------------------
+Function chktxtfld(wrk$)
+! see if matches entered text
+ Try
+	x1=0 ! no is default
+	If sfld1$="B" ! begin with
+		if sfld2$<>""
+			if len(wrk$)>=len(sfld$) ! fld<search - NO MATCH
+				if sfld2$=wrk$[1,len(sfld2$)] let x1=1
+			Endif
+		Else ! all?
+			x1=1
+		Endif
+	Endif
+	if sfld1$="C" ! contains
+		if sfld2$<>""
+			WPOS=0
+			if wrk$<>""! no data - no match
+				Search wrk$[1],sfld2$,WPOS
+				if wpos>0 let x1=1
+			Endif
+		Else ! all?
+			x1=1
+		Endif
+	Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function X1 ! chktxtfld
+! 
+!--------------------------------------------------------------------
+Sub CustAddC()
+! pass 2 customers
+! will add Cust to contracts containing 2nd cust
+! as no custref - no custcont update (see EdtCCont)
+  Try
+	Dim RKey2$[60],RKey3$[60],CKey1$[60],CKey2$[60]
+	returnstatus=1
+	call dxget("ADDCUST",TMP$)
+	if Trim$(tmp$)="" goto CADDone
+	Custadd=tmp$
+	Cust$=CustAdd using "######"
+	call getcust()
+	If Cur<=0 
+		returnstatus=0
+		message$=cust.Name$
+		Goto CADDone
+	Endif
+	! get to customer last (need cust$)
+	call dxget("TOCUST",tmp$)
+	if Trim$(tmp$)="" goto CADDone
+	Custto=tmp$
+	Cust$=Custto using "######"
+	if custto=custadd
+		returnstatus=0
+		message$="The Customer ID can not be the same #"
+		Goto CADDone
+	Endif
+	call getcust()
+	if CUR<=0
+		returnstatus=0
+		message$=cust.Name$
+		Goto CADDone
+	Endif
+	! ok - if we're here - we're creating
+	key1$=" ",key1$;X3=0
+	key1$=Custto using "######"
+	do
+		Search #RHC,3,2;key1$,R,E
+		if e exit do
+		if key1$[1,6]<>Cust$[1,6] exit do
+		Contract=key1$[7] ! see if contract exists
+		Ckey1$=Contract using "######"
+		Search #RHC,2,1;ckey1$,RHR,E
+		if e goto nxt_ckey
+		RKey2$=" ",RKey2$
+		RKey2$[1,6]=custadd using "######"
+		RKey2$[7]=Contract using "######"
+		search #RHC,2,2;RKey2$,r,e \ if not(e) goto nxt_ckey
+		If e>1 Error 11000
+		R=RHR
+		search #RHC,4,2;RKey2$,R,e
+		if e ! gosub err_search:
+			Let e$="SEARCH ERROR "+Str$(E)+" INSERT RBTHD DIR 2 - SERPRBT"
+			Error 11000
+		Endif
+		RKey3$=" ",RKey3$
+		RKey3$[1,6]=RKey2$[7,12]
+		RKey3$[7]=RKey2$[1,6]
+		search #RHC,2,3;RKey3$,r,e \ if not(e) goto nxt_ckey
+		If e>1 Error 11000
+		R=RHR
+		search #RHC,4,3;RKey3$,R,e
+		if e ! gosub err_search:
+			Let e$="SEARCH ERROR "+Str$(E)+" INSERT RBTHD DIR 3 - SERPRBT"
+			Error 11000
+		Endif
+		X3=X3+1 ! number added
+		nxt_ckey: ! next
+	loop
+	Message$="Complete, added "+Str$(Custadd)+" to "+Str$(x3)+" contracts"
+	CADDone: ! finished
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! CustAddC
+! 
+!--------------------------------------------------------------------
+Function chkprdwhsev(ProdKey$)
+! check if prod vend same as whse/vendtag
+ try
+	dim SPWH$[60],kvt$[50]
+	Dim 2%,VendCode
+	DIM 3%,VTM4[2]
+	! cct#217218                       
+	LET vng=0 ! start as ok                                   
+	LET SPWH$=" ",SPWH$
+	LET SPWH$=ProdKey$
+	Do
+		pwr=filegetprodwhse(e$,PWC,">",1,spwh$,pw.)
+		if pwr<=0 exit do
+		IF SPWH$[1,12]<>Prodkey$ exit do
+		LET VENDCODE=pw.Vend
+		!GOSUB CHK_VEND_TAG: ! check for rebate vendor 
+		LET kvt$=" ",kvt$
+		LET kvt$[1,6]=VENDCODE USING "######"
+		SEARCH #CH_VTG,2,1;kvt$,R13,E
+		IF NOT(E)
+		  MAT  READ #CH_VTG,R13,462;VTM4;
+		  IF VTM4[1] LET VENDCODE=VTM4[1]
+		ENDIF
+		LET pw.Vend=VENDCODE                                
+		IF pw.vend<>pr.PrimVend LET VNG=1                     
+	Loop
+	
+ else
+    include "src/callsuberr.inc"
+  end try
+end function vng ! chkprdwhsev
+! 
+!--------------------------------------------------------------------

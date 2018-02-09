@@ -1,0 +1,648 @@
+! rpmaint.dl4
+!
+! Restricted Product Maintenance
+!
+! loadsave -w -n 100,10 -o prog/dxport/rpmaint.dl4 src/rpmaint.src
+!
+!
+include "src/copyright.inc"
+! internal files needed
+External Lib "libfilecustgp.lib"
+Declare External Sub filedroplistcustgp
+Rem rpmaint.s - Restricted Product Customer List Maintenance
+Rem rev: 1/24/97 -kmm- created.
+Rem
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: NOV 20, 2008  14:21:40
+Rem /w2/papermaster/r2005//usr/acct/jliu/work/custom/acme.r9/rpmaint.src (univ2) [jliu] {48311}
+Rem  Copyright (c) 2008 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+! IF a product / customer / group combo is entered here - user can use it
+!  if it is not listed - IT IS RESETRICTED
+!
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+Declare External Function ChkAltItem$,formatdate2$,getuidrec
+Declare External Sub UserCntrl,getportdefault
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare Intrinsic Sub InpBuf,String
+! Option Default Dialect IRIS1
+Try
+Dim CH[9],3%,RCRD[9],PARM[9]
+Dim 1%,MAXCH,CHANGESORT,COPYMODE
+Dim 1%,CH_PROD,CH_CUST,CH_RPROD,CH_CNTRL
+Dim 2%,SCAN[10],WH
+Dim 3%,COUNT,REC_RPROD[15],REC_PROD,REC_CUST
+Dim SCRATCH$[80],SORTBY$[1],RPKEY$[40],STRTPROD$[12],STRTCUST$[6]
+Dim PARAM1$[50],CHAR$[1],ADDPROD$[12],ADDCUST$[6],CUSTDESC$[30],HOLDFLAG$[1]
+Dim HLDPROD$[12],HLDCUST$[6],DUCKY$[40],BLANK$[80],GPKEY$[6],CUSTGRP$[30]
+Rem {begin src/inc/dim.prod.i}
+Dim A$[156]
+Rem {end dim.prod.i}
+Rem {begin src/inc/dim.cust.i}
+Dim A1$[142]
+Dim 2%,C1[12]
+Rem {end dim.cust.i}
+Dim RPROD$[12],RPCUST$[6],RPFLAG$[1]
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[3000]
+dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+dim Message$[200],WebStr$[2000],SessionID$[200],List$[500,200]
+! call dxopen() ! already done in menu
+call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+CH_CNTRL = CTLC
+MAXCH = 4;maxcnt=500
+Blank$=" ",Blank$
+!Gosub OPEN_FILES
+OPEN_FILES: Rem
+SCRATCH$ = Str$(Intco) ! (Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64))
+
+CH_PROD = OpenFile(-1792,IntCo) \ if ch_prod=-1 Error 42 ! Abs(CH[1])
+CH_CUST = OpenFile(-1808,IntCo) \ if ch_cust=-1 Error 42 ! Abs(CH[2])
+CH_RPROD = OpenFile(9915,IntCo) \ If ch_rprod=-1 Error 42 !  Abs(CH[3])
+CH_CUSTGP = OpenFile(-9934,IntCo) \ if ch_custgp=-1 Error 42 ! Abs(CH[4])
+ch[1]=0-ch_prod
+ch[2]=0-ch_cust
+ch[3]=0-ch_rprod
+ch[4]=0-ch_custgp ! neg so closes in outend
+
+Action1$=UCase$(RTrim$(action1$))
+returnstatus=0
+message$="Action1 not found"
+Select Case action1$
+	Case "GETLIST" ! get the custgp list
+		Returnstatus=1
+		Message$="OK"
+		Clear List$[]
+		call filedroplistcustgp(e$,List$[],500,ch_custgp)
+		call AddToStr(e$,rstr$,List$[])
+	Case "GETCURRDATA" ! get list of current
+		Returnstatus=1
+		Message$="OK"
+		Clear List$[]
+		Gosub DOLIST
+		call AddToStr(e$,rstr$,List$[])
+	Case "SUBMITDATA"
+		Returnstatus=1
+		Message$="OK"
+		Clear List$[]
+		if action2$="ADD"
+			gosub do_add
+		Endif
+		if action2$="DEL"
+			gosub do_del
+		Endif
+	Case "COPYDATA"
+		Returnstatus=1
+		Message$="OK"
+		Clear List$[]
+		gosub COPY_QUEST
+End select
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+
+Goto OutEnd
+
+DOList: ! get list data
+gosub SORTBY_QUEST ! get how sorted (P or G)
+if sortby$<>"P" and sortby$<>"G"
+	returnstatus=0
+	message$="SORTBY is P or G only"
+	Goto Bail ! Return
+Endif
+List$[0]=Bsdel$,"LISTING",fdel$
+If SORTBY$ = "P"
+  List$[1]="PRODID",fdel$,"CUSTID",fdel$,"NAME",fdel$,"GRP",fdel$
+  row=2;maxcnt=500
+  If STRTPROD$ = "" Gosub PRIMARY_QUEST
+  if returnstatus=0 goto Bail ! return 
+  SCRATCH$ = "<first>"
+  MSGDESC$=RTrim$(STRTPROD$),fdel$  !Print @12,0;STRTPROD$;
+  DIR = 1
+  If STRTCUST$ > " " Let SCRATCH$ = STRTCUST$
+Else 
+  List$[1]="CUSTID",fdel$,"NAME",fdel$,"PRODID",fdel$,"DESC",fdel$
+  row=2;maxcnt=500
+  If STRTCUST$ = "" Gosub PRIMARY_QUEST
+  if returnstatus=0 goto Bail ! return
+  SCRATCH$ = "<first>"
+  MSGDESC$=STRTCUST$,fdel$,RTrim$(CustDesc$),fdel$ ! Print @12,0;STRTCUST$;" ";CUSTDESC$[1,20];
+  DIR = 2
+  If STRTPROD$[1,1] > " " Let SCRATCH$ = STRTPROD$
+End If 
+DISPRELIST: Rem
+RPKEY$ = " ",RPKEY$
+If SORTBY$ = "P"
+  RPKEY$[1,12] = STRTPROD$
+Else 
+  If CGFLAG Or RPFLAG$[1,1] = "G"
+    RPKEY$[1,2] = "GG"
+  Else 
+    RPKEY$[1,2] = "SS"
+  End If 
+  RPKEY$[3,8] = STRTCUST$
+End If 
+Search #CH_RPROD,6,DIR;RPKEY$,REC_RPROD,E \ If E > 2 ERROR 11000 ! Gosub ERR_SEARCH
+! mode 6 so can get correct starting ?
+DISPLOOP: Rem "Loop thru
+Search #CH_RPROD,3,DIR;RPKEY$,REC_RPROD,E \ If E > 2 ERROR 11000 ! Gosub ERR_SEARCH
+If Not(E)
+  Gosub READ_RPROD
+  If SORTBY$ = "P"
+    If RPROD$ <> STRTPROD$ Goto BAIL
+    PARAM1$ = RPCUST$
+    Gosub GET_CUST
+    !Print Using "###) ";@0,LN;LN - 1;RPCUST$;" ";CUSTDESC$;
+	tmp$=MSGDESC$,RPCust$,fdel$,RTrim$(CustDesc$),fdel$
+    If CGFLAG Or RPFLAG$[1,1] = "G"
+      tmp$=tmp$,"CUST GRP",fdel$
+    Else 
+      tmp$=tmp$,"",fdel$ ! Print "           ";
+    End If 
+  Else 
+    If RPCUST$ <> STRTCUST$ Goto BAIL
+    PARAM1$ = RPROD$
+    Gosub GET_PROD
+    !Print Using "###) ";@0,LN;LN - 1;RPROD$;" ";A$[9,38];
+	tmp$=MSGDESC$,RTrim$(RPROD$),fdel$,RTrim$(A$[9,38]),fdel$
+  End If 
+  !REC_RPROD[LN - 1] = REC_RPROD
+  !LN = LN + 1
+  !If LN > 14 Goto DISPLIST_OPT
+  List$[row]=tmp$
+  row=row+1
+  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+  Goto DISPLOOP
+End If 
+BAIL: Rem
+List$[row]=esdel$
+Return ! done with list
+
+DO_ADD: Rem
+gosub SORTBY_QUEST ! get how sorted (P or G)
+if sortby$<>"P" and sortby$<>"G"
+	returnstatus=0
+	message$="SORTBY is P or G only"
+	Return
+Endif
+If SORTBY$ = "P"
+  Gosub PRIMARY_QUEST
+  if returnstatus=0 return 
+  If STRTPROD$ > " "
+    Gosub CUST_QUEST
+	if returnstatus=0
+		message$="You must have a valid Customer or Group"
+		return
+	Endif
+  Else 
+    Message$="You must have a valid product!"
+    returnstatus=0
+    Return 
+  End If 
+Else 
+  Gosub PRIMARY_QUEST
+  if returnstatus=0 return
+  If STRTCUST$ > " "
+    Gosub PROD_QUEST
+	if returnstatus=0
+		message$="You must have a valid product"
+		Return
+	Endif
+  Else 
+    If CGFLAG Or RPFLAG$[1,1] = "G"
+      Message$="You must have a valid customer group!"
+    Else 
+      Message$="You must have a valid customer!"
+    End If 
+    returnstatus=0
+    Return 
+  End If 
+End If 
+do_add1: ! start for copy ! (already got other data)
+If PARAM1$ = "" Return 
+If SORTBY$ = "P"
+  ADDPROD$ = STRTPROD$
+  ADDCUST$ = PARAM1$
+Else 
+  ADDPROD$ = PARAM1$
+  ADDCUST$ = STRTCUST$
+End If 
+RPROD$ = ADDPROD$
+RPCUST$ = ADDCUST$
+RPKEY$[1,12] = ADDPROD$
+If CGFLAG Or RPFLAG$[1,1] = "G"
+  RPKEY$[13,14] = "GG"
+Else 
+  RPKEY$[13,14] = "SS"
+End If 
+RPKEY$[15,20] = ADDCUST$
+Search #CH_RPROD,2,1;RPKEY$,REC_RPROD,E
+If Not(E)
+  ! Print @0,20;'CL RB';"Record already exists! ";
+  If COPYMODE
+    Return 
+  Else 
+    !Signal 3,20
+    !PARAM1$ = ""
+    !Goto DO_ADD
+	returnstatus=0
+	message$="Record already exists!"
+	return
+  End If 
+End If 
+E = 2
+Search #CH_RPROD,1,0;RPKEY$,REC_RPROD,E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+If CGFLAG Or RPFLAG$[1,1] = "G"
+  RPFLAG$[1,1] = "G"
+Else 
+  RPFLAG$[1,1] = "S"
+End If 
+Gosub WRITE_RPROD
+Search #CH_RPROD,4,1;RPKEY$,REC_RPROD,E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+If CGFLAG Or RPFLAG$[1,1] = "G"
+  RPKEY$[1,2] = "GG"
+Else 
+  RPKEY$[1,2] = "SS"
+End If 
+RPKEY$[3,8] = ADDCUST$
+RPKEY$[9,20] = ADDPROD$
+Search #CH_RPROD,4,2;RPKEY$,REC_RPROD,E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+If SORTBY$ = "P" ! set up for display
+  RPKEY$[1,12] = ADDPROD$
+  DIR = 1
+Else 
+  If CGFLAG Or RPFLAG$[1,1] = "G"
+    RPKEY$[1,2] = "GG"
+  Else 
+    RPKEY$[1,2] = "SS"
+  End If 
+  RPKEY$[3,8] = ADDCUST$
+  DIR = 2
+End If 
+Search #CH_RPROD,6,DIR;RPKEY$,REC_RPROD,E
+If E Let RPKEY$ = ""
+Return 
+CUST_QUEST: Rem
+CGFLAG = 0
+RPKEY$[1,2] = "  "
+RPFLAG$[1] = " "
+PARAM1$ = ""
+if tmp1$[1,4]="MAIN" ! main
+	call dxget("GRPID",tmp$)
+Else ! for copy
+	call dxget("TOGRPID",tmp$)
+Endif
+If RTrim$(tmp$)<>"" ! is a group
+	scratch$="R"+tmp$
+Else
+  if tmp1$[1,4]="MAIN" ! main
+	call dxget("CUSTID",tmp$)
+	scratch$=tmp$
+  Else ! for copy
+	call dxget("TOCUSTID",tmp$)
+	scratch$=tmp$
+  Endif
+Endif
+! If SCRATCH$ = "E" Goto DONE
+If SCRATCH$[1,1] <> "R"
+  
+  SCR = SCRATCH$
+  If Not(SCR)  ! Goto CUST_QUEST
+	returnstatus=0
+	message$="No Customer entered"
+	return
+  Endif
+  PARAM1$ = SCR Using "######"
+Else 
+  CGFLAG = 1
+  SCR = SCRATCH$[2,7]
+  If Not(SCR) ! Goto CUST_QUEST
+	returnstatus=0
+	message$="No Group ID entered"
+	Return
+  Endif
+  PARAM1$ = SCR Using "######"
+End If 
+Gosub GET_CUST
+If E
+  !Print 'RB';
+  If CGFLAG
+    Message$="You must have a valid customer group!";returnstatus=0
+  Else 
+    Message$="You must have a valid customer!";returnstatus=0
+  End If 
+  !Signal 3,20
+  !Goto CUST_QUEST
+End If 
+Return 
+PROD_QUEST: Rem
+PARAM1$ = ""
+if tmp1$[1,4]="MAIN"
+	call dxget("PRODID",tmp$)
+Else ! for copy to
+	call dxget("TOPRODID",tmp$)
+Endif
+Scratch$=UCase$(RTrim$(tmp$))
+PARAM1$[1,12] = SCRATCH$+Blank$
+Gosub GET_PROD
+If E ! Print 'RB'; \ Goto PROD_QUEST
+	returnstatus=0
+	message$="PRODUCT ID NOT FOUND"
+Endif
+Return 
+DO_DEL: Rem
+DEL_QUEST: Rem
+gosub SORTBY_QUEST ! get how sorted (P or G)
+if sortby$<>"P" and sortby$<>"G"
+	returnstatus=0
+	message$="SORTBY is P or G only"
+	Return
+Endif
+If SORTBY$ = "P"
+  Gosub PRIMARY_QUEST
+  if returnstatus=0 return 
+  If STRTPROD$ > " "
+    Gosub CUST_QUEST
+	if returnstatus=0
+		message$="You must have a valid Customer or Group"
+		return
+	Endif
+  Else 
+    Message$="You must have a valid product!"
+    returnstatus=0
+    Return 
+  End If 
+Else 
+  Gosub PRIMARY_QUEST
+  if returnstatus=0 return
+  If STRTCUST$ > " "
+    Gosub PROD_QUEST
+	if returnstatus=0
+		message$="You must have a valid product"
+		Return
+	Endif
+  Else 
+    If CGFLAG Or RPFLAG$[1,1] = "G"
+      Message$="You must have a valid customer group!"
+    Else 
+      Message$="You must have a valid customer!"
+    End If 
+    returnstatus=0
+    Return 
+  End If 
+End If 
+If PARAM1$ = "" Return 
+If SORTBY$ = "P"
+  ADDPROD$ = STRTPROD$
+  ADDCUST$ = PARAM1$
+Else 
+  ADDPROD$ = PARAM1$
+  ADDCUST$ = STRTCUST$
+End If 
+RPROD$ = ADDPROD$
+RPCUST$ = ADDCUST$
+RPKEY$[1,12] = ADDPROD$
+If CGFLAG Or RPFLAG$[1,1] = "G"
+  RPKEY$[13,14] = "GG"
+Else 
+  RPKEY$[13,14] = "SS"
+End If 
+RPKEY$[15,20] = ADDCUST$
+Search #CH_RPROD,2,1;RPKEY$,REC_RPROD,E
+if e
+	returnstatus=0
+	message$="Record not found"
+	return
+Endif
+Gosub READ_RPROD
+If SORTBY$ = "P"
+  SCRATCH$ = RPCUST$
+Else 
+  SCRATCH$ = RPROD$
+End If 
+CONFIRM_DEL_QUEST: Rem
+!Print @0,23;'CL';"Delete " + SCRATCH$ + " (Y/N) <N> ";
+!Input ""SCRATCH$
+!Call String(1,SCRATCH$)
+!If SCRATCH$ <> "Y" Goto DEL_QUEST
+If CGFLAG Or RPFLAG$[1,1] = "G"
+  RPKEY$[1,2] = "GG"
+Else 
+  RPKEY$[1,2] = "SS"
+End If 
+RPKEY$[3,8] = RPCUST$
+RPKEY$[9,20] = RPROD$
+Search #CH_RPROD,5,2;RPKEY$,REC_RPROD,E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+RPKEY$[1,12] = RPROD$
+If CGFLAG Or RPFLAG$[1,1] = "G"
+  RPKEY$[13,14] = "GG"
+Else 
+  RPKEY$[13,14] = "SS"
+End If 
+RPKEY$[15,20] = RPCUST$
+Search #CH_RPROD,5,1;RPKEY$,REC_RPROD,E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+E = 3
+Search #CH_RPROD,1,0;RPKEY$,REC_RPROD,E \ If E ERROR 11000 ! Gosub ERR_SEARCH
+!REC_RPROD[SCR] = 0
+! Print Using "###) ";@0,SCR + 1;SCR;"*** DELETED ***"
+message$="Record deleted"
+Return 
+
+COPY_QUEST: Rem ! copy restricted data from one to another
+gosub SORTBY_QUEST ! get how sorted (P or G)
+if sortby$<>"P" and sortby$<>"G"
+	returnstatus=0
+	message$="SORTBY is P or G only"
+	Return
+Endif
+If SORTBY$ = "P"
+  Gosub PRIMARY_QUEST
+  if returnstatus=0 return 
+  clear tmp1$
+  Gosub PROD_QUEST
+  If PARAM1$ > " "
+    SCRATCH$ = PARAM1$
+    Scratch$=Trim$(SCRATCH$)
+    !Print @0,23;'CL';"Add all customers & groups on this product to ";SCRATCH$;" <N> ";
+    !Input ""SCRATCH$
+    !Call String(1,SCRATCH$)
+    !If SCRATCH$ <> "Y" Return 
+    HLDPROD$ = STRTPROD$
+    DUCKY$ = " ",DUCKY$
+    DUCKY$ = HLDPROD$
+    STRTPROD$ = PARAM1$
+    DIR = 1
+  Else 
+	returnstatus=0;message$="No Product ID"
+    Return 
+  End If 
+Else 
+  Gosub PRIMARY_QUEST
+  if returnstatus=0 return
+  clear tmp1$
+  HOLDFLAG$ = RPFLAG$
+  If HOLDFLAG$ = " " Or HOLDFLAG$ = ""
+    If CGFLAG Or RPFLAG$[1,1] = "G"
+      HOLDFLAG$ = "G"
+    Else 
+      HOLDFLAG$ = "S"
+    End If 
+  End If 
+  Gosub CUST_QUEST
+  If PARAM1$ > " "
+    SCRATCH$ = PARAM1$
+    Scratch$=Trim$(SCRATCH$)
+    !Print @0,23;'CL';"Add all products on this ";
+    !If HOLDFLAG$[1,1] = "G"
+    !  Print "Cust Group ";STRTCUST$;
+    !Else 
+    !  Print "Customer ";STRTCUST$;
+    !End If 
+    !If CGFLAG Or RPFLAG$[1,1] = "G"
+    !  Print " to Cust Group ";SCRATCH$;" <N> ";
+    !Else 
+    !  Print " to Customer ";SCRATCH$;" <N> ";
+    !End If 
+    !Input ""SCRATCH$
+    !Call String(1,SCRATCH$)
+    !If SCRATCH$ <> "Y"
+    !  Gosub READ_RPROD
+    !  Return 
+    !End If 
+    HLDCUST$ = STRTCUST$
+    DUCKY$ = " ",DUCKY$
+    If HOLDFLAG$[1,1] = "G"
+      DUCKY$[1,2] = "GG"
+    Else 
+      DUCKY$[1,2] = "SS"
+    End If 
+    DUCKY$[3,8] = HLDCUST$
+    STRTCUST$ = PARAM1$
+    DIR = 2
+  Else 
+	returnstatus=0;message$="No Group / Customer ID entered"
+    Return 
+  End If 
+End If 
+if returnstatus=0 return ! failed somewhere
+COPYMODE = 1
+COPY_LOOP: Rem
+Search #CH_RPROD,3,DIR;DUCKY$,REC_DUCKY,E \ If E > 2 ERROR 11000 ! Gosub ERR_SEARCH
+If Not(E)
+  If SORTBY$ = "P"
+    If DUCKY$[1,12] = HLDPROD$
+      If DUCKY$[13,14] = "GG"
+        RPFLAG$[1,1] = "G"
+      Else 
+        RPFLAG$[1,1] = " "
+      End If 
+      PARAM1$ = DUCKY$[15]
+      !Print @0,23;'CL';"Adding ";PARAM1$;" to ";STRTPROD$;
+      Gosub DO_ADD1
+      Goto COPY_LOOP
+    End If 
+  Else 
+    If DUCKY$[3,8] = HLDCUST$
+      PARAM1$ = DUCKY$[9]
+      !Print @0,23;'CL';"Adding ";PARAM1$;" to ";
+      !If CGFLAG Or RPFLAG$[1,1] = "G"
+      !  Print " CUST GRP ";
+      !End If 
+      !Print STRTCUST$;
+      Gosub DO_ADD1
+      Goto COPY_LOOP
+    End If 
+  End If 
+End If 
+COPYMODE = 0
+Return 
+
+PRIMARY_QUEST: Rem
+tmp1$="MAIN"
+If SORTBY$ = "P" Gosub PROD_QUEST Else Gosub CUST_QUEST
+If PARAM1$ = "" or E<>0 or returnstatus=0 Return 
+If SORTBY$ = "P"
+  STRTPROD$ = PARAM1$
+  !Print @12,0;PARAM1$;
+Else 
+  STRTCUST$ = PARAM1$
+  !Print @12,0;PARAM1$;" ";CUSTDESC$;
+  !If CGFLAG Or RPFLAG$[1,1] = "G"
+    !Print "   CUST GRP";
+  !Else 
+    !Print "           ";
+  !End If 
+End If 
+Return 
+SORTBY_QUEST: Rem
+call dxget("SORTBY",tmp$)
+Sortby$=UCase$(RTrim$(tmp$))
+Return 
+
+READ_PROD: Rem
+Rem {begin src/inc/read.prod.i}
+Mat Read #CH_PROD,REC_PROD,0;A$;
+
+Return 
+READ_CUST: Rem
+Rem {begin src/inc/read.cust.i}
+Mat Read #CH_CUST,REC_CUST,0;A1$;
+Mat Read #CH_CUST,REC_CUST,142;C1;
+
+Return 
+READ_CUSTGP: Rem
+Mat Read #CH_CUSTGP,REC_CUSTGP,0;CUSTGRP$;
+Return 
+READ_RPROD: Rem
+Mat Read #CH_RPROD,REC_RPROD,0;RPROD$
+Mat Read #CH_RPROD,REC_RPROD,12;RPCUST$
+Mat Read #CH_RPROD,REC_RPROD,18;RPFLAG$
+Return 
+WRITE_RPROD: Rem
+Mat Write #CH_RPROD,REC_RPROD,0;RPROD$
+Mat Write #CH_RPROD,REC_RPROD,12;RPCUST$;
+Mat Write #CH_RPROD,REC_RPROD,18;RPFLAG$;
+Return 
+
+GET_PROD: Rem
+SCRATCH$ = " ",SCRATCH$
+SCRATCH$ = PARAM1$[1,12]
+Search #CH_PROD,2,1;SCRATCH$,REC_PROD,E
+If Not(E)
+  Gosub READ_PROD
+  PARAM1$ = SCRATCH$
+End If 
+Return 
+GET_CUST: Rem
+If CGFLAG Or RPFLAG$[1] = "G" Or RPKEY$[1,2] = "GG"
+  Search #CH_CUSTGP,2,1;PARAM1$,REC_CUSTGP,E
+  If Not(E)
+    Gosub READ_CUSTGP
+    CUSTDESC$ = CUSTGRP$ + BLANK$
+  End If 
+Else 
+  Search #CH_CUST,2,1;PARAM1$,REC_CUST,E
+  If Not(E)
+    Gosub READ_CUST
+    CUSTDESC$ = A1$[31,60] + BLANK$
+  End If 
+End If 
+Return 
+
+DONE: Rem
+OUTEND: Rem
+For SCR = 1 To MAXCH
+  If CH[SCR] < 0 Close #Abs(CH[SCR])
+Next SCR
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------

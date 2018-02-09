@@ -1,0 +1,189 @@
+! loadsave -w -n 100,10 -o prog/util/pmu_lp_timer.dl4 src/pmu_lp_timer.src
+!
+! PMUPGRADER ROUTINE
+
+Declare Intrinsic Sub InpBuf,String,Time
+Option Default Dialect IRIS1
+include "src/utilcopyright.inc"
+dim e$[300]
+
+! Last Price Cache Timer - add control field
+! and initialize value
+
+Enter COID,GROUPID,DBAK$,CH_LOG,COREDUMP,E,...
+! if "fromUpgrade" don't send print statements with
+! control strings as this is being executed via
+! a job not attached to terminal.  Be sure to send
+! all output to ch_log as this will be reviewed and
+! sent back to software repository
+try
+	enter fromUpgrade
+else
+	dim 1%,fromUpgrade
+end try
+try ! main try
+E = 99
+include "src/dim.pmupgrade.i"
+Dim Ftemp$[16],BLANK$[80]
+Dim K2$[60]
+! dim Fielddes fields
+DIM 1%,fcount,f1
+dim d$[40]
+dim 1%,fd_r1[3],r4$[20],r5$[10],r6$[10],r7$[10],r8$[10]
+dim 1%,timCheck
+Dim 1%,LP_SOURCE
+DIM 3%,LP_PRICE,LP_COST,LP_REBATECOST,LP_CONTRACT,LP_TIME
+dim 3%
+BLANK$ = " ",BLANK$
+TRUE = 1;FALSE = Not(TRUE)
+open #1,"cntrl/cntrl" + Str$(COID)
+ROW = 22;COL = 0
+
+OPEN #2,"CNTRL/fielddes"
+
+recmaint: k2$ = 115 using "###   "
+search #2,2,1;k2$,r2_hdr,e \ if e>1 error 11000
+if e ! does not exist
+	LOGMSG$ = "Control Record 115 missing fields - cannot upgrade!"
+	gosub DO_WRITE_LOG
+	GOTO OUTEND
+end if
+read #2,r2_hdr;fcount,f1,d$;
+
+if fcount >= 18
+	LOGMSG$ = "Uprade for lastprice timer already done - skipping."
+	gosub DO_WRITE_LOG
+	GOTO OUTEND
+end if
+
+if fcount<16
+	e = 1 ! force a stop
+	LOGMSG$ = "Control record 115 has less than 16 fields defined - fatal error."
+	gosub DO_WRITE_LOG
+	GOTO OUTEND
+end if
+
+! 
+ORIG$=""
+OWRITE$ = "ye 'lp_timer'" ! "overwrite existing BU and add .lp_timer to name
+FCODE$="FIELDDES"
+MODE=0 ! COPY ONLY
+GOSUB DO_BACKUP
+
+if fcount = 16 ! need to add the synergy flag if not already there.
+	let k2$ = "115 17"
+	e=2 \ search #2,1,0;k2$,r2,e \ if e error 11000
+	search #2,4,1;k2$,r2,e \ if e error 11000
+	let fd_r1[1] = 1
+	let fd_r1[2] = 90
+	let fd_r1[3] = 4
+	let r4$  = "SYNFLAG",blank$
+	let r5$ = "0",blank$
+	let r6$ = "0",blank$
+	let r7$ = "9999",blank$
+	let r8$ = "SYNERGY FLAG",blank$
+	write #2,r2;fd_r1[1],fd_r1[2],fd_r1[3],r4$,r5$,r6$,r7$,r8$
+	fcount = fcount + 1
+	write #2,r2_hdr;fcount,f1,d$;
+end if
+
+
+! add new field description
+let k2$ = "115 18"
+e=2 \ search #2,1,0;k2$,r2,e \ if e error 11000
+search #2,4,1;k2$,r2,e \ if e error 11000
+let fd_r1[1] = 1
+let fd_r1[2] = 92
+let fd_r1[3] = 4
+let r4$  = "TIMECHECK LPFILE",blank$
+let r5$ = "0",blank$
+let r6$ = "0",blank$
+let r7$ = "9999",blank$
+let r8$ = "# OF HOURS",blank$
+
+
+write #2,r2;fd_r1[1],fd_r1[2],fd_r1[3],r4$,r5$,r6$,r7$,r8$
+fcount = fcount + 1
+write #2,r2_hdr;fcount,f1,d$;
+
+let timCheck = 0 \ mat write #1,115,92;timCheck;
+
+close #2
+!
+
+ORIG$=""
+OWRITE$ = "ye 'lp_timer'" ! "overwrite existing BU and add .lp_timer to name
+FCODE$="LASTPRICE"
+MODE=0 ! COPY ONLY
+GOSUB DO_BACKUP
+
+Read #1,88,1376;Ftemp$;
+Open #2,Ftemp$
+
+CH = 2 \ Gosub GET_ACTIVE_RECS
+LOGMSG$ = "Estimated number of records to process: " + Str$(ACTRECS)
+Gosub DO_WRITE_LOG
+
+k2$ = " ",k2$
+do
+	search #2,3,1;k2$,r2,e
+	if e>2 error 11000
+	if e exit do
+	REC = REC + 1
+	If Not(Fra(REC / 100)) Gosub DISPLAY_PROGRESS
+	gosub WriteLastPrice
+loop
+
+goto DO_EXIT
+
+WriteLastPrice: !
+	mat write #2,r2,378;LP_PRICE
+	mat write #2,r2,384;LP_COST
+	mat write #2,r2,390;LP_REBATECOST
+	mat write #2,r2,402;LP_TIME
+	mat write #2,r2,416;LP_SOURCE;
+	mat write #2,r2,418;LP_CONTRACT;
+RETURN
+
+DO_EXIT: Rem---------------- Exit the upgrade -----------------------------------
+	E = 0
+Goto OUTEND
+
+DO_BACKUP: Rem"Backup the given file
+	Call "sysfbackup",FCODE$,COID,GROUPID,ORIG$,DBAK$,OWRITE$,MODE,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+	If E Goto OUTEND
+Return
+DO_BUILD: Rem"Build the given file
+	Call "Sysfbuild",FCODE$,COID,GROUPID,PTH$,OWRITE$,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+	If E Goto OUTEND
+Return
+
+include "src/rtn.pmupgrade.i"
+
+
+OUTEND: Rem"Final exit (be sure to set e=0 if successful before branching here)
+	try ! "close any possible file opened herein
+		Close #1
+		Close #2
+	else
+		rem
+	end try
+End
+
+else ! main try
+	If Spc(8) <> 10000
+		dim msc4$[100] \ msc4$=msc$(4)
+		if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+		call env(2,"PROGNAME",msc4$)
+		if spc(8) = 11000
+			call utilsearcherr(e$, e, Spc(10))
+		else
+			Call utilsuberr(e$,Spc(8),Spc(10),Msc$(2))
+		end if
+		call programdump()
+	End If
+	Call utilmainerr(e$,Spc(8))
+	If ch_log <> -1
+		Print #ch_log;e$
+	End If
+end try

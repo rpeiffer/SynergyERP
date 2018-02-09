@@ -1,0 +1,242 @@
+! Update last price file with current price (based loosely on mx079)
+!
+! 1.0 mm/dd/yyyy change??
+!
+! loadsave -w -n 100,10 -o prog/util/lpcacheupdate.dl4 src/lpcacheupdate.src
+!
+
+include "src/utilcopyright.inc"
+External Lib "utillib.lib"
+Declare External Function ParseArguments
+External Lib "libprice.lib"
+Declare External Sub SysPriceCalc
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile
+
+! local subroutines
+Declare Sub GetCommandParameters,OpenFilesAndInit,ProcessCustomers
+Declare Sub ReadProduct,ReadProductWarehouse,ReadCommodity
+Declare Sub GetCurrentPrice,ProcessLastprice
+
+try
+
+Declare Intrinsic Sub DateToJulian,String
+Option Default Dialect IRIS1
+! MX079 - LAST PRICE UPDATE WITH CURRENT SYSTEM PRICE
+! AUTHOR: HARRY HENDERSON   NOV 22, 1988
+! LAST UPDATE:  REK 7/7/92 CLEANUP AND EXPAND PRICE TYPE DESCRIPTION
+! REK 2/15/94 NEW FIELDS
+! "     roman 05/13/1994  expand dept to 999
+! SAR 2/95 ADD PRODUCT RANGE TO REPORTS
+!???:04/16/00:Converted to Bedit   (mkbedit 1.2b)
+DIM P9$[50],args$[5,80],P61$[256]
+DIM P$[12],P1$[156],a1$[142]
+DIM K1$[50],K4$[50]
+DIM COMMD$[4]
+DIM J2$[40]
+DIM MSGDESC$[150]
+dim 3%,FLEPTR[20,1],SPECS[30],R[99]
+DIM 1%,F,C3[4],LPWH
+DIM 2%,LPR1[3],CC1[12],CPDATE,lpppcust,x2
+DIM 1%,C2[2],TIMCHECK
+dim 3%,J,X3,C4[3]
+
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp$[800],tmp2$[200],msg$[100],Message$[400],WebStr$[600]
+Dim action$[30],options$[30],userid$[8],b$[200],3%,fdel$[10],rstr$[1000],bsdel$[10],esdel$[10],rdel$[10]
+Dim 3%
+
+!*----------------
+!* M A I N   L O G I C
+!*----------------
+call GetCommandParameters()
+if not(intCo) goto OutEnd:
+
+call SetUtilSession(e$,intCo)
+call OpenFilesAndInit()
+if not(TIMCHECK) goto OutEnd: ! no point here if not using last price cache
+call ProcessCustomers()
+OutEnd: !
+chain ""
+end
+else ! MAIN try statment
+	include "src/utilcallmainerr.inc"
+end try
+
+
+!-----------------------------------------------------------------------
+! subroutines and functions
+!-----------------------------------------------------------------------
+
+Sub GetCommandParameters()
+try
+	argc = ParseArguments(e$,args$[], msc$(4))
+	! First arg is company
+	intCo = args$[1]
+	if intCo < 1 or intCo > 99
+		print "Invalid company number.  Exiting."
+		intCo = 0
+		exit sub
+	end if
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+Sub OpenFilesAndInit()
+try
+	CH_CNTRL = 1 ! done in SetUtilSession
+	ch_lastpr = OpenFile(1376,intCo) \ if ch_lastpr<0 error 42 ! #2
+	ch_prod = OpenFile(-1792,intCo) \ if ch_prod<0 error 42 ! #3
+	ch_cust = OpenFile(-1808,intCo) \ if ch_cust<0 error 42 ! #4
+	ch_commh = OpenFile(-2288,intCo) \ if ch_commh<0 error 42 ! #6
+	ch_ccodes = OpenFile(-1728,intCo) \ if ch_ccodes<0 error 42 ! #7
+	ch_prwh = OpenFile(-1744,intCo) \ if ch_prwh<0 error 42 ! #8
+	ch_conh = OpenFile(-2880,intCo) \ if ch_conh<0 error 42 ! #10
+	ch_brktbl = OpenFile(-1952,intCo) \ if ch_brktbl<0 error 42 ! #11
+	ch_cond = OpenFile(-1936,intCo) \ if ch_cond<0 error 42 ! #12
+	ch_rconh = OpenFile(-304,intCo) \ if ch_rconh<0 error 42
+	ch_rcond = OpenFile(-320,intCo) \ if ch_rcond<0 error 42
+	ch_pmark = OpenFile(-2720,IntCo) \ if ch_pmark =-1 Error 42
+	ch_prodmark = OpenFile(-1712,IntCo) \ if ch_prodmark =-1 Error 42
+	ch_vendtag = OpenFile(-1120,IntCo) \ if ch_vendtag =-1 Error 42
+	ch_lmark = OpenFile(-9941,IntCo) \ if ch_lmark =-1 Error 42
+	mat read #ch_cntrl,19,50;P9$;
+	mat read #ch_cntrl,61,0;P61$;
+	MAT  READ #ch_cntrl,115,92;TIMCHECK;
+	let tmp$=TIM(4) using "&&&&&&" ! MMDDYY
+	let tmp2$ = tmp$[5,6]+tmp$[1,4] ! YYMMDD
+	LET CPDATE=tmp2$
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+Sub ProcessCustomers()
+try
+	LET K4$=" ",k4$
+	do
+		SEARCH #ch_cust,3,1;K4$,R4,E \ IF E=2 exit sub ! all done
+		IF E error 11000
+		MAT READ #ch_cust,R4,0;A1$;
+		MAT READ #ch_cust,R4,142;CC1;
+		MAT READ #ch_cust,R4,724;lpppcust;
+		call ProcessLastprice()
+	loop
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+sub ProcessLastprice()
+try
+	LET K1$="",K1$;K1$=K4$[1,6]
+	do
+		SEARCH #ch_lastpr,3,1;K1$,R1,E \ IF E=2 exit sub
+		IF E error 11000
+		IF K1$[1,6]<>K4$[1,6] exit sub
+		MAT  READ #ch_lastpr,R1,0;P$;
+		MAT  READ #ch_lastpr,R1,16;C1;
+		MAT  READ #ch_lastpr,R1,28;C2; \ MAT  READ #ch_lastpr,R1,46;C3;
+		MAT  READ #ch_lastpr,R1,140;C4;
+		MAT  READ #ch_lastpr,R1,274;LPWH;
+		MAT  READ #ch_lastpr,R1,198;LPR1;
+		LET R[2]=R1
+		IF C4[3] goto SkipLPRecord ! not a non-stock item 
+		call ReadProduct() \ if not(R[3]) goto SkipLPRecord
+		call ReadCommodity() \ if not(R[6]) goto SkipLPRecord
+		call GetCurrentPrice() ! price routine updates last price cache
+		SkipLPRecord: !
+	loop
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+
+sub ReadCommodity()
+try
+	let r[6]=0
+	SEARCH #ch_commh,2,1;COMMD$,R[6],E \ IF E>1 error 11000
+	IF E exit sub 
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+sub ReadProduct()
+try
+	LET J2$=P$[1,12]
+	let R[3] = 0
+	SEARCH #ch_prod,2,1;J2$,R[3],E \ IF E>1 error 11000
+	IF E exit sub
+	MAT  READ #ch_prod,R[3],0;P1$;
+	LET COMMD$=P1$[152,155]
+	Let R[8]=0  ! zero out whse rec# first
+	IF P9$[32,32]="Y" AND LPWH
+		call ReadProductWarehouse()
+	ENDIF 
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+sub ReadProductWarehouse()
+try
+	LET R[8] = 0
+	LET J2$=" ",J2$;J2$[1,12]=P$[1,12];J2$[13]=LPWH USING "##"
+	SEARCH #ch_prwh,2,1;J2$,R[8],E \ IF E>1 error 11000
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+sub GetCurrentPrice()
+try
+	LET X3=C2[1]
+	LET DFT_COST=C2[2]
+	LET CURCOST=C2[2]
+	clear specs[]
+
+	LET FLEPTR[0,0]=CH_CNTRL;FLEPTR[0,1]=0
+	LET FLEPTR[1,0]=ch_prod;FLEPTR[1,1]=R[3]
+	LET FLEPTR[2,0]=ch_prwh;FLEPTR[2,1]=R[8]
+	LET FLEPTR[3,0]=ch_commh;FLEPTR[3,1]=R[6]
+	LET FLEPTR[4,0]=ch_lastpr;FLEPTR[4,1]=R[2]
+	LET FLEPTR[5,0]=ch_cond;FLEPTR[5,1]=0
+	LET FLEPTR[6,0]=ch_conh;FLEPTR[6,1]=0
+	LET FLEPTR[7,0]=ch_ccodes;FLEPTR[7,1]=0
+	LET FLEPTR[8,0]=ch_brktbl;FLEPTR[8,1]=0
+
+	LET FLEPTR[9,0]=ch_rconh;FLEPTR[9,1]=0
+	LET FLEPTR[10,0]=ch_rcond;FLEPTR[10,1]=0
+	LET FLEPTR[11,0]=ch_pmark;FLEPTR[11,1]=0
+	LET FLEPTR[12,0]=ch_prodmark;FLEPTR[12,1]=0
+	LET FLEPTR[13,0]=ch_vendtag;FLEPTR[13,1]=0
+	LET FLEPTR[14,0]=ch_lmark;FLEPTR[14,1]=0
+
+	LET FLEPTR[18,0]=ch_cust;FLEPTR[18,1]=R4
+
+
+	let x2=lpppcust
+	! If P60$[33,33]<>"Y" Let X2=0
+	If a1$[138,138]="Y" Let X2=0
+	If X2=cc1[1] let x2=0
+	if x2<1 or x2>999999 or Fra(X2) Let X2=0
+	IF P61$[100,100]<>"Y" let x2=0
+	let fleptr[0,1]=X2 ! perm price group
+
+
+
+	LET SPECS[0]=0;SPECS[1]=C2[0];SPECS[2]=LPR1[0];SPECS[3]=CC1[1]
+	LET SPECS[4]=LPWH;SPECS[5]=CPDATE;SPECS[6]=C3[1];SPECS[7]=CC1[7]
+	LET SPECS[8]=1;SPECS[9]=DFT_COST;SPECS[10]=0;SPECS[11]=0
+	LET SPECS[12]=0;SPECS[13]=C3[2];SPECS[14]=C3[3];SPECS[15]=C3[4]
+	LET SPECS[16]=0;SPECS[17]=CURCOST;SPECS[18]=0;SPECS[19]=0
+	LET SPECS[20]=X3
+	Call SysPriceCalc(e$,fleptr[],specs[],msgdesc$)
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+

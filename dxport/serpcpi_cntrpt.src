@@ -1,0 +1,991 @@
+! --- serpcpi_cntrpt.dl4
+!
+! CPI Contract Report
+!
+!
+! loadsave -w -n 100,10 -o prog/dxport/serpcpi_cntrpt.dl4 src/serpcpi_cntrpt.src
+!
+! ERP Scheduler Enabled.
+!
+! task 48608 - add email capability
+!
+!
+
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus,ERPCronSuccess
+Declare External Function GetParameter$,GetUIDRec
+Declare Intrinsic Function Findchannel
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+include "src/inc/filecpihead.inc"
+include "src/inc/filecpidet.inc"
+include "src/inc/filecpicust.inc"
+include "src/inc/filesslsm.inc"
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+Include "src/inc/filespecprice.inc" ! special price file
+Include "src/inc/filecust.inc" ! customer
+Include "src/inc/filecommhead.inc" ! commodity header
+
+!
+Declare Intrinsic Sub InpBuf,String,Findf,programdump,JulianToDate,DateToJulian
+Declare Intrinsic Sub Time
+!Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,buildsort,GetUIDSalesrep
+
+External Lib "ubsprconv.dl4"
+Declare External Function xunit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "libprice.lib"
+Declare External Sub SysPriceCalc
+
+External Lib "libcpi.lib"
+Declare External Function CPIFindPrimaryCust
+
+! Internal Subroutines and Functions
+Declare Sub OpenFiles,GetParameters,SortContracts
+Declare Sub ProcessSortedContracts,MakePriceCall
+Declare Sub PrintHeader,PrintContract,OpenEmailChan
+Declare Function YYMMDDToPrint$,PriceTypeDesc$,CostTypeDesc$,AmountOnTransfer
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200],List$[50,200],3%
+b$=" ",b$
+dim message$[150],webstr$[200]
+
+
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+! record structures
+dim cpih. as cpihead
+dim cpid. as cpidet
+dim spr. as specprice
+dim cpic. as cpicust
+dim sr. as sslsm
+Dim PR. as prod ! product file
+Dim PW. as prodwhse ! prodwhse file
+Dim cust. as cust
+Dim cm. as commhead
+! keys
+dim K_cpih$[50],K_cpid$[50],K_cpic$[50],K_ordl$[50],K_ordh$[50]
+dim K_spr$[50],K_cust$[50],K_cm$[50]
+dim K_pr$[50],K_pw$[50],K_sr$[50],K_sort$[100]
+! record numbers
+dim 3%,R_cpih,R_cpid,R_cpic,R_pr,R_pw,R_sr,R_spr,R_cust,R_cm
+
+! everything else
+dim P9$[50],mode$[1],pageHeading$[132],ageDatePrint$[8],baseUnit$[4]
+dim p61$[256],Pmask$[20],Qmask$[20],MSGDESC$[150],custom_customer$[30]
+dim qUom$[4],p60$[50],blockid$[10],priceFactor$[10],EMAILFROM$[48],SLSEMAIL$[50],SYS$[500]
+dim 1%,CNVTU[2],PT[37],repSecurity
+dim 1%,MthDays,ARMonth,L3[3],OWHT[1]
+dim 2%,Q0[1]
+dim 2%,pageNo,lineNo,maxLines,jdate
+dim 2%,BDays[24],L4[3],H5[16]
+dim 3%,currContract,currSortID,CNVTA,Amount,begSort,endSort
+dim 3%,FLEPTR[20,1],SPECS[50],x2,contCost,contPrice,qtyInBase
+dim 3%,L7[12],onTransfer
+
+
+dim sort$[1]
+
+!
+! M A I N   L O G I C
+!
+Mat Read #1,19,50;P9$;
+mat read #1,60,50;p60$; ! system flag variable
+mat read #1,61,0;p61$;
+if p61$[111,111]<>"Y"
+	e$ = "CPI is not active."
+	error 10000
+	end
+Endif
+MAT  READ #1,115,60;CUSTOM_CUSTOMER$;
+Custom_customer$=UCase$(Trim$(custom_customer$))
+call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+blockid$ = rtrim$(GetParameter$("BLOCKID"))
+restrictedReport = 0 \ if blockid$ = "CPICRPTS" restrictedReport = 1
+
+mat read #1,11,0;BDays; ! business days per month
+read #1,0,120;ARMonth; 
+MthDays=Bdays[ARMonth]
+If MthDays<=0 let MthDays=21
+
+call OpenFiles() ! open after the check
+call GetParameters()
+pageHeading$ = "CPI Contract Report"
+if toBrowser
+	!<section>
+	tmp$ = bsdel$,"CPICNTRPT",fdel$,rdel$
+	Call addtostr(e$,rstr$,tmp$)
+end if
+maxLines = 60
+lineNo=maxLines + 1 ! print heading first run through
+
+if not(toBrowser) and not(erpCron) call setoutput(e$,rstr$, 2)
+
+call SortContracts()
+call ProcessSortedContracts()
+
+OutEnd: !
+If toBrowser
+	Call addtostr(e$,rstr$,esdel$) !end section
+	call setoutput(e$,rstr$,1)
+End If
+if erpCron call ERPCronSuccess()
+try Close else rem
+! 
+! 
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end
+
+
+! ***********************************************************************
+! Nobody but us subroutines down here
+! ***********************************************************************
+
+Sub OpenFiles()
+Try
+	CH_SORT=buildsort(e$,50,0)
+	CH_CPIH=OpenFile(-9929,IntCo) \ if ch_cpih=-1 Error 42 ! cpi header
+	CH_CPID=OpenFile(-9928,IntCo) \ if ch_cpid=-1 Error 42 ! cpi detail
+	CH_CPIC=OpenFile(-9927,IntCo) \ if ch_cpic=-1 Error 42 ! cpi customer
+	CH_SR=OpenFile(-1824,IntCo) \ if ch_sr=-1 Error 42 ! salesrep
+	CH_PR=OpenFile(-1792,IntCo) \ if ch_pr=-1 Error 42 ! product
+	CH_PW=OpenFile(-1744,IntCo) \ if ch_pw=-1 Error 42 ! product wh
+	CH_CC=OpenFile(-1728,IntCo) \ if ch_cc=-1 Error 42 ! u/m codes
+	CH_SPR=OpenFile(-1936,IntCo) \ if ch_spr=-1 Error 42 ! special price
+	CH_CUST=OpenFile(-1808,IntCo) \ if ch_cust=-1 Error 42 ! customer
+	CH_ORDH=OpenFile(-1840,IntCo) \ if ch_ordh=-1 Error 42 ! order header
+	CH_ORDL=OpenFile(-1888,IntCo) \ if ch_ordl=-1 Error 42 ! order line
+	! add'l file opens for price call
+	CH_PT=openfile(-752,Intco) \ if ch_pt=-1 Error 42
+	CH_CM = OpenFile(-2288,IntCo) \ if ch_cm = -1 Error 42 ! commod code(HEAD)
+	CH_LP = OpenFile(-1376,IntCo) \ if ch_lp = -1 error 42 ! lastprice
+	CH_CPH = OpenFile(-2880,IntCo) \ if ch_cph = -1 Error 42 ! contr head
+	CH_BT = OpenFile(-1952,IntCo) \ if ch_bt = -1 Error 42 ! break tbl chann
+	CH_RCONTRACTH = OpenFile(-304,IntCo) \ if CH_RCONTRACTH =-1 Error 42 ! rebate hdr
+	CH_REBATEDTL = OpenFile(-320,IntCo) \ if CH_REBATEDTL =-1 Error 42 ! rebate dtl
+	CH_PMARK = OpenFile("SPRICEMARK",IntCo,"R") \ if CH_PMARK =-1 Error 42
+	CH_PRODMARK = OpenFile(-1712,IntCo) \ if CH_PRODMARK =-1 Error 42
+	CH_VENDTAG = OpenFile(-1120,IntCo) \ if CH_VENDTAG =-1 Error 42
+	CH_LMARK = OpenFile(-9941,IntCo) \ if CH_LMARK =-1 Error 42
+	! set up for price call
+	FLEPTR[1,0]=ch_pr;FLEPTR[2,0]=ch_pw;FLEPTR[3,0]=ch_cm
+	fleptr[4,0]=ch_lp;fleptr[5,0]=ch_spr;fleptr[6,0]=ch_cph
+	fleptr[7,0]=ch_cc;fleptr[8,0]=ch_bt;fleptr[9,0]=CH_RCONTRACTH
+	fleptr[10,0]=CH_REBATEDTL;fleptr[11,0]=CH_PMARK;fleptr[12,0]=CH_PRODMARK
+	fleptr[13,0]=CH_VENDTAG;fleptr[14,0]=CH_LMARK;fleptr[15,0]=ch_cpid
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! openfiles
+
+
+Sub GetParameters()
+Try
+	Mat Read #CTLC,115,40;Q0;
+	QMask$="------------#"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+
+	repSecurity = GetUIDSalesrep(e$)
+	if repSecurity<0
+		e$ = "User ID not on file!"
+		error 10000
+	end if
+	if not(repSecurity) and restrictedReport
+		e$ = "Salesman ID not set for user - aborting!"
+		error 10000
+	end if
+
+	!
+	! get parameters from block ID
+	!
+	sort$ = ucase$(GetParameter$("SORT"))
+	if erpCron
+		tmpSort = sort$
+		if tmpSort = 1 sort$ = "S"
+		if tmpSort = 2 sort$ = "C"
+		if tmpSort = 3 sort$ = "W"
+	end if
+	begSort = GetParameter$("BEGSORT")
+	endSort = GetParameter$("ENDSORT")
+	if not(endSort) endSort=999999
+	tmp$ = GetParameter$("INCCOST")
+	incCost = 0 \ if tmp$ = "Y" incCost = 1
+	! If chargeback table number entered
+	! ignore range as we want to see
+	! everything for that chargeback
+	! table
+	chargeBackTable = GetParameter$("CBT")
+	if chargeBackTable
+		begSort = 0
+		endSort = 999999
+	end if
+	toBrowser = 0
+	tmp$ = GetParameter$("EMAILRPT")
+	emailRpt = 0 \ if tmp$ = "Y" emailRpt = 1
+	if emailRpt
+		try close #0 else rem
+		EMCH = -1
+		If P61$[30,30] <> "Y"
+			e$ = "Email report option not enabled!"
+			error 10000
+		end if
+		If sort$ <> "S"
+			e$ = "Email report is only valid if sorting by salesrep!"
+			error 10000
+		end if
+		CHAN = Findchannel() 
+		URec=GetUIDRec(e$,IntCo,Userid$)
+		uc_ch = openfile(-9988, intCo) \ if uc_ch = -1 error 42
+		Read #uc_ch,uRec,212;EMAILFROM$; ! get the from
+		Close #uc_ch
+		Call "mxvaleaddr.dl4",EMAILFROM$,X1,e$
+		If Not(X1) Or EMAILFROM$ = ""
+			e$ = "Unable to locate ''From'' address for email."
+			error 10000
+		End If 
+	else
+		try
+			i = Chf(0)
+		else
+			toBrowser = spc(8)
+		end try
+	end if
+	if toBrowser and toBrowser <> 49 error toBrowser
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! GetParameters
+
+sub OpenEmailChan() 
+Try
+	SLSEMAIL$=LCase$(RTrim$(sr.EmailAddress$))
+	! if emch<>-1 a report is in process - close & send it - open for next slsm
+	If EMCH <> -1
+		Close #EMCH
+		EMCH = -1
+	End If 
+	Call "mxvaleaddr.dl4",SLSEMAIL$,X1,e$
+	If Not(X1) Or SLSEMAIL$ = "" exit sub 
+	SYS$ = "$/usr/ub/sys/email.report -f ''",EMAILFROM$,"''"," -t ''",SLSEMAIL$,"''"," -s ''","CPI Contract Report","''"
+	SYS$ = SYS$," -c ''","Attached is your CPI Contract Report.","''"
+	! CHAN = Findchannel() 
+	EMCH = 0 ! force to 0
+	Open #EMCH,SYS$
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! OpenEmailChan
+		
+Sub SortContracts()
+Try
+	K_cpih$ = " ",K_cpih$
+	do
+		R_cpih = filegetcpihead(e$,CH_CPIH,">",1,K_cpih$,cpih.)
+		if R_cpih <= 0 exit do
+		priCust = CPIFindPrimaryCust(e$,intco,ch_cpic,cpih.ContractNumber)
+		clear cust.
+		cust.Name$ = "NOT ON FILE!"
+		if (priCust)
+			K_cust$ = " ",K_cust$
+			K_cust$[1,6] = priCust using "######"
+			R_cust = filegetcust(e$,ch_cust,"=",1,K_cust$,cust.)
+		end if
+
+		! got one - loop through the lines
+		K_cpid$=" ",K_cpid$
+		K_cpid$[1,6] = K_cpih$[1,6]
+		do
+			R_cpid = filegetcpidet(e$,CH_CPID,">",1,K_cpid$,cpid.)
+			if R_cpid <= 0 exit do
+			if K_cpid$[1,6] <> K_cpih$[1,6] exit do
+			K_spr$ = K_cpid$
+			R_spr = filegetspecprice(e$,CH_SPR,"=",1,K_spr$,spr.)
+			if R_spr <= 0 error 11000
+			jsDate = 0 ! default really old
+			if spr.StartDate<>0
+				tmp$ = spr.StartDate using "&&&&&&"
+				call DateToJulian(1,tmp$)
+				jsDate = tmp$
+			end if
+			! KEY SORT
+			!
+			! 1-6 = SORT VALUE (REP,CUSTOMER,WH)
+			! 7-36 = PRIMARY CUSTOMER NAME (not for customer sort)
+			! 37-42 = PRIMARY CUSTOMER NUMBER (not for customer sort)
+			! 43-54 = PRODUCT CODE
+			! 22-26 = CONTRACT LINE START DATE (DDDDD)
+			! 27-31 = CONTRACT NUMBER (TIE BREAKER)
+			! 
+			! OK - got a contract line - how are we a sortin'?
+			K_sort$ = " ",K_sort$
+			if sort$ <> "C"
+				K_sort$[7,36] = cust.Name$+b$
+				K_sort$[37,42] = priCust using "######"
+			end if
+			K_sort$[43,54] = cpid.ProductID$
+			K_sort$[55,59] = jsDate using "#####"
+			K_sort$[60,64] = cpid.ContractNumber using "#####"
+			if chargeBackTable
+				if cpid.ChargebackTable <> chargeBackTable goto SkipContract
+			end if
+			if repSecurity and cpih.Salesman <> repSecurity goto SkipContract
+			select case sort$
+				case "S" ! salesrep
+					if cpih.Salesman<begSort or cpih.Salesman>endSort goto SkipContract
+					K_sort$[1,6] = cpih.Salesman using "######"
+					search #CH_SORT,4,1;K_sort$,R_cpid,e
+					if e error 11000
+				case "C" ! customer
+					! loop through customers on the contract
+					! creating a sort entry for each one
+					K_cpic$=" ",K_cpic$
+					K_cpic$[1,6] = K_cpih$[1,6]
+					do
+						R_cpic = filegetcpicust(e$,CH_CPIC,">",1,K_cpic$,cpic.)
+						if R_cpic <= 0 exit do
+						if cpic.ContractNumber<>cpih.ContractNumber exit do
+						if cpic.Customer<begSort or cpic.Customer>endSort goto SkipCustomer
+						! Piedmont requested contract shows only under
+						! primary customer
+						if cpic.Customer = priCust
+							K_sort$[1,6] = cpic.Customer using "######"
+							search #CH_SORT,4,1;K_sort$,R_cpid,e
+							if e error 11000
+						end if
+					SkipCustomer: !
+					loop
+					K_sort$[1,4] = " ",K_sort$
+				case "W" ! warehouse
+					if cpid.PurWhse<begSort or cpid.PurWhse>endSort goto SkipContract
+					K_sort$[1,6] = cpid.PurWhse using "######"
+					search #CH_SORT,4,1;K_sort$,R_cpid,e
+					if e error 11000
+			end select
+		SkipContract: !
+		loop
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! SortContracts
+
+sub ProcessSortedContracts()
+try
+	! loop through the CPI contracts - use sort
+	K_sort$ = " ",K_sort$
+	do
+		search #CH_SORT,3,1;K_sort$,R_cpid,e \ if e>2 error 11000
+		if e exit do
+		! get CPI detail record
+		Read Record #CH_CPID,R_cpid,0;cpid.;
+		! get CPI header record
+		if currContract <> cpid.ContractNumber
+			K_cpih$ = " ",K_cpih$
+			K_cpih$[1,6] = cpid.ContractNumber using "C#####"
+			R_cpih = filegetcpihead(e$,CH_CPIH,"=",1,K_cpih$,cpih.)
+			if R_cpih <= 0 error 11000
+			! get the salesrep reocrd
+			K_sr$ = " ",K_sr$
+			K_sr$[1,3] = cpih.Salesman using "###"
+			R_sr = filegetsslsm(e$,CH_SR,"=",1,K_sr$,sr.)
+			if R_sr <= 0 error 11000
+			if sort$ <> "C" ! not a customer sort, use primary
+				K_cust$ = " ",K_cust$
+				R_cust = 0
+				tmp = CPIFindPrimaryCust(e$,intco,CH_CPIC,cpid.ContractNumber)
+				if tmp = 0 ! no primary
+					clear cust.
+					cust.Name$ = "PRIMARY NOT DEFINED!"
+				else
+					K_cust$[1,6] = tmp using "######"
+					R_cust = filegetcust(e$,CH_CUST,"=",1,K_cust$,cust.)
+					if R_cust <= 0 error 11000
+				end if
+			else ! customer sort
+				K_cust$ = " ",K_cust$
+				K_cust$[1,6] = k_sort$[1,6]
+				R_cust = filegetcust(e$,CH_CUST,"=",1,K_cust$,cust.)
+				if R_cust <= 0 error 11000
+			end if
+			currContract = cpid.ContractNumber
+		end if
+		if currSortID <> val(ltrim$(K_sort$[1,6]))
+			if currSortID <> 0 ! first time through
+				lineNo = maxLines + 1 ! forces page break
+			end if
+			currSortID = val(ltrim$(K_sort$[1,6]))
+			if sort$ = "C" ! customer sort and ID changed
+				K_cust$[1,6] = currSortID using "######"
+				R_cust = filegetcust(e$,CH_CUST,"=",1,K_cust$,cust.)
+				if R_cust <= 0 error 11000
+			end if
+			if sort$ = "S" and emailRpt call OpenEmailChan()
+		end if
+		! get contract detail record (SPECPRICE)
+		K_spr$=" ",K_spr$
+		K_spr$[1,6] = cpid.ContractNumber using "C#####"
+		K_spr$[7,18] = cpid.ProductID$
+		search #CH_SPR,2,1;K_spr$,R_spr,e \ if e error 11000
+		Read Record #CH_SPR,R_spr,0;spr.;
+		! get the product record
+		K_pr$=" ",K_pr$
+		K_pr$[1,12] = cpid.ProductID$
+		search #CH_PR,2,1;K_pr$,R_pr,e \ if e error 11000
+		Read Record #CH_PR,R_pr,0;pr.;
+		! get the product record warehouse record
+		K_pw$=" ",K_pw$
+		K_pw$[1,12] = cpid.ProductID$
+		K_pw$[13,14] = cpid.PurWhse using "##"
+		R_pw = 0
+		search #CH_PW,2,1;K_pw$,R_pw,e \ if e>1 error 11000
+		if not(E)
+			Read Record #CH_PW,R_pw,0;pw.;
+		else
+			clear pw.
+		end if
+		call MakePriceCall()
+		! For price we are printing what is entered in
+		! contract, not result of price call, so override
+		contPrice = spr.SPFact
+		if spr.PrcType = 3 ! flat - convert to price UOM
+			Cnvtu[0]=0;Cnvtu[1]=spr.UMPrice;Cnvtu[2]=2
+			Cnvta=contPrice
+			contPrice=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		end if
+		onTransfer = AmountOnTransfer(R_pr,cpid.PurWhse)
+		call PrintContract()
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ProcessSortedContracts
+
+Sub MakePriceCall()
+try
+	contPrice = 0
+	contCost = 0
+	if not(R_cust) exit sub ! can't do this without a customer
+	! convert 1 "QTY" U/M to Base
+	Cnvtu[0]=spr.UMQty;Cnvtu[1]=0;Cnvtu[2]=1
+	Cnvta=1
+	qtyInBase=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	K_cm$=" ",K_cm$;K_cm$=pr.ComdtyCode$+b$;K_cm$[5]=""
+	R_cm=filegetcommhead(e$,CH_CM,"=",1,K_cm$,CM.) ! need comm rec#
+	If R_cm<0 Let R_cm=0
+	! price call - needed for current price / cost
+	fleptr[1,1]=R_pr;fleptr[2,1]=R_pw;fleptr[3,1]=R_cm
+	let x2=Cust.LpPpGrpCust
+	If CUST.AuthBuyList$="Y" Let X2=0
+	If X2=CUST.CustomerCode let x2=0
+	if x2<1 or x2>999999 or Fra(X2) Let X2=0
+	IF P61$[100,100]<>"Y" let x2=0
+	let fleptr[0,1]=X2 ! perm price group
+	clear specs[]
+	if pr.LbsFact<=1 Let pr.LbsFact=1
+	ordWgt=(ABS((pr.LbsUnit*qtyInBase)/pr.LbsFact)) ! weight of 1 order unit
+	Specs[0]=0;Specs[1]=qtyInBase;Specs[2]=ORDWGT ! ExtNetWgt
+	Specs[3]=cust.CustomerCode;Specs[4]=cpid.PurWhse;Specs[5]=0
+	Specs[6]=0;Specs[7]=Cust.PriceType;Specs[8]=1
+	! default cost from prtype file
+	mat read #ch_pt,specs[7],28;PT;
+	X=Specs[8]-1 ! pt[] is 0 to 37
+	If X<0 let x=0
+	X2=PT[x] \ if x2=0 let x2=P60$[29,29]
+	Specs[9]=X2 ! default cost
+	if custom_customer$ = "PIEDMONT" Specs[9] = 3 ! force avg cost
+	Specs[13]=spr.UMQty;Specs[14]=spr.UMPrice;Specs[15]=spr.UMCost
+	Call SysPriceCalc(e$,FLEPTR[],SPECS[],MSGDESC$)
+	if specs[0]=0 ! no error
+		! convert cost in base to cost um
+		Cnvtu[0]=0;Cnvtu[1]=spr.UMCost;Cnvtu[2]=2
+		Cnvta=specs[17]
+		contCost=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		! convert price in base to price um
+		Cnvtu[0]=0;Cnvtu[1]=spr.UMPrice;Cnvtu[2]=2
+		Cnvta=specs[20]
+		contPrice=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! MakePriceCall
+
+
+Sub PrintHeader()
+Try
+	if toBrowser and pageNo = 0 ! first run through
+		tmp$ = "SALESREP"+fdel$
+		tmp$ = tmp$+"CUSTOMER #"+fdel$+"CUSTOMER NAME"+fdel$
+		tmp$ = tmp$+"START DATE"+fdel$+"CONTRACT #"+fdel$
+		tmp$ = tmp$+"WH"+fdel$
+		tmp$ = tmp$+"ITEM NUMBER"+fdel$+"PRODUCT INFO 1"+fdel$+"PRODUCT INFO 2"+fdel$
+		if custom_customer$ = "PIEDMONT"
+			tmp$ = tmp$+"PRICE"+fdel$
+		else
+			tmp$ = tmp$+"PRICE FACTOR"+fdel$+"FACTOR TYPE"+fdel$
+		end if
+		tmp$ = tmp$+"PRICE UOM"+fdel$
+		if (incCost)
+			if custom_customer$ = "PIEDMONT" tmp$ = tmp$+"AVERAGE "
+			tmp$ = tmp$+"COST"+fdel$+"COST UOM"+fdel$
+		end if
+		tmp$ = tmp$+"RESERVE QTY"+fdel$+"UOM"+fdel$
+		tmp$ = tmp$+"QTY REMAINING"+fdel$+"REMAINING UOM"+fdel$
+		tmp$ = tmp$+"QTY SOLD"+fdel$+"SOLD UOM"+fdel$+"LAST SALE"+fdel$
+		tmp$ = tmp$+"WH AVAIL"+fdel$+"ON SALES ORD"+fdel$+"ON PO"+fdel$
+		tmp$ = tmp$+"ON TRANSFER"+fdel$
+		tmp$ = tmp$+"MIN STOCK LEVEL"+fdel$+"MAX STOCK LEVEL"+fdel$+"MIN DAYS"+fdel$+"MAX DAYS"+fdel$
+		tmp$ = tmp$+"AVG LEAD TIME"+fdel$
+		tmp$ = tmp$+"AVG MNTHLY USAGE"+fdel$
+		tmp$ = tmp$+"MIN PURCH"+fdel$
+		call addtostr(e$,rstr$,tmp$+rdel$)
+		pageNo = pageNo + 1
+	end if
+	if toBrowser exit sub
+	if lineNo < maxLines-5 exit sub ! no need to print a header
+	! need to print one
+	if pageNo > 0 print #0;"\14\" ! form feed
+	pageNo = pageNo + 1
+	Print #0;" - CPICRPT -"; Tab (Int(66 - (Len(pageHeading$) / 2)));pageHeading$
+	tmp$ = "" \ Call Time(tmp$)
+	Print #0; Tab 1;"DATE ";tmp$;
+	select case sort$
+		case "S"
+			tmp$ = str$(cpih.Salesman)+"/"+rtrim$(sr.Name$)
+		case "W"
+			tmp$ = "SORTED BY WAREHOUSE NUMBER"
+		case "C"
+			tmp$ = "SORTED BY CUSTOMER NUMBER"
+	end select
+	Print #0;Tab (Int(66 - (Len(tmp$) / 2)));tmp$;
+	Print #0; Using "PAGE ###"; Tab 119;pageNo
+	Print #0;" "
+	lineNo = 4
+	print #0;"CUSTOMER #";tab 11;"START DT";tab 20;"WH";tab 23;"ITEM NUMBER";
+	if custom_customer$ = "PIEDMONT"
+		print #0;tab 44;"     PRICE";tab 55;
+	else
+		print #0;tab 44;"PRICE FCTR";tab 55;
+	end if
+	if incCost and custom_customer$ = "PIEDMONT"
+		print #0; "       AVG";
+	end if
+	if custom_customer$ = "PIEDMONT"
+		print #0; tab 66;"   ORIG";
+	end if
+	print #0; tab 74;"    QTY";
+	print #0;tab 82;" QTY SOLD";tab 92;"WH AVAIL";tab 101;" MIN LEVEL";
+	print #0;tab 112;" AVG";tab 117;"   AVG";tab 124;"     MIN";
+	print #0;""
+	lineNo = lineNo + 1
+	print #0;"NAME";tab 11;"CONTRACT#";tab 23;"PRODUCT INFO";
+	print #0;tab 44;"       UOM";
+	if incCost print #0;TAB 55;"      COST";
+	print #0;tab 66;"RESERVE";tab 74;" REMAIN";tab 82;"      UOM";
+	print #0;tab 92;"   ON SO";tab 101;" MAX LEVEL";
+	print #0;tab 112;"LEAD";tab 117;"MNTHLY";
+	print #0;tab 124;"PURCHASE";
+	print #0;""
+	lineNo = lineNo + 1
+	if custom_customer$ <> "PIEDMONT"
+		print #0;tab 44;"FACTOR TYP";
+	end if
+	if incCost print #0;tab 55;"       UOM";
+	print #0;tab 66;"    QTY";tab 74;"    UOM";tab 82;"LAST SALE";
+	print #0;tab 92;"   ON PO";tab 101;"  MIN DAYS";
+	print #0;tab 112;"TIME";tab 117;" USAGE";
+	print #0;""
+	lineNo = lineNo + 1
+	print #0;tab 66;"    UOM";tab 92;"ON TRANS";tab 101;"  MAX DAYS";
+	print #0;""
+	lineNo = lineNo + 1
+	print #0;""
+	lineNo = lineNo + 1
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintHeader
+
+Sub PrintContract()
+Try
+	qUom$ = XUNIT$(spr.UMQty,CH_CC)
+	select case spr.PrcType
+		case 1
+			priceFactor$ = "MRK UP/DN"
+		case 2
+			priceFactor$ = "GROSS MRGN"
+		case 3
+			priceFactor$ = "FIXED PRC"
+		case 4
+			priceFactor$ = "FIXED BKT"
+		case 5
+			priceFactor$ = "BKT JUMP"
+		case 6
+			priceFactor$ = "BRK LEVL"
+		case 7
+			priceFactor$ = "FREE GOODS"
+		case else
+			priceFactor$ = "UNKNOWN"
+	end select
+	if toBrowser
+		if pageNo = 0 call PrintHeader()
+		tmp$ = str$(cpih.Salesman)+"/"+rtrim$(sr.Name$)+fdel$
+		tmp$=tmp$+str$(cust.CustomerCode)+fdel$+rtrim$(cust.Name$)+fdel$
+		tmp$=tmp$+YYMMDDToPrint$(spr.StartDate)+fdel$
+		tmp$=tmp$+str$(cpih.ContractNumber)+fdel$
+		tmp$=tmp$+str$(cpid.PurWhse)+fdel$
+		tmp$=tmp$+rtrim$(cpid.ProductID$)+fdel$+rtrim$(pr.Desc1$)+fdel$
+		tmp$=tmp$+rtrim$(pr.Desc2$)+fdel$
+		if custom_customer$ = "PIEDMONT" and spr.PrcType <> 3
+			! piedmont assumes flat, if not, problem!
+			tmp$=tmp$+"BAD TYPE"+fdel$
+		else
+			tmp$=tmp$+str$(contPrice)+fdel$
+		end if
+		if custom_customer$ <> "PIEDMONT"
+			tmp$=tmp$+priceFactor$+fdel$
+		end if
+		tmp$=tmp$+XUNIT$(spr.UMPrice,CH_CC)+fdel$
+		if (incCost)
+			tmp$=tmp$+str$(contCost)+fdel$+XUNIT$(spr.UMCost,CH_CC)+fdel$
+		end if
+		tmp$=tmp$+str$(cpid.ResStock)+fdel$+qUom$+fdel$
+		Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+		Cnvta=spr.QtySinceStart
+		spr.QtySinceStart=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		! Qty on SO - convert to qty unit
+		Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+		Cnvta=cpid.QuantityAllocated
+		cpid.QuantityAllocated=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		! qty remaining
+		if cpid.ResStock <> 0
+			tmp$=tmp$+str$(cpid.ResStock-spr.QtySinceStart-cpid.QuantityAllocated)+fdel$+qUom$+fdel$
+		else
+			tmp$=tmp$+fdel$+fdel$
+		end if
+		! qty sold
+		tmp$=tmp$+str$(spr.QtySinceStart)+fdel$+qUom$+fdel$
+		! last sale
+		tmp$=tmp$+YYMMDDToPrint$(spr.LastBuyDate)+fdel$
+		! WH Avail
+		Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+		Cnvta=pw.QtyOnHand - pw.QtyOnOrd
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		tmp$=tmp$+str$(Amount)+fdel$
+		! Qty on SO
+		tmp$=tmp$+str$(cpid.QuantityAllocated)+fdel$
+		! Qty on PO
+		Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+		Cnvta=pw.QtyOnPO
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		tmp$=tmp$+str$(Amount)+fdel$
+		! Qty on transfer
+		Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+		Cnvta=onTransfer
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		tmp$=tmp$+str$(Amount)+fdel$
+		! Min / Max Levels
+		Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+		Cnvta=pw.MinStkLvl
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		tmp$=tmp$+str$(Amount)+fdel$
+		Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+		Cnvta=pw.MaxStkLvl
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		tmp$=tmp$+str$(Amount)+fdel$
+		! min / max days / months
+		if pw.MinDaysMths>=1
+			tmp$=tmp$+str$(pw.MinDaysMths)+"M"+fdel$
+		else
+			tmp = abs(pw.MinDaysMths)
+			if tmp>0 let tmp=int((MthDays * tmp) + .5)
+			tmp$=tmp$+str$(tmp)+fdel$
+		end if
+		if pw.MaxDaysMths>=1
+			tmp$=tmp$+str$(pw.MaxDaysMths)+"M"+fdel$
+		else
+			tmp = abs(pw.MaxDaysMths)
+			if tmp>0 let tmp=int((MthDays * tmp) + .5)
+			tmp$=tmp$+str$(tmp)+fdel$
+		end if
+		! average lead time
+		tmp2$ = (pw.AvgLeadTime*MthDays) using "####"
+		tmp$=tmp$+tmp2$+fdel$
+		! average monthly usage
+		tmp2$ = (pw.UsgRate) using "######"
+		tmp$=tmp$+tmp2$+fdel$
+		! ReOrder (Min Purch)
+		Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+		Cnvta=cpid.ReOrderQty
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		tmp$=tmp$+str$(Amount)+fdel$
+		call addtostr(e$,rstr$,tmp$+rdel$)
+		exit sub
+	end if
+	call PrintHeader()
+	print #0; str$(cust.CustomerCode);
+	print #0; tab 11;YYMMDDToPrint$(spr.StartDate);
+	print #0; tab 20;cpid.PurWhse using "##";
+	print #0; tab 23;cpid.ProductID$;
+	if custom_customer$ = "PIEDMONT" and spr.PrcType <> 3
+		! piedmont assumes flat, if not, problem!
+		print #0; tab 44; "BAD TYPE";
+	else
+		print #0; tab 44; contPrice using pmask$[len(pmask$)-9];
+	end if
+	if incCost
+		print #0; tab 55; contCost using pmask$[len(pmask$)-9];
+	end if
+	print #0; tab 66; cpid.ResStock using Qmask$[len(qmask$)-6];
+	! Qty sold to date - convert to qty unit
+	Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+	Cnvta=spr.QtySinceStart
+	spr.QtySinceStart=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	! Qty on SO - convert to qty unit
+	Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+	Cnvta=cpid.QuantityAllocated
+	cpid.QuantityAllocated=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	! qty remaining
+	if cpid.ResStock <> 0
+		print #0;tab 74;(cpid.ResStock-spr.QtySinceStart-cpid.QuantityAllocated) using qmask$[len(qmask$)-6];
+	end if
+	print #0;tab 82;spr.QtySinceStart using qmask$[len(qmask$)-8];
+	! WH Avail
+	Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+	Cnvta=pw.QtyOnHand - pw.QtyOnOrd
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	print #0;tab 92;Amount using qmask$[len(qmask$)-7];
+	! Min Level
+	Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+	Cnvta=pw.MinStkLvl
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	print #0;tab 101;Amount using qmask$[len(qmask$)-9];
+	! average lead time
+	print #0;tab 112;(pw.AvgLeadTime*MthDays) using "####";
+	! average monthly usage
+	print #0;tab 117;(pw.UsgRate) using "######";
+	! ReOrder (Min Purch)
+	Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+	Cnvta=cpid.ReOrderQty
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	print #0;tab 124;Amount using qmask$[len(qmask$)-7];
+	print #0;""
+	lineNo = lineNo + 1
+	print #0; cust.Name$[1,10];
+	print #0;tab 11;cpih.ContractNumber using "########";
+	print #0;tab 23;pr.Desc1$[1,20];
+	print #0;tab 44;"      ";XUNIT$(spr.UMPrice,CH_CC);
+	if (incCost)
+		print #0;tab 55;"      ";XUNIT$(spr.UMCost,CH_CC);
+	end if
+	print #0;tab 66;"   ";qUom$;
+	if cpid.ResStock <> 0
+		print #0;tab 74;"   ";qUom$;
+	end if
+	print #0;tab 82;"     ";qUom$;
+	! Qty on SO
+	print #0;tab 92;cpid.QuantityAllocated using Qmask$[len(Qmask$)-7];
+	! Max Level
+	Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+	Cnvta=pw.MaxStkLvl
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	print #0;tab 101;Amount using qmask$[len(qmask$)-9];
+	print #0;""
+	lineNo = lineNo + 1
+	print #0;tab 23;pr.Desc2$[1,20];
+	if custom_customer$ <> "PIEDMONT"
+		print #0;tab 44;priceFactor$;
+	end if
+	! last sale
+	print #0;tab 82;" ";YYMMDDToPrint$(spr.LastBuyDate);
+	! Qty on PO
+	Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+	Cnvta=pw.QtyOnPO
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	print #0;tab 92;Amount using qmask$[len(qmask$)-7];
+	! min days / months
+	if pw.MinDaysMths>=1
+		print #0;tab 101;pw.MinDaysMths using "######.##M";
+	else
+		tmp = abs(pw.MinDaysMths)
+		if tmp>0 let tmp=int((MthDays * tmp) + .5)
+		print #0;tab 101;tmp using "##########";
+	end if
+	print #0;""
+	lineNo = lineNo + 1
+	! Qty on transfer
+	Cnvtu[0]=0;Cnvtu[1]=spr.UMQty;Cnvtu[2]=1
+	Cnvta=onTransfer
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	print #0;tab 92;Amount using qmask$[len(qmask$)-7];
+	! max days / months
+	if pw.MaxDaysMths>=1
+		print #0;tab 101;pw.MaxDaysMths using "######.##M";
+	else
+		tmp = abs(pw.MaxDaysMths)
+		if tmp>0 let tmp=int((MthDays * tmp) + .5)
+		print #0;tab 101;tmp using "##########";
+	end if
+	print #0;""
+	lineNo = lineNo + 1
+	print #0;""
+	lineNo = lineNo + 1
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintContract
+
+Function YYMMDDToPrint$(dateVal)
+try
+	dim retval$[8]
+	retval$ = "    none"
+	if not(dateVal) exit function retval$
+	tmp2$ = dateVal using "&&&&&&"
+	retval$ = tmp2$[3,4]+"/"+tmp2$[5,6]+"/"+tmp2$[1,2]
+else
+	include "src/callsuberr.inc"
+end try
+end Function retval$
+
+Function PriceTypeDesc$()
+try
+	tmp2$=""
+	select case spr.PrcType
+	case 1 ! percent
+		if spr.SPFact<0 let tmp2$="% DISCOUNT" ELSE let tmp2$="% MARK UP"
+	case 8 ! $ amount
+		If spr.SPFact<0 let tmp2$="$ DISCOUNT" ELSE let tmp2$="$ MARKUP"
+	case 3 ! flat amount
+		let tmp2$="FLAT PRICE"
+	case 2 ! margin
+		let tmp2$="MARGIN"
+	case 7 ! free
+		tmp2$="FREE GOODS"
+	case 4 ! bracket
+		IF spr.SPFact=0 tmp2$=spr.BaseType USING "BRACKET ## "
+		IF spr.SPFact>0 tmp2$=spr.BaseType USING "MARKUP OF BRKT ##"  
+		IF spr.SPFact<0 tmp2$=spr.BaseType USING "MARKDOWN  OF BRKT ##"
+	case 5, 6 ! break/brckt
+		IF spr.SPFact=0 tmp2$=spr.BaseType USING "## BRKT JMP"
+		IF spr.SPFact>0 tmp2$=spr.BaseType USING "MARKUP ## BRKT JMP"  
+		IF spr.SPFact<0 tmp2$=spr.BaseType USING "MARKDOWN ## BRKT JMP"
+		if spr.prctype=6 tmp2$=tmp2$+" OF BREAK TABLE"
+	End select
+	! give full desc
+	If spr.prctype<4 or spr.prctype>6 ! 4-6 gets no additional
+		if spr.BaseType=1 let tmp2$=tmp2$+" OF BASE COST"
+		if spr.BaseType=2 let tmp2$=tmp2$+" OF LOADED COST"
+		if spr.BaseType=3 let tmp2$=tmp2$+" OF LAST COST"
+		if spr.BaseType=4 let tmp2$=tmp2$+" OF LIST PRC 1"
+		if spr.BaseType=5 let tmp2$=tmp2$+" OF LIST PRC 2"
+		if spr.BaseType=6 let tmp2$=tmp2$+" OF LIST PRC 3"
+		if spr.BaseType=7 let tmp2$=tmp2$+" OF LIST PRC 4"
+		if spr.BaseType=8 let tmp2$=tmp2$+" OF LIST PRC 5"
+		if spr.BaseType=9 let tmp2$=tmp2$+" OF LIST PRC 6"
+		if spr.BaseType=10 let tmp2$=tmp2$+" OF SP. COST"
+		if spr.BaseType=11 let tmp2$=tmp2$+" OF SLSM COST"
+		if spr.BaseType=12 let tmp2$=tmp2$+" OF CALC. PRC"
+		if spr.BaseType=13 let tmp2$=tmp2$+" OF REDI COST"
+		if spr.BaseType=14 let tmp2$=tmp2$+" OF REBATE COST"
+	Endif
+else
+	include "src/callsuberr.inc"
+end try
+end Function tmp2$
+
+Function CostTypeDesc$()
+try
+	tmp2$=""
+	select case spr.SCostType
+	case 1 ! percent
+		if spr.SPFact<0 let tmp2$="% DISCOUNT" ELSE let tmp2$="% MARK UP"
+	case 2 ! $ amount
+		If spr.SPFact<0 let tmp2$="$ DISCOUNT" ELSE let tmp2$="$ MARKUP"
+	case 3 ! flat amount
+		let tmp2$="FLAT COST"
+	case 4 ! Standard costing
+		let tmp2$="STANDARD COST"
+	case 5 ! free
+		tmp2$="FREE GOODS"
+	End select
+	! give full desc
+	If spr.SCostType=1 or spr.SCostType=2
+		if spr.SCostBase=1 let tmp2$=tmp2$+" OF BASE COST"
+		if spr.SCostBase=2 let tmp2$=tmp2$+" OF LOADED COST"
+		if spr.SCostBase=3 let tmp2$=tmp2$+" OF LAST COST"
+		if spr.SCostBase=4 let tmp2$=tmp2$+" OF REBATE COST"
+		if spr.ScostBase=5 let tmp2$=tmp2$+" OF REDI COST"
+	Endif
+else
+	include "src/callsuberr.inc"
+end try
+end Function tmp2$
+
+
+Function AmountOnTransfer(productRec, transWH)
+try
+	dim 3%,onTransfer ! net amount of ins and outs
+
+	onTransfer = 0
+	K_ordl$ = " ",K_ordl$ \ K_ordl$[1,6] = productRec Using "######"
+	do
+		Search #ch_ordl,3,2;K_ordl$,R_ordl,E \ If E exit do
+		If productRec <> val(K_ordl$[1,6]) exit do 
+		Mat Read #ch_ordl,R_ordl,8;L3;
+		MAT READ #ch_ordl,R_ordl,16;L4;
+		Mat Read #ch_ordl,R_ordl,168;L7;
+		If L3[0] <> 0 Goto SkipOrderLine ! only inv items
+		foundHeader = 0
+		For ST = 1 To 7
+			K_ordh$[1,2] = ST Using "##"
+			K_ordh$[3,8] = K_ordl$[7,12]
+			Search #CH_ORDH,2,1;K_ordh$,R_ordh,E !!-!! \ If E > 1 Gosub ERR_SEARCH
+			If not(E)
+				foundHeader = 1
+				ST = 7 ! force loop to terminate
+				Mat Read #CH_ORDH,R_ordh,104;H5;
+				mat read #CH_ORDH,R_ordh,486;OWHT;
+				! determine whse (if not line level, header)
+				IF L4[3]<1 OR L4[3]>99
+					MAT READ #CH_ORDH,R_ordh,78;H4;
+					LET L4[3]=H4[2]
+				ENDIF
+			end if
+		Next ST
+		if not(foundHeader) goto SkipOrderLine
+		If H5[7] <> 16 Goto SkipOrderLine
+		if owht[0]=1 ! only approved
+			! coming in
+			if transWH = h5[11] onTransfer = onTransfer + (L7[2] - L7[0])
+			! going out
+			if transWH = l4[3] onTransfer = onTransfer - (L7[2] - L7[0])
+		Endif
+		SkipOrderLine:
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end function onTransfer
+
+end

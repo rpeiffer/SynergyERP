@@ -1,0 +1,1040 @@
+!"serp375" === description  synergy erp Deals Maintenance
+! 
+! loadsave -w -n 100,10 -o prog/dxport/serp375.dl4 src/serp375.src
+!
+!  02/26/2010 started
+!  - Unibasic program: po375 ! AUTHOR: DD ??/??/??
+!         04/09/1997 - DATE COMPARES JULIAN
+!         06/11/97 jlp cct104022 do not allow zero free or with qty
+! Last Updated: zyc 05/21/02 cct157488
+!               zyc 10/16/03 cct172456 problem with copy function 
+!                                      when DL1[3]=-1 and DL1[1]=2 
+!
+include "src/copyright.inc"
+!
+include "src/inc/filedeals.inc" ! deals file
+include "src/inc/fileprod.inc"
+include "src/inc/filea80vm.inc" ! vendor
+include "src/inc/fileccodes.inc" ! UM Codes
+!
+include "src/inc/sql_prod.inc" ! SQL defintions
+!
+
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,JDate$,FormatDate2$
+Declare External Function chkDteFrmt$,ChkAltItem$
+Declare External Function OpenMySQLMirror ! new function
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,UMDList
+Declare External Function getumrec,ChkPrdUM
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian, JulianToDate
+Declare Intrinsic Function findchannel
+
+! internal subs/function
+Declare Sub OpenFiles,Sndsys,CopyDeals
+Declare Sub updatelog,Deallist,Dealhead
+Declare Sub GetDeal,DelDeal,SbmDeal,calcnewnpo
+
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],X$[20]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim Prod$[12],Vend$[10],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],UA2$[50],CMDKey$[60]
+	Dim Mask34$[10]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,PRC,COMM_LEV,CMD,PTC,CMH,cpdeal
+	dim 1%,cost_lev[4],Whse,debug,cnvtu[2],2%,Q0[1]
+	Dim 2%,X2[9],UA2[2],CurDate,JDate[5]
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,PRR,VNR,DLR,PTR
+	Dim 3%,R[99],X3[9],O1,UB0[16],Amount,CNVTA
+	dim List$[maxcnt,500] ! for .net (larger size - ZLines)
+	dim slist$[maxcnt,500] ! second list
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/vdeal.log" ! fields for DEBUG
+
+	Dim PR. as prod
+	Dim deal. as deals
+	Dim vend. as a80vm
+	Dim um. as ccodes
+	dim sql_prod. as sql_prod
+
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! call dxopen() ! done in pomenu - for standalone run
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp375"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	Action2$=UCase$(action2$)
+	Action2$=RTrim$(action2$) ! UC and trimmed
+	if debugdetail
+		dmsg$="SERP375 ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$ 
+		if Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	call OpenFiles() ! open all needed files
+	call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	Mask34$="###.####" ! 3.4 mask
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Let Key1$=UserID$+"          " ! space fill it
+	UCC = OpenFile(-9988, intCo) \ if UCC=-1 Error 42
+	Key1$[11]="" ! cut to length
+	Search #UCC,2,1;Key1$,Rec,E
+	If Not(E)
+	  Let SCR=Rec
+	  Mat Read #ucc,scr,200;UA2;
+	  Mat read #ucc,scr,336;Ua2$;
+	  Read #ucc,scr,394;comm_lev;
+	Else
+	  Let SCR=0;comm_lev=0 ! 
+	  UA2[0]=0;UA2$=" ",UA2$
+	Endif
+	Close #UCC
+	! GET additional user data flags
+	REM UNPACK A2[0] TO B0[]                         
+	FOR X1=0 TO 15                                          
+		LET O1=2^X1 \ LET M1=1
+		! CALL $LOGIC,M1,O1,A2[0],B0[X1] ! ub
+		Call Logic(m1,O1,UA2[0],UB0[X1])
+		LET UB0[X1]=SGN(UB0[X1])
+	NEXT X1  
+	tmp$=Tim(8) using "&&"
+	tmp$[3]=TIM(9) using "&&"
+	tmp$[5]=TIM(10) using "&&"
+	CurDate=tmp$[1,6] ! yymmdd
+	! call dxsave(0,"tmp/pdealsv.txt!") ! save web send data
+	cpdeal=0 ! not copying
+	ReturnStatus=0
+	Message$="Action 1 not found"
+  select case action1$
+
+    Case "SYSDATA" ! sys flags,droplists					doc=PD375-GetSysData.doc
+		returnstatus=1
+		message$="OK"
+		Call Sndsys()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent flags & droplists" \ Call updatelog(debug)
+		Endif
+		! end of sysdata
+	Case "GETPROD" ! prod data								doc=PD375-GetProdData.doc
+		returnstatus=1
+		message$="OK"
+		call dxget("PRODID",tmp$)
+		Prod$=UCase$(RTrim$(tmp$))
+		If Prod$<>""
+			tmp$=ChkAltItem$(e$,IntCo,Prod$)
+			If tmp$<>"" If tmp$[1,2]<>"  " let prod$=tmp$ ! has alt item
+		Endif
+		If Prod$<>""
+		  Prod$=prod$+Blank$
+		  If Len(Prod$)>12 let Prod$[13]=""
+		  PRR=filegetProd(e$,PRC,"=",1,Prod$,pr.)
+		  if PRR<=0
+			returnstatus=0
+			message$="Product not found"
+			goto serp375done
+		  Endif
+		Else
+			returnstatus=0
+			message$="No Product Sent"
+			goto Serp375Done
+		End If 
+		Clear List$[]
+		List$[0]=bsdel$,"PRODINFO",fdel$
+		List$[1]="PRODID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+		List$[2]=Prod$,fdel$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.Desc2$),fdel$
+		List$[3]=esdel$
+		call addtostr(e$,rstr$,List$[])
+		! send u/m droplist? Yes let's do it now! assume it's cost um's
+		CALL UMDList(e$,"COST",PRC,PRR,List$[],IntCo,Pr.)
+		call addtostr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Sent Product "+Prod$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of GETPROD
+	Case "GETVEND" ! Vendor data							doc=PD375-GetVendData.doc
+		returnstatus=1
+		message$="OK"
+		Call dxget("VENDID",tmp$)
+		X3=tmp$
+		if x3<=0 or x3>999999 or fra(x3)
+			returnstatus=0
+			message$="Invalid Vendor ID"
+			goto serp375done
+		Endif
+		vend$=X3 Using "######"
+		VNR=filegeta80vm(e$,VNC,"=",1,Vend$,vend.)
+		if VNR<=0
+			RETURNSTATUS=0
+			Message$="Vendor not found"
+			goto serp375done
+		Endif
+		Clear List$[]
+		List$[0]=bsdel$,"VENDINFO",fdel$
+		List$[1]="VENDID",fdel$,"NAME",fdel$
+		List$[2]=Vend$,fdel$,RTrim$(vend.Name$),fdel$
+		List$[3]=esdel$
+		call addtostr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Send Vendor "+Vend$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of GETVEND
+	Case "DEALLIST" ! send deals for Prod/vend				doc=PD375-GetDealList.doc
+		returnstatus=1
+		message$="OK"
+		Call dxget("VENDID",tmp$)
+		X3=tmp$
+		if x3<=0 or x3>999999 or fra(x3)
+			returnstatus=0
+			message$="Invalid Vendor ID"
+			goto serp375done
+		Endif
+		vend$=X3 Using "######"
+		VNR=filegeta80vm(e$,VNC,"=",1,Vend$,vend.)
+		if VNR<=0
+			RETURNSTATUS=0
+			Message$="Vendor not found"
+			goto serp375done
+		Endif
+		Vend=x3
+		call dxget("PRODID",tmp$)
+		Prod$=UCase$(RTrim$(tmp$))
+		If Prod$<>""
+			tmp$=ChkAltItem$(e$,IntCo,Prod$)
+			If tmp$<>"" If tmp$[1,2]<>"  " let prod$=tmp$ ! has alt item
+		Endif
+		If Prod$<>""
+		  Prod$=prod$+Blank$
+		  If Len(Prod$)>12 let Prod$[13]=""
+		  PRR=filegetProd(e$,PRC,"=",1,Prod$,pr.)
+		  if PRR<=0
+			returnstatus=0
+			message$="Product not found"
+			goto serp375done
+		  Endif
+		Else
+			returnstatus=0
+			message$="No Product Sent"
+			goto Serp375Done
+		End If 
+		call deallist()
+		call addtostr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Get Deal List "+Str$(Vend)+Prod$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of DEALLIST
+	Case "GETDEAL" ! deal data							doc=PD375-GetdealData.doc
+		returnstatus=1
+		message$="OK"
+		call DealHead() ! get/set up header/key1$
+		if returnstatus=0 goto serp375done ! a problem with data
+		Call getdeal()
+		call addtostr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Get Deal "+Key1$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of GETdeal
+	Case "SBMDEAL" ! submit deal						doc=PD375-SubmitdealData.doc
+		returnstatus=1
+		message$="OK"
+		call DealHead() ! get/set up header/key1$
+		if returnstatus=0 goto serp375done ! a problem with data
+		Call Sbmdeal()
+		if debugdetail
+			dmsg$="Submit deal "+Key1$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of SBMdeal
+	Case "DELDEAL" ! delete									doc=PDL375-DeleteDealData.doc
+		returnstatus=1
+		message$="OK"
+		call DealHead() ! get/set up header/key1$
+		if returnstatus=0 goto serp375done ! a problem with data
+		Call Deldeal()
+		if debugdetail
+			dmsg$="Delete deal "+Key1$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of DELdeal
+	Case "COPYDEAL" ! copy									doc=PDL375-CopyDealData.doc
+		returnstatus=1
+		message$="OK"
+		! first get existing deal
+		Call DealHead()
+		If returnstatus=0 goto serp375done ! not found
+		! does a get of data for copy in copydeals
+		Call CopyDeals()
+		if debugdetail
+			dmsg$="Deals Copy "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of COPYDEAL
+  End Select
+  Serp375Done: ! finished
+  ! status section                                                       
+  Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)                 
+  Call AddToStr(e$,rstr$,WebStr$)                                        
+  Call SetOutPut(e$,rstr$)       
+  if debugdetail
+		dmsg$="End of Program SERP375" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	PRC = OpenFile(1792,intCo) \ If PRC = -1 Error 42 ! prod RW
+	VNC = OpenFile(-2400,intco) \ if VNC=-1 Error 42 ! vendor
+	CCC = OpenFile(-1728,Intco) \ if CCC=-1 Error 42 ! um codes
+	DLC = Openfile(864,IntCo) \ if DLC=-1 Error 42 ! deals RW
+	whi=Openfile(-2768,IntCo) \ if WHI=-1 error 42 ! whinfo
+	PWC=OpenFile(-1744,IntCo) \ if PWC=-1 error 42 ! prodwhse
+	CMC=Openfile(-2288,IntCo) \ if CMC=-1 Error 42 ! commhead
+	sqlChan = OpenMySQLMirror(e$)
+
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!
+!------------------------------------------------------------------------------------------
+Sub sndsys()
+! send flags & droplists
+ Try
+	dim WDesc$[30],CDesc$[31]
+	Clear List$[]
+	tmpcnt=maxcnt
+	! WHSE LIST (WITH 0=ALL)
+	List$[0]=bsdel$,"WHLIST",fdel$
+	List$[1]="WHSE",fdel$,"NAME",fdel$
+	! List$[2]="0",fdel$,"ALL WHSES",fdel$ ! USED FOR COPY - NO ZERO!!
+	row=2
+	For R=0 to 98 ! so is 1-99
+		Try
+			mat read #WHI,R,4;wdesc$;
+		Else
+			wdesc$=blank$
+		End try
+		tmp$=RTrim$(wdesc$)
+		If tmp$<>""
+			List$[row]=Str$(R+1),fdel$,tmp$,fdel$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next R
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	clear list$[]
+	! send deal type
+	List$[0]=bsdel$,"DEALTYPE",fdel$
+	List$[1]="TYPE",fdel$,"DESC",fdel$
+	List$[2]="1",fdel$,"Percent off",fdel$
+	List$[3]="2",fdel$,"Dollars off",fdel$
+	List$[4]="3",fdel$,"Free Goods",fdel$
+	List$[5]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! send copy type list
+	Clear List$[]
+	List$[0]=bsdel$,"COPYTODEAL",fdel$
+	List$[1]="CPTYPE",fdel$,"DESC",fdel$
+	List$[2]="1",fdel$,"Copy by PRODUCT CODE",fdel$
+	List$[3]="2",fdel$,"Copy by COMMODITY CODE",fdel$
+	List$[4]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	clear list$[]
+	! commodity code
+	List$[0]=bsdel$,"COMDLIST",fdel$
+	List$[1]="CMDID",fdel$,"DESC",fdel$
+	row=2
+	Key1$=" ",key1$
+	do
+		search #CMC,3,1;Key1$,R,E
+		if e exit do
+		mat read #cmc,r,0;cdesc$;
+		List$[row]=key1$,fdel$,RTrim$(CDesc$),fdel$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Loop
+	List$[row]=esdel$
+	! calling rtn to addtostr
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndsys
+!
+!------------------------------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Sub GetDeal()
+! send contract data
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	Search #DLC,2,1;Key1$,DLR,E
+	if e Let DLR=0
+	if DLR<=0 ! assume new if missing
+		clear deal.
+		deal.DealUM=pr.UMPurchDefault
+		deal.DiscType=1 ! %
+		deal.FreeUM=deal.dealum
+	Else ! exists
+		read record #DLC,DLR,0;deal.;
+	Endif
+	deal.ProdCode$=Prod$
+	deal.VendID=Vend
+	deal.DealType=1 ! AT ALL TIMES
+	deal.MinUM=MinUM
+	Deal.MinQty=MinQty
+	
+	List$[0]=bsdel$,"DEALDETAIL",fdel$
+	Webstr$="STDATE",fdel$,"ENDDATE",fdel$,"FACTOR",fdel$,"TYPE",fdel$,"UM",fdel$
+	Webstr$=Webstr$,"FREEWITH",fdel$,"FWUM",fdel$,"I2NLVL",fdel$,"NEFLAG",fdel$
+	List$[1]=webstr$
+	tmp$=""
+	if deal.StartDate>30
+		tmp$=PDate$(deal.StartDate)
+	Endif
+	webstr$=tmp$,fdel$
+	tmp$=""
+	if deal.EndDate>30 ! min is 01/01/00
+		tmp$=PDate$(deal.EndDate)
+	Endif
+	webstr$=webstr$,tmp$,fdel$ ! end date
+	if deal.DiscType=1 let x3=deal.Factor
+	if deal.DiscType>1 ! need convert
+		cnvtu[0]=0;cnvtu[1]=deal.FreeUM;cnvtu[2]=1
+		if deal.DiscType=2 let cnvtu[2]=2 ! $ disc
+		cnvta=deal.Factor
+		X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	Endif
+	tmp$=X3 using QMask$ ! there is no convert - use as is
+	webstr$=webstr$,LTrim$(tmp$),fdel$ ! factor
+	if deal.DiscType<1 or deal.DiscType>3 let deal.DiscType=1
+	tmp$=Str$(deal.DiscType)
+	webstr$=webstr$,tmp$,fdel$ ! type
+	tmp$=""
+	if deal.FreeUM and deal.DiscType<>1 let tmp$=XUnit$(deal.FreeUM,ccc)
+	webstr$=webstr$,tmp$,fdel$ ! um (not on %)
+	X3=0
+	if deal.DiscType=3 ! free goods
+		cnvtu[0]=0;cnvtu[1]=deal.DealUM;cnvtu[2]=1
+		cnvta=deal.WithQty
+		x3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		tmp$=X3 using QMask$
+		webstr$=webstr$,LTrim$(tmp$),fdel$
+		tmp$=""
+		if deal.DealUM let tmp$=XUnit$(deal.DealUM,ccc)
+		webstr$=webstr$,tmp$,fdel$
+		tmp$="N" \ if deal.AllowLess let tmp$="Y"
+		webstr$=webstr$,tmp$,fdel$
+	Else ! not free
+		webstr$=webstr$,fdel$,Fdel$,fdel$ ! with & um & less
+	Endif
+    ! end with new or existing flag
+	tmp$="N"
+	if DLR>0 let tmp$="E"
+	webstr$=webstr$,tmp$,fdel$ ! new/existing
+	List$[2]=webstr$
+	row=3
+	List$[row]=esdel$
+	! caller to addtostr
+	Gdealdone: ! done
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Getdeal
+!
+!------------------------------------------------------------------------------------------
+Sub DelDeal()
+! Delete deal data
+ Try
+	dim key2$[60]
+	Search #DLC,2,1;Key1$,DLR,E
+	if e Let DLR=0
+	if DLR<=0 goto DdealDone ! no dir1 no need to delete
+	
+	search #DLC,5,1;key1$,R,E
+	if e
+		returnstatus=0
+		message$="Search Error ",Str$(E)," delete dir 1 ",key1$
+	Endif
+	let e=3;r=DLR
+	Search #DLC,1,0;Key1$,R,E
+	if e
+		returnstatus=0
+		message$="Search Error ",Str$(E)," return record ",Str$(R)
+	Endif
+	call calcnewnpo()
+  DdealDone: ! finished
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Deldeal
+!
+!------------------------------------------------------------------------------------------
+Sub SbmDeal()
+! Submit deal Data
+ Try
+	dim KEY2$[60]
+	Search #DLC,2,1;Key1$,DLR,E
+	if e Let DLR=0
+	if DLR<=0 ! it's new
+		clear deal.
+		deal.DealUM=pr.UMPurchDefault
+		deal.DiscType=1 ! %
+		deal.FreeUM=deal.dealum
+	Else
+		read record #DLC,DLR,0;deal.;
+	Endif
+	deal.ProdCode$=Prod$
+	deal.VendID=Vend
+	deal.DealType=1 ! AT ALL TIMES
+	deal.MinUM=MinUM
+	Deal.MinQty=MinQty
+	deal.nu1$=blank$[1,5] ! not all way
+	call dxget("STDATE",tmp$) \ tmp$=RTrim$(tmp$)
+	if tmp$="0" let tmp$=""
+	if tmp$<>""
+		tmp$=chkDteFrmt$(e$,tmp$)
+	Endif
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	if tmp$<>""
+		tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+		deal.StartDate=tmp1$[3,8]
+	Else
+		let deal.StartDate=0
+	Endif
+	if deal.StartDate=0 let deal.StartDate=CurDate
+	call dxget("ENDDATE",tmp$) \ tmp$=RTrim$(tmp$)
+	if tmp$="0" let tmp$=""
+	if tmp$<>""
+		tmp$=chkDteFrmt$(e$,tmp$)
+	Endif
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	if tmp$<>""
+		tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+		deal.EndDate=tmp1$[3,8]
+	Else
+		let deal.EndDate=0
+	Endif
+	if deal.EndDate=0 let deal.EndDate=591231 ! max jul date
+	x$=deal.StartDate using "&&&&&&"
+	Call DateToJulian(1,X$,X$,E) \ if e let x$=blank$
+	JDate[0]=x$
+	x$=deal.EndDate using "&&&&&&"
+	Call DateToJulian(1,X$,X$,E) \ if e let x$=blank$
+	JDate[1]=x$ \ if deal.EndDate=999999 let jdate[1]=999999
+	if JDate[1]<JDate[0] ! end<start
+		returnstatus=0
+		message$="Invalid Date Range"
+		goto SDealDone
+	Endif
+	call dxget("TYPE",tmp$)
+	x1=tmp$
+	If X1<1 or x1>3 or fra(x1)
+		returnstatus=0
+		message$="Type is invalid"
+		goto sdealdone
+	Endif
+	deal.DiscType=x1
+	call dxget("FACTOR",tmp$) ! convert depends on type
+	x3=tmp$
+	If x3<=0 or x3>9999999.99 or fra(x3*100) ! NO ZERO %/$/FREE!
+		returnstatus=0
+		message$="Factor is invalid"
+		goto SdealDone
+	Endif
+	if deal.DiscType>1 ! $ or qty
+		call dxget("UM",tmp$)
+		tmp$=UCase$(RTrim$(tmp$))
+		X2=GetUMRec(e$,CCC,tmp$,IntCo,Pr.)
+		if x2=0
+			returnstatus=0
+			message$="UM not found"
+			goto sdealdone
+		Endif
+		x1=ChkPrdUM(e$,X2,IntCo,Pr.)
+		if x1=0
+			returnstatus=0
+			message$="UM not on file for product"
+			goto sdealdone
+		Endif
+		deal.FreeUM=x2
+	Else
+		deal.freeum=pr.UMPurchDefault ! to have somethng
+	Endif
+	if deal.DiscType>=2 ! $ or qty - convert factor
+		cnvtu[0]=deal.freeum;cnvtu[1]=0;cnvtu[2]=1
+		if deal.DiscType=2 let cnvtu[2]=2 ! $$
+		cnvta=x3
+		X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	Endif
+	deal.Factor=x3
+	If deal.DiscType=3 ! free goods - 3 more fields
+		call dxget("FREEWITH",tmp$)
+		X3=TMP$
+		If x3<=0 or x3>9999999.99 or fra(x3*100) ! NO 0 WITH qty
+			returnstatus=0
+			message$="Free With Qty is invalid"
+			goto SdealDone
+		Endif
+		call dxget("FWUM",tmp$)
+		tmp$=UCase$(RTrim$(tmp$))
+		X2=GetUMRec(e$,CCC,tmp$,IntCo,Pr.)
+		if x2=0
+			returnstatus=0
+			message$="Free With UM not found"
+			goto sdealdone
+		Endif
+		x1=ChkPrdUM(e$,X2,IntCo,Pr.)
+		if x1=0
+			returnstatus=0
+			message$="Free With UM not on file for product"
+			goto sdealdone
+		Endif
+		deal.DealUM=x2
+		cnvta=x3
+		cnvtu[0]=deal.dealum;cnvtu[1]=0;cnvtu[2]=1
+		X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		deal.WithQty=x3
+		call dxget("I2NLVL",tmp$)
+		deal.AllowLess=0
+		if tmp$="Y" let deal.AllowLess=1
+	Else ! not using
+		deal.WithQty=0
+		deal.DealUM=0
+		deal.AllowLess=0
+	Endif
+	! done - do file stuff
+	if cpdeal goto sdealdone ! no write - just get data for copy
+	If DLR>0 ! existing - assume no key change
+		write record #DLC,DLR,0;deal.;
+	Else ! is new - add record/keys/etc
+		let e=2;r=0
+		search #DLC,1,0;Key1$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error ",Str$(E)," getting new record"
+			goto sdealdone
+		Endif
+		DLR=R
+		search #DLC,4,1;key1$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error ",Str$(E)," adding index 1 ",Key1$
+			goto sdealdone
+		Endif
+		
+		write record #DLC,DLR,0;deal.;
+	Endif
+	call calcnewnpo() 
+	! just status return
+  SdealDone: ! finito
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Sbmdeal
+!
+!------------------------------------------------------------------------------------------
+Sub Dealhead()
+! set up deal key/main data
+ Try
+	CALL dxget("PRODID",tmp$)
+	Prod$=UCase$(RTrim$(tmp$))+Blank$
+	Prod$=prod$+Blank$
+	If Len(Prod$)>12 let Prod$[13]=""
+	PRR=filegetProd(e$,PRC,"=",1,Prod$,pr.)
+	if PRR<=0
+		returnstatus=0
+		message$="Product not found"
+		goto DHKdone
+	Endif
+	call dxget("VENDID",tmp$)
+	if len(tmp$)>6
+		returnstatus=0
+		message$="Invalid entry for quantity"
+		goto DHKDone
+	Endif
+	Vend=tmp$
+	if vend<1 or vend>999999 or fra(vend)
+		returnstatus=0
+		message$="Invalid Vendor ID"
+		goto DHKdone
+	Endif
+	tmp$=Vend Using "######"
+	VNR=filegeta80vm(e$,VNC,"=",1,tmp$,vend.)
+	if VNR<=0 
+		Returnstatus=0
+		message$="Vendor not found"
+		goto DHKDone
+	Endif
+	call dxget("MINQTY",tmp$)
+	if len(tmp$)>10
+		returnstatus=0
+		message$="Invalid entry for quantity"
+		goto DHKDone
+	Endif
+	X3=tmp$ ! hold for convert
+	call dxget("MINUM",tmp$)
+	if len(tmp$)>4
+		returnstatus=0
+		message$="Invalid entry for quantity um"
+		goto DHKDone
+	Endif
+	tmp$=UCase$(RTrim$(tmp$))
+	X2=GetUMRec(e$,CCC,tmp$,IntCo,Pr.)
+	if x2=0
+		returnstatus=0
+		message$="UM not found"
+		goto DHKdone
+	Endif
+	x1=ChkPrdUM(e$,X2,IntCo,Pr.)
+	if x1=0
+		returnstatus=0
+		message$="UM not on file for product"
+		goto DHKdone
+	Endif
+	MinUM=x2
+	cnvtu[0]=MinUm;cnvtu[1]=0;cnvtu[2]=1
+	cnvta=X3
+	MinQty=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	LET KEY1$=" ",KEY1$                      
+	LET KEY1$[1,6]=VEND USING "######"
+	LET KEY1$[7,18]=PROD$[1,12]         
+	LET KEY1$[19,27]=999999999-MinQty USING "#########"
+	DHKDone: ! done
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Dealhead
+!
+!------------------------------------------------------------------------------------------
+Sub Deallist()
+! get list of deals on vend/prod
+  Try
+	clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"EXISTING DEALS",fdel$
+	WEBSTR$="VENDID",FDEL$,"PRODID",FDEL$
+	WEBSTR$=WEBSTR$,"MINQTY",FDEL$,"UM",FDEL$
+	WEBSTR$=WEBSTR$,"TYPE",fdel$
+	List$[1]=webstr$
+	row=2
+	Key1$=" ",key1$
+	LET KEY1$[1,6]=VEND USING "######"
+	LET KEY1$[7,18]=PROD$[1,12]
+	Do
+		search #DLC,3,1;Key1$,R,E
+		if e exit do
+		x2=key1$[1,6] \ if x2<>vend exit do
+		if key1$[7,18]<>Prod$[1,12] exit do
+		read record #DLC,R,0;deal.;
+		webstr$=Str$(deal.VendID),fdel$,RTrim$(deal.ProdCode$),fdel$
+		cnvtu[0]=0;cnvtu[1]=deal.MinUM;cnvtu[2]=1
+		cnvta=deal.MinQty
+		X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		webstr$=webstr$,LTrim$(X3 using QMask$),fdel$
+		tmp$=XUnit$(deal.MinUM,ccc)
+		webstr$=webstr$,tmp$,fdel$
+		x1=deal.DiscType
+		TMP$="Unknown"
+		if x1=1 let tmp$="% Discount"
+		if x1=2 let tmp$="$ Discount"
+		if x1=3 let tmp$="Free Goods"
+		webstr$=webstr$,tmp$,fdel$
+		list$[row]=webstr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Loop
+	List$[row]=esdel$
+	! caller adds to str
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Deallist
+!
+!------------------------------------------------------------------------------------------
+Sub CopyDeals()
+ ! copy deals by 1:prod, 2:commod INTO NEW RECORD
+ ! plus - on PM does copy before submit? so changed/not saved copy is possible?
+  Try
+	Dim CPITEM$[12],SPROD$[12],EPROD$[12]
+	Dim Key3$[60],Key7$[60],CProd$[12],CP$[60]
+	Dim ndeal. as deals ! new deal copy 
+	Dim cpr. as prod ! new deal prod
+	! get/set up curr deal
+	let cpdeal=99 ! flag to get data for copy
+	call sbmdeal() ! gets curr data
+	if returnstatus=0 goto CPDDone ! something awry in submit - cannot proceed
+	Call dxget("CPTYPE",tmp$)
+	x2=tmp$
+	if x2<>1 and x2<>2 
+		Returnstatus=0
+		message$="Please select Product or Commodity Copy"
+		goto CPDDone
+	Endif
+	CMCOPY=0 \ if x2=2 let cmcopy=1
+	if cmcopy ! commodity
+		call dxget("COMMCODE",tmp$)
+		CPitem$=UCase$(tmp$)+Blank$
+		CPItem$[5]=""
+	Else ! product
+		Call dxget("STPROD",tmp$)
+		SProd$=UCase$(tmp$)+Blank$
+		Call dxget("ENDPROD",tmp$)
+		if RTrim$(tmp$)="" let tmp$="}}}}}}"
+		EProd$=UCase$(tmp$)+"}}}}}"+Blank$
+		If EProd$<SProd$
+			returnstatus=0
+			message$="Product Range invalid"
+			goto CPDDone
+		Endif
+		CProd$=SProd$
+	Endif
+	call dxget("WHSE",tmp$)
+	X2=tmp$
+	if x2<=0 or x2>99 or fra(x2)
+		returnstatus=0
+		message$="Warehouse range is 1-99"
+		goto CPDDone
+	Endif
+	CPWhse=x2
+	call dxget("OVERWRITE",tmp$)
+	tmp$=UCase$(RTrim$(tmp$))
+	if tmp$<>"Y" and tmp$<>"N"
+		returnstatus=0
+		message$="Overwrite is Y or N only"
+		goto CPDDone
+	Endif
+	OVWRT=0 \ if tmp$="Y" let OVWRT=1
+	! that's all - start - below is how po375 does it
+	
+	Key3$=" ",key3$
+	key3$=CPItem$ ! commcode
+	CMCLoop: ! 
+	If cmcopy ! thru prod dir 3
+		search #PRC,3,3;key3$,PRR,E
+		if e goto CPFIN
+		If key3$[1,4]<>CPItem$[1,4] goto CPFIN
+		SProd$=Key3$[5,16]
+	Endif
+	Key7$=" ",Key7$
+	Key7$[1,2]=CPWHSE Using "##"
+	Key7$[3,8]=deal.VendID using "######"
+	Key7$[9]=SProd$
+	Search #PWC,2,3;Key7$,PWR,E ! prodwhse dir 3
+	If Not(E) goto CPFFOne
+	! so if by commod - if no existing pwhse - bypass prod
+	PWCLoop: ! loop prodwhse
+	If CMCopy goto CMCLoop ! get next comm/prod
+	Search #PWC,3,3;Key7$,PWR,E
+	if e goto CPFin ! finito
+	X2=Key7$[1,2] \ if x2<>CPWhse Goto CPFin
+	X2=Key7$[3,8] \ if x2<>deal.VendID goto CPFin
+	CPFFone: ! found first one
+	CProd$=key7$[9,20]
+	if not(cmcopy) ! prod range
+		if cprod$<SProd$ goto PWCLoop ! before start
+		if cprod$>EProd$ goto CPFin ! done
+	Endif
+	! ok setup new deal
+	CPRR=filegetprod(e$,PRC,"=",1,CProd$,cpr.)
+	if CPRR<=0 goto PWCLoop ! prod not found
+	Clear ndeal.
+	let ndeal.VendID=deal.VendID ! deal. = from curr deal
+	ndeal.StartDate=deal.StartDate
+	ndeal.EndDate=deal.EndDate
+	ndeal.DealType=deal.DealType
+	ndeal.DiscType=deal.DiscType
+	ndeal.MinUM=cpr.UMPurchDefault
+	ndeal.FreeUM=cpr.UMPurchDefault
+	ndeal.DealUM=cpr.UMPurchDefault
+	if deal.FreeUM=-1 and ndeal.DiscType=2 let ndeal.FreeUM=-1 ! is cwt so new = cwt
+	ndeal.AllowLess=deal.AllowLess
+	ndeal.ProdCode$=CProd$
+	! convert from orig to new
+	call dxget("FACTOR",tmp$) ! convert depends on type
+	x3=tmp$ ! should have been checked earlier on submit
+	cnvtu[0]=ndeal.FreeUM;cnvtu[1]=0;cnvtu[2]=1 ! display to base - new purchasing um
+	if ndeal.DiscType=2 let cnvtu[2]=2 ! $$
+	if ndeal.DiscType>1 ! is $ or qty - % is passthru no convert
+		cnvta=X3
+		X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,CPR.)
+	Endif
+	ndeal.Factor=X3
+	cnvtu[0]=ndeal.MinUM;cnvtu[1]=0;cnvtu[2]=1
+	call dxget("MINQTY",tmp$)
+	X3=tmp$ ! hold for convert - checked earlier
+	cnvta=x3
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,CPR.)
+	ndeal.MinQty=X3
+	cnvtu[0]=ndeal.DealUM;cnvtu[1]=0;cnvtu[2]=1
+	If deal.DiscType=3 ! free goods - 3 more fields
+		call dxget("FREEWITH",tmp$)
+		X3=TMP$ ! checked earlier
+		cnvta=x3
+		X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,CPR.)
+	Else
+		x3=0 ! no freewith
+	Endif
+	ndeal.WithQty=X3
+	LET CP$=" ",CP$                                     
+	LET CP$[1,6]=ndeal.VendID USING "######"               
+	LET CP$[7,18]=ndeal.ProdCode$
+	LET CP$[19,27]=999999999-ndeal.MinQty USING "#########"
+	Search #DLC,2,1;CP$,CDLR,E
+	if not(e) ! exists - overwrite?
+		if Not(OVRWRT) goto PWCLoop ! no overwrite existing
+		
+	Else ! new - always do it
+		let e=2;R=0
+		search #DLC,1,0;CP$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error ",Str$(E)," getting new record ",cp$
+			goto CPDDone
+		endif
+		CDLR=R
+		Search #DLC,4,1;cp$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error ",Str$(E)," inserting new Key ",Cp$
+			goto CPDDone
+		endif
+	Endif
+	write record #DLC,CDLR,0;ndeal.;
+	DLR=CDLR;PRR=CPRR ! set up calc for new deal/prod
+	Call calcnewnpo() ! calc new net po
+	Goto PWCLoop
+	CPFIN: ! copy is done - any more work needed? NO, WE ARE DONE
+	CPDDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! CopyDeals
+!
+!------------------------------------------------------------------------------------------
+Sub calcnewnpo()
+! calcs new net po cost on copy,submit,delete
+  Try
+	Dim Key2$[60]
+	Dim 2%,JDate[5],3%
+	Dim cdeal. as deals ! calc deals
+	Dim npr. as prod
+	dim sql_prod. as sql_prod
+
+	LET JPCDATE=TIM(6)
+	Read record #DLC,DLR,0;deal.;
+	Read record #PRC,PRR,0;npr.;
+	! first get starting point?
+	LET DISC_PER=0;DOL_OFF=0
+	clear cdeal.
+	cnvtu[0]=pr.UMPurchDefault;cnvtu[1]=0;cnvtu[2]=1
+	cnvta=2 ! two? this way in po375!
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,NPR.)
+	LET Key2$=" ",Key2$                                     
+	LET Key2$[1,6]=npr.PrimVend USING "######"                    
+	LET Key2$[7,18]=npr.ProdCode$
+	LET Key2$[19,27]=999999999-(AMOUNT+1) USING "#########"
+	VDLoop: ! loop deals - get lowest min values?
+	Search #DLC,3,1;Key2$,LDLR,E
+	if e goto CNPDone
+	if key2$[7,18]<>npr.ProdCode$ goto CNPDone
+	read record #DLC,LDLR,0;cdeal.;
+	if cdeal.EndDate=0 let cdeal.EndDate=999999 ! was .nu2 (dl2[3])??
+	X$=cdeal.StartDate using "&&&&&&"
+	Call DateToJulian(1,X$,X$,E) \ if e let x$=blank$
+	JDate[0]=x$
+	x$=cdeal.EndDate using "&&&&&&"
+	Call DateToJulian(1,X$,X$,E) \ if e let x$=blank$
+	JDate[1]=x$ \ if cdeal.EndDate=999999 let jdate[1]=999999
+	IF JPCDATE<JDATE[0] OR JPCDATE>JDATE[1] GOTO VDLoop
+	IF cdeal.DiscType=3 GOTO VDLoop
+	IF Cdeal.DiscType=1 LET DISC_PER=Cdeal.Factor
+	IF Cdeal.DiscType=2 LET DOL_OFF=Cdeal.Factor
+	Goto VDLoop
+
+	CNPDone: ! loop done
+	! MAT  READ #3,R3,596;PRPARC                        
+	LET npr.CostNetPO=npr.CostPO-(npr.CostPO*(DISC_PER/100))-DOL_OFF
+	IF Cdeal.DiscType=3 IF Cdeal.WithQty>0                   
+	  LET EXTNET=FNR(npr.CostNetPO*Cdeal.WithQty)            
+	  LET npr.CostNetPO=EXTNET/(Cdeal.WithQty+Cdeal.Factor)    
+	  IF npr.CostNetPO<0 LET npr.CostNetPO=0                  
+	ENDIF                                             
+	!MAT  WRITE #3,R3,596;PRPARC; 
+	!write record #PRC,PRR,0;npr.;
+    !Do not write the product rec
+	!
+	if sqlChan >= 0 ! MySQL enabled and channel opened
+		call prod_DL4SQLConvert(e$,"FROMDL4",NPR.,sql_prod.,PRR)
+		e = prod_SQLAddUpdate(e$,sqlChan,sql_prod.) ! mode="a" or "c"
+		if e <> 1 ! returns the number of records add/updated/deleted
+			error 11000 ! do bad update stuff
+		end if
+	end if
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! calcnewnpo
+!
+!------------------------------------------------------------------------------------------

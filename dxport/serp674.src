@@ -1,0 +1,823 @@
+!"serp674" === description  synergy erp Commodity Maintenance
+! 
+! loadsave -w -n 100,10 -o prog/dxport/serp674.dl4 src/serp674.src
+!  07/09/2009 started
+!
+include "src/copyright.inc"
+!
+include "src/inc/filecommhead.inc" ! commodity header
+include "src/inc/fileprod.inc"
+include "src/inc/filecommodity.inc" ! commodity (price type)
+include "src/inc/fileprtypefle.inc" ! price type
+
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,JDate$,FormatDate2$
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian, JulianToDate
+
+! internal subs/function
+Declare Sub OpenFiles,UpdateLog,sndsys
+Declare Sub SndComd,DelComd,CPCPT
+Declare Sub SbmComdH,SbmComdD
+
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],X$[20]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim Prod$[12],Cmdty$[10],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],UA2$[50],CMDKey$[60]
+	Dim Mask34$[10]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,PRC,COMM_LEV,CMD,PTC,CMH
+	dim 1%,cost_lev[4],Whse,debug,cnvtu[2],2%,Q0[1]
+	Dim 2%,X2[9],UA2[2]
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,PRR,CMR,CDR,PTR
+	Dim 3%,R[99],O1,UB0[16],Amount,CNVTA
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim slist$[maxcnt,1000] ! second list
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/ccm.log" ! fields for DEBUG
+
+	Dim PR. as prod
+	Dim cmh. as commhead
+	Dim cmd. as commodity
+	Dim prt. as prtypefle
+
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! call dxopen() ! done in fmmenu - for standalone run
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp674"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	Action2$=UCase$(action2$)
+	Action2$=RTrim$(action2$) ! UC and trimmed
+	if debugdetail
+		dmsg$="SERP674 ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$ 
+		if Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	call OpenFiles() ! open all needed files
+	call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	! P9$[10,10]="N" ! a test only
+	Mask34$="###.####" ! 3.4 mask
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Let Key1$=UserID$+"          " ! space fill it
+	UCC = OpenFile(-9988, intCo) \ if UCC=-1 Error 42
+	Key1$[11]="" ! cut to length
+	Search #UCC,2,1;Key1$,Rec,E
+	If Not(E)
+	  Let SCR=Rec
+	  Mat Read #ucc,scr,200;UA2;
+	  Mat read #ucc,scr,336;Ua2$;
+	  Read #ucc,scr,394;comm_lev;
+	Else
+	  Let SCR=0;comm_lev=0 ! 
+	  UA2[0]=0;UA2$=" ",UA2$
+	Endif
+	Close #UCC
+	! GET additional user data flags
+	REM UNPACK A2[0] TO B0[]                         
+	FOR X1=0 TO 15                                          
+		LET O1=2^X1 \ LET M1=1
+		! CALL $LOGIC,M1,O1,A2[0],B0[X1] ! ub
+		Call Logic(m1,O1,UA2[0],UB0[X1])
+		LET UB0[X1]=SGN(UB0[X1])
+	NEXT X1   
+	! call dxsave(0,"tmp/cmcsv.txt!") ! save web send data
+	ReturnStatus=0
+	Message$="Action 1 not found"
+  select case action1$
+
+    Case "SYSDATA" ! sys flags,droplists					doc=COMD-GetSysData.doc
+		returnstatus=1
+		message$="OK"
+		Call Sndsys()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent flags & droplists" \ Call updatelog(debug)
+		Endif
+		! end of sysdata
+	Case "GETCOMM" ! comm data								doc=COMD-GetCommodity.doc
+		returnstatus=1
+		message$="OK"
+		call SndComd()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent Commodity "+Cmdty$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of GETCOMM
+	Case "DELCOMM" ! commod delete							doc=COMD-DeleteCommodity.doc
+		returnstatus=1
+		message$="OK"
+		call DelComd()
+		if debugdetail
+			dmsg$="Delete Commodity "+Cmdty$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of DELCOMM
+	Case "CPYCOMM" ! copy ptypes							doc=COMD-CopyCommodity.doc
+		returnstatus=1
+		message$="OK"
+		if p9$[10,10]<>"Y"
+			returnstatus=0
+			Message$="Not Using Matrix Pricing"
+			Goto serp674done
+		Endif
+		Call CPCPT()
+		if debugdetail
+			dmsg$="Copy into Commodity "+Cmdty$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of DELCOMM
+	Case "SBMCOMMH" ! header changes						doc=COMD-SubmitCommodityHead.doc
+		returnstatus=1
+		message$="OK"
+		Call SbmComdH()
+		if debugdetail
+			dmsg$="Submit Header Commodity "+Cmdty$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of SBMCOMMH
+	Case "SBMPRTYPE" ! detail price type					doc=COMD-SubmitCommodityLine.doc
+		returnstatus=1
+		message$="OK"
+		if p9$[10,10]<>"Y"
+			returnstatus=0
+			Message$="Not Using Matrix Pricing"
+			Goto serp674done
+		Endif
+		Call SbmComdD()
+		if debugdetail
+			dmsg$="Submit PTDetails Commodity "+Cmdty$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! call programdump("tmp/cmclog1!","")
+		! end of SBMPRTYPE
+  End Select
+  Serp674Done: ! finished
+  ! status section                                                       
+  Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)                 
+  Call AddToStr(e$,rstr$,WebStr$)                                        
+  Call SetOutPut(e$,rstr$)       
+  if debugdetail
+		dmsg$="End of Program SERP674" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	PRC = OpenFile(-1792,intCo) \ If PRC = -1 Error 42 ! prod
+	CMH = OpenFile(2288,intco) \ if CMH=-1 Error 42 ! commhead
+	CMD = OpenFile(9943,Intco) \ if CMD=-1 Error 42 ! commodity
+	PTC = openFile(-752,IntCo) \ if PTC=-1 Error 42 ! price type
+
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!
+!------------------------------------------------------------------------------------------
+Sub sndsys()
+! send flags & droplists
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"FLAGS",fdel$
+	List$[1]="PTPFLAG",fdel$,"PTUPFLAG",fdel$,"PRCRND",fdel$,"COMMISS",fdel$
+	row=2
+	tmp$=P9$[10,10] \ if tmp$<>"Y" Let tmp$="N"
+	webstr$=tmp$,fdel$ ! use matrix pricing(price types)
+	tmp$=p60$[50,50] \ if p9$[10,10]<>"Y" let tmp$="N"
+	webstr$=webstr$,tmp$,fdel$ ! upcrg,brktbl
+	tmp$="N" \ if p61$[50,50]="Y" Let tmp$="Y"
+	webstr$=webstr$,tmp$,fdel$ ! comm price round
+	tmp$="N" \ if comm_lev=1000 let tmp$="Y"
+	webstr$=webstr$,tmp$,fdel$ ! comm view/edit
+	List$[row]=webstr$
+	row=row+1
+	If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	List$[row]=esdel$ ! end of section
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	Clear List$[]
+	! send a commodity code list
+	call filedroplistcommhead(e$,list$[],tmpcnt,CMH)
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! send pricetype list (HAS TO SEND 1-99 and (rest if desc))
+	Clear List$[]
+	List$[0]=bsdel$,"PRTYPEFLE",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	row=2
+	If p9$[10,10]="Y" ! uses matrix price
+		SAll=1 ! send all for 1-99, then just active
+		X2=CHF(PTC)-1
+		for r=1 to x2
+			if R>99 let SAll=0
+			Try
+				read record #PTC,R,0;prt.;
+			Else
+				clear prt.
+			End try
+			tmp$=RTrim$(prt.Desc$)
+			if SALL or tmp$<>"" ! send all
+				if SALL and tmp$="" Let tmp$="No Desc - PT "+Str$(R)
+				Webstr$=Str$(R),fdel$,str$(R)," - ",tmp$,fdel$
+				List$[row]=webstr$
+				row=row+1
+				If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			Endif
+		Next R
+	Endif
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! send base type
+	Clear List$[]
+	List$[0]=bsdel$,"BASETYPE",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	row=2
+	If P9$[10,10]="Y" ! uses matrix
+		List$[row]="0",fdel$,"ENTERED LIST PRICE #",fdel$
+		row=row+1
+		List$[row]="1",fdel$,"LOAD COST",fdel$
+		row=row+1
+		List$[row]="2",fdel$,"PO COST",fdel$
+		row=row+1
+		List$[row]="3",fdel$,"LP #1",fdel$
+		row=row+1
+		List$[row]="4",fdel$,"LP #2",fdel$
+		row=row+1
+		List$[row]="5",fdel$,"LP #3",fdel$
+		row=row+1
+		List$[row]="6",fdel$,"LP #4",fdel$
+		row=row+1
+		List$[row]="7",fdel$,"LP #5",fdel$
+		row=row+1
+		List$[row]="8",fdel$,"LP #6",fdel$
+		row=row+1
+		List$[row]="9",fdel$,"BASE COST",fdel$
+		row=row+1
+		List$[row]="10",fdel$,"LOAD 2",fdel$
+		row=row+1
+	Endif
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! send Rounding type
+	Clear List$[]
+	List$[0]=bsdel$,"PRICERND",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	List$[2]="0",fdel$,"NO ROUNDING",fdel$
+	row=3
+	if p61$[50,50]="Y"
+		List$[row]="1",fdel$,"Penny",fdel$
+		row=row+1
+		List$[row]="2",fdel$,"Nickel",fdel$
+		row=row+1
+		List$[row]="3",fdel$,"9 Cents",fdel$
+		row=row+1
+		List$[row]="4",fdel$,"Dime",fdel$
+		row=row+1
+		List$[row]="5",fdel$,"Quarter",fdel$
+		row=row+1
+		List$[row]="6",fdel$,"Half Dol",fdel$
+		row=row+1
+		List$[row]="7",fdel$,"99 Cents",fdel$
+		row=row+1
+		List$[row]="8",fdel$,"Dollar",fdel$
+		row=row+1
+	Endif
+	List$[row]=esdel$
+	! calling rtn to addtostr
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndsys
+!
+!------------------------------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Sub SndComd()
+! send commodity data
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	Call dxget("COMDTY",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Commodity Code Passed"
+		goto GComdone
+	Endif
+	Cmdty$=UCase$(RTrim$(tmp$))+Blank$
+	Cmdty$[5]="" ! cut to length
+	CMHR=filegetcommhead(e$,CMH,"=",1,Cmdty$,cmh.)
+	if CMHR<=0 Clear cmh. ! for new id
+	List$[0]=bsdel$,"COMDHEAD",fdel$
+	Webstr$="COMDTY",fdel$,"DESC",fdel$,"REMARK",fdel$,"COMM",fdel$,"PRCRND",fdel$
+	Webstr$=Webstr$,"ALLWDEL",fdel$,"NEWCOMD",fdel$,"DISCCAP",fdel$
+	List$[1]=webstr$
+	cmh.code$=Cmdty$ ! in case new or missing
+	Webstr$=cmh.Code$,fdel$,RTrim$(cmh.CodeDescription$),fdel$
+	webstr$=webstr$,RTrim$(cmh.Remarks$),fdel$
+	if comm_lev=1000 let tmp$=cmh.Commission using "###.##" Else let tmp$="0"
+	webstr$=webstr$,tmp$,fdel$
+	tmp$=Str$(cmh.PriceRoundFactor) ! will be zero if p61$[50,50]<>"Y"?
+	webstr$=webstr$,tmp$,fdel$
+	CMDKey$=" ",CMDKey$
+	CMDKey$[1,4]=Cmdty$
+	PRR=filegetprod(e$,PRC,">",3,CMDKey$,pr.)
+	if CMDkey$[1,4]<>Cmdty$ let tmp$="Y" Else let tmp$="N"
+	If PRR<=0 let tmp$="Y"
+	Webstr$=webstr$,tmp$,fdel$ ! used on product
+	tmp$="N" \ if cmhr<=0 let tmp$="Y"
+	Webstr$=webstr$,tmp$,fdel$ ! Is a new commodity Y/N
+	Webstr$=webstr$,str$(cmh.disccap),fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	Clear List$[]
+	List$[0]=bsdel$,"PRTPLIST",fdel$
+	Webstr$="COMDTY",fdel$,"PRTYPE",fdel$,"PTDESC",fdel$
+	webstr$=webstr$,"BASE",fdel$,"MULT",fdel$,"BRK",fdel$
+	webstr$=webstr$,"UCTYPE",fdel$,"UCVALUE",fdel$,"BTOVR",fdel$
+	List$[1]=webstr$
+	row=2
+	If P9$[10,10]="Y"
+		CMDKey$=" ",CMDKey$
+		CMDKey$[1,4]=Cmdty$
+		Do
+			CMDR=filegetcommodity(e$,CMD,">",1,cmdkey$,cmd.)
+			If CMDR<=0 Exit do
+			If CMDkey$[1,4]<>Cmdty$ exit do
+			! should there be a check for any data (ie: bypass no base,mult,btyn?)
+			! we'll start with no chk like PM 674 does
+			Webstr$=cmd.CommodityCode$,fdel$
+			X2=Cmdkey$[5] ! cmd.PriceType$ (has bad data!?)
+			if X2<1 or x2>999 goto bppt
+			webstr$=webstr$,Str$(x2),fdel$
+			Try 
+				read record #PTC,X2,0;prt.;
+			Else
+				clear prt.
+			End Try
+			Tmp$=RTrim$(prt.Desc$)
+			if tmp$="" let tmp$="No Desc - PT "+Str$(x2)
+			webstr$=webstr$,tmp$,fdel$
+			Webstr$=webstr$,Str$(cmd.CommodityBase),fdel$
+			Webstr$=webstr$,LTrim$(cmd.Multiplier Using Mask34$),fdel$
+			tmp$="N" \ if cmd.BreakTableYM<>0 let tmp$="Y"
+			webstr$=webstr$,tmp$,fdel$
+			if p60$[50,50]="Y" ! has upcharge & override brktbl
+				tmp$="%" \ if cmd.UpchargeType$="$" let tmp$="$"
+				webstr$=webstr$,tmp$,fdel$
+				webstr$=webstr$,LTrim$(cmd.UpchargeFactor using QMask$),fdel$
+				webstr$=webstr$,Str$(cmd.BreakTbl),fdel$
+			Else ! does not have
+				webstr$=webstr$,"",fdel$,"",fdel$,"",fdel$
+			Endif
+			List$[row]=webstr$
+			row=row+1
+			If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		 BPPT: ! bypass invalid
+		Loop
+	Endif
+	List$[row]=esdel$
+	! caller to addtostr
+	GComdone: ! done
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndComd
+!
+!------------------------------------------------------------------------------------------
+Sub DelComd()
+! Delete commodity data
+ Try
+	Call dxget("COMDTY",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Commodity Code Passed"
+		goto DComdone
+	Endif
+	Cmdty$=UCase$(RTrim$(tmp$))+Blank$
+	Cmdty$[5]="" ! cut to length
+	CMHR=filegetcommhead(e$,CMH,"=",1,Cmdty$,cmh.)
+	if CMHR<=0 goto DComDone: ! for new id
+	! check prod first!
+	CMDKey$=" ",CMDKey$
+	CMDKey$[1,4]=Cmdty$
+	PRR=filegetprod(e$,PRC,">",3,CMDKey$,pr.)
+	if CMDkey$[1,4]<>Cmdty$ let tmp$="Y" Else let tmp$="N"
+	If PRR<=0 let tmp$="Y"
+	If tmp$="N" ! cannot delete
+		returnstatus=0
+		Message$="Cannot delete "+Cmdty$+". Used in Product File"
+		Goto DComDone
+	Endif
+	! okay - can & will delete it
+	! first the commodity file
+	CMDKey$=" ",CMDKey$
+	CMDKey$[1,4]=Cmdty$
+	Do
+		CMDR=filegetcommodity(e$,CMD,">",1,cmdkey$,cmd.)
+		If CMDR<=0 Exit do
+		If CMDkey$[1,4]<>Cmdty$ exit do
+		! as bad data - use search to delete
+		Search #CMD,5,1;CMDKey$,R,E
+		If E
+			returnstatus=0
+			Message$="Search Error "+Str$(E)+" deleting "+Cmdkey$
+			goto DComDone
+		Endif
+		Let E=3;R=CMDR
+		Search #CMD,1,0;Cmdkey$,R,E
+		If E
+			returnstatus=0
+			Message$="Search Error "+Str$(E)+" returning record "+Cmdkey$
+			goto DComDone
+		Endif
+	Loop
+	! okay now commhead - use fileupdate
+	R=0
+	R=fileupdatecommhead(e$,CMH,"d",CMHR,cmh.)
+	if R<>0
+		Returnstatus=0
+		Message$="Search Error "+Str$(R)+" deleting "+Cmdty$
+	Endif
+  DComDone: ! finished
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DelComd
+!
+!------------------------------------------------------------------------------------------
+Sub CPCPT()
+! copy PTypes from 1 commod to another
+ Try
+	Dim CPComd$[10],CPCKey$[60]
+	Dim ccmd. as commodity
+	Dim ccmh. as commhead
+	Call dxget("COMDTY",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Commodity Code Passed"
+		goto CPComDone
+	Endif
+	Cmdty$=UCase$(RTrim$(tmp$))+Blank$
+	Cmdty$[5]="" ! cut to length
+	CMHR=filegetcommhead(e$,CMH,"=",1,Cmdty$,cmh.)
+	if CMHR<=0 ! New? Missing?
+		ReturnStatus=0
+		Message$="Commodity "+Cmdty$+" not found"
+		goto CPComDone: ! for new id
+	Endif
+	Call dxget("CPFROM",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO From Commodity Code Passed"
+		goto CPComDone
+	Endif
+	CPComd$=UCase$(RTrim$(tmp$))+Blank$
+	CPComd$[5]="" ! cut to length
+	if cpcomd$[1,4]=Cmdty$[1,4] ! copy yourself? NO
+		returnstatus=0
+		Message$="Cannot copy from same code"
+		goto CPComDone
+	Endif
+	CCMHR=filegetcommhead(e$,CMH,"=",1,CPComd$,ccmh.)
+	if CMHR<=0 ! New? Missing?
+		ReturnStatus=0
+		Message$="Commodity "+CPComd$+" not found"
+		goto CPComDone: ! for new id
+	Endif
+	call dxget("OVRWRT",tmp$)
+	tmp$=RTrim$(UCase$(tmp$))
+	if tmp$<>"Y" and tmp$<>"N"
+		returnstatus=0
+		Message$="Overwrite existing must be Y or N"
+		goto CPComDone
+	Endif
+	OWExst=0 \ if tmp$="Y" let OWExst=1
+	! will get ALL from CPComd & put into cmdty
+	CPCKey$=" ",CPCKey$
+	CPCKey$[1,4]=CPComd$
+	Do
+		CCMDR=filegetcommodity(e$,CMD,">",1,CPCKey$,ccmd.)
+		If CCMDR<=0 exit do
+		If CPCkey$[1,4]<>CPComd$ Exit do
+		CMDKey$=CPCKey$
+		CMDKey$[1,4]=Cmdty$
+		CMDR=filegetcommodity(e$,CMD,"=",1,CMDKey$,cmd.)
+		If CMDR>0 And OWExst=0 goto BPCCpy ! no overwrite
+		! ok now move stuff in
+		clear cmd. ! start with clean slate
+		cmd.CommodityCode$=Cmdty$
+		cmd.sOpen$=blank$
+		cmd.PriceType$=CPCKey$[5,7]
+		cmd.sOpen2$=blank$
+		cmd.CommodityBase=ccmd.CommodityBase
+		cmd.Multiplier=ccmd.Multiplier
+		cmd.BreakTableYM=ccmd.BreakTableYM
+		cmd.UpchargeType$=ccmd.UpchargeType$
+		cmd.UpchargeFactor=ccmd.UpchargeFactor
+		cmd.BreakTbl=ccmd.BreakTbl
+		cmd.sOpen3$=blank$
+		cmd.BlankForKey$=blank$
+		if cmdr>0 ! existing
+			Write Record #CMD,CMDR,0;cmd.;
+		Else ! new
+			CMDR=fileupdatecommodity(e$,CMD,"a",R,cmd.)
+			If CMDR<0
+				ReturnStatus=0
+				Message$="Search Error "+Str$(CMDR)+" adding "+CMDKey$
+				Goto CPComDone
+			Endif
+		Endif
+	 BPCCpy: ! bypass
+	Loop
+  CPComDone: ! finito
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! CPCPT
+!
+!------------------------------------------------------------------------------------------
+Sub SbmComdH()
+! submit head data (in case flag =N)
+ Try
+	Call dxget("COMDTY",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Commodity Code Passed"
+		goto SBComDone
+	Endif
+	Cmdty$=UCase$(RTrim$(tmp$))+Blank$ ! what of leading spaces?
+	Cmdty$[5]="" ! cut to length
+	CMHR=filegetcommhead(e$,CMH,"=",1,Cmdty$,cmh.)
+	if CMHR<=0 ! New? Missing?
+		clear cmh.
+	Endif
+	cmh.Code$=cmdty$
+	cmh.NotUsed$=blank$
+	cmh.Spare$[1,5]=blank$ ! no complete fill -
+	CMH.SPARE$[6]="" ! CUT IT
+	call dxget("DESC",tmp$)
+	If RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="MUST HAVE A DESCRIPTION!"
+		goto SBComDone
+	Endif
+	cmh.CodeDescription$=tmp$+Blank$
+	call dxget("REMARK",tmp$)
+	cmh.Remarks$=tmp$+Blank$
+	call dxget("COMM",tmp$)
+	If Comm_lev=1000 ! can edit
+		x2=tmp$
+		IF X2<0 or X2>99 OR FRA(X2)>.99
+			returnstatus=0
+			Message$="INVALID COMMISSION"
+			GOTO SBComDone
+		Endif
+		cmh.Commission=tmp$
+	Endif
+	Call dxget("PRCRND",tmp$)
+	if p61$[50,50]="Y" ! is using
+		x2=tmp$
+		if x2<0 or x2>8 or fra(x2)
+			Returnstatus=0
+			Message$="INVALID PRICE ROUND ID"
+			goto SBComDone
+		Endif
+		cmh.PriceRoundFactor=tmp$
+	Endif
+	Call dxget("DISCCAP",tmp$)
+	x2=tmp$
+	if x2<0 or x2>99.99
+		let returnstatus=0
+		let message$="Invalid Discount Cap % "
+		goto SBComDone
+	endif
+	let cmh.disccap=x2
+	! got the info
+	If CMHR>0 ! has existing
+		Write Record #CMH,CMHR,0;cmh.;
+	Else ! new
+		CMHR=0
+		R=fileupdatecommhead(e$,CMH,"a",CMHR,cmh.)
+		If R<0
+			ReturnStatus=0
+			Message$="Search Error "+Str$(R)+" on add commhead record"
+		Endif
+	Endif
+  SBComDone: ! finished
+ else
+	include "src/callsuberr.inc"
+  end try
+end sub ! SbmComdH
+!
+!------------------------------------------------------------------------------------------
+Sub SbmComdD()
+ Try
+	Call dxget("COMDTY",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Commodity Code Passed"
+		goto SBComPTDone
+	Endif
+	Cmdty$=UCase$(RTrim$(tmp$))+Blank$
+	Cmdty$[5]="" ! cut to length
+	CMHR=filegetcommhead(e$,CMH,"=",1,Cmdty$,cmh.)
+	if CMHR<=0 ! New? Missing?
+		ReturnStatus=0
+		Message$="Commodity "+cmdty$+" Header Not Found"
+		Goto SBComPTDone
+	Endif
+	! unsure how submitted (one at a time?) multi?
+	call dxget("PRTYPE",tmp$) ! i guess one
+	X2=tmp$
+	if x2<1 or x2>999 or fra(x2)
+		returnstatus=0
+		Message$="Invalid Price Type"
+		Goto SBComPTDone
+	Endif
+	PRType=x2
+	CMDKey$=" ",CMDKey$
+	CMDKey$[1,4]=cmdty$
+	CMDKey$[5,7]=PRType Using "###"
+	Cmdkey$[9]="" ! cut at 8
+	CMDR=filegetcommodity(e$,CMD,"=",1,CMDKey$,cmd.)
+	If CMDR<0
+		clear cmd.
+	Endif
+	call dxget("EDTTYPE",tmp$) ! what we doing? ADD,EDIT,DELETE?
+	tmp$=UCase$(RTrim$(tmp$))
+	If tmp$="DELETE" ! just checking for DELETE
+		delrec=9 ! so knows its DELETE
+		goto DelRec
+	Endif
+	! per committee - no adding PT's not defined
+	Try
+		read record #PTC,PRType,0;prt.;
+	else
+		clear prt.
+	End Try
+	tmp$=RTrim$(prt.Desc$)
+	if tmp$="" and CMDR<=0 ! no ptdesc on add
+		returnstatus=0
+		Message$="Price Type not defined"
+		Goto SBComPTDone
+	Endif	
+	cmd.CommodityCode$=cmdkey$[1,4]
+	cmd.PriceType$=Cmdkey$[5,7]
+	cmd.sOpen$=blank$
+	cmd.sOpen2$=blank$
+	cmd.sOpen3$=blank$
+	cmd.BlankForKey$=blank$
+	call dxget("BASE",tmp$)
+	x2=tmp$
+	if x2<0 or x2>10
+		returnstatus=0
+		message$="Invalid Base Type"
+		goto SBComPTDone
+	Endif
+	cmd.CommodityBase=x2
+	Call dxget("MULT",tmp$)
+	x3=tmp$
+	if cmd.CommodityBase=0
+		if x3<0 or x3>6
+			returnstatus=0
+			message$="You must select List Price 1-6"
+			goto SBComPTDone
+		Endif
+	Else
+		IF X3<0 OR X3>10
+			returnstatus=0
+			message$="Invalid Factor"
+			goto SBComPTDone
+		Endif
+	Endif
+	cmd.Multiplier=x3
+	Call dxget("BRK",tmp$)
+	tmp$=UCase$(RTrim$(tmp$))
+	if tmp$<>"Y" and tmp$<>"N"
+		returnstatus=0
+		Message$="Invalid response - MUST BE Y or N"
+		goto SBComPTDone
+	Endif
+	cmd.BreakTableYM=0
+	if tmp$="Y" let cmd.BreakTableYM=1
+	If P60$[50,50]="Y" ! 3 more fields
+		Call dxget("UCTYPE",tmp$)
+		tmp$=RTrim$(tmp$)
+		if tmp$<>"%" and tmp$<>"$"
+			returnstatus=0
+			message$="Invalid Up Charge Type"
+			goto SBComPTDone
+		Endif
+		cmd.UpchargeType$=tmp$
+		Call dxget("UCVALUE",tmp$)
+		cmd.UpchargeFactor=tmp$
+		if cmd.UpchargeFactor<0
+			returnstatus=0
+			message$="Invalid Up Charge Factor"
+			goto SBComPTDone
+		Endif
+		Call dxget("BTOVER",tmp$)
+		X2=TMP$
+		if x2<0 or x2>999
+			returnstatus=0
+			Message$="Invalid break table"
+			goto SBComPTDone
+		Endif
+		cmd.BreakTbl=x2
+	Endif
+	! check if anything entered
+	
+	DelRec=0
+	if cmd.CommodityBase+cmd.BreakTableYM+cmd.BreakTbl+cmd.UpchargeFactor=0
+		if not(cmd.Multiplier) let delrec=1
+	Endif
+	if cmd.Multiplier=0 let delrec=1 ! how PM defines it
+	DelRec: ! comes here for delete
+	if delrec ! delete - not add/edit
+		If CMDR>0 ! has record
+			! as bad data in PM file - use search to delete
+			Search #CMD,5,1;CMDKey$,R,E
+			If E if e>1
+				returnstatus=0
+				Message$="Search Error "+Str$(E)+" deleting "+Cmdkey$
+				goto SBComPTDone
+			Endif
+			Let E=3;R=CMDR
+			Search #CMD,1,0;Cmdkey$,R,E
+			If E
+				returnstatus=0
+				Message$="Search Error "+Str$(E)+" returning record "+Cmdkey$
+				goto SBComPTDone
+			Endif
+		Endif
+		goto SBComPTDone 
+	Endif
+	if cmdr>0 ! existing
+		write record #CMD,CMDR,0;cmd.;
+	Else ! new
+		CMDR=0
+		R=fileupdatecommodity(e$,cmd,"a",CMDR,cmd.)
+		if r<0
+			returnstatus=0
+			message$="Search Error "+Str$(R)+" adding detail "+CMDKey$
+		Endif
+	Endif
+  SBComPTDone: ! finito
+ else
+	include "src/callsuberr.inc"
+  end try
+end sub ! SbmComdD
+!
+!------------------------------------------------------------------------------------------

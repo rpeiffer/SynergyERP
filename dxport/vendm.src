@@ -1,0 +1,3391 @@
+!! --- vendm
+! description Vendor Inquiry & Entry/Edit 
+!
+! loadsave -w -n 100,10 -o prog/dxport/vendm.dl4 src/vendm.src
+! 1.0 mm/dd/yyyy change??
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+!
+include "src/inc/filea80vm.inc"
+include "src/inc/sql_a80vm.inc"
+include "src/inc/filevendtag.inc"
+include "src/inc/filecontlist.inc" ! "address book file
+include "src/inc/filevendspec.inc"
+include "src/inc/fileglglmz.inc"
+include "src/inc/filedocdeliv.inc" ! document delivery
+include "src/inc/filevendbank.inc" ! vendor bank
+include "src/inc/fileapa10vl.inc" ! ap validation file
+include "src/inc/fileapdeth.inc" ! a/p file - current
+include "src/inc/filecurrency.inc" ! currency file
+!
+Declare Intrinsic Function FindChannel
+Declare Intrinsic Sub Logic, programdump, FindF
+Declare Intrinsic Sub DateToJulian                                                                       
+
+! *declare additional external libs & subs & functions
+External Lib "ubsprconv.dl4"
+Declare External Function XAmount, Xunit$
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr, CreateNetStatus, GetDelimiters
+
+External Lib "ubsfunc.dl4"
+Declare External Sub GetCostLevels
+Declare External Function OpenFile,JDate$,Pdate$,chkbadchars,FormatDate2$
+Declare External Function formatdate$,fmtphone2$,numericonly$
+Declare External Function OpenMySQLMirror
+
+External Lib "getglname.lib"
+Declare External Function GetGLName$
+
+External Lib "getvendfreightd.lib"
+Declare External Function GetVendFreightd$
+
+External Lib "ubsvendapopen.dl4"
+Declare External Sub GetVendAPopen
+
+External Lib "ubsvendapdet.dl4"
+Declare External Sub GetVendAPDet
+
+External Lib "ubspolist.dl4"
+Declare External Sub Getpolist
+
+External Lib "ubsvendspec.dl4"
+Declare External Sub GetVendSpecN
+
+External Lib "ubsvendaptran.dl4"
+Declare External Sub GetVendAptran
+
+External Lib "ubsvendappotran.dl4"
+Declare External Sub GetVendApPotran
+
+External Lib "ubspodet.dl4"
+Declare External Sub PODet 
+
+External Lib "ubsvendlist.dl4"
+Declare External Sub VendList
+
+Declare Sub VendSearch,VendMain,docdsettype,getvendpayto,getrebatevend
+Declare Sub GetVendBank,SubmitVendBank, DeleteVendBank
+Declare Sub OpenFiles,SndLists,VendSave,VendDel
+Declare Sub VendPayTo, VendPayment, VendUDA, VendMin, VendGen,porDdet
+Declare Sub vpaytoudt,VendSpecSV,GetVendABook,GetvendDocD
+Declare Sub ageopenitems
+Declare Function chkDateFrmt$,Vendzip9$
+
+!!Start!Dci2
+
+External Lib "libfilepofrgth.lib"
+Declare External Sub filedroplistpofrgth
+
+!!End!Dci2
+
+! **main procedure
+!
+!
+! dim variables used by program
+!
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+try
+  Option String Redim is legal ! in case subs dim/use same names
+ dim vend. As a80vm
+ dim sql_a80vm. As sql_a80vm
+ dim vtag. As Vendtag
+ dim vbnk. As Vendbank
+ dim tmpvend. as a80vm ! copy of
+ dim CABook. as contlist
+ dim Docd. as docdeliv ! document delivery file
+ Dim apvl. As apa10vl ! ap validation file
+ dim aph. as apdeth ! ap detail history
+ dim curr. as currency ! 
+
+dim keyvl$[30],3%,rec_vl
+dim 1%,ch_curr,keycurr$[50],3%,rec_curr
+ dim action$[30],options$[30],userid$[10],b$[200],Action1$[30],Action2$[30],3%
+ dim vend$[64],pum$[4],P60$[50],P61$[256],DDKey$[64]
+ Dim mode$[3],udadesc$[14],XDate$[10],costdesc$[10]
+ dim Message$[200],WebStr$[500],P9$[50],blank$[200]
+ dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+ dim 1%,keyno,valact1,vers
+ Dim 2%,ReturnStatus,vendID
+ dim 1%,vmc,vtc,vspc
+ dim filename$[16]
+ dim 1%,fileflag
+ dim List$[maxcnt,700] ! for .net
+ dim SList$[maxcnt,700] ! for .net selector(drop down) list
+ dim vwebkey$[50],vendurl$[50],1%,ch_vweb,2%,vwebid,3%,rec_vweb
+  Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[1500],tmp$[1500]
+  dim glname$[22],vendfreightd$[30],keyglm$[30],tmp1$[1200]
+  dim Key1$[60],Key2$[60],VendKey$[60],cabckey$[50]
+  dim 3%,glacct
+  dim 1%,ch_glm,ch_pofh,C0[17],cost_lev[4]
+  Dim 1%,VNE,VNC,vendname$[30],VNK$[6],3%,VNR
+  Dim 1%,WHE,WHC,WHK$[14],3%,WHR
+  Dim 1%,X1[9],2%,x2[9]
+  Dim 3%,X3[9],r[99]
+ b$=" ",b$
+ Blank$=" ",Blank$ ! i like this name instead of b$
+ !
+ call dxopen()
+ !
+
+
+ Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+ !
+ ! open files
+ call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+ ! ctlc already open
+ Mat read #ctlc,19,50;p9$;
+ mat read #ctlc,60,50;p60$;
+ mat read #ctlc,61,0;p61$;
+ MAT READ #CTLC,51,0;C0; ! MISC flags
+action$=UCase$(action$)
+action$=RTrim$(Action$) ! "trim spaces from end
+action1$=UCase$(action1$)
+action1$=RTrim$(action1$) ! "trim spaces from right end
+action2$=UCase$(action2$)
+action2$=RTrim$(action2$) ! "trim spaces from right end
+!Call dxsave(0,"/tmp/vendin.txt!") !   Save data sent from web
+!Call programdump("tmp/vnlog1in!","") ! dump program vars
+Select Case action$
+  Case "MAIN" ! inquiry main & edit options
+	call vendmain()
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+    call SetOutPut(e$,rstr$)
+	
+	! End of Main
+  Case "SEARCH" ! vendor search (used lots of places!)		doc=VendList.doc
+   Call vendsearch(e$,action$) !search vendor  
+   call AddToStr(e$,rstr$,List$[]) ! "add the list from subs to string
+   Call AddToStr(e$,rstr$,esdel$) ! end of section  
+   call SetOutPut(e$,rstr$)
+   
+   ! end of search
+  Case "DLISTS" ! Lists for entry/edit						doc=Vendm-GetLists.doc
+	returnstatus=1
+	message$="OK"
+	call openfiles()
+	call SndLists()
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+    call SetOutPut(e$,rstr$)
+	
+    !End of lists
+  Case "PORDDET" ! po detail								doc=VendPODetail.doc
+	Call PORDDet()
+    
+    !end of PORDDet
+  Case "APOPEN"  ! a/p current								doc=VendAPOPEN-GetVendApOpen.doc
+	! vers - 0=curr ap only
+	let vers=0
+	
+    Call GetVendAPopen(e$,vers,List$[],maxcnt,intCo,ReturnStatus,Message$)
+	! finish off the section
+  	call AddToStr(e$,rstr$,List$[]) ! "add the list from subs to string
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+    call SetOutPut(e$,rstr$)
+	
+    !end of APOpen
+  Case "APDETAIL"  ! a/p  DETAIL							doc=VendAPDetail-GetVendAp.doc
+	dim p1$[60],curkey$[30],mask$[12],apkey$[30]
+	Call DXGet("vendid",vend$) \ vendid=vend$
+	vend$=vendid using "######"
+	vend$ = vend$+"            "
+	vend$[7]="" ! "cut after 6 chars
+	vendChan=OpenFile(-2400,intCo) \ If vendChan = -1 Error 42
+    apc=OpenFile(-432,intCo) \ if apc= -1 Error 42 ! not found = Accounts Pay Detail 
+	
+    P1$= "INVC/MM/C" ! 
+    
+	! as the type above is going to be used for Ref detail lookup - USE SAME TYPES!
+	Mask$="-------#.##"
+	tmpcnt=maxcnt
+	clear List$[]
+	let maxcnt=2000 ! the most
+	ReturnStatus = 1
+	Message$="OK"
+!
+    List$[0]=bsdel$,"AP Detail",fdel$
+		WebStr$="Ref No",fdel$
+		WebStr$=WebStr$,"Document",fdel$
+		WebStr$=WebStr$,"PO No",fdel$
+		WebStr$=WebStr$,"Date",fdel$,"Due Date",fdel$,"Disc Date",fdel$
+		Webstr$=WebStr$,"Invoice Amt",fdel$  
+		WebStr$=WebStr$,"Discount",fdel$,"Payment",fdel$
+		Webstr$=WebStr$,"Balance",fdel$	
+		Webstr$=WebStr$,"Check No",fdel$
+		Webstr$=WebStr$,"Chk Date",fdel$	
+		List$[1]=WebStr$
+		let row=2
+	vend$[7]="" ! make sure its only 6
+	mode$="=" ! "exact match or next
+	Dir=1 ! "of vendor code / Ref
+	vendKey$=vend$
+	vendRec=filegeta80vm(e$,vendChan,mode$,dir,vendKey$,vend.)
+	if vendRec<=0
+	  Clear vend.
+	  ReturnStatus = 0
+	  Message$="vendor Not Found"
+	  goto endthis:
+	endif
+	!! heading !!! 
+	row=2
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	vendKey$=vend$
+    apKey$=vend$[1,6]+"999999" ! "   " (for mode$ >= )
+	startdate=0
+	enddate=0
+	call dxget("STARTDATE",tmp$)! do not set returnstatus
+	let tmp3=tmp$
+	if tmp3<>0
+		XDATE$ = formatdate2$(tmp$) ! from MM/DD/YYYY to
+		tmp3 = XDATE$[3,8]                      
+		! convert to julian                             
+		XDATE$ = tmp3 Using "&&&&&&"            
+		Call DateToJulian(1,XDATE$,XDATE$,errflag)      
+		If errflag                                      
+			ReturnStatus = 0                              
+			message$ = "Invalid Start Date Entered"
+			goto endthis:
+		else	
+			let startdate=xdate$ ! save in julian format                              
+		End If
+	endif
+	If startdate<>0
+		call dxget("ENDDATE",tmp$)! do not set returnstatus
+		let tmp3=tmp$
+		if not(tmp3)
+			let returnstatus=0
+			let message$="Invalid Ending Date Entered"
+			goto endthis:
+		endif
+		if tmp3<>0
+			XDATE$ = formatdate2$(tmp$) ! from MM/DD/YYYY to
+			tmp3 = XDATE$[3,8]                      
+			! convert to julian                             
+			XDATE$ = tmp3 Using "&&&&&&"            
+			Call DateToJulian(1,XDATE$,XDATE$,errflag)      
+			If errflag                                      
+				ReturnStatus = 0                              
+				message$ = "Invalid Start Date Entered"
+				goto endthis: 
+			else
+				let enddate=xdate$ ! save in julian format                              
+			End If
+			if enddate<startdate
+				let returnstatus=0
+				let message$="Ending Date must be greater than Starting Date"
+				goto endthis:
+			endif
+			apKey$=vend$[1,6]+(enddate using "######")+"z"  ! (for mode$ >= )
+		endif
+	endif
+	call dxget("CURRKEY",tmp$)
+	if rtrim$(tmp$)<>""
+		let apkey$=tmp$
+	endif
+	Mode$="<=" ! "match or PREV
+	Dir=2 ! "start w/ vend/ref (may switch to dir=2 - vend/date order)
+    Do
+		Search #apc,6,2;apkey$,aprec,e
+		if e<>0 exit do
+		if apkey$[1,6]<>vend$[1,6] exit do
+		read record #apc,aprec;aph.;
+		if startdate<>0
+			if aph.transactionDate<startdate exit do ! getnxtaphrec: !
+		endif
+		if aph.transactiontype<1 goto getnxtapdet:
+		if aph.transactiontype>3 goto getnxtapdet:
+		WebStr$=aph.invoicecode$,fdel$ ! 
+		tmp$=""
+		if aph.transactiontype>=1 and aph.transactiontype<=3 
+			let tmp$=P1$[(aph.transactiontype-1)*3+1,(aph.transactiontype-1)*3+3]
+		endif
+		let webstr$=webstr$+tmp$,fdel$
+		let tmp$=aph.ponumber using "######"
+		let webstr$=webstr$+tmp$,fdel$
+		if aph.Transactiondate<>0 ! it's yymmdd
+			tmp$=JDate$(aph.transactionDate) ! 
+		else
+			tmp$=""
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! invoice date
+	    if aph.Duedate<>0 ! it's yymmdd
+		  tmp$=PDate$(aph.DueDate) ! 
+		else
+		  tmp$=""
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! due date
+		if aph.Discountdate<>0 ! it's yymmdd
+		  tmp$=PDate$(aph.DiscountDate) ! 
+		else
+		  tmp$=""
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! discount date	
+	    tmp3=aph.originalamount
+	    WebStr$=WebStr$,RTrim$(tmp3 using Mask$),fdel$ ! Original amount
+	    If not (aph.amountpaid) and aph.originalamount<>0
+			tmp3=aph.discountavail
+			WebStr$=WebStr$,RTrim$(tmp3 using Mask$),fdel$ !Discount avail	
+			tmp3=aph.amountpaid
+			WebStr$=WebStr$,RTrim$(tmp3 using Mask$),fdel$ ! amount paid		
+			tmp3=aph.originalamount-aph.discountavail-aph.amountpaid
+			WebStr$=WebStr$,RTrim$(tmp3 using Mask$),fdel$ ! balance
+			if aph.transactiontype<>3 ! not a manual check
+				let tmp$="" ! check #
+				WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! check number
+				WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! check date
+			else
+				if aph.checknumber<>0
+					let tmp$=aph.checknumber using "######"
+				else
+					let tmp$="" ! check #
+				endif
+				WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! check number
+				if aph.checkdate<>0 ! it's yymmdd
+					tmp$=PDate$(aph.checkDate) ! 
+				else
+					tmp$=""
+				endif
+				WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! check date
+			endif
+	   else
+			tmp3=aph.discounttaken
+			WebStr$=WebStr$,RTrim$(tmp3 using Mask$),fdel$ !Discount taken	
+			tmp3=aph.amountpaid-aph.discounttaken
+			WebStr$=WebStr$,RTrim$(tmp3 using Mask$),fdel$ ! amount paid		
+			tmp3=aph.originalamount-aph.amountpaid
+			WebStr$=WebStr$,RTrim$(tmp3 using Mask$),fdel$ ! balance
+			if aph.checknumber
+				let tmp$=aph.checknumber using "######"
+			else
+				let tmp$="" ! check #
+			endif
+			WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! check number
+			if aph.checkdate<>0 ! it's yymmdd
+				tmp$=PDate$(aph.checkDate) ! 
+			else
+				tmp$=""
+			endif
+			WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! check date
+	   endif    
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>maxcnt
+			message$="CURKEY="+apkey$+"&"
+			let returnstatus=5
+			exit do
+	   endif
+		if row>=tmpcnt let tmpcnt=expandarray(e$,List$[])
+		getnxtapdet: ! 
+   Loop
+	endthis: ! 
+	List$[row]=esdel$ ! end of section
+	! finish off the section
+  	call AddToStr(e$,rstr$,List$[]) ! "add the list from subs to string
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+    call SetOutPut(e$,rstr$)
+	
+    ! end of APDETAIL
+  Case "TRANSACTION" !										doc=VendApTran-DrillDown.doc
+	Call GetVendApTran(e$,List$[],maxcnt,intCo,ReturnStatus,Message$)
+	! finish off the section
+  	call AddToStr(e$,rstr$,List$[]) ! "add the list from subs to string
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+        call SetOutPut(e$,rstr$)
+	
+    ! end of transaction
+  Case "POLIST"  ! POLIST									doc=VendPOlistl-Getpolist.doc
+	! vers - 0=curr PO only
+	let vers=0
+	
+    Call GetPOLIST(e$,vers,List$[],maxcnt,intCo,ReturnStatus,Message$)
+	! finish off the section
+  	call AddToStr(e$,rstr$,List$[]) ! "add the list from subs to string
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+    call SetOutPut(e$,rstr$)
+	
+Case "GETVENDPAYTO"  !get vend payto info	doc=vendm> getvendpayto
+	call getvendpayto()
+	call SetOutPut(e$,rstr$)
+
+Case "GETREBATEVEND" !get rebate vendor info doc= vendm > getrebatevend
+	call getrebatevend()
+	call SetOutPut(e$,rstr$)
+
+Case "GETVENDBANK" 
+	call getvendbank()
+	call SetOutPut(e$,rstr$)
+
+Case "SUBMITVENDBANK" 
+	call Submitvendbank()
+	call SetOutPut(e$,rstr$)
+
+Case "DELETEVENDBANK" 
+	call Deletevendbank()
+	call SetOutPut(e$,rstr$)
+	
+    
+
+! ** RELATED LINKS SECTION **
+  
+  Case "RELATEDLINKS"
+  
+  Call DXGet("vendid",vend$) \ vendid=vend$
+  vend$=vendid using "######"
+  vend$ = vend$+"            "
+  vend$[7]="" ! "cut after 6 chars
+  If Action1$ = "WAREHOUSE" ! warehouse						doc=GetVendorWarehouse.doc
+	If P61$[63,63]<>"Y"
+		returnstatus=0
+		Message$="Vendor Warehouse is not active!"
+		Goto RLDone1
+	Endif
+	 options$ = "VENDWH"                     
+	Call dxset("option",options$)           
+	action$ = "INPUT"                       
+	Call dxset("action",action$)            
+   !                                       
+	Clear list$[]                           
+	list$[0] = bsdel$,"WareHouse",fdel$     
+	list$[1] = "Option",fdel$,"Action",fdel$
+	list$[2] = options$,fdel$,action$,fdel$ 
+	list$[3] = esdel$ ! end of section      
+	Call AddToStr(e$,rstr$,list$[])
+	goto RLDone ! out of here
+  Endif ! all other action1$
+	! Open any files for related links
+	Call OpenFiles()
+	mode$="="
+	keyno=1
+	vendrec=0
+	vmR = filegeta80vm(e$,vmC,mode$,keyno,vend$,vend.)
+	if vmR<=0 ! "not found
+		Clear vend.
+		ReturnStatus=0
+		Message$="Vendor Not Found"
+		goto RLDone1 ! do not proceed
+	else
+		! status section - always sent with related?
+		ReturnStatus=1
+		Message$="OK"
+		vendrec=vmr
+	end if
+	vtR = filegetvendtag(e$,vtC,mode$,keyno,vend$,vtag.)
+	if vtR<=0 ! "not found
+		Clear vtag.
+	end if
+
+	!	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	! call AddToStr(e$,rstr$,WebStr$)
+	!
+	valact1=-1 ! default - action1 not found
+	! any/all action1$ go here
+	if action1$="PAYTO" ! "payto (internal sub)				doc=VendPayto.doc
+      valact1=0 ! valid action1
+		Call VendPayTo(e$,Vend$,List$[],vmr,maxcnt,CTLC,vend.)
+	endif
+    if action1$="PAYMENT" ! "Payment infg  (internal sub)	doc=VendPayment.doc
+      valact1=0 ! valid action1
+	  Call VendPayMent(e$,Vend$,List$[],vmr,maxcnt,CTLC,vend.)
+
+    endif
+	if action1$="MINIMUM" ! "Vendor Minimum  (internal sub)	doc=VendMinimum.doc
+      valact1=0 ! valid action1
+	  Call VendMin(e$,Vend$,List$[],vmr,maxcnt,CTLC,vend.,vtag.)
+	endif
+    if action1$="GENERAL" ! "Vendor General  (internal sub)	doc=VendGeneralControls.doc
+      valact1=0 ! valid action1
+	  Call VendGen(e$,Vend$,List$[],vmr,maxcnt,CTLC,vend.,vtag.)
+	endif
+	if action1$="UDA" ! "UDA  (internal sub)				doc=VendUDA.doc
+      valact1=0 ! valid action1
+	  Call VendUDA(e$,Vend$,List$[],vmr,maxcnt,CTLC,vend.,vtag.)
+	endif
+    if action1$="VENDNOTES" ! "notes from custspec file		doc=VendSpecNotes-GetVendSpecN.doc
+		valact1=0 ! valid action1
+		if action2$="SAVE" ! entry/edit						doc=Vendm-SubmitSupptNotes.doc
+			call VendSpecSv()
+		Else ! inquiry
+			Call getVendSpecN(e$,Vend$,List$[],vmr,maxcnt,CTLC,vSPC,vmc,vend.)
+			if e$[1,15]="RS=5  NEXTLINE=" ! 33263 - limit 100 per request
+				returnstatus=5
+				message$=E$[7] ! "NEXTLINE=" and the line(spec) number
+				Clear e$ ! clear bogus e$
+			endif
+		Endif
+	endif
+	If action1$="TRANSACTION" !								doc=VendApTran-GetVendapTran.doc
+	 valact1=0 ! valid action1
+	 Call GetVendApTran(e$,List$[],maxcnt,intCo,ReturnStatus,Message$)
+	endif
+	If action1$="APPOTRAN" !								doc=VendApTran-GetVendapTran.doc
+	 valact1=0 ! valid action1
+	 Call GetVendApPoTran(e$,List$[],maxcnt,intCo,ReturnStatus,Message$,RSTR$)
+	 goto rldone: 
+	endif
+	if action1$="ADDRESSBOOK" ! contact list				doc=Vendm-GetVendABook.doc
+      valact1=0 ! valid action1								doc=Vendm-DeleteVendABook.doc
+	if action2$="SAVE" or action2$="DELETE" !				doc=Vendm-SaveVendABook.doc
+     call dxget("cont",tmp$)
+	 x3=tmp$
+	 if x3=0 and action2$="SAVE" !!add mode, determine next seq #
+	  cabckey$="VD",vend$,"zz" ! start at end - work back
+	  CABCrec=filegetcontlist(e$,CABC,"<",1,cabcKey$,CABook.)
+	  if str$(CABook.CustCode)<>ltrim$(vend$) or CABook.ContactType$<>"VD" let CABCRec=-1
+	  if CABCrec>=0 let tmp$=CABook.Contact+1 using "##" Else let tmp$="1" 
+	  if tmp$="**" 
+		returnstatus=0
+		let message$="You can only add 99 Contacts per vendor"
+		goto RLDone1
+	  End if
+	 Else ! sent # - see if valid
+		tmp=tmp$\tmp$=tmp using "##"
+		cabckey$="VD",vend$,tmp$
+		CABCrec=filegetcontlist(e$,CABC,"=",1,cabcKey$,CABook.)
+		if CABCrec<0 and action2$<>"DELETE"
+			returnstatus=0
+			message$="Contact not found"
+			goto RLDone1
+		Endif
+	 end if
+	 tmp=tmp$\tmp$=tmp using "##"
+     cabckey$="VD",vend$,tmp$
+	 CABCrec=filegetcontlist(e$,CABC,"=",1,cabcKey$,CABook.)
+	 if CABCrec<0 clear CABook.
+	 if action2$="DELETE" goto BPABEnt
+	 CABook.CustCode=vend$
+	 CABook.Contact=tmp$
+     CABook.ContactType$="VD"
+	 call dxget("FirstName",tmp$)\CABook.FirstName$=tmp$,b$
+	 call dxget("LastName",tmp$)\CABook.LastName$=tmp$,b$
+	 call dxget("Title",tmp$)\CABook.TitlePos$=tmp$,b$
+	 call dxget("PhoneNumber",tmp$)\CABook.Phone=numericonly$(tmp$)
+	 call dxget("PhoneExt",tmp$)\CABook.PhoneExt=numericonly$(tmp$)
+	 call dxget("EMail",tmp$)\CABook.EmailAddr$=tmp$,b$
+	 call dxget("Pager",tmp$)\CABook.Pager=numericonly$(tmp$)
+	 call dxget("PagerPIN",tmp$)\CABook.PagerPin=numericonly$(tmp$)
+	 call dxget("FAXNumber",tmp$)\CABook.Fax=numericonly$(tmp$)
+	 call dxget("CellNumber",tmp$)\CABook.CellPhone=numericonly$(tmp$)
+	 call dxget("Phone2",tmp$)\CABook.Phone2=numericonly$(tmp$)
+	 call dxget("FAX2",tmp$)\CABook.Fax2=numericonly$(tmp$)
+	 call dxget("Comment1",tmp$)\CABook.Comment1$=tmp$,b$
+	 call dxget("Comment2",tmp$)\CABook.Comment2$=tmp$,b$
+	 call dxget("Comment3",tmp$)\CABook.Comment3$=tmp$,b$
+	 call dxget("CRTYPE",tmp$)\x=tmp$
+	 if x<1 or x>3 let x=1
+	 CABook.ContrecordType=x
+	 CABook.EditDate= tim(6) !Last Edit, today julian
+	 BPABEnt: ! bypass entry on delete
+	 returnstatus=1
+	 Message$="OK"
+	 If CABCRec<0 let mode$="a" else let mode$="c"
+	 if action2$="DELETE" let mode$="d"
+	 if mode$="d"
+	   if CABCRec<=0 goto ABDone
+	   ddkey$=" ",ddkey$
+		ddkey$="VD"+vend$
+		DCDChan=OpenFile(-9968,intCo) \ if DCDChan = -1 Error 42
+		do ! check if used in docs
+			DCDRec=filegetdocdeliv(e$,DCDChan,">",1,DDKey$,Docd.)
+			if ddkey$[1,2]<>"VD" or ddkey$[3,8]<>VEND$ let dcdrec=-1
+			if dcdrec<=0 exit do
+			if dcdrec>0
+				if CABook.Contact=docd.AddrEntry
+					returnstatus=0
+					message$="Can not delete - used in Document Delivery"
+					goto RLDone1
+				Endif	
+			Endif
+		loop
+		TRY close #DCDChan Else Rem
+	 Endif ! of delete
+	 
+	 CABCrec=fileupdatecontlist(e$,CABC,mode$,CABCrec,CABook.)
+	 if CABCrec<0
+		returnstatus=0
+		Message$=e$ !error
+		goto RLDone1
+	 Endif
+	 ABDone: ! finished
+	 if action2$="DELETE" let message$="Record deleted" Else  message$="Record saved"  !record saved
+	else
+	 Call GetVendABook(e$,vend$,SList$[],List$[],VMR,maxcnt,CTLC,CABC,vmc,vend.)
+	 Call AddtoStr(e$,rstr$,SList$[]) ! add selector list to string before data (list$[])
+	 call AddtoStr(e$,rstr$,List$[]) ! add data list
+	end if !SAVE
+  endif
+  If action1$="DOCDELIV" ! document delivery				doc=VendDocDelivery-GetVendDocD.doc
+      valact1=0 ! valid action1								doc=Vendm-DeleteVendDocD.doc
+	if action2$="SAVE" or action2$="DELETE" !				doc=Vendm-SubmitVendDocD.doc
+     DCDChan=OpenFile(9968,intCo) \ if DCDChan = -1 Error 42
+     call dxget("doctype",tmp$) !??tmp$ 4 char field
+	 if UCASE$(TRIM$(tmp$))<>"PO" ! only 1 found
+		returnstatus=0
+		message$="Only Document type PO is allowed"
+		goto RLDone1
+	 Endif
+     DDkey$="VD",Vend$,tmp$,"    "\DDKey$=DDKey$[1,12]
+	 DCDRec=filegetdocdeliv(e$,DCDChan,"=",1,DDKey$,Docd.)
+	 if DCDRec<0
+	  clear Docd.
+	  Docd.CustomerCode=vend$
+	  Docd.ContactType$="VD"
+	  Docd.DocumentType$=tmp$,"    "
+	 end if
+	 call dxget("VIA",tmp$)\Docd.via=tmp$
+	 !if docd.via<0 if docd.via>3 let e$="Invalid Via Code!"\error 10000
+	 call dxget("contkey",tmp$)
+	 if tmp$<>"0" let Docd.addrentry=tmp$[9,10] else let docd.addrentry=0 ! # from drop list just the contact #.... or 0 for none
+	 if (Docd.via=1 or Docd.via=2) and Docd.addrentry=0
+		returnstatus=0
+		message$="No Contact selected"
+		goto RLDone1
+	 Endif
+	 if docd.addrentry>0
+		tmp$= Docd.addrentry using "##"
+		cabckey$="VD",vend$,tmp$
+		CABCrec=filegetcontlist(e$,CABC,"=",1,cabcKey$,CABook.)
+		if CABCRec<=0
+			returnstatus=0
+			message$="Contact Not found"
+			goto RLDone1
+		Endif
+		If docd.via=1 ! fax
+			if cabook.Fax=0 and cabook.Fax2=0
+				returnstatus=0
+				message$="No Fax number on Contact"
+				goto RLDone1
+			Endif
+		Endif
+		if docd.via=2 ! email
+			if Rtrim$(cabook.EmailAddr$)=""
+				returnstatus=0
+				message$="No Email Address for Contact"
+				goto RLDone1
+			Endif
+		Endif
+	 Endif 
+	 Returnstatus=1
+	 Message$="OK"
+	 If DCDRec<0 let mode$="a" else let mode$="c"
+	 if action2$="DELETE" let mode$="d"
+	 DCDrec=fileupdatedocdeliv(e$,DCDChan,mode$,DCDrec,DocD.)
+	 if DCDrec<0
+		Returnstatus=0
+		message$=e$
+		Goto RLDone1 !issue updating,adding or deleting record
+	 Endif
+	 if action2$="DELETE" let message$="Record deleted" Else  message$="Record saved"  !record saved
+	else !													doc=Vendm-EditVendDocD.doc
+	 Call GetVendDocd(e$,vend$,List$[],SList$[],VMR,maxcnt,intCo,CTLC,VMC,vend.,rstr$)
+	 Call AddtoStr(e$,rstr$,SList$[]) ! add selector list to string before data (list$[])
+	 call AddtoStr(e$,rstr$,List$[]) ! add data list
+	end if
+  endif
+  RLDone1: ! done w/status send
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+
+	call AddToStr(e$,rstr$,WebStr$)
+	call AddToStr(e$,rstr$,list$[])
+  !endif ! of input or not?
+  RLDone: ! done
+  call SetOutPut(e$,rstr$)
+  
+  !end of "relatedlinks"
+  End Select
+else
+ include "src/callmainerrnet.inc"
+end try
+end ! of whole program
+!
+! ---------------------------------------------------------------------
+Sub VendMain()
+! assumes return main record info
+Try
+ call openfiles()
+ Returnstatus=1
+ Message$="OK"
+ !etc for all files needed					Inquiry=		doc=VendMainDetail.doc
+ !											Edit=			doc=Vendm-GetVendor.doc
+ ! get vendstuct record
+ Call DXGet("vendid",vend$) \ vendid=vend$
+ vend$=vendid using "######"
+ vend$ = vend$+"            "
+ vend$[7]="" ! "must be 6 only
+ 
+ vendrec=0
+    if action2$<>"" ! entry/edit
+	  If action2$<>"ADD" and action2$<>"COPY" !				doc=Vendm-GetDataDirection.doc
+		mode$=blank$
+		if action1$="NEXT" ! next from curr
+			mode$=">"
+		Endif
+		if action1$="PREV" ! back 1 from curr
+			mode$="<"
+		Endif
+		if action1$="FIRST" ! first on file
+			Vend$=blank$
+			mode$=">"
+		Endif
+		If Action1$="LAST" ! last on file
+			vend$="}}}"
+			mode$="<"
+		Endif
+		if RTrim$(mode$)<>"" ! do it
+			VendKey$=Vend$
+			vendrec = filegeta80vm(e$,VMC,mode$,1,VendKey$,vend.)
+			If Vendrec<=0
+				returnstatus=0
+				message$="End of Index reached"
+				goto VMDone
+			Endif
+			Vend$=vendKey$
+			vendid=vend$ ! need for later
+		Endif
+	  Endif ! of not add or copy
+	Endif ! of entry/edit
+ mode$="="
+ keyno=1;vendrec=0
+ vmR = filegeta80vm(e$,vmC,mode$,keyno,vend$,vend.)
+ If vmR<=0 Clear vend.
+ if vmr>0 let vendrec=vmr
+ vtR = filegetvendtag(e$,vtC,mode$,keyno,vend$,vtag.)
+ If vtR<=0 Clear vtag.
+ !
+ if action2$="ADD" if vmR>0 !requesting to add vendid, already on file, error
+  !e$="msgvendAOF" \error 10000 !Vendor already on file!
+	returnstatus=0
+	Message$="Vendor exists!"
+	goto VMDone
+ end if
+ if (action2$="" or action2$="EDIT") and VMR<=0 ! normal mode - no prod found
+	!E$="msgvendNOF" \ error 10000 ! save new allow - a2$="ADD" & vendrec<0
+	returnstatus=0
+	Message$="Vendor NOT FOUND"
+	goto VMDone
+Endif
+if vendid=0 ! NO BLANK VENDOR CODES!
+	!E$="msgvendinvalid" \ error 10000
+	ReturnStatus=0
+	Message$="ZERO VENDOR CODE NOT ALLOWED"
+	goto VMDone
+Endif
+
+!!Start!Dci2
+
+If action2$="SAVE" ! send data								doc=Vendm-MainSave.doc
+	close #vmc ! close read only
+	close #vtc
+	VmC = OpenFile(2400,intCo) \ If vmc = -1 Error 42 !vend
+	VtC = OpenFile(1120,intCo) \ If vtc = -1 Error 42 !vend
+    call vendsave()
+	goto VMDone ! don't redisplay?
+Endif
+
+If action2$="DELETE" ! delete								doc=Vendm-DeleteVendor.doc
+	close #vmc ! close read only
+	close #vtc
+	VmC = OpenFile(2400,intCo) \ If vmc = -1 Error 42 !vend
+	VtC = OpenFile(1120,intCo) \ If vtc = -1 Error 42 !vend
+   If vmR>0  ! only if onfile!
+	  tmp1=0 ! is status
+      Call VendDel()
+	  If tmp1<>0
+		Returnstatus=0
+		message$=tmp1$
+	  Else
+		returnstatus=1
+		Message$="Vendor Deleted"
+	  Endif
+	  Goto VMDone
+   Else
+      !e$="file no record" \error 10000 !file no record!
+	  Returnstatus=1
+	  Message$="Deleted - no record"
+	  goto VMDone
+   Endif
+Endif
+If action2$="ADD" ! add new									doc=Vendm-AddVendor.doc
+	clear vend.
+	clear vtag.
+	vend.VendorCode=vendid
+	vtag.VendorCode=vendid
+	vtag.AllowPoS=1 ! default it Y
+	vmr=0;vtr=0;vendrec=0 ! instead of <0
+Endif
+mode$="="
+keyno=1
+
+! vend rec section  ---------------------------------------------------------------------------------
+tmp$=bsdel$+"VendorDetail"+fdel$+rdel$
+tmp$=tmp$+"VendorID"+fdel$
+tmp$=tmp$+"VendorName"+fdel$
+tmp$=tmp$+"Address1"+fdel$
+tmp$=tmp$+"Address2"+fdel$
+tmp$=tmp$+"City"+fdel$
+tmp$=tmp$+"State"+fdel$
+tmp$=tmp$+"ZipCode"+fdel$
+tmp$=tmp$+"Country"+fdel$
+tmp$=tmp$+"Contact"+fdel$
+tmp$=tmp$+"Telephone"+fdel$
+tmp$=tmp$+"Ext"+fdel$
+tmp$=tmp$+"ExpeditingPhone"+fdel$
+tmp$=tmp$+"Fax"+fdel$
+tmp$=tmp$+"DateOpened"+fdel$
+tmp$=tmp$+"GLAcct"+fdel$
+tmp$=tmp$+"VendUrl"+fdel$
+tmp$=tmp$+rdel$
+
+Call AddToStr(e$,rstr$,tmp$)  ! put header into rstr$
+!! left side of main screen !!
+   Call AddToStr(e$,rstr$,Str$(vend.VendorCode)+fdel$)	! 
+   Call AddToStr(e$,rstr$,RTrim$(vend.Name$)+fdel$)	
+   Call AddToStr(e$,rstr$,RTrim$(vend.Address$)+fdel$)		
+   Call AddToStr(e$,rstr$,RTrim$(vend.OptAddress$)+fdel$)	
+   Call AddToStr(e$,rstr$,RTrim$(vend.City$)+fdel$)		
+   Call AddToStr(e$,rstr$,RTrim$(vend.State$)+fdel$)	
+   Call AddToStr(e$,rstr$,RTrim$(vend.Zip$)+fdel$)	
+   Call AddToStr(e$,rstr$,RTrim$(vtag.VendorCountry$)+fdel$)	
+!! right side of main screen
+   Call AddToStr(e$,rstr$,RTrim$(vend.Contact$)+fdel$)	
+   if action2$="" ! inquiry
+	Call AddToStr(e$,rstr$,RTrim$(vend.TelePhoneNumber$)+fdel$)	! telephone
+   Else ! entry/edit
+	Call AddToStr(e$,rstr$,RTrim$(vend.TelePhoneNumber$)+fdel$)	! telephone 
+   Endif
+   Call AddToStr(e$,rstr$,Str$(vend.PhoneExt)+fdel$)
+   if action2$="" ! inquiry
+	Call AddToStr(e$,rstr$,RTrim$(vtag.expidtphone$)+fdel$)	! telephone !!!! expediting phone #
+	Call AddToStr(e$,rstr$,RTrim$(vend.FaxNumber$)+fdel$)	! fax
+   else ! entry/edit
+	Call AddToStr(e$,rstr$,RTrim$(vtag.expidtphone$)+fdel$)	! telephone !!!! expediting phone #
+	Call AddToStr(e$,rstr$,RTrim$(vend.FaxNumber$)+fdel$)	! fax
+   Endif
+   if vend.DateAccountOpened<>0
+      xdate$=PDate$(vend.DateAccountOpened) ! julian date to mm/dd/yyyy
+	else
+	  xdate$="      "
+	endif
+	Call AddToStr(e$,rstr$,RTrim$(xdate$)+fdel$)		! dateopened
+   ! sales person
+   let glacct=0
+   try
+	let glacct=val(vend.glaccountnumber$)
+   else
+	let glacct=0
+	let glname$=" ",glname$
+   end try
+   if glacct<>0 
+	let tmpch=ch_glm
+	let keyglm$=glacct using " ########   "
+	let glname$=getglname$(tmpch,keyglm$,intco)
+   endif
+   if action2$="" ! inquiry
+	Call AddToStr(e$,rstr$,rtrim$(vend.glaccountnumber$)+" "+rtrim$(glname$)+fdel$)
+   else ! entry/edit
+	Call AddToStr(e$,rstr$,rtrim$(vend.glaccountnumber$)+fdel$)
+   Endif
+   let vendurl$=" ",vendurl$
+   let filename$="2/VENDWEB"+STR$(INTCO)
+   Call FindF(filename$,fileflag)
+   if fileflag<>0
+		ch_vweb=findchannel()
+		ROPEN #CH_VWEB,FILENAME$
+		let vwebkey$=vend.vendorcode using "#######"
+		search #ch_vweb,2,1;vwebkey$,rec_vweb,e
+		if not(e)
+			mat read #ch_vweb,rec_vweb,4;vendurl$;
+		endif
+	endif
+	Call AddToStr(e$,rstr$,rtrim$(vendurl$)+fdel$+rdel$)
+    
+Call AddToStr(e$,rstr$,esdel$)  ! end of section
+
+! -----------------Credit section ---------------------------------------------------------------------
+tmp$=bsdel$+"Credit"+fdel$+rdel$
+tmp$=tmp$+"Credit"+fdel$
+tmp$=tmp$+"Values"+fdel$+rdel$
+Call AddToStr(e$,rstr$,tmp$)  ! put header into rstr$
+
+   Call AddToStr(e$,rstr$,"Terms"+fdel$+rtrim$(vend.termsalpha$)+fdel$+rdel$)	! terms
+   if action2$="" ! inquiry
+	Call AddToStr(e$,rstr$,"Disc%"+fdel$+rtrim$(vend.terms using "###.##%")+fdel$+rdel$)
+   Else ! entry/edit
+	Call AddToStr(e$,rstr$,"Disc%"+fdel$+rtrim$(vend.terms using "###.##")+fdel$+rdel$)
+   Endif
+   Call AddToStr(e$,rstr$,"Discount Days"+fdel$+rtrim$(vend.discountdays using "---#")+fdel$+rdel$)
+   Call AddToStr(e$,rstr$,"Net Days"+fdel$+rtrim$(vend.netpaymentdays using "---#")+fdel$+rdel$)
+   
+   Call AddToStr(e$,rstr$,"Minimum Order"+fdel$+rtrim$(vend.MimimumOrderAmount  using "############")+fdel$+rdel$)	
+   let tmp$="N"
+   if vend.vendoronhold <>0 let tmp$="Y"
+    Call AddToStr(e$,rstr$,"Hold Inv"+fdel$+rtrim$(tmp$)+fdel$+rdel$)	
+
+Call AddToStr(e$,rstr$,esdel$)	! end of section
+
+! -----------------Controls section ---------------------------------------------------------------------
+tmp$=bsdel$+"Controls"+fdel$+rdel$
+tmp$=tmp$+"Control"+fdel$
+tmp$=tmp$+"Value"+fdel$+rdel$
+Call AddToStr(e$,rstr$,tmp$)  ! put header into rstr$
+!!!! need from the vendtag file !!!!!
+   let tmp$="N"
+   if vtag.allowpos<>0 let tmp$="Y"
+   Call AddToStr(e$,rstr$,"Allow PO"+fdel$+rtrim$(tmp$)+fdel$+rdel$)
+   let tmp$="N"
+   if vend.nextdaydelivery<>0 let tmp$="Y"
+   Call AddToStr(e$,rstr$,"Next Day Del"+fdel$+rtrim$(tmp$)+fdel$+rdel$)
+   let tmpch=ch_pofh !!! *** need the freight code description *****
+   let vendfreightd$=getvendfreightd$(tmpch,vend.freightcode$,intco)
+   if action2$="" ! inquiry
+	Call AddToStr(e$,rstr$,"Freight Code"+fdel$+rtrim$(vend.FreightCode$)+" "+rtrim$(vendfreightd$)+fdel$+rdel$)
+   Else ! entry/edit
+	Call AddToStr(e$,rstr$,"Freight Code"+fdel$+rtrim$(vend.FreightCode$)+fdel$+rdel$)
+   Endif
+   if action2$="" ! inquiry
+	tmp$="LBS" \ if vtag.TruckSizInLbCube=2 let tmp$="CUBES"
+   Else ! entry/edit
+	tmp$="" ! DO NOT SEND
+   Endif
+   Call AddToStr(e$,rstr$,"Truck Size"+fdel$+str$(vtag.trucksize)+" "+tmp$+fdel$+rdel$)
+   if action2$<>"" ! entry / edit
+	tmp$="1" \ if vtag.TruckSizInLbCube=2 let tmp$="2" ! LBS is Default
+    call addtostr(e$,rstr$,"Truck Type"+fdel$+tmp$+fdel$+rdel$)
+   Endif
+   Call AddToStr(e$,rstr$,"Routing"+fdel$+rtrim$(vend.routing$)+fdel$+rdel$)	
+   Call AddToStr(e$,rstr$,"FOB"+fdel$+rtrim$(vend.fob$)+fdel$+rdel$)
+   !if action2$<>"" ! entry/edit
+   if vend.shipvianum>0 and vend.shipvianum<99
+		chan=findchannel()
+		tmp$="3/poshpvia"+Str$(Intco)
+		ROpen #chan,tmp$
+		Try
+			read #chan,vend.shipvianum;vend.shipvia$;
+			if rtrim$(vend.shipvia$)<>""
+				Call AddToStr(e$,rstr$,"Ship Via"+fdel$+str$(vend.ShipViaNum)+fdel$+rdel$)
+			Else ! shipvia doesn't have a valid description
+				let vend.shipvia$="*Invalid",vend.shipvia$
+				let vend.shipvianum=0
+				Call AddToStr(e$,rstr$,"Ship Via"+fdel$+str$(vend.ShipViaNum)+fdel$+rdel$)
+			endif
+		else ! invalid ship record
+			let vend.shipvia$="*Invalid",vend.shipvia$
+			let vend.shipvianum=0
+			Call AddToStr(e$,rstr$,"Ship Via"+fdel$+str$(vend.ShipViaNum)+fdel$+rdel$)
+		End Try
+   else
+		Call AddToStr(e$,rstr$,"Ship Via"+fdel$+rtrim$(vend.ShipVia$)+fdel$+rdel$)
+   endif
+   !Endif
+   ! vend po disc type/amount
+   if vtag.VDiscType<>1 and vtag.VDiscType<>2 let vtag.VDiscType=0
+   if vtag.VDiscType=0 let vtag.VDiscAmt=0
+   tmp$="PO Disc Amt",fdel$,LTrim$(vtag.VDiscAmt using "#####.##"),fdel$+rdel$
+   tmp1$="%" \ if vtag.VDiscType=2 let tmp1$="$"
+   tmp$=tmp$,"PO Disc Type",fdel$,tmp1$,fdel$+rdel$
+   call addtostr(e$,rstr$,tmp$) ! both fields
+   if p61$[136,136]<>"Y" let vend.currid=0
+   if vend.currid<0 or vend.currid>7999 let vend.currid=0
+   Call AddToStr(e$,rstr$,"CurrencyId"+fdel$+str$(vend.currid)+fdel$+rdel$)
+   let curr.desc$=""
+	if p61$[136,136]="Y"
+		if vend.currid<>0
+			ch_curr=findchannel()
+			tmp$="2/CURRENCY"+str$(Intco)
+			ROpen #ch_curr,tmp$
+			let keycurr$=vend.currid using "####"
+			search #ch_curr,2,1;keycurr$,rec_curr,e
+			if e<>0
+				let curr.desc$="Currency ID is not on File "
+			else
+				read record #ch_curr,rec_curr;curr.;
+			endif
+			try
+				close #ch_curr
+			else
+				rem
+			end try
+		else
+			curr.desc$="No Currency Rate"
+		endif
+	endif
+   Call AddToStr(e$,rstr$,"CurrencyDesc"+fdel$+rtrim$(curr.desc$)+fdel$+rdel$)
+   
+   Call AddToStr(e$,rstr$,esdel$)	! end of section
+If action2$="" ! inquiry, otherwise NO AP
+    ! need to age detail
+	call ageopenitems()
+	! -----------------Ap section ---------------------------------------------------------------------
+	tmp$=bsdel$+"VendAP"+fdel$+rdel$
+	tmp$=tmp$+"Bucket"+fdel$
+	tmp$=tmp$+"Dollars"+fdel$+rdel$
+	Call AddToStr(e$,rstr$,tmp$)  ! put header into rstr$
+   !Call AddToStr(e$,rstr$,"Futures"+fdel$+RTrim$(vend.futures using "---------.##")+fdel$+rdel$)
+   Call AddToStr(e$,rstr$,"Futures"+fdel$+str$(vend.futures)+fdel$+rdel$)
+   !Call AddToStr(e$,rstr$,"Current"+fdel$+RTrim$(vend.current using "---------.##")+fdel$+rdel$)
+   Call AddToStr(e$,rstr$,"Current"+fdel$+STR$(vend.current)+fdel$+rdel$)
+   !Call AddToStr(e$,rstr$,"Over 30" +fdel$+RTrim$(vend.over30days using "---------.##")+fdel$+rdel$)
+   Call AddToStr(e$,rstr$,"Over 30" +fdel$+str$(vend.over30days)+fdel$+rdel$)
+   !Call AddToStr(e$,rstr$,"Over 60"+fdel$+RTrim$(vend.over60days using "---------.##")+fdel$+rdel$)
+   Call AddToStr(e$,rstr$,"Over 60"+fdel$+str$(vend.over60days)+fdel$+rdel$)
+   !Call AddToStr(e$,rstr$,"Over 90"+fdel$+RTrim$(vend.s90daysover using "---------.##")+fdel$+rdel$)
+   Call AddToStr(e$,rstr$,"Over 90"+fdel$+str$(vend.s90daysover)+fdel$+rdel$)
+   !Call AddToStr(e$,rstr$,"Credit Memo"+fdel$+RTrim$(vend.creditmemos using "---------.##")+fdel$+rdel$)
+   Call AddToStr(e$,rstr$,"Credit Memo"+fdel$+str$(vend.creditmemos)+fdel$+rdel$)
+   !Call AddToStr(e$,rstr$,"Total Due"+fdel$+rTrim$(vend.apbalance using "---------.##")+fdel$+rdel$)
+   Call AddToStr(e$,rstr$,"Total Due"+fdel$+str$(vend.apbalance)+fdel$+rdel$)
+	Call AddToStr(e$,rstr$,esdel$)	! end of section
+	! Call SetOutput(e$,rstr$) ! that's NOT all folks - send status!
+Endif
+!
+If action2$="EDIT" or action2$="ADD" or action2$="COPY"
+	! send needed additional sections
+
+	Call VendPayTo(e$,Vend$,List$[],vmr,maxcnt,CTLC,vend.)
+	call AddToStr(e$,rstr$,list$[])
+	Call VendMin(e$,Vend$,List$[],vmr,maxcnt,CTLC,vend.,vtag.)
+	call AddToStr(e$,rstr$,list$[])
+	Call VendGen(e$,Vend$,List$[],vmr,maxcnt,CTLC,vend.,vtag.)
+	call AddToStr(e$,rstr$,list$[])
+	Call VendUDA(e$,Vend$,List$[],vmr,maxcnt,CTLC,vend.,vtag.)
+	call AddToStr(e$,rstr$,list$[])
+End if
+!!End!Dci2
+
+VMDone: ! finished
+! If action2$<>"" ! entry/edit mode
+	! status section - ALWAYS!!!
+	!call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	!call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+    !call SetOutPut(e$,rstr$)
+! Endif
+! end of main
+else
+ include "src/callsuberr.inc"
+end try
+end sub ! vendmain
+
+
+! Open files used by links -------------------------------------------------
+Sub OpenFiles()
+
+  Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	VmC = OpenFile(-2400,intCo) \ If vmc = -1 Error 42 !vend
+	VtC = OpenFile(-1120,intCo) \ If vtc = -1 Error 42 !vend
+	ch_glm= OpenFile(-176,intCo) \ If ch_glm = -1 Error 42 !vend
+	ch_pofh = OpenFile(-9962,intCo) \ If ch_pofh= -1 Error 42 !vend
+	VSPC = OpenFile(-1008,intCo) \ if VSPC = -1 Error 42 !VENDspec
+	CCC = OpenFile(-1728,intCo) \ If CCC = -1 Error 42  !u/m codes file
+	CABC = OpenFile(9998,intCo) \ If CABC = -1 Error 42 ! contlist (address book)
+	ch_vl = OpenFile(32,intCo) \ If ch_vl = -1 Error 42 ! ap /gl validatio
+	sqlChan = OpenMySQLMirror(e$)
+	 !
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!----------------------------------------------------------------------------
+Sub vendsearch(e$,action$)                                                
+  !--------------------------------------------------------------------   
+  Try                                                                     
+    ! DRM Create Filtered Vendor                                       
+    Declare External Sub VendList                                         
+    Dim StrSearch$[30],lgic$[20],what$[20],VendId$[6],io$[10],KEY1$[50],CO$[1]                                                        
+    Dim 2%,vend                                                         
+    Dim 3%                                                                
+                              
+    !Call DXGet("S_USER.AppID",CO$) ! Company                              
+                   
+    Call DXGet("keyval",StrSearch$)                                       
+    ! 
+    ! Call DXGet("keyNext",key1$)                                           
+    Call DXGet("logic",lgic$)   
+    if RTrim$(LGIC$)<>"2" LET LGIC$="1"
+    Call DXGet("searchfield",what$) \ what$ = UCase$(what$)    
+    if what$="" let what$="1"
+    ! Call DXGet("action2",action2$)                                        
+    Call DXGet("vendid",VendId$) \ vend = VendId$                         
+    Call VendList(IntCo,maxcnt,strSearch$,lgic$,what$, Key1$, vend, list$[])
+    
+else
+	!rem 
+end try
+End Sub
+!!! call/subs
+
+
+
+! --- end sub --- vendlist
+!----------------------------------------------------------------------------
+
+Sub VendPayTo(e$,Vend$,List$[],vendrec,maxcnt,intCo,Vend. as A80vm)
+  ! Creates a list of the Vendor Pay to Info
+  ! 
+  ! e$         : error message
+  ! Vend$      : Vend #
+  ! List$		: list of fields/data
+  ! VendRec		: Vend Rec #
+  ! maxcnt		: max rows of data
+  ! intCo	   : Company ID Number
+  ! Vend.      : vendor data
+  Try
+   Dim 2%,Row,tmpcnt
+   call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+   tmpcnt=maxcnt
+   Clear List$[]
+    List$[0]=bsdel$+"PAYTO"+fdel$ ! section name
+	WebStr$="Fields"+fdel$
+	WebStr$=WebStr$+"Values"+fdel$
+	List$[1]=WebStr$  ! put header into rstr$
+	row=2 ! starting row for data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	IF vendrec>0
+	  WebStr$="VendorID",fdel$,Vend$," ",RTrim$(Vend.Name$),fdel$ ! Vend key
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	 if PayToVendorCode<=0 let PayToVendorCode=vend.VendorCode
+     WebStr$="PaytoVendorID"+fdel$+Str$(vend.PayToVendorCode)+fdel$ ! +" "+rtrim$(vend.name$)+fdel$	
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	 If vend.vendorcode<>vend.PayToVendorCode ! diff - get name from them
+		Key2$=" ",Key2$;Key2$=vend.PayToVendorCode using "######"
+		PVMR=filegeta80vm(e$,VMC,"=",1,Key2$,tmpvend.)
+		if pvmr>0 ! okay move that vendor's pay to in
+			vend.PayToName$=tmpvend.PayToName$
+			vend.PayToAddress$=tmpvend.PayToAddress$
+			vend.PayToOptAddress$=tmpvend.PayToOptAddress$
+			vend.PayToCity$=tmpvend.PayToCity$
+			vend.PayToState$=tmpvend.PayToState$
+			vend.PayToZip$=tmpvend.PayToZip$
+			vend.PayToCountry$=tmpvend.PayToCountry$
+		Endif
+	 Endif
+     WebStr$="PaytoName"+fdel$+rtrim$(vend.PayToName$)+fdel$	
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+     WebStr$="PaytoAddress1"+fdel$+RTrim$(vend.PayToAddress$)+fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+     WebStr$="PaytoAddress2"+fdel$+RTrim$(vend.PayToOptAddress$)+fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+    WebStr$="PaytoCity"+fdel$+RTrim$(vend.PayToCity$)+fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+    WebStr$="PaytoState"+fdel$+RTrim$(vend.PayToState$)+fdel$+rdel$+"PaytoZip"+fdel$+Rtrim$(vend.PayToZip$)+fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	 !!! screen detail has country but there is none on file - YES THERE IS!
+    WebStr$="PaytoCountry"+fdel$+RTrim$(vend.PayToCountry$)+fdel$
+  	List$[row]=WebStr$
+	row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	! bank #?? (if c0[17])
+	If action2$="" ! inquiry
+	 If C0[17]
+		webstr$="PayFromBank",fdel$,Str$(vend.Bank),fdel$
+	 Else
+		webstr$=fdel$,fdel$
+	 Endif
+	Else ! entry/edit
+		webstr$="PayFromBank",fdel$,Str$(vend.Bank),fdel$ ! always
+	Endif
+	 
+	List$[row]=WebStr$
+	row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+
+   end if
+   List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! VendPayTo
+!----------------------------------------------------------------------------
+
+Sub VendPayment(e$,Vend$,List$[],VendRec,maxcnt,intCo,Vend. as A80vm)
+  ! Creates a list of the Vendor Pay to Info
+  ! 
+  ! e$         : error message
+  ! Vend$      : Vend #
+  ! List$		: list of fields/data
+  ! VendRec		: Vend Rec #
+  ! maxcnt		: max rows of data
+  ! intCo	   : Company ID Number
+  ! Vend.      : vendor data
+  Try
+   Dim 2%,Row,tmpcnt
+   call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+   tmpcnt=maxcnt
+   Clear List$[]
+    List$[0]=bsdel$+"PAYMENT"+fdel$ ! section name
+	WebStr$="Fields"+fdel$
+	WebStr$=WebStr$+"Values"+fdel$
+	List$[1]=WebStr$  ! put header into rstr$
+	row=2 ! starting row for data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	If VendRec>0
+	
+     WebStr$="Avg Pay Days",fdel$,RTrim$(vend.AvgPaymentDays using "###.##"),fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	
+     WebStr$="Last Payment Amount"+fdel$+rtrim$(vend.lastpaymentamount using "---------.##")+fdel$	
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+      if vend.lastpaymentdate<>0
+      xdate$=PDate$(vend.lastpaymentdate) ! julian date to mm/dd/yyyy
+	else
+	  xdate$="      "
+	endif
+	
+     WebStr$="Last Payment Date"+fdel$+rtrim$(xdate$)+fdel$+rdel$+"Check #"+fdel$+rtrim$(vend.LastCheckNumber using "######")+fdel$	
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+     WebStr$="MTD Discounts"+fdel$+RTrim$(vend.mtddiscount using "---------.##")+fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+     WebStr$="YTD Discounts"+fdel$+RTrim$(vend.ytddiscount using "---------.##")+fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+    WebStr$="MTD Payments"+fdel$+RTrim$(vend.mtdpayments using "---------.##")+fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+     WebStr$="YTD Payments"+fdel$+RTrim$(vend.ytdpayments using "---------.##")+fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+     ! WebStr$="Dollars"+fdel$+"Units"+fdel$
+	 ! List$[row]=WebStr$
+	 ! row=row+1
+	 ! if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+      ! WebStr$="Mtd"+fdel$+RTrim$(vend.mtdpurchases using "--------.##")+fdel$
+       ! WebStr$=WebStr$+RTrim$(vend.OfUnits using "--------.##")+fdel$
+	 !List$[row]=WebStr$
+	 !row=row+1
+	 !if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+     !  WebStr$="Ytd"+fdel$+RTrim$(vend.ytdpurchases using "--------.##")+fdel$
+       ! WebStr$=WebStr$+RTrim$(vend.s0fUnitsYtd using "--------.##")+fdel$
+	 !List$[row]=WebStr$
+	 !row=row+1
+	 !if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	
+	!-----------------------------------------------
+      WebStr$="Mtd $"+fdel$+RTrim$(vend.mtdpurchases using "---------.##")+fdel$+rdel$
+      WebStr$=WebStr$+"MTD Units"+fdel$+RTrim$(vend.OfUnits using "---------.##")+fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+     WebStr$="Ytd $"+fdel$+RTrim$(vend.ytdpurchases using "---------.##")+fdel$+rdel$
+     WebStr$=WebStr$+"YTD Units"+fdel$+RTrim$(vend.s0fUnitsYtd using "---------.##")+fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+
+	 WebStr$="LY"+fdel$+RTrim$(vend.purchaselastyear using "---------.##")+fdel$
+	  List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	
+
+  
+
+
+   end if
+   List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! VendPayMent
+!----------------------------------------------------------------------------
+
+Sub VendMin(e$,Vend$,List$[],VendRec,maxcnt,intCo,Vend. as A80vm, Vtag. as VendTag)
+  ! Creates a list of the Vendor Minimums
+  ! 
+  ! e$         : error message
+  ! Vend$      : Vend #
+  ! List$		: list of fields/data
+  ! VendRec		: Vend Rec #
+  ! maxcnt		: max rows of data
+  ! intCo	   : Company ID Number
+  ! Vend.      : vendor data
+  Try
+   Dim 2%,Row,tmpcnt
+   call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+   tmpcnt=maxcnt
+   Clear List$[]
+    List$[0]=bsdel$+"Minimums"+fdel$ ! section name
+	WebStr$="Field"+fdel$+"Order Levels"+fdel$+"Freight Paid"+fdel$+"Review Cycle Month"+fdel$+"Days"+fdel$
+	
+	List$[1]=WebStr$  ! put header into rstr$
+	row=2 ! starting row for data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	If VendRec>0
+
+	
+     WebStr$="Minimum $ Amount "+fdel$
+     WebStr$=webstr$+rtrim$(vtag.minorder using "######.##"),fdel$
+     WebStr$=webstr$+rtrim$(vtag.frtpaid using "######.##"),fdel$
+     WebStr$=webstr$+rtrim$(vtag.reviewcycle using "###.##"),fdel$
+     WebStr$=webstr$+rtrim$((vtag.reviewcycle*30) using "###.##"),fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+     WebStr$="Minimum Weight "+fdel$
+     WebStr$=webstr$+rtrim$(vtag.minwtorder using "######.##"),fdel$
+     WebStr$=webstr$+rtrim$(vtag.frtpaidwt using "######.##"),fdel$
+     WebStr$=webstr$+rtrim$(vtag.reviewcycleWt using "###.##"),fdel$
+     WebStr$=webstr$+rtrim$((vtag.reviewcyclewt*30) using "###.##"),fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+     WebStr$="Minimum Cubes "+fdel$
+     WebStr$=webstr$+rtrim$(vtag.minCubeord using "######.##"),fdel$
+     WebStr$=webstr$+rtrim$(vtag.frtpaidcubes using "######.##"),fdel$
+     WebStr$=webstr$+rtrim$(vtag.reviewcycleCube using "###.##"),fdel$
+     WebStr$=webstr$+rtrim$((vtag.reviewcycleCube*30) using "###.##"),fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+      WebStr$="Minimum Quantity "+fdel$
+     WebStr$=webstr$+rtrim$(vtag.minqtyord using "######.##"),fdel$
+     WebStr$=webstr$+rtrim$(vtag.frtpaidqty using "######.##"),fdel$
+     WebStr$=webstr$+rtrim$(vtag.reviewcycleqty using "###.##"),fdel$
+     WebStr$=webstr$+rtrim$((vtag.reviewcycleqty*30) using "###.##"),fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+   end if
+   List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! VendMin
+
+!----------------------------------------------------------------------------
+
+Sub VendGen(e$,Vend$,List$[],VendRec,maxcnt,intCo,Vend. as A80vm, Vtag. as VendTag)
+  ! Creates a list of the Vendor General Control
+  ! 
+  ! e$         : error message
+  ! Vend$      : Vend #
+  ! List$		: list of fields/data
+  ! VendRec		: Vend Rec #
+  ! maxcnt		: max rows of data
+  ! intCo	   : Company ID Number
+  ! Vend.      : vendor data
+  Try
+   Dim 2%,Row,tmpcnt
+   call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+   tmpcnt=maxcnt
+   Clear List$[]
+   List$[0]=bsdel$,"VENDORGENERAL",fdel$
+	!
+	WebStr$="Salesperson",fdel$,"SAddress",fdel$
+	Webstr$=WebStr$,"SCity",fdel$,"SState",fdel$,"SZip",fdel$
+	WebStr$=WebStr$,"SCountry",fdel$,"SPhone No",fdel$
+	WebStr$=WebStr$,"Vendor Fax No",fdel$,"Review Cycle Freezing",fdel$,"Rebate Cost",fdel$
+	WebStr$=WebStr$,"Supp Cust No",fdel$,"Supp Bill To No",fdel$,"Group",fdel$
+	WebStr$=WebStr$,"Group ID",fdel$,"Name Control(1099)",fdel$,"1099 ID Type",fdel$,"1099 ID",fdel$
+	WebStr$=WebStr$,"Seasonal",fdel$,"Start Month",fdel$,"End Month",fdel$
+    Webstr$=Webstr$,"RebateVend",fdel$
+	List$[1]=WebStr$
+	!
+	row=2 ! starting row for data
+   
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	If VendRec>0
+	!!!! Load General Date here
+	
+     WebStr$=rtrim$(vtag.salesmanname$)+fdel$
+     WebStr$=webstr$+rtrim$(vtag.slsmaddress$),fdel$
+     WebStr$=webstr$+rtrim$(vtag.slsmcity$),fdel$
+     WebStr$=webstr$+rtrim$(vtag.slsmstate$),fdel$,rtrim$(vtag.slsmzip$)+fdel$
+     WebStr$=webstr$+rtrim$(vtag.slsmcountry$),fdel$
+	 if action2$="" ! inquiry
+     WebStr$=webstr$+rtrim$(vtag.slsmphone$),fdel$
+	 Else ! entry/edit
+	 WebStr$=webstr$+rtrim$(vtag.slsmphone$),fdel$
+	 Endif
+     WebStr$=webstr$+rtrim$(vtag.vendorfax$),fdel$
+     let tmp$="N"
+     if vtag.freezereviewcycle<>0 let tmp$="Y"
+      WebStr$=webstr$+rtrim$(tmp$),fdel$
+      let costdesc$=" ",costdesc$
+     if vtag.rebatecost=1
+	read #ctlc,18,120;costdesc$; ! load cost
+     else
+	if vtag.rebatecost=2
+		read #ctlc,18,220;costdesc$; ! redi cost
+	else
+		if vtag.rebatecost=3
+			read#ctlc,18,130;costdesc$; ! avg cost
+		else
+			if vtag.rebatecost=4 or vtag.rebatecost<0
+				read #ctlc,18,110;costdesc$; ! po cost
+			else
+				if vtag.rebatecost=5
+					let costdesc$="BASE COST "
+				Else
+					if vtag.rebatecost=6
+						read #ctlc,18,230;costdesc$; ! net po
+					endif
+				endif
+			endif
+		endif
+	endif
+     endif
+	 if action2$="" ! inquiry
+	 WebStr$=webstr$+str$(vtag.rebatecost)+" "+rtrim$(costdesc$),fdel$
+	 else ! entry/edit
+	 WebStr$=webstr$+str$(vtag.rebatecost),fdel$
+	 Endif
+     ! now for the right side of the screen
+     WebStr$=webstr$+rtrim$(vtag.suppliercust$),fdel$
+     WebStr$=webstr$+rtrim$(vtag.supplierbillto$),fdel$
+     WebStr$=webstr$+rtrim$(vtag.vendorgroup using "######"),fdel$
+     WebStr$=webstr$+rtrim$(vtag.groupid using "######"),fdel$
+     WebStr$=webstr$+rtrim$(vend.namecontrol$),fdel$
+     let tmp$=" "
+      if vend.tintype=1
+	let tmp$="F"
+      else
+	 if vend.tintype=2
+		let tmp$="S"	
+	else
+		if vend.tintype=3
+			let tmp$="C"
+		else
+			if vend.tintype=4
+				let tmp$="E"
+			endif
+		endif
+	 endif
+     endif
+     WebStr$=webstr$+rtrim$(tmp$),fdel$
+     WebStr$=webstr$+rtrim$(vend.s1099id$),fdel$
+     let tmp$="N"
+     if vtag.seasonalflag<>0 let tmp$="Y"
+     WebStr$=webstr$+rtrim$(tmp$),fdel$
+     WebStr$=webstr$+rtrim$(vtag.startmonth using "##"),fdel$
+     WebStr$=webstr$+rtrim$(vtag.endmonth using "##"),fdel$
+	 webstr$=webstr$+rtrim$(vtag.REBVENDID using "######"),fdel$
+         List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+
+   end if
+   List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! VendGen
+
+!----------------------------------------------------------------------------
+
+!!!!!! start sub uda !!!!
+
+Sub VendUDA(e$,Vend$,List$[],VendRec,maxcnt,intCo,Vend. as A80vm, Vtag. as VendTag)
+  ! Creates a list of the Vendor Pay to Info
+  ! 
+  ! e$         : error message
+  ! Vend$      : Vend #
+  ! List$		: list of fields/data
+  ! VendRec		: Vend Rec #
+  ! maxcnt		: max rows of data
+  ! intCo	   : Company ID Number
+  ! Vend.      : vendor data
+  Try
+   Dim 2%,Row,tmpcnt
+   call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+   tmpcnt=maxcnt
+   Clear List$[]
+    List$[0]=bsdel$+"VENDORUDA"+fdel$ ! section name
+	WebStr$="FieldDesc"+fdel$
+	WebStr$=WebStr$+"UDAValues"+fdel$
+	List$[1]=WebStr$  ! put header into rstr$
+	row=2 ! starting row for data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	!If VendRec>0
+	if vendrec<0
+		clear vtag.
+	endif
+	!! uda 1
+	Read #ctlc,67,56;udadesc$;
+     WebStr$=rtrim$(udadesc$),fdel$,RTrim$( vtag.uda1$),fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+	!! uda 2
+	Read #ctlc,67,70;udadesc$;
+    	WebStr$=rtrim$(udadesc$),fdel$,RTrim$( vtag.uda2$),fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+       !! uda 3
+       Read #ctlc,67,84;udadesc$;
+    	WebStr$=rtrim$(udadesc$),fdel$,RTrim$( vtag.uda3$),fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+	!! uda 4
+       Read #ctlc,67,98;udadesc$;
+    	WebStr$=rtrim$(udadesc$),fdel$,RTrim$( vtag.uda4 USING "######.####"),fdel$
+	 List$[row]=WebStr$
+	 row=row+1
+	 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+  ! end if
+   List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! VendUDA
+
+!!! ------------------section for podetail ------ ! mtg
+action = "PORDDET"
+Sub  PORDDet()
+
+Try 
+	Dim  dlog$[50]
+	
+	
+	Declare Sub updatelog,errTrap
+	Include "src/povars.inc"  ! has pointo. & poitem
+	
+
+        DIM CO$[1],SLS$[3]
+	dim 2%,returnstatus,vendid, message$[200],PO$[10],VENDID$[10],POHREC$[10],msg1$[256]
+	Dim arrSales[999],3%,maxrow
+	maxrow=1000
+	
+	
+        Dim poh. As poinfo                                                        
+        Dim pol.[MaxRow] As poitem                                                
+        Dim 2%,ii,ss                                                              
+                                                       
+Call DXGet("S_USER.AppID",CO$) ! Company                                  
+Call DXGet("S_USER.Userdef1",SLS$) ! Salesman Number                      
+Call DXGet("po",PO$) ! PO   ! get specific po detail                                               
+IF PO$[1,2]="PO" THEN PO$[1,2]="  "  ! tc - 37421
+Call DXGet("vendid",VendID$) ! Vendor Number
+vendid=vendid$
+poh.vend$=vendid using "######"
+let pohrec$="000000" ! set to zero
+LET SLS$="999" ! FOR ALL SALESMAN
+! LET COST_LEV[2]=99 ! SET TO VIEW NEED TO MODIFY WHEN SECURITY IS SET
+Call PODet(Val(CO$),Val(SLS$),debug,dlog$,PO$,pohrec$,poh.,pol.[],ii,msg1$,ss,MaxRow,cost_lev[])                                                           
+If ss = 10000 Let e$ = "Purchase order not found."                        
+ If ss Error 10000  
+!! --- start Purchase order header section --- 
+tmp$=bsdel$+"Purchase Order Header"+fdel$+rdel$
+Call AddToStr(e$,rstr$,tmp$)  ! put header into rstr$
+!! purchase order header headings ^M      
+tmp$="PO# "+fdel$               
+tmp$=tmp$+"Order Date"+fdel$     
+tmp$=tmp$+"Term"+fdel$           
+tmp$=tmp$+"Type"+fdel$          
+tmp$=tmp$+"Total Amount"+fdel$       
+    
+!! purchase order header 2nd line^M       
+tmp$=tmp$+"Due Date"+fdel$         
+tmp$=tmp$+"Buyer"+fdel$      
+tmp$=tmp$+"Whse"+fdel$            
+tmp$=tmp$+"Total Weight"+fdel$           
+            
+!!! purchase order header 3rd line^M      
+tmp$=tmp$+"Conf Date"+fdel$       
+tmp$=tmp$+"Ship Via"+fdel$           
+tmp$=tmp$+"Status"+fdel$           
+tmp$=tmp$+"Total Cubes"+fdel$          
+
+!!! purchase order header 4th line
+tmp$=tmp$+"Total Pieces"+fdel$
+tmp$=tmp$+rdel$
+Call AddToStr(e$,rstr$,tmp$)  ! put header into rstr$  
+tmp$=po$+fdel$                           
+tmp$=tmp$+ poh.OrderDate$+fdel$                
+tmp$=tmp$+ poh.Term$+fdel$                     
+tmp$=tmp$+ poh.Type$+fdel$                    
+tmp$=tmp$+ poh.totamt$+fdel$                    
+!! purchase order header 2nd line                      
+tmp$=tmp$+poh.duedate$+fdel$                    
+tmp$=tmp$+ poh.buyer$+fdel$                 
+tmp$=tmp$+ poh.whse$+fdel$                                 
+tmp$=tmp$+ poh.totwt$+fdel$                      
+!!! order header 3rd line                     
+tmp$=tmp$+ poh.confdate$+fdel$                  
+tmp$=tmp$+ poh.shipvia$+fdel$                     
+tmp$=tmp$+ poh.status$+fdel$                                       
+tmp$=tmp$+ poh.totcube$+fdel$
+!!! purchase order header 4th line
+tmp$=tmp$+ poh.totpc$+fdel$
+tmp$=tmp$+ rdel$   
+Call AddToStr(e$,rstr$,tmp$)  ! put header into rstr$                               
+Call AddToStr(e$,rstr$,esdel$)	! end of section
+!! ---- start order shipto/soldto section ---
+tmp$=bsdel$+"Purchase Order Address"+fdel$+rdel$
+Call AddToStr(e$,rstr$,tmp$)  ! put header into rstr$   
+
+!! purchase order address heading
+tmp$="VendorNo"+fdel$
+tmp$=tmp$+"SoldAddress1"+fdel$
+tmp$=tmp$+"SoldAddress2"+fdel$
+tmp$=tmp$+"SoldAddress3"+fdel$
+tmp$=tmp$+"SoldAddress4"+fdel$
+tmp$=tmp$+"ShipAddress1"+fdel$
+tmp$=tmp$+"ShipAddress2"+fdel$
+tmp$=tmp$+"ShipAddress3"+fdel$
+tmp$=tmp$+"ShipAddress4"+fdel$
+tmp$=tmp$+rdel$
+Call AddToStr(e$,rstr$,tmp$)  ! put header into rstr$
+tmp$=poh.vend$+fdel$
+tmp$=tmp$+poh.SoldAddr1$+fdel$
+tmp$=tmp$+poh.SoldAddr2$+fdel$
+tmp$=tmp$+poh.SoldAddr3$+fdel$
+tmp$=tmp$+poh.SoldAddr4$+fdel$
+tmp$=tmp$+poh.ShipAddr1$+fdel$
+tmp$=tmp$+poh.ShipAddr2$+fdel$
+tmp$=tmp$+poh.ShipAddr3$+fdel$
+tmp$=tmp$+poh.ShipAddr4$+fdel$
+tmp$=tmp$+rdel$
+Call AddToStr(e$,rstr$,tmp$)  ! put header into rstr$
+Call AddToStr(e$,rstr$,esdel$)	! end of section
+
+!! ---- end purchase order address section ----
+
+!!! ---- start purchase order line section ----
+tmp$=bsdel$+"PurchaseOrderLine"+fdel$+rdel$
+tmp$=tmp$+"Line"+fdel$
+tmp$=tmp$+ "Item"+fdel$
+tmp$=tmp$+"Description1"+fdel$
+tmp$=tmp$+"Order Qty"+fdel$
+tmp$=tmp$+"To Ship Qty"+fdel$
+tmp$=tmp$+"Received Qty"+fdel$
+tmp$=tmp$+"UM"+fdel$
+tmp$=tmp$+"Unit Cost"+fdel$
+tmp$=tmp$+"Extended Cost"+fdel$
+
+tmp$=tmp$+rdel$
+Call AddToStr(e$,rstr$,tmp$)  ! put heading into rstr$
+    For i=0 to ii-1
+	tmp$=pol.[i].li$+fdel$ ! line # 
+	tmp$=tmp$+pol.[i].item$+fdel$ ! item # 
+	tmp$=tmp$+pol.[i].desc1$+fdel$  
+	tmp$=tmp$+pol.[i].qtyord$+fdel$ 
+	tmp$=tmp$+pol.[i].qtyshp$+fdel$ 
+	tmp$=tmp$+pol.[i].qtyrcv$+fdel$ 
+	tmp$=tmp$+pol.[i].uom$+fdel$ 
+      	tmp$=tmp$+pol.[i].UnitCost$+"/"+pol.[i].cUnit$+fdel$
+        tmp$=tmp$+pol.[i].ExtCost$+fdel$
+       
+	tmp$=tmp$+rdel$
+	Call AddToStr(e$,rstr$,tmp$)  ! put heading into rstr$
+    Next i
+!Call AddToStr(e$,rstr$,esdel$)	! end of section
+!! --- end order line section
+	Call SetOutput(e$,rstr$+esdel$)
+else
+	include "src/callsuberr.inc"
+end try
+
+End Sub ! -- PORDDet
+!
+!-----------------------------------------------------------------------------
+Sub SndLists()
+! send needed flags & droplists
+ Try
+	Dim Shpv$[24],Vgrp$[30],fields$[1,30]
+	Dim 3%
+	tmpcnt=maxcnt
+	Clear List$[]
+	! list$[0]=bsdel$,"
+	! allow vendorwhse?  P61$[63,63]
+!!-!Building section for Pofrgth
+  chan=openfile("Pofrgth",intco,"R")
+  clear list$[]
+  Key2$=" ",key2$
+  key2$=""
+  call filedroplistpofrgth(e$,list$[],100,chan) ! ,"",fields$[],1,key2$,"0")
+  call addToStr(e$,rstr$,list$[])
+  close #chan
+
+  !! 1099 ID type tintype
+	  clear list$[]
+	  list$[0]=bsdel$,"droplist1099IDTYPE",fdel$
+	  list$[1]="ID",fdel$,"Description",fdel$
+	  list$[2]="",fdel$,"NO 1099",fdel$
+	  list$[3]="F",fdel$,"F - Fed Emp #",fdel$
+	  list$[4]="S",fdel$,"S - Soc Ser #",fdel$
+	  list$[5]="C",fdel$,"C - Corp ID #",fdel$
+	  list$[6]="E",fdel$,"E - Employee",fdel$
+  	  list$[7]=esdel$
+	  call addtostr(e$,rstr$,list$[])
+	  
+!!rebate cost drop list
+	  clear list$[]
+	  list$[0]=bsdel$,"droplistREBATECOST",fdel$
+	  list$[1]="ID",fdel$,"Description",fdel$
+	  list$[2]="0",fdel$,"-Select-",fdel$
+	  read #ctlc,18,120;costdesc$; ! load cost
+	  list$[3]="1",fdel$,"1 - ",costdesc$,fdel$
+	  read #ctlc,18,220;costdesc$; ! redi cost
+	  list$[4]="2",fdel$,"2 - ",costdesc$,fdel$
+	  read#ctlc,18,130;costdesc$; ! avg cost
+	  list$[5]="3",fdel$,"3 - ",costdesc$,fdel$
+	  read #ctlc,18,110;costdesc$; ! po cost
+	  list$[6]="4",fdel$,"4 - ",costdesc$,fdel$
+	  List$[7]="5",fdel$,"5 - Base Cost",fdel$
+	  READ #CTLC,18,230;COSTDESC$; ! NET PO
+	  LIST$[8]="6",fdel$,"6 - ",costdesc$,fdel$
+	  list$[9]=esdel$
+	  call addtostr(e$,rstr$,list$[])
+	! g/l accounts
+	!clear list$[]
+	!call filedroplistglglmz(e$,list$[],tmpcnt,ch_glm)
+	!call addtostr(e$,rstr$,list$[])
+	! *** remove the gl master file list and put in the correct list using validation file
+	clear list$[]
+	list$[0]=bsdel$,"droplistglglm",fdel$ ! this is using the validation but using the same section heading
+	list$[1]="ID",fdel$,"GLAcct",fdel$,"Desc",fdel$
+	list$[2]=" ",fdel$,"0",fdel$,"None",fdel$
+	let row=3
+	let keyvl$=" ",keyvl$
+	do
+		search #ch_vl,3,1;keyvl$,rec_vl,e
+		if e<>0 exit do
+		read record #ch_vl,rec_vl;apvl.;
+		let list$[row]=rtrim$(apvl.AcctId$),fdel$,rtrim$(apvl.Acctid$),fdel$,rtrim$(apvl.desc$),fdel$
+		let row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	loop
+	list$[row]=esdel$
+	call addtostr(e$,rstr$,list$[])
+	! ship via (manual or list select)
+	! separate file (3/poshpvia#)
+	chan=findchannel()
+	tmp$="3/poshpvia"+Str$(Intco)
+	ROpen #chan,tmp$
+	clear List$[]
+	List$[0]=bsdel$,"SHIPVIA",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	row=2
+	X2=chf(chan)-1
+	for r=1 to x2
+		try
+			read #chan,r,0;shpv$;
+		Else
+			shpv$=B$
+		end try
+		tmp$=RTrim$(shpv$)
+		if tmp$<>""
+			list$[row]=Str$(R),fdel$,tmp$,fdel$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next R
+	close #chan
+	list$[row]=esdel$
+	call addtostr(e$,rstr$,list$[])
+	! vendor group
+	chan=findchannel()
+	tmp$="2/vendgrp"+str$(Intco)
+	ROpen #chan,tmp$
+	clear List$[]
+	List$[0]=bsdel$,"VENDGRP",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	list$[2]="0",fdel$,"NONE",fdel$
+	row=3
+	Key1$=" ",key1$
+	Do
+		search #chan,3,1;Key1$,R,E
+		if e>0 exit do
+		MAT READ #CHAN,R,0;VGRP$;
+		tmp$=RTrim$(vgrp$)
+		if tmp$<>""
+			List$[row]=RTrim$(key1$),fdel$,tmp$,fdel$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Loop
+	close #chan
+	list$[row]=esdel$
+	call addtostr(e$,rstr$,list$[])
+	! bank # - If C0[17]
+	chan=OpenFile(-112,Intco)
+	clear list$[]
+	list$[0]=bsdel$,"BANKIDLIST",fdel$
+	list$[1]="ID",fdel$,"NAME",fdel$
+	List$[2]="0",fdel$,"NOT USED",fdel$
+	row=3
+	if c0[17] ! flagged
+	 Key1$=" ",key1$
+	 Do
+		search #chan,3,1;Key1$,R,E
+		if e>0 exit do
+		MAT READ #CHAN,R,2;VGRP$; ! it's 30 char so use same as above!
+		tmp$=RTrim$(vgrp$)
+		if tmp$<>""
+			List$[row]=RTrim$(key1$),fdel$,tmp$,fdel$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	 Loop
+	Endif ! of sysflag=1
+	if chan>0 close #chan
+	list$[row]=esdel$
+	call addtostr(e$,rstr$,list$[])
+	! truck type
+	Clear List$[]
+	List$[0]=bsdel$,"TRUCKTYPE",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	List$[2]="1",fdel$,"LBS",fdel$
+	List$[3]="2",fdel$,"CUBES",fdel$
+	List$[4]=esdel$
+	call addtostr(e$,rstr$,list$[])
+	Clear List$[]
+	list$[0]=bsdel$,"SYSFLAGS",fdel$
+	List$[1]="ALLOWWHSE",fdel$,"ACHBANKFLAG",Fdel$,"USEVENDURL",FDEL$
+	tmp$="N" \ if p61$[63,63]="Y" let tmp$="Y"
+	List$[2]=tmp$,fdel$ ! P61$[63,63]
+	tmp$="N"\if p61$[99,99]="Y" let tmp$="Y" 
+	List$[2]=List$[2],tmp$,fdel$ ! pos pay/ach flag
+	let tmp$="N"
+	let filename$="2/VENDWEB"+STR$(INTCO)
+	Call FindF(filename$,fileflag)  
+	If fileflag<>0 let tmp$="Y"
+	List$[2]=List$[2],tmp$,fdel$ ! usevendurl		
+	List$[3]=esdel$
+	call addtostr(e$,rstr$,list$[])
+	 clear list$[]
+	 list$[0]=bsdel$,"droplistcurrency",fdel$ ! this is using the validation but using the same section heading
+	 list$[1]="ID",fdel$,"Desc",fdel$
+	if p61$[136,136]<>"Y"
+		list$[2]="0",fdel$,"None",fdel$
+	else
+		list$[2]="0",fdel$,"No Currency Exchange",fdel$
+	endif
+	let row=3
+	if p61$[136,136]="Y"
+		ch_curr=findchannel()
+		tmp$="2/CURRENCY"+str$(Intco)
+		ROpen #ch_curr,tmp$
+		let keycurr$=" ",keycurr$
+		do
+			search #ch_curr,3,1;keycurr$,rec_curr,e
+			if e<>0 exit do
+			read record #ch_curr,rec_curr;curr.;
+			let list$[row]=str$(curr.CurrId),fdel$,rtrim$(curr.desc$),fdel$
+			let row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		loop
+		try
+			close #ch_curr
+		else
+			rem
+		end try
+	endif
+	list$[row]=esdel$
+	call addtostr(e$,rstr$,list$[])
+	endcurrency: ! 
+	! always end w/ addtostr!
+ else
+	include "src/callsuberr.inc"
+end try
+
+End Sub ! -- sndlists
+!
+!-----------------------------------------------------------------------------			
+Sub VendSave()
+! get and put into vend. or vtag.
+Try
+    !!-!Filling vend.
+	vend.VendorCode=vend$
+	if vtr>0 ! existing vendtag entry
+		if vtag.vendorcode<=0 OR vtag.vendorcode<>vend.VendorCode ! pm native writes vendor as 0 !!??
+			vtag.vendorcode=vend$ ! write it now to avoid se upon change
+			write record #VTC,vtr,0;vtag.;
+		Endif
+	Endif	
+	vtag.vendorcode=vend$
+	if vend.VendorCode<=0
+		returnstatus=0
+		message$="Vendor Number is zero"
+		goto VSDone
+	Endif
+	call DXGet("VendorName",tmp$)\vend.Name$=UCASE$(tmp$),b$
+	if Trim$(vend.Name$)=""
+		returnstatus=0
+		Message$="VENDOR NAME IS REQUIRED!"
+		goto VSDone
+	Endif
+	strgok=chkbadchars(e$,vend.Name$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor Name"
+		goto VSDone
+	Endif
+	call DXGet("Address1",tmp$)\vend.Address$=tmp$,b$
+	strgok=chkbadchars(e$,vend.Address$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor Address 1"
+		goto VSDone
+	Endif
+	call DXGet("Address2",tmp$)\vend.OptAddress$=tmp$,b$
+	strgok=chkbadchars(e$,vend.OptAddress$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor Address 2"
+		goto VSDone
+	Endif
+	call DXGet("City",tmp$)\vend.City$=tmp$,b$
+	strgok=chkbadchars(e$,vend.City$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor City"
+		goto VSDone
+	Endif
+	call DXGet("State",tmp$)\vend.State$=tmp$,b$
+	strgok=chkbadchars(e$,vend.State$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor State"
+		goto VSDone
+	Endif
+	call DXGet("ZipCode",tmp$) ! 9 chars
+	tmp$=VendZip9$(tmp$) ! check/adjust to 9
+	vend.Zip$=tmp$,b$
+	call DXGet("Country",tmp$)\vtag.VendorCountry$=tmp$+B$
+	strgok=chkbadchars(e$,vtag.VendorCountry$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor Country"
+		goto VSDone
+	Endif
+	call DXGet("Contact",tmp$)\vend.Contact$=tmp$,b$
+	strgok=chkbadchars(e$,vend.Contact$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor Contact"
+		goto VSDone
+	Endif
+	call DXGet("Telephone",tmp$)\vend.TelephoneNumber$=tmp$,b$
+	strgok=chkbadchars(e$,vend.TelephoneNumber$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor Phone"
+		goto VSDone
+	Endif
+	call DXGet("Ext",tmp$)           \ vend.PhoneExt=tmp$
+	call DXGet("ExpeditingPhone",tmp$)\vtag.ExpidtPhone$=tmp$+B$
+	strgok=chkbadchars(e$,vtag.ExpidtPhone$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor Exped Phone"
+		goto VSDone
+	Endif
+	call DXGet("Fax",tmp$)\vend.FaxNumber$=tmp$,b$
+	strgok=chkbadchars(e$,vend.FaxNumber$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor Fax"
+		goto VSDone
+	Endif
+	call DXGet("GLAcct",tmp$)\vend.GLAccountNumber$=tmp$,b$  
+    call DXGet("Terms",tmp$)
+	if rtrim$(vend.TermsAlpha$)<>"" and rtrim$(tmp$)=""
+		Call dxsave(0,"/tmp/vendterms.txt!")
+	endif
+	vend.TermsAlpha$=tmp$,b$
+	strgok=chkbadchars(e$,vend.TermsAlpha$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor Terms"
+		goto VSDone
+	Endif
+	call DXGet("Disc",tmp$)          \ vend.Terms=tmp$
+	if vend.Terms<0 or vend.Terms>100
+		returnstatus=0
+		message$="Invalid Discount percent"
+		goto VSDone
+	Endif
+	call DXGet("DiscountDays",tmp$)  \ vend.DiscountDays=tmp$
+	call DXGet("NetDays",tmp$)       \ vend.NetPaymentDays=tmp$
+	call DXGet("MinimumOrder",tmp$)  \ vend.MimimumOrderAmount=tmp$
+	call DXGet("HoldInv",tmp$)
+	vend.VendorOnHold=0 \ if UCase$(RTRIM$(tmp$))="Y" let vend.VendorOnHold=1
+    call dxget("DATEOPEN",tmp$) ! as mm/dd/yyyy
+	tmp$=chkDateFrmt$(tmp$) ! make sure it's correct format
+	tmp1$=tmp$[9,10],tmp$[1,2],tmp$[4,5] ! to yymmdd
+	vend.DateAccountOpened=tmp1$
+	call DXGet("AllowPO",tmp$)
+	vtag.AllowPoS=0 \ if tmp$[1,1]="Y" let vtag.AllowPoS=1
+	call DXGet("NextDayDel",tmp$)
+	vend.NextDayDelivery=0 \ if tmp$[1,1]="Y" let vend.NextDayDelivery=1
+	call DXGet("FreightCode",tmp$)\vend.FreightCode$=tmp$,b$
+	call DXGet("TruckSize",tmp$)\vtag.TruckSize=tmp$
+	call dxget("Trucktype",tmp$)
+	vtag.TruckSizInLbCube=1 \ if tmp$="2" let vtag.TruckSizInLbCube=2
+	call DXGet("Routing",tmp$)\vend.Routing$=tmp$,b$
+	strgok=chkbadchars(e$,vend.Routing$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor Routing"
+		goto VSDone
+	Endif
+	call DXGet("FOB",tmp$)\vend.FOB$=tmp$,b$
+	strgok=chkbadchars(e$,vend.FOB$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor FOB"
+		goto VSDone
+	Endif
+	call dxget("SHIPVIA",tmp$)
+	let vend.shipvianum=0
+	let vend.shipvia$=" ",vend.shipvia$
+	let tmp3=0
+	try
+		let tmp3=tmp$
+	else
+	end try
+	if tmp3>0 and tmp3<99
+		chan=findchannel()
+		tmp$="3/poshpvia"+Str$(Intco)
+		ROpen #chan,tmp$
+		Try
+			read #chan,tmp3;vend.shipvia$;
+			if rtrim$(vend.shipvia$)<>""
+				let vend.shipvianum=tmp3
+			Else ! shipvia doesn't have a valid description
+				let returnstatus=0
+				let message$="Invalid Ship Via Submitted"
+			endif
+		else ! invalid ship record
+			let returnstatus=0
+			let message$="Invalid Ship Via Submitted"	
+		End Try
+    else
+		vend.ShipVia$=tmp$+b$
+    endif
+	strgok=chkbadchars(e$,vend.ShipVia$)
+	if not(strgok)
+		returnstatus=0
+		Message$="Invalid Characters in Vendor Ship Via"
+		goto VSDone
+	Endif
+	call dxget("PODISCTYPE",tmp$)
+	vtag.VDiscType=0 \ if tmp$="%" let vtag.VDiscType=1
+	if tmp$="$" let vtag.VDiscType=2
+	call dxget("PODISCAMT",tmp$)
+	x3=tmp$ \ if x3=0 let vtag.VDiscType=0
+	if x3<0
+		returnstatus=0
+		message$="Invalid PO Discount amount"
+		goto VSDone
+	Endif
+	if vtag.VDiscType=1 and x3>100
+		returnstatus=0
+		message$="Invalid PO Discount percent"
+		goto VSDone
+	Endif
+	vtag.VDiscAmt=x3
+	if c0[17]
+		call dxget("VBANK",tmp$)\vend.Bank=tmp$
+		If vend.bank<=0
+			returnstatus=0
+			Message$="PLEASE SELECT A BANK!"
+			goto vsdone
+		Endif
+		chan=OpenFile(-112,Intco)
+		if chan>0
+			key1$=" ",key1$;key1$=vend.bank using "##"
+			SEARCH #CHAN,2,1;key1$,R,E
+			close #chan
+			if e
+				returnstatus=0
+				message$="BANK NOT FOUND!"
+				goto vsdone
+			Endif
+		Endif
+	Endif
+    If p61$[136,136]="Y"
+		call dxget("CURRENCYID",tmp$)\vend.currid=tmp$
+		if  vend.currid<0 or vend.currid>7999
+			let returnstatus=0
+			let Message$="Invalid Currency Id Entered "
+			goto vsdone:
+		endif
+		if vend.currid<>0
+			ch_curr=findchannel()
+			tmp$="2/CURRENCY"+str$(Intco)
+			ROpen #ch_curr,tmp$
+			let keycurr$=vend.currid using "####"
+			search #ch_curr,2,1;keycurr$,rec_curr,e
+			if e<>0
+				let returnstatus=0
+				let Message$="Currency ID is not on File "
+				goto vsdone:
+			endif
+			try
+				close #ch_curr
+			else
+				rem
+			end try
+		endif
+	endif
+    
+	!related links fields
+	!payto
+	 Call dxget("PaytoVendorID",tmp$)\vend.PayToVendorCode=tmp$
+	 if vend.PayToVendorCode<=0 let vend.PayToVendorCode=vend.VendorCode
+	 if vend.PayToVendorCode=vend.VendorCode ! only if same!
+		 call dxget("Paytoname",tmp$) ! 
+		 if rtrim$(vend.paytoName$)<>"" and rtrim$(tmp$)=""
+			returnstatus=0
+			let message$="Pay to Name needs to be entered"
+			Call dxsave(0,"/tmp/vendname.txt!")
+			goto VSDONE
+		 endif
+		 let tmp$=rtrim$(tmp$)+b$
+		 vend.PayToName$=tmp$,b$
+		 strgok=chkbadchars(e$,tmp$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Pay to Name"
+			goto VSDone
+		 Endif
+		 vend.PayToName$=rtrim$(tmp$),b$
+		 call dxget("PaytoAddress1",tmp$)\vend.PayToAddress$=tmp$,b$
+		 strgok=chkbadchars(e$,vend.PayToAddress$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Pay to Addr 1"
+			goto VSDone
+		 Endif
+		 call dxget("PaytoAddress2",tmp$)\vend.PayToOptAddress$=tmp$,b$
+		 strgok=chkbadchars(e$,vend.PayToOptAddress$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Pay to Addr 2"
+			goto VSDone
+		 Endif
+		 call dxget("PaytoCity",tmp$)\vend.PayToCity$=tmp$,b$
+		 strgok=chkbadchars(e$,vend.PayToCity$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Pay to City"
+			goto VSDone
+		 Endif
+		 call dxget("PaytoState",tmp$)\vend.PayToState$=tmp$,b$
+		 strgok=chkbadchars(e$,vend.PayToState$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Pay to State"
+			goto VSDone
+		 Endif
+		 call dxget("PaytoZip",tmp$) ! 
+		 tmp$=VendZip9$(tmp$) ! check/adjust to 9 chars
+		 vend.PayToZip$=tmp$,b$
+		 call dxget("PaytoCountry",tmp$)\vend.PayToCountry$=tmp$,b$
+		 strgok=chkbadchars(e$,vend.PayToCountry$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Pay to Country"
+			goto VSDone
+		 Endif
+	 Else ! different - chk & change
+		 Key2$=" ",key2$
+		 key2$=vend.PayToVendorCode using "######"
+	     PVMR=filegeta80vm(e$,VMC,"=",1,Key2$,tmpvend.)
+		 if pvmr<=0 ! NO GOOD
+			returnstatus=0
+			message$="PAY TO ID NOT FOUND"
+			goto VSDone
+		 Endif
+		 if tmpvend.PayToVendorCode<>vend.PayToVendorCode ! can't do string of #'s
+			! on pm - if tmpptv=vendptv it is ok
+			returnstatus=0
+			message$="Pay to refers to another Pay to "+Str$(tmpvend.PayToVendorCode)
+			goto vsdone
+		 Endif
+	  Endif
+	  if vmr>0 ! existing - see if diff
+			read record #VMC,VMR,0;tmpvend.;
+			if tmpvend.PayToVendorCode<=0 let tmpvend.PayToVendorCode=vend.vendorcode
+			if tmpvend.PayToVendorCode<>vend.PayToVendorCode ! diff - 
+			! 501 does a chg in a file
+				call dxget("UPDPAYTO",tmp$)
+				udpay2=0 \ if tmp$="Y" let udpay2=1
+				if udpay2
+					call vpaytoudt()
+				Else ! no update - no change
+					vend.PayToVendorCode=tmpvend.PayToVendorCode ! reset to orig
+				Endif
+			Endif
+	  Endif ! if diff - uses that vendor
+
+	!general
+	call dxget("salesperson",tmp$)\vtag.salesmanname$=tmp$,b$
+	strgok=chkbadchars(e$,vtag.salesmanname$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Sls Name"
+			goto VSDone
+		 Endif
+	call dxget("saddress",tmp$)\vtag.slsmaddress$=tmp$,b$
+	strgok=chkbadchars(e$,vtag.slsmaddress$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Sls Address"
+			goto VSDone
+		 Endif
+	call dxget("scity",tmp$)\vtag.slsmcity$=tmp$,b$
+	strgok=chkbadchars(e$,vtag.slsmcity$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Sls City"
+			goto VSDone
+		 Endif
+	call dxget("sState",tmp$)\vtag.slsmstate$=tmp$,b$
+	strgok=chkbadchars(e$,vtag.slsmstate$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Sls State"
+			goto VSDone
+		 Endif
+	call dxget("sZip",tmp$)
+	tmp$=VendZip9$(tmp$) ! check/adjust to 9 chars
+	vtag.slsmzip$=tmp$,b$
+	call dxget("sCountry",tmp$)\vtag.slsmcountry$=tmp$,b$
+	strgok=chkbadchars(e$,vtag.slsmcountry$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Sls Country"
+			goto VSDone
+		 Endif
+	call dxget("sPhoneNo",tmp$)\vtag.slsmphone$=tmp$,b$
+	strgok=chkbadchars(e$,vtag.slsmphone$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Sls Phone"
+			goto VSDone
+		 Endif
+	call dxget("vendorfaxno",tmp$)\vtag.vendorfax$=tmp$,b$
+	strgok=chkbadchars(e$,vtag.vendorfax$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor Fax"
+			goto VSDone
+		 Endif
+    call dxget("ReviewCycleFreezing",tmp$)
+	vtag.freezereviewcycle=0\if tmp$="Y" let vtag.freezereviewcycle=1
+    call dxget("RebateCost",tmp$) \ X2=TMP$
+	if x2<0 or x2>6
+		returnstatus=0
+		message$="Rebate Cost invalid"
+		goto vsdone
+	Endif
+	vtag.rebatecost=tmp$
+	call dxget("SuppCustNo",tmp$)\vtag.suppliercust$=tmp$,b$
+	call dxget("SuppBillToNo",tmp$)\vtag.supplierbillto$=tmp$,b$
+	call dxget("Group",tmp$)\vtag.vendorgroup=tmp$
+	call dxget("GroupID",tmp$)\vtag.groupid=tmp$
+	call dxget("NameControl1099",tmp$)\vend.namecontrol$=tmp$,b$
+	call dxget("1099IDType",tmp$) \ vend.tintype=0
+     if tmp$="F" let vend.tintype=1
+     if tmp$="S" let vend.tintype=2
+     if tmp$="C" let vend.tintype=3
+     if tmp$="E" let vend.tintype=4
+	call dxget("1099ID",tmp$)\vend.s1099id$=tmp$,b$
+	call dxget("Seasonal",tmp$)
+	vtag.seasonalflag=0\if tmp$="Y" let vtag.seasonalflag=1
+	call dxget("StartMonth",tmp$)\vtag.startmonth=tmp$
+	call dxget("EndMonth",tmp$)\vtag.endmonth=tmp$ 
+	if vtag.seasonalflag=0 let vtag.startmonth=0;vtag.endmonth=0
+	Call dxget("REBATEVEND",tmp$)
+	let tmp3=tmp$
+	if tmp3<>0 and tmp3<>vend.VendorCode
+		Key2$=" ",key2$
+		key2$=tmp3 using "######"
+	    PVMR=filegeta80vm(e$,VMC,"=",1,Key2$,tmpvend.)
+		if pvmr<=0 ! NO GOOD
+			returnstatus=0
+			message$="Rebate Vendor "+str$(tmp3)+" Not On File" 
+			goto VSDone
+		Endif
+	endif
+	let vtag.REBVENDID=tmp3
+
+    !vendormin
+	 call dxget("ordlvl1",tmp$)\vtag.MinOrder=tmp$
+	 call dxget("frtpaid1",tmp$)\vtag.frtpaid=tmp$
+	 call dxget("reviewcycle1",tmp$)
+	 IF vtag.freezereviewcycle=1 LET vtag.reviewcycle=tmp$
+	 call dxget("ordlvl2",tmp$)\vtag.MinWtOrder=tmp$
+	 call dxget("frtpaid2",tmp$)\vtag.frtpaidwt=tmp$
+	 call dxget("reviewcycle2",tmp$)
+	 IF vtag.freezereviewcycle=1 LET vtag.reviewcycleWt=tmp$
+	 call dxget("ordlvl3",tmp$)\vtag.MinCubeOrd=tmp$
+	 call dxget("frtpaid3",tmp$)\vtag.frtpaidcubes=tmp$
+	 call dxget("reviewcycle3",tmp$)
+	 IF vtag.freezereviewcycle=1 LET vtag.reviewcycleCube=tmp$
+	 call dxget("ordlvl4",tmp$)\vtag.MinQtyOrd=tmp$
+	 call dxget("frtpaid4",tmp$)\vtag.frtpaidqty=tmp$
+	 call dxget("reviewcycle4",tmp$)
+	 IF vtag.freezereviewcycle=1 LET vtag.reviewcycleqty=tmp$
+
+	!uda
+     call dxget("uda1",tmp$)\vtag.uda1$=tmp$,b$
+	 strgok=chkbadchars(e$,vtag.uda1$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor UDA 1"
+			goto VSDone
+		 Endif
+     call dxget("uda2",tmp$)\vtag.uda2$=tmp$,b$
+	 strgok=chkbadchars(e$,vtag.uda2$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor UDA 2"
+			goto VSDone
+		 Endif
+     call dxget("uda3",tmp$)\vtag.uda3$=tmp$,b$
+	 strgok=chkbadchars(e$,vtag.uda3$)
+		 if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Vendor UDA 3"
+			goto VSDone
+		 Endif
+     call dxget("uda4",tmp$)\vtag.uda4=tmp$
+
+	!! clear spare strings - to avoid NULLS!
+	! using SQL type, ALL FIELDS WRITTEN ALL THE TIME!
+	vend.NotUsed$=blank$
+	vend.Exportflag$=blank$
+	!vend.ForestExpressId$[1,18]=blank$ ! NOT ALL WAY!
+	vend.ForestExpressId$[19]="" ! need null here so it doesn't write pass eof
+	vtag.Spare$=blank$
+	vtag.NotUsed$=blank$
+	! vtag.SpareFiller$=blank$[1,10] ! NOT ALL WAY!!
+	
+	!!Updating or adding a record	
+	if vmR<=0 let mode$="a" else let mode$="c" !add new or change existing record
+	aa=fileupdatea80vm(e$,vmC,mode$,vmR,vend.,0,0,-1)
+	If aa<0
+		returnstatus=0
+		message$="Search Error "+Str$(aa)+" on vendor update"
+	Endif
+	if sqlChan>0
+		call a80vm_DL4SQLConvert(e$,"FROMDL4",vend.,sql_a80vm.)
+		e = a80vm_SQLAddUpdate(e$,sqlChan,sql_a80vm.)
+	end if
+	if vtR<=0 let mode$="a" else let mode$="c"
+	aa = fileupdatevendtag(e$,vtC,mode$,vtR,vtag.)
+	If aa<0
+		returnstatus=0
+		message$="Search Error "+Str$(aa)+" on vendtag update"
+	Endif
+    let filename$="2/VENDWEB"+STR$(INTCO)
+    Call FindF(filename$,fileflag)
+	if fileflag<>0
+		ch_vweb=findchannel()
+		OPEN #CH_VWEB,FILENAME$
+		call dxget("VENDURL",tmp$)
+		let vendurl$=rtrim$(tmp$)+blank$
+		let vwebkey$=vend.vendorcode using "#######"
+		search #ch_vweb,2,1;vwebkey$,rec_vweb,e
+		if not(e)
+			mat write #ch_vweb,rec_vweb,4;vendurl$;
+		else
+			IF RTRIM$(VENDURL$)<>""
+				let e=2\search #ch_vweb,1,0;vwebkey$,rec_vweb,e
+				if not(e)
+					let vwebid=vend.vendorcode
+					mat write #ch_vweb,rec_vweb,0;vwebid;
+					mat write #ch_vweb,rec_vweb,4;vendurl$;
+					search #ch_vweb,4,1;vwebkey$,rec_vweb,e
+				endif
+			endif
+		endif
+	endif
+	VSdone: ! finito
+else
+	include "src/callsuberr.inc"
+end try
+
+End Sub ! -- vendsave
+!
+!-----------------------------------------------------------------------------
+Sub VendDel()
+! set up and call venddel.dl4
+  Try
+	dim 1%,Chan[9]
+	Dim 3%
+	chan[1]=ctlc;chan[2]=VMC;Chan[3]=VTC
+	tmp1$=" ",tmp1$
+	clear tmp1$ ! tmp1$ will hold all reasons for no delete!
+	e$="";tmp1=0 ! tmp1 is status. 0=okay, deleted, >0 = problem
+	call "venddel.dl4",tmp1,vend.Name$,vmr,chan[],vendid,tmp1$,intco,e$,rstr$
+  
+  else
+	include "src/callsuberr.inc"
+end try
+
+End Sub ! -- venddel
+!
+!-----------------------------------------------------------------------------
+Sub vpaytoudt()
+! change payto vendor
+ Try
+	DIM 3%,APDH2[4]
+	Chan=OpenFile(432,IntCo)
+	if chan=-1 exit sub ! no can do
+	key1$=" ",key1$
+	key1$=tmpvend.PayToVendorCode using "######"
+	key1$[7]=vend.vendorcode using "######"
+	x2[1]=tmpvend.PayToVendorCode ! ORIG
+	x2[2]=vend.vendorcode ! VENDOR
+	x2[3]=vend.PayToVendorCode ! NEW
+	do
+		search #chan,3,3;key1$,R,E
+		if e>0 exit do
+		x2=key1$[1,6] \ if x2<>x2[1] exit do
+		x2=key1$[7,12] \ if x2<>x2[2] exit do
+		MAT  READ #Chan,R,52;APDH2
+		LET APDH2[4]=X2[3] ! vend.PayToVendorCode ! new
+		MAT  WRITE #Chan,R,52;APDH2;
+		LET Key2$=Key1$ \ LET Key2$[1,6]=x2[3] USING "######"   
+		SEARCH #Chan,4,3;Key2$,R,E
+		IF E ! GOSUB ERR_SEARCH:
+			Returnstatus=0
+			message$="SE "+Str$(E)+" adding new APDETH key "+Key2$
+		Endif
+		SEARCH #Chan,5,3;Key1$,R,E
+		IF E ! GOSUB ERR_SEARCH:
+			Returnstatus=0
+			message$="SE "+Str$(E)+" deleting old APDETH key "+Key1$
+		Endif
+	loop
+	Close #chan
+ else
+	include "src/callsuberr.inc"
+end try
+
+End Sub ! -- vpaytoudt
+!
+!-----------------------------------------------------------------------------
+Sub VendSpecSV()
+! vendor notes - Save
+! no key fields in file - use search
+ Try
+	Dim M1$[30]
+	ReturnStatus=1
+	Message$="OK"
+	close #VSPC ! close Read-Only
+	VSPC = OpenFile(1008,intCo) \ if VSPC = -1 Error 42 !VENDspec
+	call dxget("STRTLINE",tmp$) !! 33263 - grps of 100
+	VSSLine=tmp$ ! should be 0,100,200,300,400,etc
+	If VSSLine<>0 goto VSPSVDone ! LIMIT IS 99 Lines!!
+	if FRA(VSSLINE/100) ! not allowed!!
+		returnstatus=0
+		message$="STRTLINE IS NOT A MULTIPLE OF 100!"
+		goto VSPSVDone
+	Endif
+	If VSSLINE<0 or VSSLINE>900
+		returnstatus=0
+		Message$="STRTLINE IS INVALID"
+		goto VSPSVDone
+	Endif
+	slp=1 ! VSSLINE+1 ! 1,101,201,etc
+	elp=99 ! VSSLINE+100 ! 100,200,300,etc
+	for i=slp to elp !  was   i=1 to 25
+		  VendKey$=Vend$+" "+i using "###"
+		  VSRec=0
+		  Search #VSPC,2,1;Vendkey$,VSRec,E
+		  if e let vsrec=e*-1
+		  if vSRec<0
+			 M1$=Blank$
+		  end if
+		  call dxget("note"+str$(i),tmp$)
+		  M1$=tmp$+blank$ ! Note
+		  If vSRec<0 let mode$="a" else let mode$="c"
+		  if rtrim$(tmp$)="" let mode$="d"
+		  if mode$="a"
+			let e=2;vSRec=0
+			Search #VSPC,1,0;VendKey$,R,E
+			if not(e)
+				Search #VSPC,4,1;VendKey$,R,E
+				mat write #VSPC,R,12;M1$;
+			Endif
+		   Endif
+		   if mode$="c"
+			Mat write #VSPC,VSRec,12;M1$;
+		   Endif
+		   If mode$="d" and VSRec>0
+			Search #VSPC,5,1;VendKey$,R,E
+			If Not(E)
+				Let E=3;R=VSRec
+				Search #VSPC,1,0;VendKey$,R,E
+			Endif
+		   Endif
+	next i
+	VSPSVDone: ! finished
+ else
+	include "src/callsuberr.inc"
+end try
+
+End Sub ! -- VendSpecSV
+!
+!-----------------------------------------------------------------------------
+Sub GetVendABook(e$,vend$,Slist$[],List$[],vendrec,maxcnt,CTLChan,ABChan,vendChan,vend. as a80vm)
+
+  ! Creates a list of the vendor's Address Book Entries on file
+  !
+  ! e$         : error message
+  ! vend$      : vendor #
+  ! SList$[]	: .net selector string
+  ! List$[]    : Vendor misc list
+  ! VendRec	   : Vendor Record #
+  ! maxcnt     : max # of lines for list$[]
+  ! CTLChan    : Control file channel
+  ! ABChan     : Vendor Contact file channel
+  ! vendchan   : Vendor file channel
+  ! vend.      : Vendor data
+ 
+ ! Note: this requires a "dropdown list" selector of which record to display
+ ! I will do this by creating 2 lists (1: for ddl, 2: for data) that
+ ! 1-ddl added to the string as data read, the 2-data sent back as normal
+  try
+!
+   dim 1%,tmp1,Dir
+	dim 2%,tmp2,tmpcnt,row,srow,stmpcnt
+    dim 3%,tmp3,CCRec
+	dim ContKey$[64],Mode$[2],blank$[100]
+!	dim SList$[maxcnt,700]
+!
+	! dim CABook. as contlist - done
+!	dim cust. as cust  ! "we passed it!
+!
+	! call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+!
+
+	tmpcnt=maxcnt
+	stmpcnt=maxcnt
+
+	clear List$[] ! main data list
+	clear SList$[] ! selector (dropdown) list
+!
+ 	List$[0]=bsdel$,"ADDRBOOKDATA",fdel$ ! data section header
+	SList$[0]=bsdel$,"ADDRESSBOOK",fdel$ ! list section header
+	!
+	WebStr$="ID",fdel$,"CONT#",fdel$,"First Name",fdel$,"Last Name",fdel$
+	Webstr$=WebStr$,"Title",fdel$ ! "extent of selector list
+	SList$[1]=WebStr$ ! load it to temp selector list
+	WebStr$=WebStr$,"Phone Number",fdel$ ! continue with data headers
+	WebStr$=WebStr$,"Phone Ext",fdel$,"EMail",fdel$
+	Webstr$=WebStr$,"Pager",fdel$,"Pager PIN",fdel$
+	WebStr$=WebStr$,"FAX Number",fdel$,"Cell Number",fdel$
+	Webstr$=WebStr$,"Phone 2",fdel$,"FAX 2",fdel$
+	WebStr$=WebStr$,"Comment 1",fdel$,"Comment 2",fdel$
+	WebStr$=WebStr$,"Comment 3",fdel$,"Last Edit",fdel$
+	Webstr$=WebStr$,"CRTYPE",fdel$,"CTDESC",fdel$
+    List$[1]=WebStr$ ! load to data list
+	!
+	row=2 ! starting row for data
+	srow=2 ! start of sel row
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Vend$[7]="" ! make sure its only 6
+	mode$="=" ! "exact match
+	Dir=1 ! "of Vendor code
+	
+	if VendRec>0
+		Contkey$="VD"+vend$+"  "
+		mode$=">=" ! "match or greater
+		Dir=1 ! "dir1 = type(CS) cust# ABnumber
+	  DO
+		CCrec=filegetcontlist(e$,ABchan,mode$,dir,ContKey$,CABook.) 
+		If CCRec<0 Or ContKey$[3,8]<>vend$[1,6] Exit do
+		if ContKey$[1,2]<>"VD" Exit do ! Vendor is always VD type
+		mode$=">" ! "switch to next key
+		Dir=1 ! still use dir 1
+		WebStr$=ContKey$[3,8],fdel$ ! Vendor # in key
+		WebStr$=WebStr$,RTrim$(ContKey$[9,10]),fdel$ ! contact number
+		WebStr$=WebStr$,RTrim$(CABook.FirstName$),fdel$ ! first name
+		WebStr$=WebStr$,RTrim$(CABook.LastName$),fdel$ ! last name
+		WebStr$=WebStr$,RTrim$(CABook.TitlePos$),fdel$ ! title/pos
+		SList$[srow]=WebStr$ \ srow=srow+1
+		if srow<stmpcnt let stmpcnt=expandarray(e$,SList$[])
+		WebStr$=WebStr$,FMTphone2$(Str$(CABook.Phone)),fdel$ ! phone
+		WebStr$=WebStr$,Str$(CABook.PhoneExt),fdel$ ! extension
+		WebStr$=WebStr$,RTrim$(CABook.EmailAddr$),fdel$ ! Email
+		WebStr$=WebStr$,FMTphone2$(Str$(CABook.Pager)),fdel$ ! pager
+		WebStr$=WebStr$,Str$(CABook.PagerPin),fdel$ ! pager pin
+		WebStr$=WebStr$,FMTphone2$(Str$(CABook.Fax)),fdel$ ! fax
+		WebStr$=WebStr$,FMTphone2$(Str$(CABook.CellPhone)),fdel$ ! cell
+		WebStr$=WebStr$,FMTphone2$(Str$(CABook.Phone2)),fdel$ ! phone 2
+		WebStr$=WebStr$,FMTphone2$(Str$(CABook.Fax2)),fdel$ ! fax 2
+		WebStr$=WebStr$,RTrim$(CABook.Comment1$),fdel$ ! comment
+		WebStr$=WebStr$,RTrim$(CABook.Comment2$),fdel$ ! comment
+		WebStr$=WebStr$,RTrim$(CABook.Comment3$),fdel$ ! comment
+		if CABook.EditDate<>0 ! it's julian date (it says)
+		  tmp$=JDate$(CABook.EditDate) ! julian date to mm/dd/yyyy
+		else
+		  tmp$="      "
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! last edit date
+		! need contact type/desc
+		x=CABook.ContrecordType
+		if x<1 or x>3 let x=1
+		tmp$="Sales" \ if x=2 let tmp$="Payables"
+		if x=3 let tmp$="Other"
+		webstr$=webstr$,Str$(X),fdel$,tmp$,fdel$
+		!
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Loop
+
+	endif
+	! send selector list now
+	SList$[srow]=esdel$ ! end of section
+	! call AddToStr(e$,rstr$,SList$[]) ! "add the selector list to string before returning
+	!
+	List$[row]=esdel$ ! end of section (data)
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetVendABook
+! -------------------------------------------------------------------------------------
+Sub GetvendDocD(e$,vend$,List$[],SList$[],VendRec,maxcnt,intCo,CTLChan,VendChan,vend. as a80vm,rstr$)
+
+  ! Creates a list of the Vendor's Document Del fields
+  !
+  ! e$         : error message
+  ! Vend$      : vendor #
+  ! List$[]    : Vendor data list
+  ! SList$[]	: Selector data list
+  ! VendRec	   : Vendor Record #
+  ! maxcnt     : max # of lines for list$[]
+  ! intCo      : company id #
+  ! CTLChan    : Control file channel
+  ! VendChan   : vendor file channel
+  ! vend.      : vendor data
+  ! rstr$      : rstring
+ 
+  try
+!
+   dim 1%,tmp1,Dir,MAXTYPE,DCDChan,ABChan,DDType,ABDir
+	dim 2%,tmp2,tmpcnt,row,srow,stmpcnt
+    dim 3%,tmp3,DCDRec, ABRec
+	dim ContKey$[64],Mode$[2],blank$[100],P61$[256]
+	dim DOCDPREFIX$[4],DOCDDESCRIPT$[24]
+	DIM VIATYPE$[100],CNtype$[2],ABKey$[64],ABMode$[4]
+	dim action2$[20],fields$[1,30]
+
+!
+
+!	dim cust. as cust  ! "we passed it!
+	!dim Docd. as docdeliv ! document delivery file
+	dim ABK. as contlist ! contact list (address book)
+!
+	! call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+!
+	Try
+	   mat read #CTLChan,61,0;P61$; ! system flags
+	Else
+	   CtlChan=OpenFile(-9999,intCo) \ if CTLChan=-1 Error 42
+	end try
+	mat read #CTLChan,19,50;P9$; ! system flags  ??for
+	mat read #CTLChan,61,0;P61$; ! system flags  ??for
+	
+	DCDChan=OpenFile(-9968,intCo) \ if DCDChan = -1 Error 42
+	ABChan=CABC ! OpenFile(-9998,intCo) \ if ABChan = -1 Error 42
+	
+	tmpcnt=maxcnt
+	stmpcnt=maxcnt
+	
+	call dxget("action2",action2$)
+	action2$=ucase$(action2$)
+	if action2$="EDIT" !include CS addrress book droplist
+	  clear list$[]
+	  call filedroplistcontlist(e$,list$[],100,ABChan,"",fields$[],1,"VD"+vend$,"0") !drop list of address book, 0 None and 'CS' records
+
+      call addToStr(e$,rstr$,list$[])
+	  ! ALSO VIA LIST
+	  clear list$[]
+	  list$[0]=bsdel$,"VIALIST",fdel$
+	  list$[1]="ID",fdel$,"DESC",fdel$
+	  List$[2]="0",fdel$,"Print",fdel$
+	  list$[3]="1",fdel$,"FAX",fdel$
+	  List$[4]="2",fdel$,"EMail",fdel$
+	  !List$[5]="3",fdel$,"EMail",fdel$
+	  list$[5]="9",fdel$,"Not Print",fdel$
+	  List$[6]=esdel$
+	  call addToStr(e$,rstr$,list$[])
+	  ! and a DOC TYPE LIST
+	  clear List$[]
+	  List$[0]=bsdel$,"DOCTYPE",fdel$
+	  List$[1]="ID",fdel$,"DESC",fdel$
+	  List$[2]="PO",fdel$,"Purchase Order",fdel$
+	  List$[3]=esdel$
+	  call addToStr(e$,rstr$,list$[])
+    end if
+	clear List$[]
+
+	LET VIATYPE$[1]="Print"   
+	LET VIATYPE$[11]="FAX"    
+	LET VIATYPE$[21]="Email"
+	VIATYPE$[91]="Not Print" !??
+	CNType$="VD" ! "use same as contlist type
+	MAXTYPE=0 ! maximum # of doc types (from 0) - VENDOR ONLY PO?
+!
+ 	SList$[0]=bsdel$,"DOCDELIV",fdel$ ! selector section
+	List$[0]=bsdel$,"DOCDELVDATA",fdel$ ! "data section
+	WebStr$="ID",fdel$,"Doctype",fdel$,"Docdesc",fdel$,"VIA",fdel$,"contkey",fdel$,"Recipient",fdel$
+	SList$[1]=WebStr$
+	WebStr$="ID",fdel$,"Doctype",fdel$,"Docdesc",fdel$,"VIA",fdel$,"contkey",fdel$,"Recipient",fdel$,"Fax/URL",fdel$
+	List$[1]=WebStr$
+	row=2 ! starting row for data
+	srow=2 ! start row for sel data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	vend$[7]=""
+	ContKey$=vend$
+	Dir=1 ! "of Vendor code
+	If vendRec>0
+		DDKey$=CNType$+vend$+" "
+		mode$=">"
+		Dir=1
+		Do
+			DCDRec=filegetdocdeliv(e$,DCDChan,mode$,dir,DDKey$,Docd.)
+			If DCDRec<0 Or DDKey$[1,2]<>CNType$ Exit Do
+			If DDKey$[3,8]<>vend$[1,6] Exit Do
+			WebStr$=vend$,fdel$ ! dockey
+			DDType=0
+			FOR TYPE=0 TO MAXTYPE
+				Call DOCDSETTYPE(Type,DocDPrefix$,DocDDescript$)
+			    IF DOCDPREFIX$=DocD.DocumentType$
+				  Let DDType=Type
+				  exit for ! exit loop NOW
+				endif
+			NEXT TYPE
+			
+			WebStr$=WebStr$,docdprefix$,fdel$,RTrim$(DocDDescript$),fdel$ ! doc desc
+			tmp$=VIATYPE$[DocD.Via*10+1]
+			tmp$[11]="" ! cut it at limit of desc
+			WebStr$=WebStr$,str$(DocD.Via)," ",RTrim$(tmp$),fdel$ ! via
+			! get data from contlist file (addr book)
+			ABKey$=CNType$+vend$+DocD.AddrEntry Using "##"
+			ABMode$="=" ! exact match
+			ABDir=1
+			ABRec=filegetcontlist(e$,ABChan,abmode$,abdir,ABKey$,ABK.)
+			If ABRec<0 
+				Clear ABK. 
+				ABKey$="0";tmp$="None"
+			Else
+				tmp$=ABK.TitlePos$
+			Endif
+			!If DocD.Via=0 let tmp$="None" \ABKey$="0" ! print has no recipient
+			WebStr$=WebStr$,ABKey$,fdel$,RTrim$(tmp$),fdel$ ! recipient
+			SList$[srow]=WebStr$ ! for selector - done
+			srow=srow+1
+			if srow>stmpcnt let stmpcnt=expandarray(e$,SList$[])
+			tmp$="N/A" ! in case print is via
+			If DocD.Via=1 ! fax
+			  tmp$=Str$(ABK.Fax)
+			endif
+			If DocD.Via=2 ! email
+			  tmp$=ABK.EmailAddr$
+			endif
+			WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! fax # or URL
+
+			List$[row]=WebStr$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			  
+		Loop
+
+	endif ! valid cust rec
+	Close #DCDChan
+	! Close #ABChan
+	!
+	SList$[srow]=esdel$ ! end of section
+	List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetvendDocD
+! -------------------------------------------------------------------------------------
+Sub DOCDSETTYPE(Type,DocDPrefix$,DocDDescript$) !  Set document delivery types
+IF TYPE=0 ! IS ONLY 1 FOR VENDORS
+	DOCDPREFIX$="PO  "            
+	DOCDDESCRIPT$="Purchase Order"
+ENDIF
+End Sub ! docdsettype
+! -------------------------------------------------------------------------------------
+Function chkDateFrmt$(DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY
+! if not make it MM/DD/YYYY
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE" or DIn$="0"
+	  Let DOut$=UCase$(DIn$)
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function DOut$ ! chkDateFrmt$
+! 
+!--------------------------------------------------------------------
+Function VendZip9$(zip$)
+! as only 9 char zip - see if user entered 10
+ try
+	tmp1$=Trim$(zip$) ! trim front & back
+	tmp$=" ",tmp$ ! clear result to send back
+	
+	if len(tmp1$)<10 ! only 5 or no dash
+		tmp$=tmp1$
+		goto VZDone
+	Endif
+	x1=1 ! first pos
+	for x=1 to 10 ! as length checked above!
+		if tmp1$[x,x]="-" ! other characters to check?
+			rem ! do nothing (do not add)
+		Else ! add it to result
+			tmp$[x1,x1]=tmp1$[x,x]
+			x1=x1+1 ! increment position
+		Endif
+	Next x
+	VZDone: ! finito
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function tmp$ ! VendZip9$
+! 
+
+! ------------------------------------------------------------------------
+Sub getvendpayto() 
+Try
+
+	dim filename$[16]
+	DIM 3%,APDH2[4]
+	let returnstatus=1
+	let message$="OK"
+	call dxget("VENDID",tmp$)
+	let vendid=tmp$
+	call dxget("ORGPAYTO",tmp$)
+	let orgpayvendid=tmp$
+	call dxget("PAYTOVENDID", tmp$)
+	LET paytovendorid = tmp$
+	If paytovendorid <= 0 Or paytovendorid > 999999
+		let returnstatus=0
+		message$ = "Invalid Payto Vendor entered!" 
+	else
+		VmC = OpenFile(2400,intCo) \ If vmc = -1 Error 42 !vend
+		Key2$=" ",Key2$;Key2$=PayToVendorId using "######"
+		PVMR=filegeta80vm(e$,VMC,"=",1,Key2$,vend.)
+		if pvmr<=0 
+			let returnstatus=0
+			let message$="Pay To Vendor "+str$(paytovendorid)+" Not on File "
+	    endif
+		if vend.PayToVendorCode<>PayToVendorId! can't do string of #'s
+			if paytovendorid=vendid
+				! leave payto address as is - just changing vend code as in native
+			else
+				returnstatus=0
+				message$="Pay to refers to another Pay to "+Str$(vend.PayToVendorCode)
+			endif
+		Endif
+	end if
+        Clear List$[]
+		List$[0]=bsdel$+"PAYTO"+fdel$ ! section name
+		webstr$="PAYTOVENDORID",fdel$
+        WebStr$=webstr$+"PaytoName"+fdel$
+		WebStr$=webstr$+"PaytoAddress1"+fdel$
+        WebStr$=webstr$+"PaytoAddress2"+fdel$
+        WebStr$=webstr$+"PaytoCity"+fdel$
+		WebStr$=webstr$+"PaytoState"+fdel$
+		webstr$=webstr$+"PaytoZip"+fdel$
+        WebStr$=webstr$+"PaytoCountry"+fdel$
+        webstr$=webstr$+"PayFromBank",fdel$
+		webstr$=webstr$+"PromptAct",fdel$
+	List$[1]=WebStr$  ! put header into rstr$
+	row=2 ! starting row for data
+	If returnstatus<>0
+		webstr$=str$(paytovendorid),fdel$
+		WebStr$=webstr$+rtrim$(vend.PayToName$)+fdel$
+		WebStr$=webstr$+RTrim$(vend.PayToAddress$)+fdel$
+		WebStr$=webstr$+RTrim$(vend.PayToOptAddress$)+fdel$
+		WebStr$=webstr$+RTrim$(vend.PayToCity$)+fdel$
+     	WebStr$=webstr$+RTrim$(vend.PayToState$)+fdel$
+		webstr$=webstr$+Rtrim$(vend.PayToZip$)+fdel$
+	 	WebStr$=webstr$+RTrim$(vend.PayToCountry$)+fdel$
+     	if c0[17]
+			webstr$=webstr$+Str$(vend.Bank),fdel$
+		else
+			webstr$=webstr$+""+fdel$
+		endif
+		let tmp$="N"
+		Try
+			Chan=OpenFile(432,IntCo)
+			if chan>0
+				key1$=" ",key1$
+				key1$=orgpayvendid using "######"
+				key1$[7]=vendid using "######"
+				do
+					search #chan,3,3;key1$,R,E
+					if e>0 exit do
+					x2=key1$[1,6] \ if x2<>orgpayvendid exit do
+					x2=key1$[7,12] \ if x2<>vendid exit do
+					let tmp$="Y"
+					exit do
+				loop
+			endif
+		else
+			let tmp$="N"
+		end try
+		let webstr$=webstr$,tmp$,fdel$
+		List$[row]=webstr$
+		let row=row+1
+	endif
+	list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! getvendpayto
+!----------------------------------------------------------------------------
+
+! ------------------------------------------------------------------------
+Sub getrebatevend() 
+Try
+	let returnstatus=1
+	let message$="OK"
+	Call dxget("REBATEVEND",tmp$)
+	let tmp3=tmp$
+	if tmp3=0
+		let vendname$="No Rebate Vendor Assigned"
+	else
+		VmC = OpenFile(2400,intCo) \ If vmc = -1 Error 42 !vend
+		Key2$=" ",Key2$;Key2$=tmp3 using "######"
+		PVMR=filegeta80vm(e$,VMC,"=",1,Key2$,vend.)
+		if pvmr<=0 
+			let returnstatus=0
+			let message$="Rebate Vendor "+str$(tmp3)+" Not on File "
+	    else
+			let vendname$=vend.name$
+		endif
+	end if
+    Clear List$[]
+	List$[0]=bsdel$+"RebateVendor"+fdel$ ! section name
+	webstr$="RebateVend",fdel$
+    WebStr$=webstr$+"RebateVendName"+fdel$
+	List$[1]=WebStr$  ! put header into rstr$
+	row=2 ! starting row for data
+	If returnstatus<>0
+		webstr$=str$(tmp3),fdel$
+		WebStr$=webstr$+rtrim$(vendname$)+fdel$
+		List$[row]=webstr$
+		let row=row+1
+	endif
+	list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! getrebatevend
+
+! ------------------------------------------------------------------------
+Sub getvendbank() 
+Try
+	dim filename$[16],keyvbnk$[30]
+	dim 1%,ch_vbnk,fileflag
+	DIM 3%,rec_vbnk
+	let returnstatus=1
+	let message$="OK"
+	call dxget("VENDID",tmp$)
+	let vendid=tmp$
+	if p61$[99,99]="Y"
+		let filename$="2/VENDBANK"+STR$(INTCO)
+		Call FindF(filename$,fileflag)  
+		If not(fileflag)
+			let returnstatus=0
+			let message$="Vendor Bank File Not Available"
+		else
+			ch_vbnk = FindChannel() ! need to get a channel #  
+			Open #ch_vbnk,filename$  
+			Keyvbnk$=" ",Keyvbnk$;Keyvbnk$=vendid using "######"
+			rec_vbnk=filegetvendbank(e$,ch_vbnk,"=",1,Keyvbnk$,vbnk.)
+			if rec_vbnk<=0 
+				clear vbnk.
+			endif
+		endif
+	else
+		let returnstatus=0
+		let message$="Vendor Bank Module Not Available"
+	end if
+    Clear List$[]
+	List$[0]=bsdel$+"VendBank"+fdel$ ! section name
+	webstr$="VENDID",fdel$
+    WebStr$=webstr$+"BankAcct"+fdel$
+	WebStr$=webstr$+"BankRoute"+fdel$
+    WebStr$=webstr$+"RouteDigit"+fdel$
+    WebStr$=webstr$+"IDCode"+fdel$
+	WebStr$=webstr$+"VendBankName"+fdel$
+	webstr$=webstr$+"BankId"+fdel$  
+	webstr$=webstr$+"VendEmail"+fdel$
+	List$[1]=WebStr$  ! put header into rstr$
+	row=2 ! starting row for data
+	If returnstatus<>0
+		webstr$=str$(vendid),fdel$
+		WebStr$=webstr$+rtrim$(vbnk.BankAcctId$)+fdel$
+		WebStr$=webstr$+RTrim$(vbnk.Routing$)+fdel$
+		WebStr$=webstr$+RTrim$(vbnk.RoutingDigit$)+fdel$
+		WebStr$=webstr$+RTrim$(vbnk.vid$)+fdel$
+     	WebStr$=webstr$+RTrim$(vbnk.VendName$)+fdel$
+		webstr$=webstr$+str$(vbnk.bank)+fdel$
+		webstr$=webstr$+rtrim$(vbnk.VBEMAIL$)+fdel$
+		List$[row]=webstr$
+		let row=row+1
+	endif
+	list$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! getvendbank
+!----------------------------
+
+! ------------------------------------------------------------------------
+Sub submitvendbank() 
+Try
+	dim filename$[16],keyvbnk$[30]
+	dim 1%,ch_vbnk,fileflag
+	DIM 3%,rec_vbnk
+	let returnstatus=1
+	let message$="OK"
+	call dxget("VENDID",tmp$)
+	let vendid=tmp$
+	if vendid<1 or vendid>999999
+		let returnstatus=0
+		let message$="Invalid Vendor Submitted "
+		goto endsubmitvendbank:
+	endif
+	if p61$[99,99]="Y"
+		let filename$="2/VENDBANK"+STR$(INTCO)
+		Call FindF(filename$,fileflag)  
+		If not(fileflag)
+			let returnstatus=0
+			let message$="Vendor Bank File Not Available"
+			goto endsubmitvendbank:
+		else
+			ch_vbnk = FindChannel() ! need to get a channel #  
+			Open #ch_vbnk,filename$  
+			Keyvbnk$=" ",Keyvbnk$;Keyvbnk$=vendid using "######"
+			rec_vbnk=filegetvendbank(e$,ch_vbnk,"=",1,Keyvbnk$,vbnk.)
+			if rec_vbnk<=0 
+				clear vbnk.
+				let vbnk.vendid=vendid
+				tmp3 = fileupdatevendbank(e$,ch_vbnk,"a",rec_vbnk,vbnk.) 
+				if tmp3<0
+					let returnstatus=0
+					let message$="Error Adding Bank Info for Vendor "+str$(vendid)
+					goto endsubmitvendbank:
+				endif
+				let rec_vbnk=tmp3
+			endif
+		endif
+	else
+		let returnstatus=0
+		let message$="Vendor Bank Module Not Available"
+		goto endsubmitvendbank:
+	end if
+    call dxget("BankAcct",tmp$)
+	vbnk.BankAcctId$=rtrim$(tmp$)+blank$
+	call dxget("BankRoute",tmp$)
+	vbnk.Routing$=rtrim$(tmp$)+blank$
+	call dxget("RouteDigit",tmp$)
+	vbnk.RoutingDigit$=rtrim$(tmp$)+blank$
+	call dxget("IDCode",tmp$)
+	vbnk.vid$=rtrim$(tmp$)+blank$
+	call dxget("VendBankName",tmp$)
+	vbnk.VendName$=rtrim$(tmp$)+blank$
+    call dxget("BankId",tmp$)
+	let tmp3=tmp$
+	if tmp3<1 or tmp3>99
+		let returnstatus=0
+		let message$="Invalid Bank Submitted"
+		goto endsubmitvendbank:
+	end if
+	vbnk.bank=tmp3
+	call dxget("VendEmail",tmp$)
+	vbnk.VBEMAIL$=rtrim$(tmp$)+blank$
+	if rec_vbnk>=0
+		Write Record #ch_vbnk,rec_vbnk,0;vbnk.; 
+	else
+		let returnstatus=0
+		let message$="Error Updating Bank Info for Vendor "+str$(vendid)
+		goto endsubmitvendbank:
+	endif
+	endsubmitvendbank: ! end call
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! submitvendbank
+!----------------------------
+
+! ------------------------------------------------------------------------
+Sub deletevendbank() 
+Try
+	dim filename$[16],keyvbnk$[30]
+	dim 1%,ch_vbnk,fileflag
+	DIM 3%,rec_vbnk
+	let returnstatus=1
+	let message$="OK"
+	call dxget("VENDID",tmp$)
+	let vendid=tmp$
+	if vendid<1 or vendid>999999
+		let returnstatus=0
+		let message$="Invalid Vendor Submitted "
+		goto enddeletevendbank:
+	endif
+	if p61$[99,99]="Y"
+		let filename$="2/VENDBANK"+STR$(INTCO)
+		Call FindF(filename$,fileflag)  
+		If not(fileflag)
+			let returnstatus=0
+			let message$="Vendor Bank File Not Available"
+			goto enddeletevendbank:
+		else
+			ch_vbnk = FindChannel() ! need to get a channel #  
+			Open #ch_vbnk,filename$  
+			Keyvbnk$=" ",Keyvbnk$;Keyvbnk$=vendid using "######"
+			rec_vbnk=filegetvendbank(e$,ch_vbnk,"=",1,Keyvbnk$,vbnk.)
+			if rec_vbnk>0 
+				clear vbnk.
+				let vbnk.vendid=vendid
+				tmp3 = fileupdatevendbank(e$,ch_vbnk,"d",rec_vbnk,vbnk.) 
+			endif
+		endif
+	else
+		let returnstatus=0
+		let message$="Vendor Bank Module Not Available"
+		goto enddeletevendbank:
+	end if
+	enddeletevendbank: ! end call
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! deletevendbank
+!----------------------------
+
+
+
+! ------------------------------------------------------------------------
+Sub ageopenitems() 
+Try
+	dim keyoi$[30]
+	dim 1%,ch_oi,fileflag,ch_vend,o1[2]
+	DIM 2%,apdate,jagdate,japdate,agedays,bucket,o2[6]
+	DIM 3%,apbalance,o3[9],c3[5]
+	dim o$[6],3%,oi
+	DIM 3%,rec_oi,rec_vend
+	let returnstatus=1
+	let message$="OK"
+	Try
+		Close #ch_oi
+	else
+		let ch_oi=0
+	end try
+	Try
+		Close #ch_vend
+	else
+		let ch_vend=0
+	end try
+	ch_oi = OpenFile(-9801,intCo) \ If ch_oi = -1 Error 42 ! open item file
+	ch_vend=OpenFile(2400,intCo) \ If ch_vend= -1 Error 42 ! open item file
+	let keyoi$=vend.VendorCode using "######"
+	search #ch_vend,2,1;keyoi$,rec_vend,e
+	if e<>0 goto endageopenitems:
+	Read #ch_vend,rec_vend,304;apbalance;
+	Mat read #ch_vend,rec_vend,364;C3;
+	vend.futures=0
+	vend.current=0
+	vend.over30days=0  
+	vend.over60days=0   
+	vend.s90daysover=0
+	vend.creditmemos=0
+	vend.apbalance=0
+	for ctr=0 to 5\let c3[ctr]=0\next ctr
+	MAT  READ #CTLC,0,134;APDATE;
+	let japdate=0
+	if not(apdate) goto endageopenitems:
+	if apdate<>0                             
+			XDATE$ = apdate Using "&&&&&&"            
+			Call DateToJulian(1,XDATE$,XDATE$,errflag)      
+			If errflag                                      
+				let jagdate=0
+				goto endageopenitems:
+			else	
+				let jagdate=xdate$ ! save in julian format                              
+			End If
+		endif
+    let keyoi$=vend.VendorCode using "######"
+    do
+		Search #ch_oi,3,1;Keyoi$,Rec_oi,E
+		If E = 2 exit do
+		let tmp3=keyoi$[1,6]
+		if tmp3<>vend.vendorCode exit do
+		Mat Read #ch_oi,rec_oi,0;O$;
+		If O$[1,1] = "6" Goto getnextoi:
+		If O$[1,1] = "0" Goto getnextoi:
+		Mat Read #ch_oi,rec_oi,40;O3;
+		if not(o3[0]-o3[5]-o3[7]) goto getnextoi
+		Mat Read #ch_oi,rec_oi,6;O1;
+		Mat Read #ch_oi,rec_oi,12;O2;
+		if o1=2
+			let bucket=1 
+			C3[bucket] = C3[bucket] + O3 - O3[5] - O3[7]
+			goto getnextoi:
+		endif
+	    let japdate=0
+		if o2[2]<>0                             
+			XDATE$ = o2[2] Using "&&&&&&"            
+			Call DateToJulian(1,XDATE$,XDATE$,errflag)      
+			If errflag                                      
+				let japdate=0
+			else	
+				let japdate=xdate$ ! save in julian format                              
+			End If
+		endif
+		agedays = JAGDATE - JAPDATE
+		If agedays < 0 Let bucket = 0
+		If agedays >= 0 Let bucket = Int(agedays/ 30) + 2
+		If bucket > 5 Let bucket= 5
+		C3[bucket] = C3[bucket] + O3 - O3[5] - O3[7]
+		getnextoi:! 
+	loop
+	apbalance = C3 + C3[2] + C3[3] + C3[4] + C3[5] + C3[1]
+	Write #ch_vend,rec_vend,304;apbalance;!!!
+	Mat Write #ch_vend,rec_vend,364;C3;
+	vend.futures=c3[0]
+	vend.current=c3[2]
+	vend.over30days=c3[3]  
+	vend.over60days=c3[4]  
+	vend.s90daysover=c3[5]
+	vend.creditmemos=c3[1]
+	vend.apbalance=apbalance
+	endageopenitems: ! 
+	Try 
+		close #ch_oi
+		close #ch_vend
+	else
+		! rem
+	end try
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ageopenitems
+!----------------------------

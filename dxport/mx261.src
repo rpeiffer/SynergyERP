@@ -1,0 +1,1922 @@
+! >>> Program 261
+!
+! description Back Order Release
+!
+! loadsave -w -n 100,10 -o prog/dxport/mx261.dl4 src/mx261.src
+!
+! ERP ASSISTANT ENABLED - action=NEWENTALL
+!
+! 1.0 mm/dd/yyyy change??
+!
+include "src/copyright.inc" ! dx
+!
+Rem  MX261.s  - BACK ORDER REL.
+Rem  rev:    09/11/95 -kmm- convert to bedit, make work with RASL
+Rem      05/13/95 -kmm- more cleanup & bug fixes
+Rem tc/jlp 9/22/98 cct114952 fix amount selected/avail for each item
+!           04/30/97 -jlp- only use skiplocks if select mode, cct102628
+!			8/22/97 - tc cct106125 don't let bowork go over array size
+!           8/1/97 tc cct105393 write to rolnew only if order valid, added to aviod errors 5.03x
+!           11/11/97  ac don't release b/o if ord type is 9 cct#108023
+!           12/23/97 modify the input screen 
+!           12/29/97 jlp cct109024 increase record limit from 300 to 1000
+!           01/15/98 dd qty aval not correct
+! tc 4/10/98 cct111277 have a 261 being run value for the backorder
+!                      processing being done flag
+! ac 6/9/98 cct113573 do not accept a letter on division field
+! tc 7/6/98 cct113677 for mark_all routine, work only those lines on current screen
+!! tc/jlp 9/22/98 cct114952 fix amount selected/avail for each item
+! zyc 08/23/99 cct125991 be17@12440 return without gosub
+! jlp 09/07/99 cct126127 fix record locking for whse record
+! jliu 7/11/00 cct132775 if the order type is "11", skip the b/o processing
+! zyc 06/12/01 cct147123 modified msg
+! kag 5/9/02 cct157022 do not allow release qty when changing qty if there is
+!            not enough available - do not allow invalid qty (neg or nonnumeric)
+! cct# 161985 & 162897 - wmb - ck for bad data-cust name vs cust code
+! zyc 08/19/03 cct170554 check roh from status 1 to 4
+! zyc 01/02/04 cct173998 dim R2 from 1% to 3%
+
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: OCT  7, 2005  15:46:21
+Rem /w2/papermaster/r2005//usr/acct/txc/work/r2005/mx2/mx261.src (univ2) [txc] {34568}
+Rem  Copyright (c) 2005 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+
+
+!#comment
+!	BOBUF[x,0] = bowork record number
+!	BOBUF[x,1] = x (shows row number to screen)
+!	BOBUF[x,2] = B/O released amount
+!
+!	relmode = 1 for all, 2 for selected, 3 for order
+!	emode = 0 for entry, 1 for edit
+!#endcomment
+include "src/inc/filewhinfoz.inc" ! warehouse
+include "src/inc/filedivifle.inc" ! division file
+include "src/inc/fileprod.inc" ! product file
+include "src/inc/sql_prod.inc"
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault
+Declare External Function OpenFile,PDate$,getuidrec,JDate$,OpenMySQLMirror
+External Lib "libdroplist.lib"
+Declare External sub OrdTypeDropList
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus,ERPCronSuccess
+Declare External Function GetParameter$
+External Lib "libprod.lib"
+Declare External Sub ProdList,UMDList
+Declare External Function getpravail,getumrec,ChkPrdUM
+
+External Lib "libcustlist.lib"
+Declare External Sub CustList
+
+Declare Intrinsic Sub DateToJulian,InpBuf,String,FindF
+Declare Intrinsic sub programdump
+! Option Default Dialect IRIS1
+
+Com 1%,PFU1[20],CNVTU[2],UN[2]
+Com 3%,PFU2[6],CNVTA,A[33],UWORK[10],BASE,FIELD
+Com 2%,C4[8]
+Com J4$[50]
+If Err 0 Gosub ERR_TRAP
+Dim 3%,R9[20]
+! Chain Read R9  ! this program is started elsewhere?? (NOT THAT I FOUND!)
+Dim 1%,CH_CNTRL,CH_SPRODLOT,CH_PROD,CH_SORDLOT,CH_PDESKEY,CH_ROL,CH_ROH,CH_VEND
+Dim 1%,CH_CUST,CH_BOWORK,CH_CCODES,P0[1023],bologging
+Dim 1%,H4[2],L3[3],S9,OT,EUN[2],S2[1],UN[2],S9_OLD,RASL[5],USEPRI,C7[4]
+Dim 1%,P1[1],WHSE,T1[2],S1[3],OTYP,SKIPLOCKS,WWHSE, ch[16],ords9[9]
+Dim 1%,maxcnt \ maxcnt=100
+Dim List$[maxcnt,1000]
+Dim 2%,P2[2],L1[11],K,K1,V9,V1,V2,DT3[1],JWDATE,MAXRECS
+Dim 2%,E1,D9[5],C1[10],H0[12],H5[16],L2[1],L4[3]
+Dim 3%,A1[30],J8,L5[3],B0[12],LBSORD,WHLBS[1],LBSHIP,R[30]
+Dim 3%,P3[4],R1[20],S3[3]
+Dim 3%,L7[12],W3[14],F1$[16],W9,PLV[1],WHLV[1],T[3]
+Dim 3%,SHIPDATE,SCAN[8],TB0[10]
+Dim 3%,A2[7],DBOBUF,DB0[10],SCR2,SCR1,OLM[6],UNF[6]
+Dim 3%,R2,cfin[8],tmp,ResStkAmt,QtyAllocated
+Dim J0$[10],J1$[40],J2$[20],J$[40],J8$[6],P60$[50],J7$[70]
+Dim U9$[450],U3$[80],W$[60],Y$[80],LOC$[6],LOT$[12]
+Dim U5$[50],F$[17],PROD1$[12],K2$[30],PROD2$[12],DUNIT$[4]
+Dim P9$[50],K5$[60],X$[10],D1$[10],K9$[50],K3$[50],B0$[12],L1$[12]
+Dim K4$[50],C1$[30],P2$[30],UNIT$[4],I$[50],SCRATCH$[80]
+Dim OL2$[16],K1$[50],P1$[156],V$[27],T1$[40],T2$[40]
+Dim S0$[36],S1$[40],PRODONPAGE$[12],PREV_B0$[12],CURR_B0$[12]
+Dim J9$[80],J5$[80],Prod4List$[12]
+DIM keypol$[30],1%,pol1[3]
+Dim 3%,rec_pol,POL3[6],POPL4[23],TMP3
+dim holdpoflag$[1],p61$[256],k_sslsm$[10]
+DIM CUSTOM_CUSTOMER$[30],KT$[60],TB0$[12]
+Dim tmp$[1600],tmp1$[500],typ$[10],linein$[80],logname$[100]
+Dim action$[30],options$[30],userid$[8],b$[200],3%,fdel$[10],rstr$[1500],bsdel$[10],esdel$[10],rdel$[10]
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+dim Action1$[30],Action2$[30],Blank$[50],msg$[200],Message$[500],WebStr$[1500]
+Blank$=" ",Blank$
+Dim Pr. as prod ! for um list
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) / 100)
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+!! call dxsave(0,"tmp/tc.in!") \ stop
+Close #CTLC ! need to close read only open
+CTLC=OpenFile(9999,IntCo) ! reopen as read/write!
+CH_CNTRL = CTLC ! 1
+CH_SPRODLOT = 2
+CH_PROD = 3
+CH_SORDLOT = 4
+CH_PDESKEY = 5
+CH_ROL = 6
+CH_ROH = 7
+CH_VEND = 8
+CH_CUST = 10
+CH_BOWORK = 11
+CH_CCODES = 12
+CH_PRODWHSE = 13
+ch_sslsm = 16
+CH_POL=17
+Mat Read #CH_CNTRL,19,50;P9$;
+Mat Read #CH_CNTRL,60,50;P60$;
+mat read #ch_cntrl,61,0;p61$;
+Mat Read #CH_CNTRL,3,188;SHIPDATE;
+Mat Read #CH_CNTRL,115;D9;
+mat read #CH_CNTRL,115,60;custom_customer$; ! ALT
+custom_customer$=UCase$(Trim$(custom_customer$))
+call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+! 04/2014 - per group - allow BO's on amalg - just do not allow amalgamation on BO's
+!If P60$[13,13] = "Y"
+!  J7$ = "Cannot use automatic b/o release with amalgamation or freight add-on!"
+!  Gosub SendUMsg ! DSPLY_MESSAGE
+!  Goto L_9010
+!End If 
+gosub check_261264
+Read #CH_CNTRL,182,12;MAXRECS;
+If MAXRECS <= 0 Or Fra(MAXRECS) Let MAXRECS = 300 ! maximum records to process at one time?
+if custom_customer$="WENELSON" and MAXRECS<1000 let MAXRECS=1000
+linein$=" check cntrl/bopp# for an errors logged" \ gosub Write_261264_log:
+LINEIN$=" max records set to "+maxrecs \ gosub Write_261264_log:
+Dim 3%,BOBUF[MAXRECS,3]
+UIDRec=getuidrec(e$,IntCo,Userid$)
+Mat read #ch_cntrl,120,0;p0;
+Read #CH_CNTRL,20,2;S9;
+S9_OLD = S9
+If S9 < 0 ! how to handle multiple starts as entry/edit on web page?
+	if s9=-1 or s9=-2
+		gosub check_reset
+	endif
+	if s9=-2 j7$="A BACKORDER REGISTER IS CURRENTLY BEING PRINTED"
+	If S9 = -2 Let J7$ = "A BACKORDER REGISTER IS CURRENTLY BEING PRINTED"
+	If S9 = -1  ! Entry/edit
+		If P0[261]<>UIDRec ! diff user or PM run
+			Let J7$ = "BACKORDER ENTRY/EDIT CURRENTLY IN PROCESS"
+		Else ! same user
+			! allow right in? would have to as they make multiple calls to program!
+			Goto asuin
+		Endif
+	Endif ! Entry/edit in process
+	If S9 = -3 Let J7$ = "BACKORDER ACCEPT IN PROGRESS"
+	if s9 < 0
+		LINEIN$=j7$ \ gosub Write_261264_log:
+		Gosub SendUMsg !DSPLY_MESSAGE \ 
+		Goto OUT_LEAVELOCKED
+	endif
+End If 
+ASUIN: ! allow same user in multiple times until done
+S9 = -1
+Write #CH_CNTRL,20,2;S9;
+Let P0[261]=UIDRec
+mat write #ch_cntrl,120,0;p0;
+gosub write_log:
+If Err 0 Gosub ERR_TRAP1
+LINEIN$=" s9 set and p0 set" \ gosub Write_261264_log:
+W = 0
+CURBO = 0
+U3$ = " ",U3$
+!R3 = R9
+!If Not(R3) ! Not started from diff program?
+  For X = 2 To 17
+    Read E1 \ If E1 = -1 Goto L_250
+    Read #CH_CNTRL,88,ABS(E1);F$;
+	IF E1>0
+		Open #X,F$
+	ELSE
+		ROPEN #X,F$
+	ENDIF
+L_250: Next X
+  Data "2528","1792","2320","1104","1888","1840","2400","-1","1808","2576","1728","1744"
+  data "2288","1872","1824","-2432"
+!End If 
+linein$=" standard files opened" \ gosub Write_261264_log:
+if p61$[111,111] = "Y" ! CPI FLAG
+	ch_cpidet = OpenFile(9928,IntCo) \ if ch_cpidet = -1 error 42
+END IF
+sqlChan = OpenMySQLMirror(e$)
+linein$=" myseql open" \ gosub Write_261264_log:
+RASL = 0
+If P9$[41,41] = "Y" Or P9$[41,41] = "W" Let RASL = 9
+If RASL Let LOC$ = "NONE  " Else Let LOC$ = "STOCK "
+LOC$ = "STOCK "
+LOT$ = "STOCK       "
+! Print 'CS';
+If Not(EMODE) Gosub CHECK_EDIT_MODE ! see if entries on file
+linein$=" emode checked, set to "+str$(emode) \ gosub Write_261264_log:
+If EMODE Let SCRATCH$ = "EDIT" Else Let SCRATCH$ = "ENTRY"
+! now to switch this to web mode
+Action1$=UCase$(RTRIM$(Action1$))
+Action2$=UCase$(RTrim$(Action2$))
+linein$=" action1$= "+action1$ \ gosub Write_261264_log:
+linein$=" action2$= "+action2$ \ gosub Write_261264_log:
+If EMode and Action1$="NEWENTSEL" Let Action1$="EDTALLSEL" ! no load - edit (same vars used)
+ReturnStatus=0
+Message$="Action1 not found"
+select case action1$
+  CASE "PROGMODE" ! call to see if entry or edit mode		doc=BO261-GetProgramMode.doc
+	! as what they can do depends on this
+	returnstatus=1
+	Message$="OK"
+	Clear List$[]
+	List$[0]=bsdel$,"PROGRAMMODE",fdel$
+	List$[1]="ID",fdel$,"MODE",fdel$
+	List$[2]=Str$(EMODE),fdel$,Scratch$,fdel$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	linein$=" progmode done" \ gosub Write_261264_log:
+	! mode complete
+  case "DROPLIST"
+	! droplist related here
+	If action2$="ALLLIST" ! all available lists				doc=BO261-GetDroplists.doc
+		! whse, div, & order type
+		returnstatus=1
+		Message$="OK"
+		Clear List$[]
+		Ch_Wh = OpenFile(-2768,intCo) \ If Ch_Wh = -1 Error 42  !" warehouse file
+		call FileDropListWhinfoz(e$,List$[],100,ch_wh)
+		call AddToStr(e$,rstr$,List$[])
+		close #ch_wh ! whse list
+		! next division
+		Clear List$[]
+		Ch_Div=OpenFile(-688,intCo) \ If Ch_div = -1 Error 42 !DIVISION
+		call FileDropListDivifle(e$,List$[],100,ch_div)
+		call AddToStr(e$,rstr$,List$[])
+		Close #ch_div ! div list
+		! last order types
+		Clear List$[]
+		call OrdTypeDropList(e$,List$[],bsdel$,esdel$,fdel$,100,ctlc)
+		call AddToStr(e$,rstr$,List$[])
+		linein$=" alllist done" \ gosub Write_261264_log:
+	Endif ! of all
+	If action2$="WHSE" ! whse droplist						doc=BO261-GetWhseDroplist.doc
+		returnstatus=1
+		Message$="OK"
+		Clear List$[]
+		Ch_Wh = OpenFile(-2768,intCo) \ If Ch_Wh = -1 Error 42  !" warehouse file
+		call FileDropListWhinfoz(e$,List$[],100,ch_wh)
+		call AddToStr(e$,rstr$,List$[])
+		close #ch_wh
+		linein$=" whse done" \ gosub Write_261264_log:
+	Endif
+	If action2$="DIV" ! division droplist					doc=BO261-GetDivDroplist.doc
+		returnstatus=1
+		Message$="OK"
+		Clear List$[]
+		Ch_Div=OpenFile(-688,intCo) \ If Ch_div = -1 Error 42 !DIVISION
+		call FileDropListDivifle(e$,List$[],100,ch_div)
+		call AddToStr(e$,rstr$,List$[])
+		Close #ch_div
+		linein$=" div done" \ gosub Write_261264_log:
+	Endif
+	If Action2$="ORDTYPE" ! order types						doc=BO261-GetOrdTypeDroplist.doc
+		returnstatus=1
+		Message$="OK"
+		Clear List$[]
+		call OrdTypeDropList(e$,List$[],bsdel$,esdel$,fdel$,100,ctlc)
+		call AddToStr(e$,rstr$,List$[])
+		linein$=" ordtype done" \ gosub Write_261264_log:
+	Endif
+	
+	If Action2$="UMLIST" ! u/m list							doc=BO261-GetUMDroplist.doc
+		Let ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		
+		Call DXGet("RECID",tmp$) ! BOWORK REC
+		Let X2=tmp$
+		If X2<1 or x2>CHF(CH_BOWORK)-1 or Fra(X2)
+			ReturnStatus=0
+			Message$="INVALID RECORD ID PASSED!"
+			Goto OutDone
+		Endif
+		Let BOBUF[1,0]=X2
+		CurBo=1
+		Gosub Read_BOWORK
+		Mat Read #CH_ROL,B0[3],8;L3;
+		If L3[0] Gosub L_30000 Else Gosub get_prod
+		prc=CH_Prod;prr=0
+		Clear pr. ! only looks at um & factor!
+		Let Pr.BaseUM=PFU1[0]! =Prod.BaseUM;PFU2[0]=1
+		Let Pr.UM2=PFU1[1];Pr.UM2Fact=PFU2[0]
+		Let Pr.UM3=PFU1[2];Pr.UM3Fact=PFU2[1]
+		Let Pr.UM4=PFU1[3];Pr.UM4Fact=PFU2[2]
+		Let Pr.UM5=PFU1[4];Pr.UM5Fact=PFU2[3]
+		Let Pr.UM6=PFU1[5];Pr.UM6Fact=PFU2[4]
+		Let Pr.UM7=PFU1[6];pr.UM7Fact=PFU2[5]
+		Let Pr.UM8=PFU1[7];Pr.UM8Fact=PFU2[6]
+		Let pr.UMPurchDefault=PFU1[10]
+		let pr.UMSellDefault=PFU1[9]
+		typ$="QTY" ! ALWAYS QTY
+		Call UMDList(e$,typ$,PRC,PRR,List$[],IntCo,Pr.)
+		
+		call AddToStr(e$,rstr$,List$[])
+		linein$=" umlist done" \ gosub Write_261264_log:
+	Endif
+	! END OF DROPLIST SECTION
+  CASE "PRODLIST" ! prodlist search				doc=BO261-ProdScanList.doc
+		!
+		Let ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		X2=0 ! normal scan
+		Call ProdList(e$,IntCo,List$[],maxcnt,ctlc,CH_Prod,CH_ProdWhse,x2,0,"",UserId$)
+		If E$<>""
+		  Let ReturnStatus=0
+		  Message$=E$
+		Endif
+		call AddToStr(e$,rstr$,List$[])
+		linein$=" prodlist done" \ gosub Write_261264_log:
+	! Endif
+   CASE "CUSTLIST" ! Custfile search				doc=BO261-CustScan.doc
+		Let ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		Call CustList(e$,IntCo,List$[],maxcnt,ctlc,CH_CUST,0,"",UserId$)
+		If E$<>""
+		  Let ReturnStatus=0
+		  Message$=E$
+		Endif
+		call AddToStr(e$,rstr$,List$[])
+		linein$=" custlist done" \ gosub Write_261264_log:
+	! Endif
+  Case "NEWENTALL" ! new entry - all selected				doc=BO261-AutoLoadProcess.doc
+		Let ReturnStatus=1
+		Message$="OK"
+		If EMode ! can't do entry if existing?
+			ReturnStatus=0
+			Message$="ENTRIES ALREADY ON FILE!"
+			Goto OutDone
+		Endif
+		RELMODE = 1;C1[1] = 0;C1[2] = 999999;PROD1$ = "";PROD2$ = "z",PROD2$
+		SKIPLOCKS = 1
+		J$=UCase$(RTrim$(GetParameter$("USCPRTY")))
+		UsePri=0
+		If J$ = "Y" Let USEPRI = 1
+		J$ = GetParameter$("WHSE")
+		E1=J$
+		If E1<=0 Or E1>D9[5] or fra(E1)
+			ReturnStatus=0
+			Message$="INVALID WAREHOUSE"
+			Goto OutDone
+		Endif
+		WHSE = E1
+		j$ = GetParameter$("DIV")
+		E1=J$
+		If E1<0 or E1>99 or fra(E1)
+			ReturnStatus=0
+			Message$="INVALID DIVISION"
+			Goto OutDone
+		Endif
+		DIV = E1
+		j$ = GetParameter$("ORDTYPE")
+		E1=J$
+		if e1<0 or e1>38 or fra(E1)
+			ReturnStatus=0
+			Message$="INVALID ORDER TYPE"
+			Goto OutDone
+		Endif
+		!If E1 = 4 Or E1 = 8 Or E1 = 15 Or E1 = 16 or E1 = 9 Or E1 = 11 Or E1 = 24 Or E1 = 21 Or E1 = 22 or e1=5 or e1=19
+		If E1 = 4 OR E1=5 Or E1 = 8 or E1 = 9 Or E1 = 11 Or E1 = 15 Or E1 = 16 Or E1=19 Or E1 = 21 Or E1 = 22 Or E1 = 24
+			Message$="Order Type not available for release"
+			ReturnStatus=0
+			Goto OutDone
+		End If 
+		OTYP = E1
+		! load the file
+		linein$=" looks set to go to load_bowork from newentall" \ gosub Write_261264_log:
+		Gosub LOAD_BOWORK ! load the file & AUTO RELEASE IT!
+		If RECFOUND <> 99 ! means no stk bo's
+			If Not(RECFOUND) Message$="NO BACK ORDERS ON FILE --- "
+			If RECFOUND = 88 Message$="NO STOCK BACK ORDERS ON FILE --- "
+			if erpCron
+				! in ERP, user MUST click exit causing a BOEDONE call
+				! after NEWENTALL.  Not an issue for ERP Scheduler
+				! UNLESS we don't have any backorders to fill.
+				! If so, we must emulate the end result here to
+				! allow the process to continue on to completion
+				Let ReturnStatus=1
+				s9_OLD = -1
+				Message$=Message$," - OK"
+				call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+				call AddToStr(e$,rstr$,WebStr$)
+				call SetOutPut(e$,rstr$)
+				Goto L_9010
+			end if
+			Goto OutDone !Goto L_9000
+		Endif
+		PROD4LIST$="" ! starting point (not used)
+		Gosub StartList ! will gothru list and release w/no sendback
+		! status section
+		call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+		call AddToStr(e$,rstr$,WebStr$)
+		call SetOutPut(e$,rstr$)
+		linein$=" do setoutput to return string to front" \ gosub Write_261264_log:
+		goto L_9010
+		! done with load all
+  Case "NEWENTSEL" ! new entry - Selective					doc=BO261-SelLoadProcess.doc
+	Let ReturnStatus=1
+		Message$="OK"
+		If EMode ! can't do entry if existing?
+			ReturnStatus=0
+			Message$="ENTRIES ALREADY ON FILE!"
+			Goto OutDone
+		Endif
+		SKIPLOCKS = 1;RELMODE = 2
+		Call DXGet("USCPRTY",j$)
+		J$=UCase$(RTrim$(J$))
+		UsePri=0
+		If J$ = "Y" Let USEPRI = 1
+		Call DXGet("WHSE",J$)
+		E1=J$
+		If E1<=0 Or E1>D9[5] or fra(E1)
+			ReturnStatus=0
+			Message$="INVALID WAREHOUSE"
+			Goto OutDone
+		Endif
+		WHSE = E1
+		Call DXGet("DIV",J$)
+		E1=J$
+		If E1<0 or E1>99 or fra(E1)
+			ReturnStatus=0
+			Message$="INVALID DIVISION"
+			Goto OutDone
+		Endif
+		DIV = E1
+		Call DXGet("ORDTYPE",J$)
+		E1=J$
+		if e1<0 or e1>38 or fra(E1)
+			ReturnStatus=0
+			Message$="INVALID ORDER TYPE"
+			Goto OutDone
+		Endif
+		If E1 = 4 OR E1=5 Or E1 = 8 or E1 = 9 Or E1 = 11 Or E1 = 15 Or E1 = 16 Or E1=19 Or E1 = 21 Or E1 = 22 Or E1 = 24
+			Message$="Order Type not available for release"
+			ReturnStatus=0
+			Goto OutDone
+	    End If 
+		OTYP = E1
+		Call DXGet("SCUST",tmp$)
+		let C1[1]=tmp$
+		if c1[1]<0 or c1[1]>999999 or fra(c1[1])
+			ReturnStatus=0
+			Message$="INVALID CUSTOMER NUMBER"
+			Goto OutDone
+		Endif
+		Call DXGet("ECUST",tmp$)
+		IF tmp$="" let tmp$="999999"
+		Let C1[2]=tmp$
+		if c1[2]<0 or c1[2]>999999 or fra(c1[2])
+			ReturnStatus=0
+			Message$="INVALID CUSTOMER NUMBER"
+			Goto OutDone
+		Endif
+		if c1[2]<c1[1]
+			ReturnStatus=0
+			Message$="INVALID CUSTOMER RANGE"
+			Goto OutDone
+		Endif
+		Call DXGet("SPROD",tmp$)
+		Prod1$=UCase$(Tmp$)+Blank$
+		Call DXGet("EPROD",tmp$)
+		if tmp$="" let tmp$="}}}}"
+		Prod2$=UCase$(Tmp$)+Blank$
+		if prod2$<Prod1$
+			ReturnStatus=0
+			Message$="INVALID PRODUCT RANGE"
+			Goto OutDone
+		Endif
+		! load the file
+		linein$=" goto load_bowork from newentsel" \ gosub Write_261264_log:
+		Gosub LOAD_BOWORK ! loads the file only
+	    If RECFOUND <> 99 ! means no stk bo's
+			If Not(RECFOUND) Message$="NO BACK ORDERS ON FILE --- "
+			If RECFOUND = 88 Message$="NO STOCK BACK ORDERS ON FILE --- "
+			ReturnStatus=0
+			Goto OutDone !!Goto L_9000
+		Endif
+		PROD4LIST$="" ! starting point (first one found)
+		Clear List$[]
+		row=0
+		Gosub StartList ! will gothru list for manual release
+		if row>0 
+			let List$[row]=esdel$
+			call AddToStr(e$,rstr$,List$[]) ! sends back list
+		Endif ! no row = no list
+		! done with selective entry
+  Case "EDTORDSEL" ! edit mode - order select				doc=BO261-EditOrderProcess.doc
+		Let ReturnStatus=1
+		Message$="OK"
+		If NOT(EMode) ! can't do edit if none?
+			ReturnStatus=0
+			Message$="NO ENTRIES ON FILE!"
+			Goto OutDone
+		Endif
+		SKIPLOCKS = 1
+		RELMODE = 3;C1[1] = 0;C1[2] = 999999;PROD1$ = "";PROD2$ = "z",PROD2$
+		Call DXGet("ORDERID",j$)
+		C1[4] = J$
+		linein$=" edit by order number, order "+str$(c1[4]) \ gosub Write_261264_log:
+	  If C1[4]<=0 Or C1[4]>999999 or fra(C1[4])
+		ReturnStatus=0
+		Message$="INVALID ORDER NUMBER"
+		Goto OutDone
+	  Endif
+	  SCRATCH$ = " ",SCRATCH$
+	  maxstat=4 \ if custom_customer$="WENELSON" let maxstat=6
+	  For S2 = 1 To maxstat ! was 4
+		SCRATCH$[1,2] = S2 Using "##"
+		SCRATCH$[3] = C1[4] Using "###### "
+		Search #CH_ROH,2,1;SCRATCH$,R7,E
+		If Not(E) Goto CHK4ORDER
+	  Next S2
+	  ReturnStatus=0
+		Message$="ORDER NUMBER NOT FOUND"
+		Goto OutDone
+	CHK4ORDER: Rem
+	  Mat Read #CH_ROH,R7,0;H0;
+	  Mat Read #CH_ROH,R7,78;H4;
+	  Mat Read #CH_ROH,R7,104;H5;
+	  If H5[7] = 4 or h5[7]=5 Or H5[7]=8 or H5[7] = 9 Or H5[7] = 11 Or H5[7] = 15 Or H5[7] = 16 Or H5[7]=19 or H5[7] = 21 Or H5[7] = 22 Or H5[7] = 24 
+		Message$="ORDER TYPE INVALID"
+		ReturnStatus=0
+		Goto OutDone
+	  End If 
+	  MAXBO = 0;CURR_B0$ = "";PREV_B0$ = ""
+	  SCRATCH$ = " ",SCRATCH$
+	  SCRATCH$[1,6] = H0[4] Using "######"
+	  SCRATCH$[7] = C1[4] Using "######"
+	  Search #CH_BOWORK,3,2;SCRATCH$,R3,E
+	  If E > 2 Gosub ERR_SEARCH1
+	  X2 = SCRATCH$[7,12]
+	  If E Or X2 <> C1[4]
+		Message$="ORDER NOT IN BACKORDER FILE "
+		ReturnStatus=0
+		Goto OutDone
+	  End If 
+	  WHSE = H4[2]
+	  Call DXGet("CURPROD",tmp$) ! product to work on (null=first)
+	  tmp$=UCase$(LTrim$(tmp$)) ! no beginning spaces?
+	  PROD4LIST$=tmp$
+	  if tmp$<>"" ! Sent prod - get next/prev
+			Let Prod4list$=Prod4list$+Blank$
+			Let K1$=" ",k1$;k1$=Prod4List$
+			linein$=" prod4list$ "+ Prod4List$ \ gosub Write_261264_log:
+			Call DXGet("DIR",tmp$) ! next prod or prev (F=forward, B=Back, S=Same)
+			Mode=3 \ if tmp$="B" Let mode=6
+			if tmp$="S" goto EOSP
+			If mode=3 let k1$[13,14]="AA"
+			BOWOLoop: ! 
+			Search #CH_BOWORK,mode,1;K1$,R3,E
+			If E
+				Let ReturnStatus=0
+				Message$="END OF FILE"
+				Goto OutDone
+			Endif
+			If Prod4List$=K1$[1,12] goto BOWOLoop ! not diff yet?
+			Mat read #CH_BOWORK,r3,12;B0;
+			!IF BO[2]<>C1[4] GOTO BOWOLOOP ! not same order
+			!call programdump("/tmp/bo261!","")
+		EOSP: ! wants same (relist)
+			Prod4List$=K1$[1,12] ! set to prod
+	  Endif
+	  donxtlst: ! 
+	  Clear List$[]
+	  row=0
+	  Gosub StartList
+	  !call programdump("/tmp/bo261b!","")
+	  if row=0 ! none found?
+		k1$=Prod4List$
+		if mode=0 let mode=3
+		BOWO2Loop: ! 
+			Search #CH_BOWORK,mode,1;K1$,R3,E
+			If E
+				Let ReturnStatus=0
+				Message$="END OF FILE"
+				Goto OutDone
+			Endif
+			If Prod4List$=K1$[1,12] goto BOWO2Loop ! not diff yet?
+			Prod4List$=K1$[1,12] ! set to prod
+			!call programdump("/tmp/bo261a!","")
+			Goto Donxtlst
+	  Endif
+	  If row>0
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+	  Endif
+	  ! end of select by order
+  Case "EDTALLSEL" ! edit selective							doc=BO261-EditSelProcess.doc
+		Let ReturnStatus=1
+		Message$="OK"
+		If NOT(EMode) ! can't do edit if none?
+			ReturnStatus=0
+			Message$="NO ENTRIES ON FILE!"
+			Goto OutDone
+		Endif
+		SKIPLOCKS = 1;RELMODE = 2
+		Call DXGet("USCPRTY",j$)
+		J$=UCase$(RTrim$(J$))
+		UsePri=0
+		If J$ = "Y" Let USEPRI = 1
+		Call DXGet("WHSE",J$)
+		E1=J$
+		If E1<=0 Or E1>D9[5] or fra(E1)
+			ReturnStatus=0
+			Message$="INVALID WAREHOUSE"
+			Goto OutDone
+		Endif
+		WHSE = E1
+		Call DXGet("DIV",J$)
+		E1=J$
+		If E1<0 or E1>99 or fra(E1)
+			ReturnStatus=0
+			Message$="INVALID DIVISION"
+			Goto OutDone
+		Endif
+		DIV = E1
+		Call DXGet("ORDTYPE",J$)
+		E1=J$
+		if e1<0 or e1>38 or fra(E1)
+			ReturnStatus=0
+			Message$="INVALID ORDER TYPE"
+			Goto OutDone
+		Endif
+		If E1 = 4 OR E1=5 Or E1 = 8 or E1 = 9 Or E1 = 11 Or E1 = 15 Or E1 = 16 Or E1=19 Or E1 = 21 Or E1 = 22 Or E1 = 24
+			Message$="Order Type not available for release"
+			ReturnStatus=0
+			Goto OutDone
+	    End If 
+		OTYP = E1
+		Call DXGet("SCUST",tmp$)
+		let C1[1]=tmp$
+		if c1[1]<0 or c1[1]>999999 or fra(c1[1])
+			ReturnStatus=0
+			Message$="INVALID CUSTOMER NUMBER"
+			Goto OutDone
+		Endif
+		Call DXGet("ECUST",tmp$)
+		if tmp$="" let tmp$="999999"
+		Let C1[2]=tmp$
+		if c1[2]<0 or c1[2]>999999 or fra(c1[2])
+			ReturnStatus=0
+			Message$="INVALID CUSTOMER NUMBER"
+			Goto OutDone
+		Endif
+		if c1[2]<c1[1]
+			ReturnStatus=0
+			Message$="INVALID CUSTOMER RANGE"
+			Goto OutDone
+		Endif
+		Call DXGet("SPROD",tmp$)
+		Prod1$=UCase$(Tmp$)+blank$
+		Call DXGet("EPROD",tmp$)
+		if tmp$="" let tmp$="}}}}"
+		Prod2$=UCase$(Tmp$)+Blank$
+		if prod2$<Prod1$
+			ReturnStatus=0
+			Message$="INVALID PRODUCT RANGE"
+			Goto OutDone
+		Endif
+		linein$=" edtallsel" \ gosub Write_261264_log:
+		! load the file
+		Call DXGet("CURPROD",tmp$) ! product to work on (null=first)
+		tmp$=UCase$(LTrim$(tmp$)) ! no beginning spaces?
+		PROD4LIST$=tmp$
+		linein$=" prod4list$ "+ Prod4List$ \ gosub Write_261264_log:
+		if tmp$<>"" ! Sent prod - get next (F=forward, B=Back, S=Same)
+			Let Prod4list$=Prod4list$+Blank$
+			Let k1$=Prod4List$
+			Call DXGet("DIR",tmp$) ! next prod or prev
+			Mode=3 \ if tmp$="B" Let mode=6
+			if tmp$="S" Goto ESPS
+			If mode=3 let k1$[13,14]="AA" ! dir is prod/date
+			BOWLoop: ! 
+			Search #CH_BOWORK,mode,1;K1$,R3,E
+			if k1$[1,12]>Prod2$ or k1$[1,12]<Prod1$ Let e=2
+			If E
+				Let ReturnStatus=0
+				Message$="END OF FILE"
+				Goto OutDone
+			Endif
+			If Prod4List$=K1$[1,12] goto BOWLoop ! not diff yet?
+		  ESPS: ! wants same product (relist)
+			Prod4List$=K1$[1,12] ! set to prod
+		Endif
+		Clear List$[]
+		row=0
+		Gosub StartList
+		if row>0
+			List$[row]=esdel$
+			call AddToStr(e$,rstr$,List$[])
+		Endif
+	  ! done with edit selective
+  CASE "BOEDONE" ! edit/entry done							doc=BO261-EndBOProcess.doc
+	! force user to click a button to exit
+	Let ReturnStatus=1
+	Message$="OK"
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	linein$=" bodone" \ gosub Write_261264_log:
+	Goto L_9010
+ ! NOW ALL EDIT OF LINES
+  CASE "PRODDETL" ! retrieve a total for product			doc=BO261-GetProdDetail.doc
+	Let ReturnStatus=1
+	Message$="OK"
+	Call DXGet("WHSE",J$)
+		E1=J$
+		If E1<=0 Or E1>D9[5] or fra(E1)
+			ReturnStatus=0
+			Message$="INVALID WAREHOUSE"
+			Goto OutDone
+		Endif
+		WHSE = E1
+	Call DXGet("PRODID",tmp$)
+	B0$=UCase$(Tmp$)+Blank$
+	Clear List$[]
+	row=0
+	gosub get_prod
+	gosub get_sprodlot ! get actual sprodlot avail
+    Gosub RECALC_TOTBO
+	Gosub sendprod ! send main prod
+	call AddToStr(e$,rstr$,List$[]) ! that's all just the prod
+	linein$=" proddetl "+b0$ \ gosub Write_261264_log:
+   ! end send a retotal of product
+  CASE "CHGBOQTY" ! changing qty on a line					doc=BO261-SubmitBORelease.doc
+	Let ReturnStatus=1
+	Message$="OK"
+	Call DXGet("WHSE",J$)
+	E1=J$
+	If E1<=0 Or E1>D9[5] or fra(E1)
+		ReturnStatus=0
+		Message$="INVALID WAREHOUSE"
+		Goto OutDone
+	Endif
+	WHSE = E1
+	Call DXGet("RECID",tmp$)
+	Let X2=tmp$
+	If X2<1 or x2>CHF(CH_BOWORK)-1 or Fra(X2)
+		ReturnStatus=0
+		Message$="INVALID RECORD ID PASSED!"
+		Goto OutDone
+	Endif
+	Let BOBUF[1,0]=X2
+	CurBo=1
+	Gosub Cng_rel_qty
+    ! end of chg qty
+	linein$=" chgboqty RECID "+str$(x2) \ gosub Write_261264_log:
+  CASE "CHGSTATUS" ! aka toggle mark  0->1  1->0			doc=BO261-ToggleBOStatus.doc
+	Let ReturnStatus=1
+	Message$="OK"
+	Call DXGet("WHSE",J$)
+	E1=J$
+	If E1<=0 Or E1>D9[5] or fra(E1)
+		ReturnStatus=0
+		Message$="INVALID WAREHOUSE"
+		Goto OutDone
+	Endif
+	WHSE = E1
+	Call DXGet("RECID",tmp$)
+	Let X2=tmp$
+	If X2<1 or x2>CHF(CH_BOWORK)-1 or Fra(X2)
+		ReturnStatus=0
+		Message$="INVALID RECORD ID PASSED!"
+		Goto OutDone
+	Endif
+	Let BOBUF[1,0]=X2
+	CurBo=1
+	Gosub Toggle_Mark
+	linein$=" chgstatus  RECID "+str$(recid)+" b0[7] "+str$(b0[7]) \ gosub Write_261264_log:
+	! end of chgstatus
+  Case "MARKRANGE" ! chg a list from 0->1					doc=BO261-MarkRangeBOStatus.doc
+	! web sends a list of lines to update
+	Let ReturnStatus=1
+	Message$="OK"
+	Call DXGet("WHSE",J$)
+	E1=J$
+	If E1<=0 Or E1>D9[5] or fra(E1)
+		ReturnStatus=0
+		Message$="INVALID WAREHOUSE"
+		Goto OutDone
+	Endif
+	WHSE = E1
+	Call DXGet("TTLLNS",tmp$)
+	X2=tmp$
+	If X2<0 or x2>9999 or fra(X2)
+		Let ReturnStatus=0
+		Message$="INVALID NUMBER OF LINES"
+		Goto OutDone
+	Endif
+	TTLLNS=X2
+	For LNNO=1 to TTLLNS
+		Call DXGet("RECID"+Str$(LNNO),tmp$)
+		Let X2=tmp$
+		If X2<1 or x2>CHF(CH_BOWORK)-1 or Fra(X2)
+			ReturnStatus=0
+			Message$="INVALID RECORD ID PASSED!"
+			Goto BDRMR ! OutDone
+		Endif
+		Let BOBUF[1,0]=X2
+		CurBo=1
+		Gosub Mark_all
+		linein$=" markrange  RECID("+str$(lnno)+") "+str$(x2)+" b0[7] "+str$(b0[7]) \ gosub Write_261264_log:
+	BDRMR: ! next
+	Next LNNO
+	! end of markrange
+  CASE "ZAPLINES" ! effectively delete lines				doc=BO261-DelRangeBOStatus.doc
+	! 'zap' seems to mean change status to 9
+	Let ReturnStatus=1
+	Message$="OK"
+	Call DXGet("WHSE",J$)
+	E1=J$
+	If E1<=0 Or E1>D9[5] or fra(E1)
+		ReturnStatus=0
+		Message$="INVALID WAREHOUSE"
+		Goto OutDone
+	Endif
+	WHSE = E1
+	Call DXGet("TTLLNS",tmp$)
+	X2=tmp$
+	If X2<0 or x2>9999 or fra(X2)
+		Let ReturnStatus=0
+		Message$="INVALID NUMBER OF LINES"
+		Goto OutDone
+	Endif
+	TTLLNS=X2
+	For LNNO=1 to TTLLNS
+		Call DXGet("RECID"+Str$(LNNO),tmp$)
+		Let X2=tmp$
+		If X2<1 or x2>CHF(CH_BOWORK)-1 or Fra(X2)
+			ReturnStatus=0
+			Message$="INVALID RECORD ID PASSED!"
+			Goto BDZPL ! OutDone
+		Endif
+		Let BOBUF[1,0]=X2
+		CurBo=1
+		Let F9 = 1
+		Gosub RESET
+		linein$=" zaplines  RECID "+str$(x2)+" b0[7] "+str$(b0[7]) \ gosub Write_261264_log:
+	BDZPL: ! next
+	Next LNNO
+	
+    ! end of zaplines
+  CASE "RESETLINES"		!									doc=BO261-ResetRangeBOStatus.doc
+	! 'reset' seems to mean change status 1 to 0
+	Let ReturnStatus=1
+	Message$="OK"
+	Call DXGet("WHSE",J$)
+	E1=J$
+	If E1<=0 Or E1>D9[5] or fra(E1)
+		ReturnStatus=0
+		Message$="INVALID WAREHOUSE"
+		Goto OutDone
+	Endif
+	WHSE = E1
+	Call DXGet("TTLLNS",tmp$)
+	X2=tmp$
+	If X2<0 or x2>9999 or fra(X2)
+		Let ReturnStatus=0
+		Message$="INVALID NUMBER OF LINES"
+		Goto OutDone
+	Endif
+	TTLLNS=X2
+	For LNNO=1 to TTLLNS
+		Call DXGet("RECID"+Str$(LNNO),tmp$)
+		Let X2=tmp$
+		If X2<1 or x2>CHF(CH_BOWORK)-1 or Fra(X2)
+			ReturnStatus=0
+			Message$="INVALID RECORD ID PASSED!"
+			Goto BDRSL ! OutDone
+		Endif
+		Let BOBUF[1,0]=X2
+		CurBo=1
+		Let F9 = 0 ! 
+		Gosub RESET
+		linein$=" resetlines  RECID "+str$(x2)+" b0[7] "+str$(b0[7]) \ gosub Write_261264_log:
+	BDRSL: ! next
+	Next LNNO
+	! end of resetlines
+  !case "
+  ! done with case select
+End Select
+	OutDone: ! finished
+	linein$=" outdone " \ gosub Write_261264_log:
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	! if it's just because we didn't find anything
+	! this is not a bad status
+Goto L_9999  ! just end?
+! SELECTION STUFF AT END
+STARTLIST: Rem  Send list for product or auto release all
+linein$=" begin startlist" \ gosub Write_261264_log:
+linein$=" relmode "+relmode \ gosub Write_261264_log:
+FIRSTBOONPAGE = 0
+CURBO = 0
+MAXBO = 0
+TOTQTY_RELEASED = 0
+R2 = 0
+B0$ = "";PREV_B0$ = "";CURR_B0$ = ""
+K1$ = " ",K1$ 
+K1$ = PROD1$[1,12]
+if prod4list$<>"" Let K1$=Prod4list$ ! sent a prod to start at
+K1$[12] = ""
+BOWORK_LOOP: Rem ---------- load backorder buffer based on selection criteria
+Search #CH_BOWORK,3,1;K1$,R3,E \ If E > 2 Gosub ERR_SEARCH1
+If E
+  If RELMODE = 1 Return ! Goto L_9010 ! is the auto select/release all
+Else 
+	linein$=" bowork loop "+k1$ \ gosub Write_261264_log:
+  If prod4list$<>"" and k1$[1,12]<>Prod4list$ return
+  If K1$[1,2] = "+ " Goto BOWORK_LOOP ! THIS IGNORES NON-STOCKS so why LOAD THEM!?
+  Mat Read #CH_BOWORK,R3;B0$;
+  Mat Read #CH_BOWORK,R3,12;B0;
+  HR3=R3
+  If EMODE
+    Gosub CHECK_RANGES
+    If Not(PASS) 
+		linein$=" failed check_ranges" \ gosub Write_261264_log:
+		Goto BOWORK_LOOP
+	endif
+  End If 
+  MAXBO = 10 !? MAXBO + 1
+  If CURR_B0$ = "" Let CURR_B0$ = B0$ ! B0$=PRODUCT
+  If CURR_B0$ = B0$
+    If B0[7] = 1 Or B0[7] = 2
+      TOTQTY_RELEASED = TOTQTY_RELEASED + B0[6]
+      BOBUF[MAXBO,2] = B0[6]
+    Else 
+      BOBUF[MAXBO,2] = 0
+    End If 
+  Else ! not same prod
+	if relmode<>1 Return ! diff prod done ! not auto all
+	! let relmode 1 thru	
+  End If 
+  If PREV_B0$ <> B0$ Let PREV_B0$ = B0$
+  BOBUF[MAXBO,0] = R3 \ BOBUF[MAXBO,1] = MAXBO
+  Gosub GET_CUST
+  If RELMODE = 1 ! auto release
+    CURBO = MAXBO ! set to curr bowork line
+    Gosub GET_SPRODLOT ! get avail
+    Gosub RELEASE_ALL
+	linein$=" returned from release_all" \ gosub Write_261264_log:
+  Else ! other modes - SEND BACK list for a product
+	CURBO=MAXBO
+	!Gosub READ_BOWORK (READ ABOVE?)
+	Mat Read #CH_ROL,B0[3],8;L3; ! need FOR every key
+    If PRODONPAGE$ = "" !  only 1 prod per page - so this is first prod?
+      PRODONPAGE$ = B0$[1,12]
+      
+	  gosub get_prod
+      Gosub GET_SPRODLOT
+      Gosub RECALC_TOTBO
+	  Gosub sendprod ! send main prod
+	  WebStr$=bsdel$,"LINEDATA",fdel$
+	  List$[row]=WebStr$
+	  row=row+1 \ if row>maxcnt let maxcnt=expandarray(e$,List$[])
+	  ! line headings
+	  WebStr$="RECID",fdel$,"STATUS",fdel$,"CUSTID",fdel$,"CUSTNAME",fdel$
+	  WebStr$=WebStr$,"ORDERNO",fdel$,"ORDDATE",fdel$,"DUEDATE",fdel$
+	  WebStr$=WebStr$,"ORIGBO",fdel$,"UM",fdel$,"CURRBO",fdel$
+	  List$[row]=WebStr$
+	  row=row+1 \ if row>maxcnt let maxcnt=expandarray(e$,List$[])
+	  ! 
+    End If ! end of first time for prod
+	MAXBO=10;CURBO=MAXBO
+	BOBUF[MAXBO,0] = HR3 \ BOBUF[MAXBO,1] = MAXBO
+	Gosub READ_BOWORK ! (READ ABOVE? NEEDS REREAD for some reason)
+	Gosub REDRAW_LINE ! send the line
+  End If ! end of relmode 1 or not
+  Goto BOWORK_LOOP
+End If ! of not E
+Return ! no more to do on web
+
+Sendprod: ! send the product
+List$[0]=bsdel$,"PRODDATA",fdel$
+WebStr$="PRODUCT",fdel$,"DESC1",fdel$ ! ,"DESC2",fdel$
+WebStr$=WebStr$,"UM",fdel$,"AVAIL",fdel$,"RELSD",fdel$
+List$[1]=webStr$
+If L3[0] Gosub L_30000
+WebStr$=B0$[1,12],fdel$,RTRIM$(P2$[1,25]),fdel$
+B0[10] = PFU1[9]
+if custom_customer$="WENELSON" let b0[10]=pfu1[8]
+Gosub GET_DUNIT
+WebStr$=WebStr$,DUNIT$[1,4],fdel$
+CNVTU[0] = 0 \ CNVTU[1] = B0[10] \ CNVTU[2] = 1
+CNVTA = TOTQTY_RELEASED \ Gosub CONVERT
+SCR2 = AMOUNT
+CNVTA = TOTQTY_AVAIL \ Gosub CONVERT
+SCR1 = AMOUNT
+WebStr$=WebStr$,LTrim$(SCR1 Using "--------#.##"),fdel$
+WebStr$=WebStr$,LTrim$(SCR2 Using "--------#.##"),fdel$
+List$[2]=WebStr$
+List$[3]=esdel$
+Row=4
+Return
+
+TOGGLE_MARK: Rem toggle MARK
+TMP_CURBO = CURBO
+Gosub READ_BOWORK
+Gosub Get_Sprodlot ! get avail
+If (B0[7] = 0 And B0[6] > TOTQTY_AVAIL) Or B0[7] = 8
+ ! ignore line?
+Else 
+  If B0[7] = 0
+    SINE = 1
+    Gosub UPDATE_PROD
+    Gosub UPDATE_SPRODLOT
+    Gosub UPDATE_SORDLOT
+    Gosub ADJUST_LINE
+    B0[7] = 1
+  Else 
+    If B0[7] = 1 Or B0[7] = 2
+      SINE = -1
+      Gosub UPDATE_PROD
+      Gosub UPDATE_SPRODLOT
+      Gosub UPDATE_SORDLOT
+      Gosub ADJUST_LINE
+      B0[7] = 0
+    End If 
+  End If 
+End If 
+B0[12]=TOTQTY_AVAIL   !! TASK 50693
+Gosub WRITE_BOWORK
+!Gosub DISP_PAGE
+!CURBO = TMP_CURBO
+Return ! Goto OPT_LOOP
+MARK_ALL: Rem MARK ALL (was ABOVE) - now PASSED FROM WEB
+X4 = CURBO
+!For CURBO = X4 To FIRSTBOONPAGE Step -1
+  Gosub READ_BOWORK
+  Gosub Get_Sprodlot ! get avail
+  If (B0[7] = 0 And B0[6] > TOTQTY_AVAIL) Or B0[7] = 8 Goto L_2840
+  If B0[7] = 0
+    SINE = 1
+    Gosub UPDATE_PROD
+    Gosub UPDATE_SPRODLOT
+    Gosub UPDATE_SORDLOT
+    Gosub ADJUST_LINE
+    B0[7] = 1
+  End If 
+L_2840: B0[12]=TOTQTY_AVAIL   !! TASK 50693
+Gosub WRITE_BOWORK
+! Next CURBO
+CURBO = X4
+!Gosub DISP_PAGE
+Return ! Goto OPT_LOOP
+
+CNG_REL_QTY: Rem NEW REL QTY
+Gosub READ_BOWORK
+Mat Read #CH_ROL,B0[3],8;L3
+If Not(L3[0]) gosub get_prod Else Gosub L_30000
+Gosub GET_SPRODLOT ! get avail
+If Not(B0[7])
+RELQTY_QUEST: Rem
+  Call DXGet("RELQTY",tmp$)
+  J$=Trim$(tmp$)
+  If J$ = "" Or J$[1,1] = "E" Return ! NOTHING SENT Print @60,23;'CE'; \ Goto OPT_QUEST
+  X3=J$
+  If X3 > 999999 Or X3 < 0 ! bad qty
+	ReturnStatus=0;Message$="INVALID QUANTITY ENTERED"
+	RETURN ! Goto RELQTY_QUEST
+  Endif
+  RUNIT = J$
+  If RUNIT < 0 Return ! Goto RELQTY_QUEST
+  CNVTU[0] = B0[10];CNVTU[1] = 0;CNVTU[2] = 1;CNVTA = RUNIT
+  Gosub CONVERT
+  If AMOUNT > TOTQTY_AVAIL
+    J7$ = "NOT ENOUGH QUANTITY AVAILABLE TO RELEASE"
+    ReturnStatus=0;Message$=J7$ ! Gosub DSPLY_MESSAGE
+    Return
+  End If 
+  Gosub GET_UM
+  If Not(Pass) ! failed
+	ReturnStatus=0 ! will have message$
+	Return
+  Endif
+  CNVTU[0] = UNIT \ CNVTU[1] = 0 \ CNVTU[2] = 1
+  CNVTA = RUNIT \ Gosub CONVERT
+  If B0[8] Let X2 = B0[8] Else Let X2 = B0[6]
+  If AMOUNT > X2 ! no release more than started
+	ReturnStatus=0;Message$="INVALID QUANTITY ENTERED"
+	RETURN ! Goto RELQTY_QUEST
+  Endif
+  ! okay made it thru
+  Clear List$[]
+  row=0
+  WebStr$=bsdel$,"LINEDATA",fdel$
+	  List$[row]=WebStr$
+	  row=row+1 \ if row>maxcnt let maxcnt=expandarray(e$,List$[])
+	  ! line headings
+	  WebStr$="RECID",fdel$,"STATUS",fdel$,"CUSTID",fdel$,"CUSTNAME",fdel$
+	  WebStr$=WebStr$,"ORDERNO",fdel$,"ORDDATE",fdel$,"DUEDATE",fdel$
+	  WebStr$=WebStr$,"ORIGBO",fdel$,"UM",fdel$,"CURRBO",fdel$
+	  List$[row]=WebStr$
+	  row=row+1 \ if row>maxcnt let maxcnt=expandarray(e$,List$[])
+  If Not(B0[8]) Let B0[8] = B0[6]
+  B0[10] = UNIT
+  B0[6] = AMOUNT
+  SINE = 1
+  Gosub UPDATE_PROD
+  Gosub UPDATE_SPRODLOT
+  Gosub UPDATE_SORDLOT
+  Gosub ADJUST_LINE
+  B0[7] = 1
+  B0[12]=TOTQTY_AVAIL   !! TASK 50693
+  Gosub WRITE_BOWORK
+  Prodonpage$=B0$
+  Gosub Redraw_line
+  List$[row]=esdel$ ! end
+  !Gosub DISP_PAGE ! RESEND WHOLE THING? or just this line?? Try NOTHING!
+Else
+	ReturnStatus=0
+	Message$="NO QTY CHANGE MADE - LINE IS STATUS "+Str$(B0[7])
+End If 
+Return ! Goto OPT_LOOP
+
+GET_SPRODLOT: Rem SPROD LOT AVAILABLE
+K5$ = " ",K5$
+TOTQTY_AVAIL = 0
+K5$[1,12] = B0$[1,12]
+K5$[13,14] = WHSE Using "##"
+L_3060: Search #CH_SPRODLOT,3,2;K5$,BOBUF,E \ If E > 2 Gosub ERR_SEARCH1
+If E = 2 Return 
+If K5$[1,12] <> B0$[1,12] Let E = 2 \ Return 
+K1 = BOBUF
+Mat Read #CH_SPRODLOT,K1,66;P1;
+If WHSE If P1 <> WHSE Goto L_3170
+Mat Read #CH_SPRODLOT,K1,70;P2;
+Mat Read #CH_SPRODLOT,K1,82;P3;
+TOTQTY_AVAIL = TOTQTY_AVAIL + (P3[0] - P3[1] - P3[3])
+L_3170: Goto L_3060
+
+GET_PROD: Rem PROD Get prod/pfu1,2
+K4$ = B0$[1,12]
+Search #CH_PROD,2,1;K4$,R4,E
+If E Let P2$ = "** NOT ON FILE **" \ Goto L_3250
+Mat Read #CH_PROD,R4,8;P2$;
+Mat Read #CH_PROD,R4,256;A;
+Mat Read #CH_PROD,R4,512;PFU1; \ Mat Read #CH_PROD,R4,554;PFU2;
+W3[0] = 0
+W3[2] = 0
+W$ = " ",W$
+W$[1,12] = B0$[1,12]
+W$[13,14] = WHSE Using "##"
+Search #CH_PRODWHSE,2,1;W$,W9,E \ If E > 1 Gosub ERR_SEARCH1
+If Not(E)
+  Mat Read #CH_PRODWHSE,W9,78;W3;
+End If 
+!TOTQTY_AVAIL = W3[0] - W3[2]
+L_3250: Return 
+REDRAW_LINE: Rem REDRAW LINE
+linein$=" set up webstr$ to be returned in redraw_line" \ gosub Write_261264_log:
+Gosub GET_CUST
+B0$ = PRODONPAGE$
+If L3[0] Gosub L_30000 Else Gosub GET_PROD
+WebStr$=Str$(BOBUF[curbo,0]),fdel$,Str$(B0[7]),fdel$ ! rec #, status?
+If B0[7] = 9 Let C1$ = "LINE DELETED ***"
+WebStr$=WebStr$,B0[0] Using "######",fdel$,RTrim$(C1$[1,30]),fdel$ ! cust # / name
+If B0[7] = 9 ! deleted - skip rest Print 'ED'; \ Goto L_3510
+	WebStr$=WebStr$,"0",fdel$,"0",fdel$,"0",fdel$,"0",fdel$,"",fdel$,"0",fdel$
+	
+Else ! active line
+	WebStr$=WebStr$,B0[2] Using "######",fdel$ ! order #
+	X2 = B0[1] !\ Gosub L_6970
+	X$=PDate$(X2)
+	WebStr$=WebStr$,X$,fdel$ ! order date
+	X2 = B0[4]! \ Gosub JUL2DATE
+	!if custom_customer$<>"WENELSON"
+		X$=jDate$(X2) ! normally julian
+	!else
+	!	x$=PDate$(x2) ! nelson = yymmdd
+	!Endif
+	WebStr$=WebStr$,X$,fdel$ ! due date
+	if custom_customer$="WENELSON"
+		LET CNVTU[0]=0 \ LET CNVTU[1]=PFU1[8] \ LET CNVTU[2]=1
+		LET CNVTA=B0[6]
+	Else
+	CNVTU[0] = 0 \ CNVTU[1] = B0[10] \ CNVTU[2] = 1
+	If Not(B0[8]) Let CNVTA = B0[6] Else Let CNVTA = B0[8]
+	Endif
+	Gosub CONVERT
+	DB0[6] = AMOUNT
+	WebStr$=WebStr$,LTrim$(DB0[6] Using "#######.##"),fdel$ ! Orig Qty BO
+	Gosub GET_DUNIT
+	WebStr$=WebStr$,DUNIT$[1,4],fdel$ ! UM
+	CNVTA = BOBUF[CURBO,2] \ Gosub CONVERT
+	DBOBUF = AMOUNT
+	WebStr$=WebStr$,LTrim$(DBOBUF Using "########.##"),fdel$! current Qty BO
+ENDIF ! If B0[7] Print 'ER';
+List$[row]=WebStr$
+row=row+1 \ if row>maxcnt let maxcnt=expandarray(e$,List$[])
+L_3510: Return 
+READ_BOWORK: Rem READ BOWORK FOR A CHOSEN LINE
+If BOBUF[CURBO]
+  Mat Read #CH_BOWORK,BOBUF[CURBO];B0$;
+  Mat Read #CH_BOWORK,BOBUF[CURBO],12;B0;
+End If 
+Return 
+WRITE_BOWORK: Rem WRITE OUT BO LINE
+If BOBUF[CURBO]
+  Mat Write #CH_BOWORK,BOBUF[CURBO];B0$;
+  Mat Write #CH_BOWORK,BOBUF[CURBO],12;B0;
+  linein$=" write_bowork "+b0$+" "+str$(b0[0])+" relflag "+str$(b0[7])+" qty "+str$(b0[6]) \ gosub Write_261264_log:
+End If 
+Return 
+RESET: Rem
+X7 = 0 \ X4 = 0 \ J$ = ""
+X4 = CURBO
+! f9 =0 Reset, F9=1 ZAP, F9=2 RELIST
+  Gosub READ_BOWORK
+  If F9 = 1 And (B0[7] = 1 Or B0[7] = 2)
+     ! zap - ignore ones marked?
+  Else 
+    If Not(F9) And (B0[7] = 1 Or B0[7] = 2)
+      SINE = -1
+      Gosub UPDATE_PROD
+      Gosub UPDATE_SPRODLOT
+      Gosub UPDATE_SORDLOT
+      Gosub ADJUST_LINE
+    End If 
+    If F9 = 1 Let B0[7] = 9
+    If Not(F9) If B0[8] Let B0[6] = B0[8] \ B0[8] = 0
+    If Not(F9) Let B0[7] = 0
+	Gosub WRITE_BOWORK
+  End If 
+
+CURBO = X4
+Return ! Goto OPT_LOOP
+
+RECALC_TOTBO: Rem total for product awaiting bo release
+PREV_B0$ = B0$
+K9$ = "",K9$
+K9$ = PRODONPAGE$
+TOTQTY_RELEASED = 0
+RTL_PLoop: ! loop
+Search #CH_BOWORK,3,1;K9$,R6,E
+if k9$[1,12]<>ProdonPage$ let E=2
+If E = 2 Goto DONE_RECALC_TOTBO
+If E Gosub ERR_SEARCH1
+    Mat Read #CH_BOWORK,R6,0;B0$
+    Mat Read #CH_BOWORK,R6,12;B0;
+    If B0[7] = 1 Or B0[7] = 2
+        
+        TOTQTY_RELEASED = TOTQTY_RELEASED + B0[6]
+    
+    End If 
+Goto RTL_PLoop
+DONE_RECALC_TOTBO: Return 
+
+GET_UM: Rem unit of measure for release qty
+Call DXGet("UM",tmp$)
+Let Unit$=tmp$+Blank$
+
+END_GET_UM_LOOP: Rem
+If UNIT$ = "CWT " ! GET UNIT CODE
+  UNIT = -1
+Else 
+  If UNIT$ = "LB  " And PFU1[15] = -3
+    UNIT = -3
+  Else 
+    Search #CH_CCODES,2,1;UNIT$,UNIT,E
+    If E
+      Message$=UNIT$+" INVALID "
+      Pass=0
+	  Return
+    Else 
+      PASS = 0
+      For X = 0 To 7
+        If UNIT = PFU1[X]
+          PASS = 1
+          X = 7
+        End If 
+      Next X
+      If Not(PASS)
+        WebStr$=UNIT$+" INVALID FOR THIS PRODUCT "
+        Return
+      End If 
+    End If 
+  End If 
+End If 
+Return 
+GET_DUNIT: Rem
+if custom_customer$="WENELSON"
+	IF PFU1[8]>0
+		MAT  READ #CH_CCODES,PFU1[8],10;DUNIT$;
+	ENDIF
+Else
+If B0[10] > 0
+  Mat Read #CH_CCODES,B0[10],10;DUNIT$;
+End If 
+Endif
+Return 
+GET_PRODWHSE: Rem PROD WHSE
+If P9$[33,33] = "N" Return 
+W$ = " ",W$
+W$[1,12] = B0$[1,12]
+W$[13,14] = WHSE Using "##"
+Search #CH_PRODWHSE,2,1;W$,W9,E \ If E > 1 Gosub ERR_SEARCH1
+If Not(E)
+  Mat Read #CH_PRODWHSE,W9,78;W3
+  Mat Read #CH_PRODWHSE,W9,780;WHLV
+  Mat Read #CH_PRODWHSE,W9,980;WHLBS
+  W3[2] = W3[2] + (B0[6] * SINE)
+  If P1$[127,127] = "Y" Let WHLBS[1] = WHLBS[1] + (LBSHIP * SINE)
+  WHLV[0] = WHLV[0] + (B0[6] * SINE)
+  Mat Write #CH_PRODWHSE,W9,78;W3
+  Mat Write #CH_PRODWHSE,W9,780;WHLV;
+  Mat Write #CH_PRODWHSE,W9,980;WHLBS;
+End If 
+Return 
+RELEASE_ALL: Rem RELEASE ALL
+If (B0[7] = 0 And B0[6] > TOTQTY_AVAIL) Or B0[7] = 8 Goto L_5050
+B0[7] = 1
+SINE = 1
+Gosub UPDATE_PROD
+Gosub UPDATE_SPRODLOT
+Gosub UPDATE_SORDLOT
+Gosub ADJUST_LINE
+L_5050: B0[12]=TOTQTY_AVAIL   !! TASK 50693
+Gosub WRITE_BOWORK
+Return 
+UPDATE_PROD: Rem UPDATE PROD
+K5$ = " ",K5$
+K4$ = B0$[1,12]
+Search #CH_PROD,2,1;K4$,R4,E
+If E Gosub ERR_SEARCH1
+Mat Read #CH_PROD,R4,0;P1$;
+Mat Read #CH_PROD,R4,256;A1 \ Mat Read #CH_PROD,R4,990;PLV
+Read #CH_PROD,R4,664;LBSORD
+If A1[5] <= 0 Let A1[5] = 1
+LBSHIP = FNR((A1[6] * B0[6]) / A1[5])
+A1[3] = A1[3] + (B0[6] * SINE)
+If P1$[127,127] = "Y" Let LBSORD = LBSORD + (LBSHIP * SINE)
+PLV[0] = PLV[0] + (B0[6] * SINE)
+Mat Write #CH_PROD,R4,256;A1 \ Mat Write #CH_PROD,R4,990;PLV
+Write #CH_PROD,R4,664;LBSORD
+if sqlChan >= 0 ! MySQL enabled and channel opened
+	e = prod_UpdateSQLFromDL4(e$, intCo, K4$, sqlChan, ch_prod)
+	if e <> 1 ! returns the number of records add/updated/deleted
+		gosub err_search1
+	end if
+end if
+Gosub GET_PRODWHSE
+if p61$[111,111] Gosub UpdateCPIContract
+Return
+UpdateCPIContract: !
+	if p61$[111,111] <> "Y" return
+	! determine if this line
+	! is on a cpi contract
+	Mat Read #CH_ROL,B0[3],404;OLM;
+	if not(OLM[2]) return ! not on any contract
+	tmp$ = " ",tmp$
+	tmp$[1,6] = OLM[2] using "C#####"
+	tmp$[7,18] = B0$[1,12]
+	search #ch_cpidet,2,1;tmp$,r_cpi,e \ if e>1 GOSUB ERR_SEARCH1
+	if e return ! not a cpi contract
+	mat read #ch_cpidet,r_cpi,42;ResStkAmt;
+	if not(ResStkAmt) return ! not a reserve stock contract
+	mat read #ch_cpidet,r_cpi,68;QtyAllocated
+	QtyAllocated = QtyAllocated + (B0[6] * SINE)
+	mat write #ch_cpidet,r_cpi,68;QtyAllocated;
+Return
+
+
+UPDATE_SPRODLOT: Rem UPDATE SPROD LOT
+K5$ = " ",K5$
+K5$[1,12] = B0$[1,12]
+K5$[13,14] = WHSE Using "##"
+K5$[15,20] = LOC$[1,6]
+UPD_SPRD_LOOP: Rem
+Search #CH_SPRODLOT,3,2;K5$,BOBUF,E \ If E > 2 Gosub ERR_SEARCH1
+If Not(E) And K5$[1,12] = B0$[1,12]
+  Mat Read #CH_SPRODLOT,BOBUF,66;P1;
+  Mat Read #CH_SPRODLOT,BOBUF,82;P3;
+  If P1[0] <> WHSE Goto UPD_SPRD_LOOP
+  P3[4] = P3[4] - (B0[6] * SINE)
+  If P3[4] < 0 Let P3[4] = 0
+  P3[3] = P3[3] + (B0[6] * SINE)
+  Mat Write #CH_SPRODLOT,BOBUF,66;P1;
+  Mat Write #CH_SPRODLOT,BOBUF,82;P3;
+End If 
+END_UPD_SPRD_LOOP: Rem
+L_5320: Return 
+UPDATE_SORDLOT: Rem UPDATE SORDLOT
+K5$ = " ",K5$
+K5$[1,12] = B0$[1,12]
+K5$[13,18] = B0[2] Using "######"
+K5$[19,21] = B0[5] Using "###"
+K5$[22,23] = WHSE Using "##"
+K5$[24,29] = LOC$[1,6]
+UPD_SORDLOT_LOOP: Rem
+Search #CH_SORDLOT,3,1;K5$,BOBUF,E \ If E > 2 Gosub ERR_SEARCH1
+If Not(E) And K5$[1,12] = B0$[1,12] ! prod
+  X2 = K5$[13,18]
+  If X2 <> B0[2] Goto UPD_SORDLOT_LOOP
+  X2 = K5$[19,21]
+  If X2 <> B0[5] Goto UPD_SORDLOT_LOOP
+  X2 = K5$[22,23]
+  If X2 <> WHSE Goto UPD_SORDLOT_LOOP
+  Mat Read #CH_SORDLOT,BOBUF,60;S3;
+  S3[1] = S3[1] + (B0[6] * SINE)
+  S3[3] = S3[3] - (B0[6] * SINE)
+  Mat Write #CH_SORDLOT,BOBUF,60;S3;
+End If 
+END_UPD_SORDLOT_LOOP: Rem
+Return 
+ADJUST_LINE: Rem ADJUST LINE
+If B0[7] = 9 Return 
+Mat Read #CH_ROL,B0[3],16;L4;
+Mat Read #CH_ROL,B0[3],168;L7;
+L7[12] = L7[12] + (B0[6] * SINE)
+L7[3] = L7[3] - (B0[6] * SINE)
+Mat Write #CH_ROL,B0[3],168;L7;
+Return 
+GET_CUST: Rem CUSTOMER
+K4$ = B0[0] Using "######"
+Search #CH_CUST,2,1;K4$,R4,E \ If E > 1 Gosub ERR_SEARCH1
+If E
+  C1$ = "*** NOT ON FILE ***"
+  C7[3] = 0
+  Goto L_5660
+End If 
+Mat Read #CH_CUST,R4,30;C1$;
+Mat Read #CH_CUST,R4,378;C7;
+L_5660: Return 
+GET_FLD: Rem GET FLD
+J2 = (J0 - 1) * 10
+Read #CH_CNTRL,18,J2;D1$;
+Return 
+
+CHECK_RANGES: Rem
+PASS = 1
+Mat Read #CH_ROH,B0[9],78;H4;
+Mat Read #CH_ROH,B0[9],104;H5;
+Mat Read #CH_ROL,B0[3],16;L4;
+If H5[7] = 4 or h5[7]=5 Or H5[7]=8 Or H5[7] = 9 Or H5[7] = 11 Or H5[7]=15 or H5[7]=16 Or H5[7]=19 Or H5[7] = 21 Or H5[7] = 22 Or H5[7] = 24  Let PASS = 0
+WWHSE = H4[2] \ If L4[3] > 0 And L4[3] < 100 Let WWHSE = L4[3]
+If RELMODE = 1 And B0[2] <> C1[4] Let PASS = 0
+If OTYP If H5[7] <> OTYP Let PASS = 0
+If DIV And H5[8] <> DIV Let PASS = 0
+If B0[0] < C1[1] Let PASS = 0
+If B0[0] > C1[2] Let PASS = 0
+If B0$[1,12] < PROD1$[1,12] Let PASS = 0
+If B0$[1,12] > PROD2$[1,12] Let PASS = 0
+If WHSE If WHSE <> WWHSE Let PASS = 0
+If B0[7] = 8 Let PASS = 0
+If RELMODE = 3 !  checking for edit of particlular order
+  If B0[2] <> C1[4] Let PASS = 0
+End If 
+Return 
+LOAD_BOWORK: Rem LOAD BO WORK FILE
+RECFOUND = 0
+! Print @6,22;"BUILDING BACK ORDER WORK FILE PLEASE WAIT..."
+MAXBO = 0
+LB_LOOP: Rem
+Search #CH_ROL,3,1;K2$,R2,E \ If E > 2 Gosub ERR_SEARCH1
+If E Return 
+linein$=" load_bowork read rol key "+k2$ \ gosub Write_261264_log:
+SCR = 0
+If Err 0 Let SCR = Spc(8)
+DO_RETRY: Rem
+Mat Read #CH_ROL,R2,0,10;L2
+If SCR ! error on read
+  If SCR = 123
+    If Not(SKIPLOCKS) ! has to on web?
+SKIPLOCKS_QUEST: Rem
+      !Print @0,23;'CL';"Order# ";K2$[1,6];" Line# ";K2$[7,9];" locked!  ";
+      !Print "S:Skip, R:retry, A:skip all ";'RB';
+      !Input ""SCRATCH$
+      !If SCRATCH$ <> "S" And SCRATCH$ <> "R" And SCRATCH$ <> "A"
+        !Print 'RB';
+        !Goto SKIPLOCKS_QUEST
+      !End If 
+      !If SCRATCH$ = "S" Goto LB_LOOP
+      !If SCRATCH$ = "R" Goto DO_RETRY
+      !If SCRATCH$ = "A" Let SKIPLOCKS = 1
+    End If ! of not skiplocks
+    !Print @0,23;'CL BR';"Record locked ... skipping line...";K2$;'ER';
+    Goto LB_LOOP
+  Else 
+    Gosub ERR_TRAP1
+  End If 
+End If 
+If Err 0 Gosub ERR_TRAP1
+Mat Read #CH_ROL,R2,8;L3 \ Mat Read #CH_ROL,R2,16;L4
+Mat Read #CH_ROL,R2,140;L1$
+Mat Read #CH_ROL,R2,168;L7 \ Mat Read #CH_ROL,R2,250;UN
+Mat Read #CH_ROL,R2,256;S2 \ Mat Read #CH_ROL,R2,404;OLM
+Mat Read #CH_ROL,R2,446;EUN \ Mat Read #CH_ROL,R2,452;UNF
+if p61$[74,74]="Y"
+    read #ch_rol,r2,403;holdpoflag$
+	if holdpoflag$[1,1]="Y" goto lb_loop:
+endif
+If S2[0] = 3 Goto LB_LOOP
+If L3[0] = 1 goto LB_Loop ! NO NONSTOCK LINES!!
+ORDER = K2$[1,6]
+If L7[3] = 0 Goto LB_LOOP
+If L3[0] = 0 And L3[1] = 0 Goto LB_LOOP
+WWHSE = L4[3]
+maxstat=4 \ if custom_customer$="WENELSON" let maxstat=6
+For S = 1 To maxstat ! was 4
+  K3$[1,2] = S Using "##"
+  K3$[3] = ORDER Using "######"
+  Search #CH_ROH,2,1;K3$,R3,E \ If E > 1 Gosub ERR_SEARCH1
+  If Not(E) Goto L_8200
+Next S
+Goto LB_LOOP
+
+L_8200: Rem --- within order status ----
+linein$=" load_bowork rol header record found "+k3$ \ gosub Write_261264_log:
+If p61$[86,86]="B" or p61$[86,86]="S"
+	if l4[2]<>0 ! has a purchase order
+		let keypol$=" ",keypol$
+		let keypol$[1,6]=l4[2] using "######"
+		POL_LOOP: ! find link on purchase order
+		Search #ch_pol,3,1;keypol$,rec_pol,e
+		if e=2 goto end_POl_Loop:
+		if e<>0 gosub err_search
+		let tmp3=keypol$[1,6]\if tmp3<>l4[2] goto end_pol_loop:
+		mat read #ch_pol,rec_pol,0;pol1;
+		if pol1[0]<>3 ! line is not closed
+			mat read #ch_pol,rec_pol,24;pol3;
+			mat read #ch_pol,rec_pol,232;popl4;
+			if pol3[1]=L4[0] and popl4[10]=l4[2] and popl4[11]=l3[2] 
+				linein$=" found PO "+keypol$+" no put in work file" \ gosub Write_261264_log:
+				goto lb_loop: ! prod rec, order # and line # matches
+			ENDIF
+		endif
+		goto pol_loop:
+		End_POL_loop:
+	endif
+ENDIF
+
+Mat Read #CH_ROH,R3;H0;
+Mat Read #CH_ROH,R3,78;H4;
+Mat Read #CH_ROH,R3,104;H5;
+if h5[7] = 5 goto lb_loop  ! "no future orders
+If H5[7] = 4 Or H5[7] = 24 Goto LB_LOOP
+If H5[7] = 9 Goto LB_LOOP
+If H5[7] = 11 Goto LB_LOOP
+If H5[7]=19 Goto LB_Loop: ! "bill complete - skip(has to keep order#)
+If H5[7] = 21 Or H5[7] = 22 Goto LB_LOOP
+If H5[7] = 8 Or H5[7] = 15 Or H5[7] = 16 Goto LB_LOOP
+If OTYP If H5[7] <> OTYP Goto LB_LOOP
+If DIV And H5[8] <> DIV Goto LB_LOOP
+If H0[4] < C1[1] Goto LB_LOOP
+If H0[4] > C1[2] Goto LB_LOOP
+If L1$[1,12] < PROD1$[1,12] Goto LB_LOOP
+If L1$[1,12] > PROD2$[1,12] Goto LB_LOOP
+If WWHSE <= 0 Or WWHSE > 99 Let WWHSE = H4[2]
+If WHSE If WHSE <> WWHSE Goto LB_LOOP
+B0$[1,12] = L1$[1,12]
+If Not(L3[0]) And RELMODE = 2
+  Gosub GET_SPRODLOT
+  linein$=" check available "+str$(totqty_avail) \ gosub Write_261264_log:
+  If TOTQTY_AVAIL <= 0 Goto LB_LOOP
+End If 
+X2 = H5[1] \ Gosub YMD2JUL \ X2 = 0
+JWDATE = X2
+ch[0]=0
+ch[1]=CTLC
+ch[2]=0
+ch[3]=ch_prod
+ch[4]=14
+ch[5]=ch_cust
+ch[6]=ch_prodwhse
+ch[7]=0
+ch[8]=ch_roh
+ch[9]=15
+ch[10]=ch_rol
+ch[11]=0
+ch[12]=0
+ch[13]=16
+ch[14]=0
+ch[15]=0
+ch[16]=0
+LET B0[0]=H0[4] \  gosub get_cust: 
+MAT  READ #ch_cust,R4,544;Cfin;
+! r4=cust rec
+! r3=roh rec
+k_sslsm$=H0[11] USING "###"
+linein$=" do mxslscom5" \ gosub Write_261264_log:
+search #ch_sslsm,2,1;k_sslsm$,rec_sslsm,e \ if e gosub err_search1
+CALL "MXSLSCOM5",ordS9[],CH[],R4,r3,rec_sslsm,CFIN[] 
+c7[3]=0
+B0$ = " ",B0$
+B0$[1,12] = L1$[1,12]
+B0[0] = H0[4] \ If USEPRI Gosub GET_CUST
+B0[1] = H0[9]
+B0[2] = H0[7]
+B0[3] = R2
+B0[4] = JWDATE ! \ if custom_customer$="WENELSON" let B0[4]=H5[1]
+B0[5] = L3[2]
+B0[6] = L7[3]
+B0[7] = 0
+B0[8] = 0
+B0[9] = R3
+B0[10] = UN[0]
+B0[11] = 9
+If USEPRI Let B0[11] = 9 - C7[3]
+K9$ = " ",K9$
+If Not(L3[0]) Let K9$[1,12] = L1$[1,12] Else Let K9$[1,1] = "+"
+
+K9$[13,14] = B0[11] Using "##"
+K9$[15,20] = JWDATE Using "######"
+K9$[21,26] = H0[4] Using "######"
+K9$[27] = R2 Using "######"
+linein$=" add to bowork "+k9$ \ gosub Write_261264_log:
+E = 2 \ Search #CH_BOWORK,1,0;K9$,R6,E \ If E Gosub ERR_SEARCH1
+Search #CH_BOWORK,4,1;K9$,R6,E \ If E Gosub ERR_SEARCH1
+Write #CH_BOWORK,R6,0;B0$;
+Mat Write #CH_BOWORK,R6,12;B0;
+linein$=" load bowork "+b0$+" "+str$(b0[0])+" relflag "+str$(b0[7])+" qty "+str$(b0[6]) \ gosub Write_261264_log:
+K9$ = " ",K9$
+K9$[1,6] = H0[4] Using "######"
+K9$[7,12] = H0[7] Using "######"
+K9$[13,15] = L3[2] Using "###"
+K9$[16] = R2 Using "######"
+Search #CH_BOWORK,4,2;K9$,R6,E \ If E Gosub ERR_SEARCH1
+L7[11] = 1 \ Mat Write #CH_ROL,R2,168;L7;
+L2[1] = ORDER
+Mat Write #CH_ROL,R2,0;L2;
+If Not(RECFOUND) If L3[0] Let RECFOUND = 88
+If Not(L3[0]) Let RECFOUND = 99
+MAXBO = MAXBO + 1
+Goto LB_LOOP
+CHECK_EDIT_MODE: Rem
+K9$ = " ",K9$
+Search #CH_BOWORK,3,1;K9$,R2,E \ If E > 2 Gosub ERR_SEARCH1
+If E
+  !Print @33,10;'RB BR';"ENTRY MODE";'ER';
+  EMODE = 0
+Else 
+  !Print @33,10;'RB BR';"EDIT MODE";'ER';
+  EMODE = 1
+End If 
+!Signal 3,10
+Return 
+
+YMD2JUL: Rem  REM  CONVERT YYMMDD TO JULIAN (RETURN=NOGOOD, +1=OKAY)
+if x2<=0 return
+X$ = X2 Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Return 
+X2 = X$[1,5]
+Return 1
+
+Rem {begin rtn.convert.s}
+CONVERT: Rem "UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)   ! 20040 REM
+If CNVTU[2] = 3 Or CNVTU[2] = 4 Goto CVTSTARTA
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto CVTDONE
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto CVTDONE
+If CNVTU[2] = 0 Goto CVTSTARTA
+If Not(CNVTA) Let AMOUNT = 0 \ Goto CVTDONE
+CVTSTARTA: !
+CVTSTARTB: Rem "====== unibasic 5+ logic
+Call "MXPRCONV5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,e$,rstr$
+If CNVTU[2] = 0 Goto CVTDONE
+If FLAG Let E = FLAG \ Gosub ERR_SEARCH1
+AMOUNT = CNVTA
+CVTDONE: Return 
+Rem {end rtn.convert.s}
+L_30000: Rem ===== set units for conversions (stock/nonstock version)
+Mat Read #CH_ROL,B0[3],8;L3 \ Mat Read #CH_ROL,B0[3],16;L4
+Mat Read #CH_ROL,B0[3],140;L1$
+Mat Read #CH_ROL,B0[3],168;L7 \ Mat Read #CH_ROL,B0[3],250;UN
+Mat Read #CH_ROL,B0[3],256;S2 \ Mat Read #CH_ROL,B0[3],404;OLM
+Mat Read #CH_ROL,B0[3],446;EUN \ Mat Read #CH_ROL,B0[3],452;UNF
+If S2[0] = 3 Goto L_30099
+PFU1[0] = EUN[0];PFU1[1] = UN[0]
+PFU1[2] = UN[1];PFU1[3] = UN[2]
+PFU1[4] = EUN[1]
+PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+PFU1[8] = UN[0];PFU1[9] = UN[0];PFU1[10] = EUN[1]
+PFU1[11] = UN[2];PFU1[12] = UN[1]
+If Not(L3[0]) Goto L_30060
+PFU1[13] = UN[0];PFU1[16] = EUN[0];PFU1[17] = EUN[0]
+If UN[1] = -3 Or UN[2] = -3 Let PFU1[15] = -3
+PFU1[18] = UN[0];PFU1[19] = UN[0]
+L_30060: PFU2[0] = UNF[0];PFU2[1] = UNF[1]
+PFU2[2] = UNF[2];PFU2[3] = UNF[3]
+PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+For X1 = 1 To 4
+  For X2 = 0 To X1 - 1
+    If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+  Next X2
+Next X1
+L_30099: Return 
+SendUMsg: ! Send back message
+! status section *** last section ***
+ReturnStatus=0
+Message$=J7$
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	
+	! done with it
+        call SetOutPut(e$,rstr$)
+Return
+L_9000: Rem EXIT ROUTINE
+OUTEND: Rem just another label
+!If Not(RECFOUND) Print @15,15;'RB RB RB';"NO BACK ORDERS ON FILE --- "; !\ Signal 3,30
+!If RECFOUND = 88 Print @15,15;'RB RB RB';"NO STOCK BACK ORDERS ON FILE --- "; !\ Signal 3,30
+OUT_UNLOCK: Rem yet another label
+L_9010: ! Print 'CS'
+If Not(RECFOUND) And S9_OLD = 0
+  S9 = 0 \ Write #CH_CNTRL,20,2;S9;
+Else 
+  S9 = 1 \ Write #CH_CNTRL,20,2;S9;
+End If 
+Mat read #ch_cntrl,120,0;P0;
+P0[261]=0
+Mat write #ch_cntrl,120,0;P0;
+OUT_LEAVELOCKED: Rem CLOSE
+Read #CH_CNTRL,20,2;S9;
+!Close 
+!Chain "MX000"
+!Stop
+if ReturnStatus = 1 call ERPCronSuccess()
+L_9999:  linein$=" done and out" \ gosub Write_261264_log: 
+for i=1 to 10000 \ x2=1 \ next i   !! just testing a pause
+Try Close #ch_bolog  Else Rem
+End 
+
+Rem {begin rtn.error.s}
+ERR_TRAP: Rem
+If Spc(8) = 123
+  Escdis 
+  Escclr 
+  Return -1
+End If 
+Goto ERR_MAIN
+ERR_SEARCH: Rem
+ENUM = E + 1000;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+Msc$(4)
+Goto ERR_MAIN
+ERR_MAIN: Rem
+! If Err 0 Rem
+e$ = msg$
+If Spc(8) <> 10000 Call suberr(e$,Spc(8),Spc(10),Msc$(2))
+Call mainerr(e$,Spc(8),buttonlist$[],nextlist$[])
+End 
+Rem {end rtn.error.s}
+
+
+write_log: rem write out to log file that will be used to help
+rem decide it auto recovery can be done
+linein$=intco using "cntrl/bopp#"
+Call FindF(linein$,e)
+if e then kill linein$
+Build #30,+(linein$+"!")
+! system "touch "+linein$
+close #30
+open #30,linein$
+linein$="261 "+(tim(5) using "##### ")+(((tim(11)*60)+tim(12)) using "####")
+write #30;linein$
+close #30
+return
+
+err_trap1:  rem write to log file before producing error
+linein$=intco using "cntrl/bopp#"   
+open #30,linein$
+linein$="261 "+(tim(5) using "##### ")+(((tim(11)*60)+tim(12)) using "####")
+linein$=linein$+" error err_trap"
+write #30;linein$ 
+close #30         
+gosub err_trap:
+return
+
+err_search1:  rem write to log file before producing error              
+linein$=intco using "cntrl/bopp#"   
+open #30,linein$
+linein$="261 "+(tim(5) using "##### ")+(((tim(11)*60)+tim(12)) using "####") 
+linein$=linein$+" error err_search"                                           
+write #30;linein$                                                            
+close #30                                                                    
+gosub err_search:                                                              
+return                                                                       
+
+check_reset:  rem see if this can be automatically reset
+linein$=intco using "cntrl/bopp#"      
+call findf(linein$,e)                                
+!! if file not found, don't reset
+if e
+	open #30,linein$ 
+	read #30;linein$
+	if (s9=-1 or s9=-2)  and (linein$[1,3]="261" or linein$[1,3]="262")
+		search linein$,"error",e
+		if not(e)
+			!! does not look like an error involved
+			tmp=linein$[5,9]    ! date check
+			!system "echo "+str$(tmp)+" >> tmp/tcchk"
+			!system "echo "+str$(tim(5))+" >> tmp/tcchk"
+			if tmp<>tim(5) then s9=1
+			tmp=linein$[11,14]		!minutes check
+			!system "echo "+str$(tmp)+" >> tmp/tcchk"
+			!system "echo "+str$(((tim(11)*60)+tim(12)))+" >> tmp/tcchk"
+			if ((tim(11)*60)+tim(12))-tmp>10 then s9=1
+		endif
+	endif
+	close #30
+endif
+return
+
+Write_261264_log: rem create/maintain and write to log to track flow of 261-264 activity
+if bologging<>1 then return
+logname$=intco using "tmp/bolog#"
+tmp$=" ",tmp$
+tmp1$=" ",tmp1$
+tmp1$=(tim(8) using "&&")+(tim(9) using "&&")+(tim(10) using "&& ")+(tim(11) using "&&:")+(tim(12) using "&&:")+(tim(13) using "&& ")
+if not(ch_bolog)
+	found=0 \ CALL FINDF(logname$,FOUND)         
+	IF NOT (FOUND)                                              
+		BUILD #31,+logname$       
+		close #31
+		open #31,logname$
+		PRINT #31;tmp1$;" 261 bolog created"   
+	else
+		gosub clean_261264:
+		open #31,logname$
+		log_pos_loop: read #31;tmp$
+		if tmp$ goto log_pos_loop:
+	endif
+endif
+ch_bolog=31
+print #CH_BOLOG;tmp1$;" 261 ";LINEIN$
+return
+
+
+clean_261264: REM CLEAN OLD RECORDS FROM LOG
+dateage=5
+open #31,logname$
+read #31;tmp$
+close #31
+if tmp$
+	x=tmp$[1,6]
+	X$=x using "&&&&&&"
+	Call DateToJulian(1,X$,X$,e)
+	x=x$[1,5]
+	i=tim(8)*10000+tim(9)*100+tim(10)
+	x$=i using "&&&&&&"
+	Call DateToJulian(1,X$,X$,e) 
+	i=x$[1,5]
+	if i-x>dateage   !! checking number of days 1st entry is
+		!close #31
+		!linein$=intco using "tmp/bolog#"
+		SYSTEM "mv "+logname$+" "+logname$+".bak" 
+		BUILD #31,+logname$
+		close #31
+		open #31,logname$
+		ropen #32,logname$+".bak"
+		WHILE tmp$
+			read #32;tmp$
+			IF tmp$
+				x$=tmp$[1,6]
+				Call DateToJulian(1,X$,X$,e) 
+				x=x$[1,5]
+				if not (i-x>dateage)		!! checking number of days 1st entry is
+					FOR j=1 TO LEN(tmp$)
+						IF tmp$[j,j]<" " or tmp$[j,j]>"~"     
+							LET tmp$[j,j]=" "                      
+						ENDIF                                  
+					NEXT j                                   
+					print #31;tmp$
+				endif	
+			ENDIF
+		WEND
+		close #31,#32
+		kill logname$+".bak" 
+	endif
+endif
+return
+
+check_261264: rem see if we should be doing the log
+logname$="cntrl/log261264.ini"
+bologging=0
+found=0 \ CALL FINDF(logname$,FOUND)         
+IF FOUND                                              
+	open #31,logname$
+iniloop: read #31;linein$
+	if linein$
+		if linein$[1,9]="log 261=Y" bologging=1
+		goto iniloop: 
+	endif
+	close #31
+endif
+return

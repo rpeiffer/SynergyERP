@@ -1,0 +1,644 @@
+!Program Name: ubsdayedts 
+!
+! loadsave -w -n 100,10 -o prog/dxport/ubsdayedts.dl4 src/ubsdayedts.src
+!                                                  
+!Last Updated:                                     
+!zyc 09/01/04 cct182085 modified path for include  
+!zyc 09/03/04 cct182085 add log file
+!zyc 09/08/04 cct182085 modified logic
+!zyc 09/16/04 cct182589 using dir 4 - 2/edittrack#
+!zyc 09/24/04 cct182799 using smart mask
+!zyc 09/27/04 cct182799 rounding 
+!rce 10/10/05  salesgroup
+!
+
+Declare External Sub ETEdits
+Declare Sub initVar,updatelog,errTrap
+
+Include "src/etvars.inc"
+
+Dim e.[25] as ETInfo
+Dim arrSales[999]
+
+Call ETEdits(1,35,1,"files/6/dx.log",e.[],ii,ss,600, arrSales[])
+Print i,s
+Stop
+
+External Sub ETEdits(intCo, intSalesMan, debug, dlog$, E.[] as ETInfo, ii ,ss,iLimit, arrSales[])
+
+Try
+
+Declare Intrinsic Function FindChannel,Trim$
+declare Intrinsic Sub FormatDate,DXSet,JulianToDate,DateToJulian
+Declare External Function PDate$,JDate$,XAmount,Xunit$,OpenFile,Escape$
+
+External Lib "ubsfunc.dl4","ubsprconv.dl4"
+
+Include "src/ubsorder.inc"
+Include "src/ubscustomer.inc"
+Include "src/ubsprod.inc"
+Include "src/ubsetrack.inc"
+
+!DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01)
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)                       
+Def FNN(H) = Int(Abs(H) * 10 ^ Q0[1] + .5) * 10 ^ - Q0[1] * Sgn(H)       
+Def FNT(H) = Int(Abs(H) * 10 ^ Q0[1]) * 10 ^ - Q0[1] * Sgn(H)            
+Def FNV(H) = Int(Abs(H) * 10 ^ Q0[1] + .9999999) * 10 ^ - Q0[1] * Sgn(H) 
+Def FNU(H) = Int(Abs(H) + Sgn(Fra(Abs(H)))) * Sgn(H)                     
+
+Dim ODK$[12],OHK$[12],CUK$[12],SMK$[20],POK$[16],WHK$[20],ETK$[30],PRK$[20]
+
+Dim OH. As OrdH
+Dim OD. As OrdD
+Dim CU. As Customer
+Dim PR. As Prod
+Dim ET. As ETrack
+
+Dim 1%,debugDetail
+! Variables for Channel#'s
+Dim 2%,OHC,ODC,OSC,OTC,CUC,CTLC,ENC,SMC,POC,PRC,CCC,WHC,ETC
+! Variables for Search Record#
+Dim 3%,OHR,ODR,OSR,OTR,CUR,CTLR,SMR,POR,PRC,WHR,ETR
+! Variables for Search Error
+Dim 2%,OHE,ODE,OSE,OTE,CUE,CTLE,SME,POE,PRE,WHE,ETE
+
+Dim Msg$[256],pgmName$[20]
+Dim Temp$[100],Space$[100],Sales$[30]
+Dim SLS$[3],CO$[2], UM$[4] 
+Dim P9$[50],P60$[50],HLD$[100],U5$[50]
+Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5]
+Dim 1%,PP,DIR
+Dim 3%,weightx$[10]
+
+debugDetail=1
+pgmName$="ubsdayedts"
+msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+ii=0 ! Item Counter
+
+Dim 2%, Q0[1],JToday, d1[1]
+Dim 2%, t2, N2[5], ErrStat, X1, X2
+Dim 3%, JDate, ETOQTY1[2],ETNQTY1[2],ODQTY[2]
+Dim 3%, OUnitPrice,NUnitPrice,GP,GPP
+
+Clear E.
+
+Space$=" ",Space$
+ErrStat = 0
+SLS$=intSalesMan Using "###" ! Passed Salesman
+CO$=Str$(intCo) ! Company
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+
+
+ETC= OpenFile(-9996,intCo)  \ If ETC=-1 Error 42    ! EditTrack
+OHC= OpenFile(-1840,intCo)  \ If OHC=-1 Error 42    ! Order Header
+ODC= OpenFile(-1888,intCo)  \ If ODC=-1 Error 42    ! Order detail Line
+CUC= OpenFile(-1808,intCo)  \ If CUC=-1 Error 42    ! Customer master
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42   ! Control
+SMC= OpenFile(-1824,intCo)  \ If SMC=-1 Error 42    ! SalesMan
+PRC= OpenFile(-1792,intCo)  \ If PRC=-1 Error 42    ! Product
+CCC= OpenFile(-1728,intCo)  \ If CCC=-1 Error 42    ! CCodes
+
+
+Mat Read #CTLC,19,50;P9$;
+Mat Read #CTLC,60,50;P60$;
+Mat Read #CTLC,115,40;Q0; 
+
+
+If not(Q0[1]) let Q0[1]=2                                                       
+Let Dec$="#",Dec$;Qmask$="---,---,--#"                                         
+If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask      
+If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask        
+Let Emask$="-$$$,$$$,$$$,$$$.##"                         !ext. price mask       
+
+
+!rem First get last record number on dir 3, this will give us the lastest date!
+!Let ETK$="zzzzz"
+!Search #ETC,6,3;ETK$,ETR,ETE \ If ETE Goto ETEND: 
+!Let JDate=Val(ETK$[1,8]) ! JDate is the date we will report on.
+
+!Let ETK$="zzzzz"
+!Let maxDay=5
+
+Let JToday=Tim(6)
+mat read #ctlc,0,108;d1;
+temp$ = d1[1] using "&&&&&&"
+call datetojulian(1,temp$,temp$,e)
+if not(e) let JToday = temp$
+
+Let ETK$="z",ETK$
+If SLS$=" 999" Then
+  DIR=3
+Else
+  ETK$[1,3]=SLS$   !Key1$
+  DIR=4
+End If
+
+arrayloop: !
+if arrSales
+	ETK$=arrsales[counter] using "###99999999"
+Endif
+
+ETTOP: Rem Loop through Edittrack======================================
+Search #ETC,6,DIR;ETK$,ETR,ETE
+
+!new security
+! If SLS$<>" 999" Then
+!   If ETK$[1,3]<>SLS$ Let ETE=22
+!   If Val(ETK$[4,11])<JToday-1 goto EtTop:
+! Else
+!   If Val(ETK$[4,11])<JToday-1 goto EtTop:
+! End If
+
+IF SLS$<>"999"
+	if arrsales  ! using salesgroup
+		If val(ETK$[1,3]) <> arrSales[counter] or Val(ETK$[4,11])<JToday
+			Let ETE=22
+			counter=counter+1
+			if arrSales[counter] and counter<1000 goto arrayloop  ! if more loop
+		endif
+	else  ! not arrSales  (single salesrep)
+		If Val(ETK$[4,11])<JToday or ETK$[1,3]<>SLS$ Let ETE=22
+	endif
+else !   sls$ = "999"
+	If Val(ETK$[1,8])<JToday ETE=22
+endif
+
+If ETE Then Goto ETEND:
+
+If debugDetail
+   msg$="doing...Search #ETC: ETK$="+ETK$+" ETR="+ETR \ Call updatelog(debug)
+   If ETE msg$="error...Search error "+ETE  \ Call updatelog(debug)
+Endif
+Read Record #ETC,ETR;ET.;
+
+!If JDate<>ET.ETDate Then
+!   ETK$[13,20]="99999999"
+!   Goto ETTOP:
+!End If
+
+!If Abs(JDate-ET.ETDate)>maxDay Then
+!   Goto ETEND:
+!Endif
+
+
+If FRA(ET.ETACTION) OR ET.ETPROD$[1,10]="STATUS CHG" goto ETTop:
+
+
+!========================================Get Ord Header
+Let OHK$="  ",OHK$;OHK$[1,3]=SLS$;OHK$[4,9]=ETK$[18,23]
+ROHTop: Search #OHC,2,3;OHK$,OHR,OHE
+If OHK$[4,9]<>ETK$[18,23] Let OHE=22
+
+If debugDetail
+   msg$="doing...Search #OHC: OHK$="+OHK$+" OHR="+OHR \ Call updatelog(debug)
+   If OHE msg$="error...Search error "+OHE  \ Call updatelog(debug)
+Endif
+If OHE =0 Then ! Cannot get ordhdr??
+  Read Record #OHC,OHR; OH.;
+Else
+  Clear OH.
+End If
+
+
+!If IntSalesMan<>999 If OH.H0[11]<>IntSalesMan Goto ETTOP: ! Security 
+
+! Get Customer Info.
+
+CUK$=OH.H0[4] USING "######"
+Temp$=CUK$
+
+Search #CUC,2,1;CUK$,CUR,CUE 
+If CUK$[1,6]<>Temp$ Let CUE=22 
+
+If debugDetail
+   msg$="doing...Search #CUC: CUK$="+CUK$+" CUR="+CUR \ Call updatelog(debug)
+   If CUE msg$="error...Search error "+CUE  \ Call updatelog(debug)
+Endif
+IF CUE Then
+  Clear CU.
+Else
+  Read Record #CUC,CUR;CU.;
+End If
+
+
+!========================Get SalesMan
+SMK$=OH.H0[11] Using "### "
+Temp$=SMK$
+
+Search #SMC,2,1;SMK$,SMR,SME
+If SMK$[1,4] <> Temp$ Let SME=22
+
+If debugDetail
+   msg$="doing...Search #SMC: SMK$="+SMK$+" SMR="+SMR \ Call updatelog(debug)
+   If SME msg$="error...Search error "+SME  \ Call updatelog(debug)
+Endif
+If SME=0 Then
+	Mat Read #SMC,SMR;Sales$[1,30];
+Else
+	Sales$="-NF-"
+End If
+
+
+Call initVar()
+If ET.ETPROD$[1,10]<>"STATUS CHG" AND ET.ETPROD$[1,7]<>"DELETED" Then
+
+  !=====================================rolnew
+  Let ODK$=" ",ODK$;ODK$=ETK$[18,23],ET.ETLINE Using "### "
+  Let Temp$=" ",Temp$;Temp$=ODK$
+
+  Search #ODC,2,1;ODK$,ODR,ODE
+
+  If ODK$[1,9]<>Temp$[1,9] LET ODE=22
+  If ODE=0 Then ! No Detail Record??
+    Read Record #ODC,ODR,0;OD.;
+  Else
+    Clear OD.
+  End If
+
+  !============================product
+  Let Temp$=" ",Temp$;Temp$=ET.ETPROD$
+  Let PRK$=" ",PRK$;PRK$=Temp$
+  
+  Search #PRC,2,1;PRK$,PRR,PRE
+  If PRK$[1,12]<>Temp$[1,12] Let PRE=22
+
+  If debugDetail
+	 msg$="doing...Search #CUC: CUK$="+CUK$+" CUR="+CUR \ Call updatelog(debug)
+ 	 If CUE msg$="error...Search error "+CUE  \ Call updatelog(debug)
+  Endif
+  If PRE=0 Then
+    Read Record #PRC,PRR;PR.;
+	weightX$= str$(PR.A[6]/PR.A[5])
+  Else 
+	Clear PR.
+	weightX$= "0"
+  End If
+
+  L_30000: ! ===== set n/s units for conversions
+  If ET.ETNONSTOCK Then
+     Let PR.A[6]=OD.L6[4];PR.A[5]=OD.UNF[5] 
+	 If not(PR.A[5]) LET PR.A[5]=1;OD.UNF[5]=1
+     Let PR.PFU1[0]=OD.EUN[0];PR.PFU1[1]=OD.UN[0] ! "base and selling units
+     Let PR.PFU1[2]=OD.UN[1];PR.PFU1[3]=OD.UN[2]  ! "pricing and costing
+     Let PR.PFU1[4]=OD.EUN[1]                     ! "purchasing
+     Let PR.PFU1[5]=0;PR.PFU1[6]=0;PR.PFU1[7]=0
+     ! "stock,sell,purch dflt 
+     Let PR.PFU1[8]=OD.UN[0];PR.PFU1[9]=OD.UN[0];PR.PFU1[10]=OD.EUN[1] 
+	 ! "cost,price,prod dflt
+     Let PR.PFU1[11]=OD.UN[2];PR.PFU1[12]=OD.UN[1];PR.PFU1[13]=OD.UN[0]
+	 ! "up,bkn,pack dflt
+     Let PR.PFU1[16]=OD.EUN[0];PR.PFU1[17]=OD.EUN[0];PR.PFU1[18]=OD.UN[0] 
+     Let PR.PFU1[19]=OD.UN[0]                      ! "size default
+     Let PR.PFU2[0]=OD.UNF[0];PR.PFU2[1]=OD.UNF[1] ! "selling and pricing factor
+     Let PR.PFU2[2]=OD.UNF[2];PR.PFU2[3]=OD.UNF[3] ! "costing and purchasing
+     Let PR.PFU2[4]=0;PR.PFU2[5]=0;PR.PFU2[6]=0
+     For X1=1 TO 4
+	     For X2=0 TO X1-1
+			If PR.PFU1[X1]=PR.PFU1[X2] Let PR.PFU1[X1]=0;PR.PFU2[X1-1]=0
+	  	 Next X2
+ 	 Next X1
+	Try weightX$= str$(OD.L6[4]/OD.UNF[5]) else WeightX$ = "0"
+  Endif
+  
+  REM Get UM
+
+  LET UM$="BASE"
+  IF ET.ETUNIT=-1 LET UM$="CWT "
+  IF ET.ETUNIT=-2 LET UM$="LOT "
+  IF ET.ETUNIT=-3 LET UM$="LB  "
+  IF ET.ETUNIT>0 MAT  READ #ccc,ET.ETUNIT,10;UM$;
+
+  Rem Do Conversion
+  IF ET.ETNONSTOCK Then
+    For X1=0 TO 2
+      Let ETOQTY1[X1]=ET.ETOQTY[X1]
+      Let ETNQTY1[X1]=ET.ETNQTY[X1]
+    Next X1
+  Else
+    CNVTU[0]=0         !current unit
+    CNVTU[1]=ET.ETUNIT !desired unit
+    CNVTU[2]=1         !mode  
+    For X1=0 TO 2
+      CNVTA=ET.ETOQTY[X1]
+      ETOQTY1[X1]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+      CNVTA=ET.ETNQTY[X1]
+      ETNQTY1[X1]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+    Next X1
+
+	CNVTU[0]=0         !current unit                                         
+	CNVTU[1]=OD.UN[0]  !desired unit                                         
+	CNVTU[2]=1         !mode                                                 
+	CNVTA=OD.L7[2]     !ordered qty 
+    ODQTY[0]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+	CNVTA=OD.L7[3]     !b/o qty                                     
+	ODQTY[2]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+	CNVTA=OD.L7[4]     !shipped qty                                     
+	ODQTY[1]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+  End If
+
+  Rem  Now do some other UM Conversion for the unit cost/unit resale
+
+  IF OD.UN[1]=-1 Then
+    Let PR.A[6]=OD.L6[4]
+    Let PR.A[5]=OD.UNF[5]
+  End if
+  Let CHBase=0
+  If OD.S3[8]=-3 THEN
+    LET CHBase=(OD.S3[0]/OD.L7[2])
+  Else
+    LET CHBase=OD.S3[0]
+  End If
+  If OD.UN[1]>0 AND OD.S2[1] Then
+    Let CNVTA=((OD.L5[2]-OD.L6[1])/OD.S2[1]) + (CHBase/OD.S2[1])
+  Else
+    Let CNVTA=OD.L5[2]-OD.L6[1] + CHBase
+  End If
+
+  !old unit price                                                           
+  If ET.ETACTION=9 and ET.ETUNITPRICE[0] Then
+     Let CNVTA=ET.ETUNITPRICE[0]   !cost/price/qty                              
+     Let CNVTU[0]=0                !current unit                                
+     Let CNVTU[1]=ET.ETPUNIT       !desired unit                                
+     Let CNVTU[2]=2                !mode 1=qty 2=cost/price                     
+     Let OUNITPRICE=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG) 
+  Endif
+
+  !old unit price                                                             
+  If ET.ETACTION=9 and ET.ETUNITPRICE[1] Then
+     Let CNVTA=ET.ETUNITPRICE[1]   !cost/price/qty                             
+     Let CNVTU[0]=0                !current unit                             
+     Let CNVTU[1]=ET.ETPUNIT       !desired unit                            
+     Let CNVTU[2]=2                !mode 1=qty 2=cost/price                  
+     Let NUNITPRICE=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+  Endif
+
+  Let CNVTA=CNVTA-(CNVTA*(OD.L6[0]/100))
+  Let CNVTA=CNVTA+(CNVTA*(OD.L7[8]/100))
+  Let CNVTU[0]=0
+  Let CNVTU[1]=OD.UN[1]
+  Let CNVTU[2]=2
+  LET OD.OLM[3]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+  
+  LET CNVTU[0]=0
+  LET CNVTU[1]=OD.UN[2]
+  LET CNVTU[2]=2
+  LET CNVTA=OD.L5[1]
+  LET OD.L5[1]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+  IF OD.S2[1]=0 OR OD.S3[1]=0 THEN
+    LET Temp$=""
+  ELSE
+    ChBase=0
+    IF OD.S2[11]=-3 AND OD.L7[2] THEN
+      CHBase=(OD.S3[1]/OD.L7[2])
+    ELSE
+      CHBase=OD.S3[1]
+    END IF
+    IF CHBASE AND OD.S2[1] THEN
+      LET CNVTA=CHBase/OD.S2[1]
+    ELSE
+      LET CNVTA=0
+    END IF
+    IF OD.S3[11]=-1 AND OD.UN[2]=-1 AND CHBase LET CNVTA=CHBase
+    IF CHBase AND OD.UN[2]<0 LET CNVTA=CHBase
+    LET CNVTU[0]=0
+    LET CNVTU[1]=OD.UN[2]
+    LET CNVTU[2]=2
+    LET OD.L5[1]=OD.L5[1] + XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+  END IF
+
+  !current gpp
+  LET GP=OD.L5[0]-OD.S3[13]    !OD.L5[3]-OD.S3[12]
+  LET GPP=0
+  If OD.L5[0] Then
+    Let GPP=FNR((GP/OD.L5[0])*100)
+  Else
+    If OD.S3[13] Then
+      Let GPP=-100
+    Else
+      Let GPP=0
+    End If
+  End If
+End If ! End of UM Conversion stuff.
+
+If ii < iLimit Then
+  Rem Now Put together the Line Item returned Structure array.
+  E.[ii].Orderno$=Str$(ET.ETORDER)
+  E.[ii].OrderDate$=PDate$(OH.H0[9])
+  E.[ii].CustID$=Str$(ET.ETCUST)
+  E.[ii].CustName$=Trim$(CU.A1$[31,60])
+  If ET.ETLINE       E.[ii].OrdItem$=Str$(ET.ETLINE)
+  If not(ET.ETLINE)  E.[ii].OrdItem$=" "
+  E.[ii].OrdItemChg$=JDate$(ET.ETDATE)
+  E.[ii].Access$=ET.ETUSER$
+  E.[ii].WeightX$=weightX$
+
+  If ET.ETPROD$[1,10]<>"STATUS CHG" AND ET.ETPROD$[1,7]<>"DELETED" Then
+    E.[ii].Item$           = Trim$(ET.ETPROD$)
+    E.[ii].ItemDesc$       = Trim$(escape$(PR.A$[9,38]))+" | "+Trim$(escape$(PR.A$[63,92]))
+
+	!current
+	E.[ii].OrdCItemQty$    = ODQTY[0] Using Qmask$     
+	If not(ODQTY[0]) then    E.[ii].OrdCItemQty$ = Space$  
+	E.[ii].OrdCItemUM$     = XUNIT$(OD.UN[0],CCC)      
+	If not(OD.UN[0]) then    E.[ii].OrdCItemUM$ = Space$
+	E.[ii].OrdCItemShipQty$= ODQTY[1] Using Qmask$     
+	If not(ODQTY[1]) then    E.[ii].OrdCItemShipQty$ = Space$
+	E.[ii].OrdCItemBO$     = ODQTY[2] Using Qmask$
+	If not(ODQTY[2]) then    E.[ii].OrdCItemBO$ = Space$
+    E.[ii].OrdItemPrice$   = OD.OLM[3]  Using Pmask$       
+	If not(OD.OLM[3]) then   E.[ii].OrdItemPrice$ = Space$ 
+	E.[ii].OrdItemPriceUM$ = XUNIT$(OD.UN[1],CCC)                       
+	If not(OD.UN[1]) then    E.[ii].OrdItemPriceUM$ = Space$
+	E.[ii].OrdItemMargin$  = GPP Using "#####.##%"         
+	If not(GPP) E.[ii].OrdItemMargin$ = Space$             
+
+	!previous
+    E.[ii].OrdItemQty$     = ETOQTY1[0] Using Qmask$ 
+    E.[ii].OrdItemUM$      = XUNIT$(ET.ETUNIT,CCC)
+	If not(ET.ETUNIT) then   E.[ii].OrdItemUM$ = Space$
+    E.[ii].OrdItemShipQty$ = ETOQTY1[1] Using Qmask$ 
+    E.[ii].OrdItemBO$      = ETOQTY1[2] Using Qmask$
+
+	!new or changed to
+	E.[ii].OrdNItemQty$    = ETNQTY1[0] Using Qmask$
+    E.[ii].OrdNItemUM$     = XUNIT$(ET.ETUNIT,CCC)
+	If not(ET.ETUNIT) then   E.[ii].OrdNItemUM$ = Space$
+    E.[ii].OrdNItemShipQty$= ETNQTY1[1] Using Qmask$ 
+    E.[ii].OrdNItemBO$     = ETNQTY1[2] Using Qmask$  
+    E.[ii].OrdNItemPrice$  = OD.OLM[3]  Using Pmask$   
+    E.[ii].OrdNItemPriceUM$= XUNIT$(OD.UN[1],CCC) 
+    If not(OD.UN[1]) then    E.[ii].OrdNItemPriceUM$ = Space$
+    E.[ii].EditType$       = "C"
+    E.[ii].ETAction$       = Space$ 
+  Else
+    E.[ii].ETAction$="["+ET.ETPROD$+"]"
+  End If
+  If ET.ETACTION=1 Then
+	Let E.[ii].EditType$="C"
+	Let E.[ii].ETAction$="*** LINE EDITED  ***"
+  Endif
+  If ET.ETACTION=2 Then
+    Let E.[ii].EditType$="2"
+    Let E.[ii].ETAction$="*** LINE DELETED ***"
+  End If
+  If ET.ETACTION=3 AND ET.ETPROD$[1,12]="DEL OR-BAD D" Then
+    Let E.[ii].EditType$="D"
+    Let E.[ii].ETAction$="*** ORDER DELETED FROM 229- BAD DATA ***"
+  End If
+  If ET.ETACTION=3 AND ET.ETPROD$[1,12]<>"DEL OR-BAD D" Then
+    Let E.[ii].EditType$="3"
+    Let E.[ii].ETAction$="*** ORDER DELETED FROM 206 ***"
+  End If
+  If ET.ETACTION=4 Then
+    Let E.[ii].EditType$="D"
+    Let E.[ii].ETAction$="*** LINE DELETED FROM 229- BAD DATA ***"
+  End If
+  If ET.ETACTION=5 Then
+    Let E.[ii].EditType$="D"
+    Let E.[ii].ETAction$="*** ORDER DELETED FROM 225 ***"
+  End If
+  If ET.ETACTION=6 Then
+    Let E.[ii].EditType$="D"
+    Let E.[ii].ETAction$="*** INVOICE DELETED FROM 225 ***"
+  End If
+  If ET.ETACTION=15 Then                                    
+	Let E.[ii].EditType$="P"                               
+    Let E.[ii].ETAction$="*** PRICE CHANGE FROM SALESPRO ***"
+	E.[ii].OrdCItemQty$     = ODQTY[0] Using Qmask$   
+	E.[ii].OrdCItemUM$      = XUNIT$(OD.UN[0],CCC)                          
+	E.[ii].OrdCItemShipQty$ = ODQTY[1] Using Qmask$      
+	E.[ii].OrdCItemBO$      = ODQTY[2] Using Qmask$      
+	Let E.[ii].ETOldUnitPrice$=OUnitPrice using Pmask$
+	Let E.[ii].ETNewUnitPrice$=NUnitPrice using Pmask$
+	If ET.ETPUNIT      Let E.[ii].ETPunit$=XUNIT$(ET.ETPUNIT,CCC)
+	If not(ET.ETPUNIT) Let E.[ii].ETPunit$=Space$
+	Let E.[ii].ETOldUnitPrice$=E.[ii].ETOldUnitPrice$+"/"+E.[ii].ETPunit$
+	Let E.[ii].ETNewUnitPrice$=E.[ii].ETNewUnitPrice$+"/"+E.[ii].ETPunit$
+  End If                                                   
+  IF FRA(ET.ETACTION) OR ET.ETPROD$[1,10]="STATUS CHG" THEN
+    Let E.[ii].EditType$="S"
+    Let E.[ii].ETAction$="*** STATUS CHG FRM "+Str$(Int(ET.ETACTION))+" TO "+Str$(FRA(ET.ETACTION)*100)+" ***"
+  End If
+
+  If ET.ETACTION=9 Then
+    Let E.[ii].EditType$="9"
+    Let E.[ii].ETAction$="*** ORDER DELETED FROM 225 ***"
+  End If
+  If ET.ETACTION=10 Then
+    Let E.[ii].EditType$="10"
+    Let E.[ii].ETAction$="*** INVOICE DELETED FROM 225 ***"
+  End If
+  If ET.ETACTION=11 Then
+    Let E.[ii].EditType$="2"
+    Let E.[ii].ETAction$="*** LINE WAS ADDED ***"
+  End If
+  If ET.ETACTION=12 Then
+    Let E.[ii].EditType$="12"
+    Let E.[ii].ETAction$="*** HOLD CODE WAS EDITED ***"
+  End If
+  If ET.ETACTION=13 Then
+    Let E.[ii].EditType$="13"
+    Let E.[ii].ETAction$="*** HOLD CODE WAS EDITED BY SYSTEM ***"
+  End If
+  If ET.ETACTION=14 Then
+    Let E.[ii].EditType$="14"
+    Let E.[ii].ETAction$="*** THE ORDER HEADER ACCESS ***"
+  End If
+  If ET.ETACTION=16 Then
+    Let E.[ii].EditType$="16"
+    Let E.[ii].ETAction$="*** PRICE OR COST CHANGE FROM MX066 ***"
+  End If
+  If ET.ETACTION=17 Then
+    Let E.[ii].EditType$="17"
+    Let E.[ii].ETAction$="*** ENTER A DATE TO HOLD IN 102 ***"
+  End If
+  If ET.ETACTION=18 Then
+    Let E.[ii].EditType$="18"
+    Let E.[ii].ETAction$="*** RELEASE THE DATE TO HOLD IN 102 ***"
+  End If
+  If ET.ETACTION=19 Then
+    Let E.[ii].EditType$="19"
+    Let E.[ii].ETAction$="*** RELEASE THE DATE TO HOLD IN MEUM 310 OR 13 ***"
+  End If
+  If ET.ETACTION=20 Then
+    Let E.[ii].EditType$="20"
+    Let E.[ii].ETAction$="*** ORDER SENT TO ROUTING ***"
+  End If
+  If ET.ETACTION=21 Then
+    Let E.[ii].EditType$="21"
+    Let E.[ii].ETAction$="*** ROUTING INFO UPLOADED ***"
+  End If
+  If ET.ETACTION=22 Then
+    Let E.[ii].EditType$="22"
+    Let E.[ii].ETAction$="*** ORDER CONFIRMATION PRINTED ***"
+  End If
+
+  IF (ET.ETACTION<1 OR ET.ETACTION>22) AND ET.ETPROD$[1,12]<>"STATUS CHG" THEN
+    Let E.[ii].EditType$="U"
+    Let E.[ii].ETAction$="*** ACTION UNKNOWN ***"
+  End If
+
+  Let ii=ii+1
+  ss=0
+  Goto ETTop:
+Endif
+
+ETEnd: Rem End it all !==================================================
+
+Close #OHC,#ODC,#ETC,#CUC,#CTLC,#SMC,#CCC,#PRC
+msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+ss=ErrStat
+Exit Sub
+
+Else
+  ss=Spc(10)
+  Call errTrap(pgmName$)
+  Exit Sub
+End Try
+
+Sub initVar()
+   E.[ii].Item$           = Space$        
+   E.[ii].ItemDesc$       = Space$        
+   E.[ii].OrdCItemQty$    = Space$        
+   E.[ii].OrdCItemUM$     = Space$        
+   E.[ii].OrdCItemShipQty$= Space$        
+   E.[ii].OrdCItemBO$     = Space$        
+   E.[ii].OrdItemQty$     = Space$        
+   E.[ii].OrdItemUM$      = Space$        
+   E.[ii].OrdItemShipQty$ = Space$        
+   E.[ii].OrdItemBO$      = Space$        
+   E.[ii].OrdItemPrice$   = Space$        
+   E.[ii].OrdItemPriceUM$ = Space$        
+   E.[ii].OrdItemMargin$  = Space$        
+   E.[ii].OrdNItemQty$    = Space$        
+   E.[ii].OrdNItemUM$     = Space$        
+   E.[ii].OrdNItemShipQty$= Space$        
+   E.[ii].OrdNItemBO$     = Space$        
+   E.[ii].OrdNItemPrice$  = Space$        
+   E.[ii].OrdNItemPriceUM$= Space$        
+   E.[ii].EditType$       = Space$        
+   E.[ii].ETAction$       = Space$    
+   E.[ii].ETOldUnitPrice$ = Space$             
+   E.[ii].ETNewUnitPrice$ = Space$             
+   E.[ii].ETPunit$        = Space$  
+   E.[ii].Access$         = Space$
+End Sub
+
+Sub updatelog(debug)                                        
+	If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub       
+
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+		
+
+ss=ErrStat
+
+End Sub
+

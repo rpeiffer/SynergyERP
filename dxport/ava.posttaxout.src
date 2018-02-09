@@ -1,0 +1,443 @@
+Rem AVA.POSTTAXOUT
+!
+! loadsave -w -n 100,10 -o prog/dxport/ava.posttaxout.dl4 src/ava.posttaxout.src
+!
+Rem  Copyright (c) 2016 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+!
+include "src/copyright.inc" ! dx
+!
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+Declare Intrinsic Sub DateToJulian,FindF,FormatDate,InpBuf,String,Time,VerifyDate
+Declare Intrinsic Function FindChannel
+! Option Default Dialect IRIS1
+Rem AVA.POSTTAXOUT - CREATE A COMMIT FILE FROM 1 ORDER
+Rem 53250
+Rem Called program
+Rem  IF txt file changed/added CHECK/CHANGE THIS PROGRAM
+Rem text file for template: txt/ava.posttax.xmlo
+Rem file for storing order & avalara transid: 7/AVAORDTRANS#
+Rem file sent: YYYYMMDDHHMMSSOOOOOO.pl
+If Err 0 Gosub ERR_TRAP
+Enter ORDERNO,ORDERREC,TRANSID$,intco,rstr$
+Rem {begin src/inc/dim.getchan.i}
+Dim 1%,CHNL
+Dim 3%,CHNLSCR,CHNLFREE
+Rem {end dim.getchan.i}
+Dim WRKLINE$[500],TMPLINE$[500],VAR$[10],WORK$[5000],TEMP$[500]
+Dim FLE$[30],RETVAL$[512],AVAACCTNO$[20],AVALCKEY$[16],DIRTO$[64]
+Dim AVAOID$[20],INXMLFLE$[64],PMCN$[30],P0$[20],custom_customer$[30]
+Dim K1$[64],K2$[64],K3$[64],K4$[64],XMLFLE$[50],TMPFLE$[50]
+Dim X$[20],VARNM$[40],AVAPC$[10],LOGFNM$[40],SPACES$[200]
+Dim 1%,X,X1[9],COID,CH_CNTRL,CH_TMPL,FLESENTO
+Dim 1%,L3[3],S2[1],H4[2],TCB,POS0,POS1,POS2,POS3,CH_DTL
+Dim 1%,CH_AVATRNS,SCR,CREDIT,CCHAN[19]
+Dim 2%,X2[9],H0[12],MCODE[9],L4[3],H6[8],JDATE[5]
+Dim 3%,X3[9],SRN[5],T2[25],MCHARGE[9,1],L5[3],L7[12]
+Dim 3%,R[99],OREF[5],PMOHC,E,H
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim WebStr$[256],msg$[100],message$[300] ! ,RSTR$[500]
+SPACES$ = " ",SPACES$;CREDIT = 0
+If TRANSID$[1,6] = "CREDIT" Let CREDIT = 1 ! came from mx247!
+TRANSID$ = ""
+FLESENTO = 0 ! no file sent
+If ORDERNO <= 0 Goto OUTEND
+H0[7] = ORDERNO
+ORDREC=ORDERREC
+returnstatus=1;message$="OK"
+COID = IntCo ! Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64)
+CH_CNTRL = 1
+If Err 0 Let X2 = Spc(8)
+X2 = 0
+X3 = Chf(CH_CNTRL)
+If Err 0 Gosub ERR_TRAP
+If X2 ! cntrl not open
+  Open #1,"cntrl/cntrl" + Str$(COID)
+End If 
+CHNL = 97 \ Gosub GETCHAN
+If Err 0 Gosub ERR_TRAP ! getchan changes to err_escape:?
+If CHNL > 1 ! valid channel
+  Call "progdflt","AVA","",CHNL,RETVAL$
+  If RETVAL$[1,5] = "@@@@@" Let RETVAL$ = " ",RETVAL$
+  AVAACCTNO$ = RETVAL$[1,20] ! "customer id
+  AVALCKEY$ = RETVAL$[21,36] ! "licensekey
+  DIRTO$ = RETVAL$[37,101] ! "send file to
+  LOGFNM$ = RETVAL$[102,139] ! "log file name
+Else ! "NO DEFAULTS!?
+  returnstatus=0;message$="NO DEFAULTS DEFINED!"
+!  Signal 3,30
+  Goto OUTDONE
+End If 
+AVAACCTNO$=Trim$(AVAACCTNO$)
+AVALCKEY$=Trim$(AVALCKEY$)
+DIRTO$=Trim$(DIRTO$)
+If AVAACCTNO$ = "" Or DIRTO$ = "" ! "NEED THESE!!
+  returnstatus=0;message$="MISSING DEFAULT VALUES!"
+  !Signal 3,30
+  Goto OUTDONE
+End If 
+LOGFNM$=Trim$(LOGFNM$)
+If LOGFNM$ = "" ! no name defined - hardcode default name
+  LOGFNM$ = "files/1/avataxout.log"
+Else ! see if set for dl4
+  IF Logfnm$[1,1]<>"/" and LOGFNM$[1,6]<>"files/" ! NEEDS THIS ON DL4!!
+	TEMP$="files/"+logfnm$
+	logfnm$=temp$ ! MUST START WITH files/ if to a directory!
+  Endif
+End If 
+If DIRTO$ = "" Or DIRTO$[1,10] = SPACES$[1,10] Let DIRTO$ = "/tmp/" ! SEND IT SOMEWHERE!
+FLE$ = "txt/ava.posttax.xmlo"
+Rem for credits - use same as invoice - send neg values?
+Call FindF(FLE$,H)
+If Not(H)
+  returnstatus=0;message$="TEMPLATE FILE NOT FOUND"
+  !Signal 3,30
+  Goto OUTDONE
+End If 
+CHNL = 97 \ Gosub GETCHAN
+If CHNL > 1 ! valid
+  CH_TMPL = CHNL
+  Open #CH_TMPL,FLE$
+Else 
+  returnstatus=0;message$="TEMPLATE FILE NOT OPENED"
+  !Signal 3,30
+  Goto OUTDONE
+End If 
+FLE$ = "7/AVAORDTRANS" + Str$(COID)
+CHNL = 97 \ Gosub GETCHAN
+If Err 0 Gosub ERR_TRAP ! getchan changes to err_escape:?
+Call FindF(FLE$,H)
+If Not(H) ! not found - get out now!
+  returnstatus=0;message$="TRANSACTION FILE MISSING"
+  !Signal 3,30
+  Goto OUTDONE
+End If 
+If CHNL > 1 ! valid
+  CH_AVATRNS = CHNL
+  Open #CH_AVATRNS,FLE$
+Else 
+  returnstatus=0;message$="TRANSACTION FILE NOT OPENED"
+  !Signal 3,30
+  Goto OUTDONE
+End If 
+AVAOID$ = " ",AVAOID$ ! avalara trans id
+K2$ = " ",K2$;K2$ = H0[7] Using "######"
+Search #CH_AVATRNS,2,1;K2$,R,E \ If E > 1 Gosub ERR_SEARCH
+If Not(E) ! found it - get trans
+  AVAOID$ = K2$[7]
+End If 
+AVAOID$=Trim$(AVAOID$)
+H0[7] = ORDERNO
+Rem The above should be the inv/cm trans id number!
+TEMP$ = "" \ Call Time(TEMP$) ! get todays info
+WORK$ = TEMP$[1,13] ! just the MMM dd, yyyy
+X1 = 5 ! need yyyymmdd
+Call VerifyDate(WORK$,X$,E,X1)
+WORK$ = X$[1,8]
+WORK$[9] = Tim(11) Using "&&" ! hour
+WORK$[11] = Tim(12) Using "&&" ! minute
+WORK$[13] = Tim(13) Using "&&" ! second
+WORK$[15] = H0[7] Using "&&&&&&" ! order
+XMLFLE$ = WORK$ + ".pl" ! final file name (PERL Script)
+INXMLFLE$ = WORK$ + "in.txt"
+TMPFLE$ = "/tmp/" + WORK$[1,14] + Spc(6) Using "&&&&" ! temp(detail)=/tmp/YYYYMMDDHHMMSSPPPP
+CHNL = 90 \ Gosub GETCHAN
+If Err 0 Gosub ERR_TRAP ! getchan changes to err_escape:?
+CH_DTL = CHNL
+Build #CH_DTL, + TMPFLE$ + "!"
+mat read #ch_cntrl,115,60;custom_customer$;
+CUSTOM_CUSTOMER$=UCASE$(TRIM$(CUSTOM_CUSTOMER$))
+Read #CH_CNTRL,3,0;PMCN$; ! company name
+if custom_customer$="PIEDMONT" ! we MUST MAKE NAME WHAT AVALARA EXPECTS?! (25 Max)
+	PMCN$="Piedmont 7040"
+endif
+If custom_customer$="WENELSON"
+	if coid=1 let PMCN$="PDX" ! "Nelson Portland"
+	if coid=3 let PMCN$="SPKN" ! spokane
+	if coid=5 let PMCN$="SEA" ! seattle
+Endif
+PMCN$=Trim$(PMCN$) ! comp name
+If CCHAN[2] <= 0 ! no roh
+  CHNL = 97 \ Gosub GETCHAN
+  If CHNL > 1 Let CCHAN[2] = CHNL
+  Read #CH_CNTRL,88,1840;FLE$[1,16];
+  Open #CCHAN[2],FLE$
+  CCHAN[2] = 0 - CCHAN[2] ! "show we opened
+End If 
+CH_ROH = Abs(CCHAN[2])
+If CCHAN[4] <= 0 ! no rot
+  CHNL = 97 \ Gosub GETCHAN
+  If CHNL > 1 Let CCHAN[4] = CHNL
+  Read #CH_CNTRL,88,1872;FLE$[1,16];
+  Open #CCHAN[4],FLE$
+  CCHAN[4] = 0 - CCHAN[4] ! "show we opened
+End If 
+CH_ROT = Abs(CCHAN[4])
+If CCHAN[6] <= 0 ! no TAX
+  CHNL = 97 \ Gosub GETCHAN
+  If CHNL > 1 Let CCHAN[6] = CHNL
+  Read #CH_CNTRL,88,2176;FLE$[1,16];
+  Ropen #CCHAN[6],FLE$
+  CCHAN[6] = 0 - CCHAN[6] ! "show we opened
+End If 
+CH_TAX = Abs(CCHAN[6])
+H0[7] = ORDERNO
+Mat Read #CH_ROH,ORDREC,0;H0;
+Mat Read #CH_ROH,ORDREC,78;H4;
+Mat Read #CH_ROH,ORDREC,408;H6;
+Mat Read #CH_ROH,ORDREC,446;P0$;
+Mat Read #CH_ROH,ORDREC,512;OREF;
+ROTREC = H0[3]
+Mat Read #CH_ROT,ROTREC,8;T2;
+Read #CH_TAX,H4[0],412;TCB;
+If TCB <> 2 Goto OUTDONE ! NOT ava TAX CALC!   ---- should we check this - 227/247 already does
+! let's check it - to be sure we are sending a bonafide avatax order data!
+CREDIT = 0;INVOICE = 0
+If H0[0] >= 9 And H0[0] <= 12 Let CREDIT = 1
+If H0[0] >= 5 And H0[0] <= 7 Let INVOICE = 1
+If H0[0] = 58 Or H0[0] = 59 Let INVOICE = 1
+If H0[0] >= 90 ! in process/edit/etc
+  If H6[2] >= 9 And H6[2] <= 12 Let CREDIT = 1
+  If H6[2] >= 5 And H6[2] <= 7 Let INVOICE = 1
+  If H6[2] = 58 Or H6[2] = 59 Let INVOICE = 1
+End If 
+If T2[1] < 0 Let CREDIT = 1 ! AVA wants NEGATIVE QUANTITIES FOR CMs!!!
+TEMPLT_LOOP: Rem read until detail done
+WRKLINE$ = ""
+Gosub READ_TEMPLATE
+If WRKLINE$ = "" Goto ORDDONE
+If WRKLINE$[1,6] = "DOHEAD" Goto ORDDONE ! finished detail marker (ADDED MANUALLY TO FILE!)
+Gosub PARS_LINE
+If Not(POS1) ! no variable
+  Print #CH_DTL;WRKLINE$
+Else ! need to insert a variable
+  Print #CH_DTL;WRKLINE$[1,POS1 - 1]; ! send beginning string
+  If VARNM$ = "ACCOUNTID" ! trans id
+    Print #CH_DTL;AVAACCTNO$;
+  End If 
+  If VARNM$ = "AVAPWID" ! license key
+    Print #CH_DTL;AVALCKEY$;
+  End If 
+  If VARNM$ = "AVACLIENT" !
+    Print #CH_DTL;"ubs connector ver. 1.1";
+  End If 
+  If VARNM$ = "AVAADAPTER" !
+    Print #CH_DTL;"ver. 1.1";
+  End If 
+  If VARNM$ = "AVADEVNAME" !
+    Print #CH_DTL;"ubs connector ver. 1.1";
+  End If 
+  If VARNM$ = "PMDATE" ! "on credits - send date
+    X2 = H0[10]
+    If CREDIT Let X2 = H0[9]
+    If INVOICE Let X2 = H0[8]
+    X$ = X2 Using "&&&&&&" ! NEED A DATE CHECK (causes ava Hang if no good)
+    Call DateToJulian(1,X$,X$,E) \ If E Let X$ = "0"
+    JDATE[1] = X$ ! ship date julian
+    JDATE[2] = JDATE[0] - JDATE[1] ! diff between today & Shipdate
+    If JDATE[2] < 0 Or JDATE[2] > 400 ! future or >1 yr is NO GOOD
+      X$ = XMLFLE$[3,8] ! from file name yyyymmdd drop the 1st 2 yy(20)
+      X2 = X$[1,6] ! just the yymmdd part
+    End If 
+    X$ = X2 Using "&&&&&&" ! x2 is either ship or corrected date
+    X1 = 4
+    Call FormatDate(X$,X$,E,X1) ! "try from yymmdd to mm/dd/yyyy
+    WORK$ = X$[7,10] + "-" + X$[1,2] + "-" + X$[4,5] !  +"T11:14:37"
+    Print #CH_DTL;WORK$; ! " X$;
+  End If 
+  If VARNM$ = "PMUCODE" ! company name
+    Print #CH_DTL;PMCN$;
+  End If 
+  If VARNM$ = "AVAOID" ! trans id
+    Print #CH_DTL;AVAOID$;
+  End If 
+  If VARNM$ = "PMTYPE" ! avalara doc type
+    TEMP$ = "SalesOrder"
+    If INVOICE Let TEMP$ = "SalesInvoice"
+    If CREDIT Let TEMP$ = "ReturnInvoice"
+    Print #CH_DTL;TEMP$; !! avaDPC$;
+  End If 
+  If VARNM$ = "PMORDNO" ! PM trans id (order #)
+    X$ = H0[7] Using "######"
+    If H0[5] Let X$ = X$ + "-" + Str$(H0[5]) ! need 1 time # so add backorders?
+    X$=Trim$(X$)
+    Print #CH_DTL;X$;
+  End If 
+  Rem we are sending what the current (as accepted) values of the ord/inv are!
+  If VARNM$ = "PMORDTTL" ! The total amount (not including tax) for the document.
+    X3 = T2[0] - T2[7] ! NOT INCLUDING TAX
+    If CREDIT Let X3 = 0 - X3 ! reverse sign
+    X$ = X3 Using "-------#.##"
+    X$=Trim$(X$)
+    Print #CH_DTL;X$;
+  End If 
+  If VARNM$ = "PMTTAX" ! The total tax for the document.
+    X3 = T2[7] \ If CREDIT Let X3 = 0 - X3 ! credits are negative!
+    X$ = X3 Using "-------#.##"
+    X$=Trim$(X$)
+    Print #CH_DTL;X$;
+  End If 
+  If VARNM$ = "AVACOMT" ! yes we are permanently committing this order
+    Print #CH_DTL;"true";
+  End If 
+  Print #CH_DTL;WRKLINE$[POS2 + 1] ! send remaining string
+End If 
+Goto TEMPLT_LOOP
+READ_TEMPLATE: Rem read (needs any processing?)
+Read #CH_TMPL;WRKLINE$;
+STRPCCHAR: Rem "remove cr/lf etc
+If Len(WRKLINE$) > 1 
+  if WRKLINE$[Len(WRKLINE$)] < " "
+	WRKLINE$[Len(WRKLINE$)] = "" ! Strip control chars
+	Goto STRPCCHAR
+  Endif
+End If 
+Return 
+PARS_LINE: Rem See if line holds variables
+VARNM$ = " ",VARNM$
+POS0 = 1;POS1 = 0;POS2 = 0
+Search WRKLINE$[POS0],"~",POS1
+If Not(POS1) Return ! none there
+Let VARNM$ = WRKLINE$[POS1 + 1] To "~" : POS2 ! variable now has ~name~
+VARNM$ = WRKLINE$[POS1 + 1,POS2 - 1] ! trim the ~'s
+Call String(1,VARNM$) ! make sure UPPERCASE
+Return 
+ORDDONE: Rem detail done, now header
+Close #CH_DTL ! close detail
+WORK$ = TMPFLE$ + "H!" ! name =/tmp/YYYYMMDDHHMMSSPPPPH (same as dtl with H appended)
+Build #CH_DTL, + WORK$ ! build the temp header file
+HDR_LOOP: Rem rest is header
+WRKLINE$ = ""
+Gosub READ_TEMPLATE
+If WRKLINE$ = "" Goto FINFILE
+If WRKLINE$[1,6] = "DOHEAD" Goto HDR_LOOP ! place holder (not part of send file)
+Gosub PARS_LINE ! see if any needed data
+If POS1 ! yes data needed
+  Print #CH_DTL;WRKLINE$[1,POS1 - 1]; ! send beginning string
+  If VARNM$ = "LENGTH" ! "get byte count of detail file
+    WORK$ = "wc -c " + TMPFLE$ + " > /tmp/WC" + Str$(H0[7]) + Str$(Spc(6))
+    System WORK$,X2
+    If Not(X2) ! no errors
+      WORK$ = "/tmp/WC" + Str$(H0[7]) + Str$(Spc(6)) ! file sent to above
+      If Err 0 Rem
+      Close #76
+      If Err 0 Gosub ERR_TRAP
+      Open #76,WORK$
+      TEMP$ = "";X3 = 0
+WCR_LOOP: Rem if loop needed
+      Read #76;TEMP$;
+      If TEMP$ <> "" ! hopefully one line w/no blank start/end
+        X3 = TEMP$ ! get any number before the file name
+      End If 
+      Close #76
+      Print #CH_DTL;Str$(X3);
+    End If 
+  End If 
+  Print #CH_DTL;WRKLINE$[POS2 + 1] ! send remaining string
+Else 
+  Print #CH_DTL;WRKLINE$
+End If 
+Goto HDR_LOOP
+FINFILE: Rem now add the xml detail
+Print #CH_DTL;"" ! Skip a line (insert a blank line after header
+Close #CH_DTL ! close header file
+X2 = 0;X3 = 0 ! error = none
+X$ = "\\"
+WORK$ = "tr -d '" + X$ + "000' < " + TMPFLE$ + "H > " + DIRTO$ + XMLFLE$ ! hdr to final
+System WORK$,X2
+WORK$ = "tr -d '" + X$ + "000' < " + TMPFLE$ + " >> " + DIRTO$ + XMLFLE$ ! detail append to final
+System WORK$,X3
+If X2 Or X3 ! unix reported errors
+  returnstatus=0;message$="ERROR REPORTED ON FILE COMPILATION"
+  call programdump("tmp/posttaxue!","")
+End If 
+DELTRANS: Rem as it's committed - remove from trans
+K1$ = " ",K1$;K1$ = H0[7] Using "######"
+Search #CH_AVATRNS,2,1;K1$,R,E \ If E > 1 Gosub ERR_SEARCH
+If Not(E) ! found previous DELETE IT! (to prevent old or bad info accumulation)
+  Search #CH_AVATRNS,5,1;K1$,R,E \ If E Gosub ERR_SEARCH
+  Goto DELTRANS
+End If 
+WORK$ = TMPFLE$ + "H"
+If Err 0 Rem
+Kill WORK$ ! remove temp header
+Kill TMPFLE$ ! remove temp detail
+If Err 0 Gosub ERR_TRAP
+Rem let's wait for response before showing it's available
+ORDFINISH: Rem finish
+!If Not(CREDIT) Print @0,23;'CL';"ORDER ";
+!If CREDIT Print @0,23;'CL';"CREDIT ";
+!Print "COMMIT CREATED. ";
+!If X2 Or X3 Print "UNIX FILE ERROR"; Else Print "NO PROBLEMS";
+!If X2 Or X3 Signal 3,20 ! "only pause if PROBLEM
+If Not(CREDIT) Let TEMP$ = "ORDER: "
+If CREDIT Let TEMP$ = "CREDIT: "
+TEMP$ = TEMP$ + H0[7] Using "######"
+TEMP$ = TEMP$ + "  " + Msc$(3) ! +"\215\"
+TEMP$ = TEMP$ + " AVATID: " + AVAOID$
+If Not(X2) And Not(X3) Let TEMP$ = TEMP$ + " COMMIT AS: " + DIRTO$ + XMLFLE$
+If X2 Or X3 Let TEMP$ = TEMP$ + " UNIX ERROR: " + Str$(X2) + " :Headfile  " + Str$(X3) + " :Detlfile "
+WORK$ = "echo " + TEMP$ + " >> " + LOGFNM$ ! append to logfile
+System WORK$
+If Not(X2) And Not(X3) ! "no errors on file create
+  WORK$ = "chmod +x " + DIRTO$ + XMLFLE$
+  System WORK$,X1 ! need to make it executable
+  ! Print @0,22;'CL';"SENDING FILE NOW";
+  WORK$ = DIRTO$ + XMLFLE$ + " " + DIRTO$ + INXMLFLE$
+  System WORK$ ! "execute - results to inxmlfle$
+  FLESENTO = 1
+End If 
+OUTDONE: Rem finished
+If Err 0 Rem
+For X = 1 To 10
+  If CCHAN[X] <= 0 ! we opened
+    X1 = Abs(CCHAN[X]) ! stored as 0-chan
+    If X1 > 0 Close #X1
+  End If 
+Next X
+Close #CH_TMPL
+Close #CH_AVATRNS
+If Err 0 Gosub ERR_TRAP
+OUTEND: Rem outta here
+If FLESENTO And H0[7] ! we sent a file so call read program?
+  WORK$ = DIRTO$ + INXMLFLE$
+  X2 = 0 - H0[7] ! signal to parser its a commit
+  Call "ava.xmlfle.in.dl4",H0[7],WORK$,intco,rstr$ ! just order # & response file name
+  FLE$ = "7/AVAORDTRANS" + Str$(COID)
+  Open #CH_AVATRNS,FLE$ ! file was closed above -- reopen (and should have been updated in the called program)
+  K1$ = " ",K1$;K1$ = H0[7] Using "######"
+  Search #CH_AVATRNS,2,1;K1$,R,E \ If E > 1 Gosub ERR_SEARCH
+  If Not(E) ! found
+    TRANSID$ = K1$[7] ! all after order #
+  End If 
+  Close #CH_AVATRNS
+  If Trim$(TRANSID$)="" LET TRANSID$=AVAOID$
+End If 
+End 
+Rem {begin src/inc/rtn.getchan.i}
+GETCHAN: Rem search for open channel (counts down from supplied chnl #)
+CHNL=FindChannel()
+Return 
+OutErr: ! something amiss
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call AddToStr(e$,rstr$,WebStr$)
+call SetOutPut(e$,rstr$)
+End
+Rem {end rtn.getchan.i}
+ERR_SEARCH: Rem
+ENUM = E + 1000;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+MSC$(4)
+Call programdump("tmp/ava.posttaxoutse!","")
+returnstatus=0
+message$=msg$
+goto OutErr ! alt - send user info
+Rem {begin rtn.error.s}
+ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+!
+include "src/callmainerrnet.inc"
+End 

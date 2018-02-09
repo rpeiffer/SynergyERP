@@ -1,0 +1,1030 @@
+! --- serp450amalg.dl4
+!
+! Create amalgamation adjustments
+!
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp450amalg.dl4 src/serp450amalg.src
+!
+! Set for ERPAssistant
+!
+! This program will roll through a open commission file and create adjustments
+! based on order amalgamation.  Operationally much like hypothetical commisssion
+! calculation where it will create "faux" order records that can be actually
+! written to, thus you can get a complete recalculation using the actual
+! commission calculate routine.
+!
+! Will only consider commission records meeting the following criteria
+!
+! 1. Must be type "1" types (actual invoices with history, not credits, manual, etc.)
+! 2. Must NOT already be marked paid.
+! 3. Must NOT already have been amalgamated (having an "amalgamated type adjustment").
+! 4. Must NOT be the result of a "backorder release" (BO counter or different order #).
+!
+! If it meets this criteria, it will be amalgamated as follows:
+!
+! Invoices will be grouped as follows:
+!
+! Salesrep, Customer Billto, Invoice Date, Type where Type is either Direct
+! or non-Direct.
+!
+! Added system flag to control grouping - task 49564
+! System Flag = B is the original Billto / Invoice Date grouping above
+! System Flag = S is ship to / Ship Date group
+!
+! Salesrep, Billto Customer, How Shipped(SRN[3]0-5), Shipto Customer or Shipto Code 
+! (depending on how shipped, see below), Ship Date, Type where Type is either Direct or non-Direct. 
+!
+! There are currently 4 different options for choosing where an order will ship to: 
+!
+! 1. Plain old bill to address from customer file. (SRN[3]=0)
+! 2. Selecting a shipto address (either default of 0 or others). (SRN[3]=1 or SRN[3]=2) 
+! 3. Selecting another customer entirely to ship to. (SRN[3]=4)
+! 4. Manually entering an address. (SRN[3]=5)
+!
+! If a grouping has multiple occurrences that match, sales dollars and costs will
+! be combined and the invoice in question will be sent through another full
+! commission calculation using the overriding sales and costs dollars.  The
+! resulting difference between the ORIGINAL commission amount (note that this
+! would be before any adjustments had been made to the existing commission
+! record) and teh NEW commission amount is used to make an adjustment to the
+! current commission amount.
+!
+! This will adjust as follows:
+! Compare the old commission amount against the newly calculated, if new is less
+! leave old in place.
+! Adjust the current commission by the difference between the new and old.
+! Based on new commission amount, calculate a new blended commission rate (based
+! on existing costs and resale in the commission record).
+!
+! As the sort key (k_sort) is used throughout and is used to store data but ship to sort is 7 chars longer
+! - a new variable h_sort$ is added to keep programming changes to a minimum
+! k_sort is actual sort key - h_sort is made to look like billto option 
+! this way we can use the original location of data in the sort key if needed (SALES, COST, ETC)
+
+! KNOWN SHORTCOMINGS
+!
+
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+Declare Intrinsic Sub DateToJulian,FormatDate,Time
+Declare External Sub ERPCronSuccess
+Declare External Function GetParameter$
+
+include "src/inc/filesslsmcomm.inc"
+include "src/inc/filesslsm.inc"
+include "src/inc/filecust.inc"
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,GetUIDRec,buildsort,JDate$,PDate$
+
+! internal subroutines
+Declare Sub OpenFilesAndGetControlInfo,OpenFilesAndGetControlInfo
+Declare Sub GetParameters,BuildAmalgamatedSort
+Declare Sub BuildAmalgamatedHistory,ClearAmalgamatedHistory
+Declare Sub AddToSort,RecalcCommission
+Declare Sub ClearAmalgamatedCommission,CreateAmalgamatedCommission
+Declare Sub CreateCommissionAdjustments
+Declare Sub ReadHistoryHeader,ReadAmalgHistoryHeader,ReadHistoryTotals
+Declare Sub CreateCommissionRecord,ReadAmalgCommRec,WriteAmalgCommRec
+Declare Sub AdjustCommission
+Declare Sub ReadCommAuditRec,WriteCommAuditRec
+Declare Sub PrintHeader,PrintLine
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+
+try
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[300],tmp2$[300],b$[200],List$[50,200],3%
+b$=" ",b$
+dim message$[150],webstr$[200],custom_customer$[30]
+
+dim ahypo$[1],invh_key$[100],p9$[50],comm_key$[100],comma_key$[100],comma_key2$[100]
+dim k_sort$[50],k_sort2$[50],k_sr$[50],k_cust$[50],P61$[256],H_Sort$[50]
+dim 1%,comm_ch[20],ARMONTH
+dim 2%,h0[12]
+dim 3%,invh_rec,invha_rec,invl_rec,invla_rec,s9[9],cfin[8],rec_cust,rec_sr
+Dim 3%,SRN[5]
+
+! invoice header variables needed
+dim hmat$[2],smat$[2]
+dim 1%,SplitFlag
+dim 2%,SLSM[9],CSPLT[4],CommBase[4],h5[16],h0[12]
+dim 3%,SCOM[4],SMER[4],SCST[4],commsrvchg,oref[5]
+
+! invoice total variables needed
+dim 3%,t2[25],tot[4]
+
+! commission record variables needed
+dim 1%,s4[1],SplitType
+dim 2%,s1[3],s3[1]
+dim 3%,s2[1],s6[1],cs7[2],cs9[3],ocs1[3]
+
+! commission audit record variables needed
+Dim 1%,AS1[3],AS4[1],USER
+Dim 2%,AS2[1]
+Dim 3%,AS3[5],AS_$[60],SOURCE$[10],AS5[6],AORIGCOMM
+
+dim sc. as sslsmcomm
+dim sca. as sslsmcomm
+dim sr. as sslsm
+dim cust. as cust
+
+dim 2%,pageNo,lineNo,maxLines
+dim pageHeading$[132],pmask$[20]
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+dim 3%,SALE,COST,numInvoices
+dim 3%
+
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+call OpenFilesAndGetControlInfo()
+call GetParameters()
+if toBrowser
+	!<section>
+	tmp$ = bsdel$,"SERP450AMALG",fdel$,rdel$
+	Call addtostr(e$,rstr$,tmp$)
+	tmp$ = ""
+	tmp$ = tmp$,"SALES REP",fdel$,"CUSTOMER BILLTO",fdel$
+	if p61$[129,129]="S"
+		tmp$=tmp$,"SHIP DATE",fdel$
+	Else
+		tmp$ = tmp$,"INVOICE DATE",fdel$
+	Endif
+	tmp$ = tmp$,"ORDER TYPE",fdel$,"INVOICE #",fdel$
+	tmp$ = tmp$,"INV MERCH $",fdel$,"INV COST $",fdel$
+	tmp$ = tmp$,"AMALG MERCH $",fdel$,"AMALG COST $",fdel$
+	tmp$ = tmp$,"ORIG COMMISSION",fdel$
+	tmp$ = tmp$,"NEW COMMISSION",fdel$
+	tmp$ = tmp$,"ADJUSTMENT",fdel$
+	if p61$[129,129]="S" ! per spec - send the data
+		tmp$=tmp$,"SHIP TYPE",fdel$
+		tmp$=tmp$,"SHIP #",fdel$
+	endif
+	call addtostr(e$,rstr$,tmp$+rdel$)
+else
+	pageHeading$ = "Transactional Commission Amagalmation"
+	if auditMode pageHeading$ = pageHeading$+" - AUDIT MODE"
+	maxLines = 60
+	if not(erpCron) call setoutput(e$,rstr$, 2)
+end if
+lineNo = maxLines + 1 ! make sure next line we print prints header
+call BuildAmalgamatedSort()
+call BuildAmalgamatedHistory()
+call CreateAmalgamatedCommission()
+call CreateCommissionAdjustments()
+
+If toBrowser Call addtostr(e$,rstr$,esdel$) !end section
+if toBrowser or erpCron call setoutput(e$,rstr$,1)
+call ERPCronSuccess()
+else ! main try
+	include "src/callmainerrnet.inc"
+end try
+end
+
+! ***********************************************************************
+! Nobody but us subroutines down here
+! ***********************************************************************
+
+Sub OpenFilesAndGetControlInfo()
+Try
+	comm_ch[1] = CTLC
+	! control file open - load needed flags and configuration
+	! information
+	mat read #ctlc,115,60;custom_customer$;
+	let custom_customer$=UCase$(trim$(custom_customer$))
+	Read #ctlc,0,120;ARMONTH;
+	Mat Read #ctlc,19,50;P9$;
+	Mat read #ctlc,61,0;P61$;
+	ListPriceComm = 0
+	if custom_customer$ = "CSS"
+		ListPriceComm = 1
+	end if
+	! not sure if list price commission is valid with amalgamation
+! 	if ListPriceComm
+! 		e$ = "List price commission is not supported for amalgamated comissions!"
+! 		error 10000
+! 	end if
+	comm_ch[3] = openfile(-1792, intCO) \ if comm_ch[3] = -1 error 42
+	comm_ch[4] = openfile(-2288, intCO) \ if comm_ch[4] = -1 error 42
+	comm_ch[5] = openfile(-1808, intCO) \ if comm_ch[5] = -1 error 42
+	comm_ch[6] = openfile(-1744, intCO) \ if comm_ch[6] = -1 error 42
+	! invh
+	comm_ch[8] = openfile(-1136, intCO) \ if comm_ch[8] = -1 error 42
+	! invt
+	comm_ch[9] = openfile(-1168, intCO) \ if comm_ch[9] = -1 error 42
+	! invl
+	comm_ch[10] = openfile(-1184, intCO) \ if comm_ch[10] = -1 error 42
+	! invs - added for amalg by ship to
+	comm_ch[11] = openfile(-1152, intCo) \ if comm_ch[11] = -1 error 42
+	! slsrep
+	comm_ch[13] = openfile(-1824, intCO) \ if comm_ch[13] = -1 error 42
+	comm_ch[14] = comm_ch[8]
+	comm_ch[15] = comm_ch[10]
+	! use regular grids
+	comm_ch[16] = openfile(-1584, intCO) \ if comm_ch[16] = -1 error 42
+	! amalgamated invoice header file
+	comm_ch[17] = openfile(9902, intCO) \ if comm_ch[17] = -1 error 42
+	! amalgamated invoice line file
+	comm_ch[18] = openfile(9901, intCO) \ if comm_ch[18] = -1 error 42
+	commamalg_ch = openfile(9903, intCO) \ if commamalg_ch = -1 error 42
+	commopen_ch = openfile(2240, intCO) \ if commopen_ch = -1 error 42
+	comma_ch = openfile(9931, intCO) \ if comma_ch = -1 error 42
+	sort_ch = buildsort(e$,25,0) \ if sort_ch = -1 error 42
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! OpenFilesAndGetControlInfo
+
+Sub GetParameters()
+Try
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	begRep = GetParameter$("BEGREP")
+	endRep = GetParameter$("ENDREP") \ if not(endRep) endRep = 999
+	tmp$ = ucase$(GetParameter$("AUDIT")) \ if tmp$ = "Y" let auditMode = 1
+	toBrowser = 0
+	try
+		i = Chf(0)
+	else
+		toBrowser = spc(8)
+	end try
+	if toBrowser and toBrowser <> 49 error toBrowser
+	pmask$ = "--,---,--&.&&"
+
+
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! GetParameters
+
+Sub BuildAmalgamatedSort()
+Try
+	! sweep through current open commissions
+	! and build sort file for next sweep
+	comm_key$ = " ",comm_key$
+	comm_key$[1,3] = begRep using "###"
+	do
+		search #commopen_ch,3,1;comm_key$,comm_rec,e
+		if e>2 error 11000
+		if e exit do
+		if val(comm_key$[1,3]) > endRep exit do
+		CommRecType = comm_key$[14,14]
+		read record #commopen_ch,comm_rec,0;sc.;
+		! if not a straight out invoice and or not tied to history
+		! not eligible for amalgamation
+		if CommRecType <> 1 goto SkipCommissionRecord
+		! if paid, not eligible for amalgamation
+		if sc.PaidFlag goto SkipCommissionRecord
+		! if we are part of a back order process (not
+		! the initial order), not eligible
+		invh_key$ = " ",invh_key$
+		let invh_key$[1,2] = "30"
+		let invh_key$[3,12] = sc.Invoice using "##########"
+		search #comm_ch[8],2,1;invh_key$,invh_rec,e
+		! no history - no amalgamation
+		if e goto SkipCommissionRecord
+		call ReadHistoryHeader()
+		! skip all but first instance of backorder process
+		if H0[5] or (OREF[2] and OREF[2] <> H0[7]) goto SkipCommissionRecord
+		if p61$[129,129]="S" ! certain ship to types ONLY
+			if srn[3]=5 goto SkipCommissionRecord ! NO MANUAL ENTRY!
+			! 
+		endif
+		! if we have already amalgamated, not eligile for
+		! additional amalgamation
+		comma_key$ = " ",comma_key$
+		comma_key$[1,3] = sc.Salesman Using "###"
+		comma_key$[4,13] = sc.Invoice Using "##########"
+		comma_key$[14,14] = comm_key$[14,14]
+		tmp$ = comma_key$
+		do
+			search #comma_ch,3,1;comma_key$,comma_rec,e \ if e>2 error 11000
+			if e exit do
+			if comma_key$[1,14] <> tmp$[1,14] exit do
+			! got one - see if it's on amalgamation type
+			call ReadCommAuditRec()
+			if as4[0] = 9 goto SkipCommissionRecord
+		loop
+		! if we get here, we have a record we want to evaluate
+		! for amalgamation
+		Call AddToSort()
+		SkipCommissionRecord: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! BuildAmalgamatedSort
+
+sub AddToSort()
+try
+	! HERE WE GO - SORT KEY
+	! 1-3 is salesrep
+	! 4-9 is customer billto
+	! 10-15 is julian invoice / CM date
+	! 16-17 is type defined as
+	!       02 = direct invoice
+	!	01 = not a direct, but an invoice
+	! 18 is "~" indicates commission record
+	!       "!" idicates summary header rec
+	! FOR COMMISION RECORD
+	! 19-28 is invoice / credit memo number
+	! 29 is commission type
+	! FOR SUMMARY HEADER RECORD
+	! 18-18 = "!"
+	! 19-28 amalgamated sale
+	! 29-38 amalgamated cost
+	! 39-42 number of invoices
+	! AMALGAMATE BY SHIP TO
+	! 1-3 is salesrep
+	! 4-9 is customer billto
+	! 10-10 IS ship type (0-5)
+	!! SRN[3] = 0 USED BILL TO ADDRESS FROM CUST FILE 
+	!! SRN[3] = 1 USED DEFAULT SHIP TO CODE 0         
+	!! SRN[3] = 2 USED A SHIP TO CODE                 
+	!! SRN[3] = 3 SKIPPED OOPS                         
+	!! SRN[3] = 4 SHIP TO ANOTHER CUSTOMER            
+	!! SRN[3] = 5 MANUAL EDIT.                        
+	! 11-16 is Ship number (customer or shipto)
+	! 17-22 is ship date
+	! 23-24 is direct or not
+	! 25 is "~" or "!"
+	! 26-35 is inv/cm number
+	! 36 is comm type
+	! FOR COMMISION RECORD
+	! 26-35 is invoice / credit memo number
+	! 36 is commission type
+	! FOR SUMMARY HEADER RECORD
+	! 25-25 = "!"
+	! 26-35 amalgamated sale
+	! 36-45 amalgamated cost
+	! 46-49 number of invoices
+	!
+	k_sort$ = " ",k_sort$
+	k_sort$[1,3] = sc.Salesman using "###"
+	k_sort$[4,9] = H0[1] Using "######"
+	if p61$[129,129]<>"S" ! Bill to as originally programmed
+		tmp$ = sc.InvCmDate using "&&&&&&"
+		try
+			call DateToJulian(1,tmp$,tmp$,E) ! don't get BE 38 - use E
+			if e exit sub ! bad date - no amalg.
+		else
+			! no date - no amalg.
+			exit sub
+		end try
+		k_sort$[10,15] = val(tmp$) Using "######"
+		If sc.OrderType = 2 Let OT = 2 Else Let OT = 1
+		k_sort$[16,17] = OT Using "##"
+		k_sort$[18,18] = "~"
+		k_sort$[19,28] = sc.Invoice Using "##########"
+		k_sort$[29,29] = comm_key$[14,14]
+		k_sort$[30] = ""
+	Else ! amalgamate by ship to
+		k_sort$[10,10]=Str$(SRN[3]) ! (0-5) as in the file
+		if srn[3]=0 or srn[3]=4 ! CUSTOMER 
+			k_sort$[11,16]=SRN[2] using "######" ! or SRN[1]
+		endif
+		if srn[3]=1 or srn[3]=2 ! ship to
+			let k_sort$[11,16]=SRN[1] using "######" ! or SRN[2]
+		endif
+		tmp$ = H0[10] using "&&&&&&"
+		try
+			call DateToJulian(1,tmp$,tmp$,E) ! don't get BE 38 - use E
+			if e exit sub ! bad date - no amalg.
+		else
+			! no date - no amalg.
+			exit sub
+		end try
+		k_sort$[17,22] = val(tmp$) Using "######"
+		If sc.OrderType = 2 Let OT = 2 Else Let OT = 1
+		k_sort$[23,24] = OT Using "##"
+		k_sort$[25,25] = "~"
+		k_sort$[26,35] = sc.Invoice Using "##########"
+		k_sort$[36,36] = comm_key$[14,14]
+		k_sort$[37] = ""
+	endif	
+	Search #sort_ch,4,1;k_sort$,comm_rec,E
+	If E error 11000
+	! add / update header rec
+	k_sort2$ = k_sort$ ! needs new sort for 129,129=S
+	SALES = 0;COST = 0
+	numInvoices = 0
+	if p61$[129,129]="S"
+		k_sort2$[25,25] = "!"
+		k_sort2$[26,50] = b$
+	else
+		k_sort2$[18,18] = "!"
+		k_sort2$[19,50] = b$
+	endif
+	Search #sort_ch,3,1;k_sort2$,tmp,E
+	If not(e) 
+	    if p61$[129,129]<>"S" and k_sort2$[1,17] = k_sort$[1,17] and k_sort2$[18,18] = "!"
+			! got existing - update
+			SALES = k_sort2$[19,28] \ COST = k_sort2$[29,38] \ numInvoices = k_sort2$[39,42]
+			Search #sort_ch,5,1;k_sort2$,tmp,E
+			If E error 11000
+		Endif
+		if p61$[129,129]="S" and k_sort2$[1,24] = k_sort$[1,24] and k_sort2$[25,25] = "!"
+			! got existing - update
+			SALES = k_sort2$[26,35] \ COST = k_sort2$[36,45] \ numInvoices = k_sort2$[46,49]
+			Search #sort_ch,5,1;k_sort2$,tmp,E
+			If E error 11000
+		endif
+	end if
+	if p61$[129,129]="S"
+		k_sort2$[25,25] = "!"
+		k_sort2$[26,50] = b$
+	Else
+		k_sort2$[18,18] = "!"
+		k_sort2$[19,50] = b$
+	Endif
+	SALES = SALES + sc.OrigInvCMDollars
+	COST = COST + sc.OrigCost
+	numInvoices = numInvoices + 1
+	tmp = 0
+	if p61$[129,129]="S"
+		k_sort2$[26,35] = SALES Using "-######.##"
+		k_sort2$[36,45] = COST Using "-######.##"
+		k_sort2$[46,49] = numInvoices Using "####"
+	else
+		k_sort2$[19,28] = SALES Using "-######.##"
+		k_sort2$[29,38] = COST Using "-######.##"
+		k_sort2$[39,42] = numInvoices Using "####"
+	endif
+	Search #sort_ch,4,1;k_sort2$,tmp,E
+	If E error 11000
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! AddToSort
+
+
+sub BuildAmalgamatedHistory()
+try
+	call ClearAmalgamatedHistory()
+	! sweep through sort 
+	! we just created
+	k_sort$ = " ",k_sort$
+	skipNext = 0
+	do
+		Search #sort_ch,3,1;k_sort$,comm_rec,E \ If E > 2 error 11000
+		If e exit do
+		if skipNext
+			! last header rec was for a single invoice
+			! and this is the invoice record
+			skipNext = 0
+			goto SkipThisOne
+		end if
+		H_Sort$=K_Sort$ ! for further use - a standard(original billto) key
+		if p61$[129,129]="S" ! ship to key - adjust it (added 2 fields - strip 'em)
+			H_Sort$=" ",H_Sort$ ! clear it!
+			let H_Sort$=K_sort$[1,9] ! 10-16 added for shipto
+			let H_Sort$[10]=k_sort$[17] ! rest is same (only ship date instead of inv date)
+		endif
+		If H_sort$[18,18] = "!"
+			! new header
+			SALES = H_sort$[19,28]
+			COST = H_sort$[29,38]
+			numInvoices = H_sort$[39,42]
+			! don't mess around trying to amalgamate
+			! a group of invoices that is only 1!
+			if numInvoices = 1 skipNext = 1
+			goto SkipThisOne
+		End If 
+		! OK - got one
+		invh_key$ = " ",invh_key$
+		invh_key$[1,2] = "30"
+		invh_key$[3,12] = H_sort$[19,28]
+		search #comm_ch[8],2,1;invh_key$,invh_rec,e
+		if e error 11000
+		Call ReadHistoryHeader()
+		Call RecalcCommission()
+		SkipThisOne: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! BuildAmalgamatedHistory
+
+sub ClearAmalgamatedHistory()
+Try
+	tmp$ = " ",tmp$
+	do
+		! loop through hypo header
+		search #comm_ch[17],3,1;tmp$,r,e \ if e>2 error 11000
+		if e exit do
+		tmp2$ = " ",tmp2$
+		let tmp2$[1,10] = tmp$[3,12]
+		do
+			! loop through lines
+			search #comm_ch[18],3,1;tmp2$,r2,e \ if e>2 error 11000
+			if e exit do
+			if tmp2$[1,10] <> tmp$[3,12] exit do
+			! delete
+			search #comm_ch[18],5,1;tmp2$,r2,e \ if e error 11000
+			e=3 \ search #comm_ch[18],1,0;tmp2$,r2,e \ if e error 11000
+		loop
+		! delete
+		search #comm_ch[17],5,1;tmp$,r,e \ if e error 11000
+		e=3 \ search #comm_ch[17],1,0;tmp$,r,e \ if e error 11000
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ClearAmalgamatedHistory
+
+Sub RecalcCommission()
+Try
+	clear s9[]
+	clear r5 ! doesn't need to be set in new commission routine
+	clear cfin[] ! will be read in commission routine
+	H1 = invh_rec
+	if h0[0] = 31 let s9[4] = 241 ! credit memo
+	! let's find the salesrep
+	tmp$ = h0[11] using "###"
+	search #comm_ch[13],2,1;tmp$,v1,e \ if e>1 error 11000
+	if e exit sub ! can't find rep
+	call "mxslscom5",s9[],comm_ch[],r5,h1,v1,cfin[],2,SALES,COST
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! RecalcCommission
+
+sub ClearAmalgamatedCommission()
+Try
+	tmp$ = " ",tmp$
+	do
+		! loop through hypo commission
+		search #commamalg_ch,3,1;tmp$,r,e \ if e>2 error 11000
+		if e exit do
+		! delete
+		search #commamalg_ch,5,1;tmp$,r,e \ if e error 11000
+		e=3 \ search #commamalg_ch,1,0;tmp$,r,e \ if e error 11000
+	loop
+	tmp$ = " ",tmp$
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ClearAmalgamatedCommission
+
+Sub CreateAmalgamatedCommission()
+Try
+	call ClearAmalgamatedCommission()
+	! loop through newly created history
+	invh_key$ = " ",invh_key$
+	do
+		search #comm_ch[17],3,1;invh_key$,invha_rec,e \ if e>2 error 11000
+		if e exit do
+		search #comm_ch[8],2,1;invh_key$,invh_rec,e \ if e error 11000
+		call ReadHistoryHeader()
+		call ReadAmalgHistoryHeader()
+		call ReadHistoryTotals()
+		call CreateCommissionRecord()
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CreateAmalgamatedCommission
+
+sub CreateCommissionAdjustments()
+try
+	! loop back through the sort file
+	! and look for the "new" commission
+	! record
+	k_sort$ = " ",k_sort$
+	skipNext = 0
+	do
+		Search #sort_ch,3,1;k_sort$,comm_rec,E \ If E > 2 error 11000
+		If e exit do
+		if skipNext
+			! last header rec was for a single invoice
+			! and this is the invoice record
+			skipNext = 0
+			goto SkipThisOne2
+		end if
+		H_Sort$=k_sort$ ! set for further use
+		if p61$[129,129]="S" ! ship to key - adjust it
+			H_Sort$=" ",H_Sort$ ! clear it!
+			let H_Sort$=K_sort$[1,9] ! 10-16 added for shipto
+			let H_Sort$[10]=k_sort$[17] ! rest is same (only ship date instead of inv date)
+		endif
+		If H_sort$[18,18] = "!"
+			! new header
+			SALES = H_sort$[19,28]
+			COST = H_sort$[29,38]
+			numInvoices = H_sort$[39,42]
+			! don't mess around trying to amalgamate
+			! a group of invoices that is only 1!
+			if numInvoices = 1 skipNext = 1
+			goto SkipThisOne2
+		End If 
+		! OK - got one
+		! find "new" amalgamated commission record
+		comm_key$ = " ",comm_key$
+		comm_key$[1,3] = H_sort$[1,3]
+		comm_key$[4,14] = H_sort$[19,29] ! ref# & type
+		search #commamalg_ch,2,1;comm_key$,comm_rec,e
+		if e error 11000
+		Read record #commamalg_ch,comm_rec,0;sca.
+		search #commopen_ch,2,1;comm_key$,comm_rec,e
+		if e error 11000
+		Read record #commopen_ch,comm_rec,0;sc.
+		! sca = new amalgamated commission
+		! sc = current commission
+		if sc.OrigCommDollars >= sca.CommDollars goto SkipThisOne2 ! no decreases!
+		! Call Report Adjustment
+		Call AdjustCommission()
+		k_cust$ = " ",k_cust$
+		k_cust$[1,6] = H_sort$[4,9]
+		rec_cust = filegetcust(e$,comm_ch[5],"=",1,k_cust$,cust.)
+		if rec_cust <= 0
+			clear cust.
+			cust.Name$ = "NOT ON FILE!"
+		end if
+		k_sr$ = " ",k_sr$
+		k_sr$[1,3] = H_sort$[1,3]
+		rec_sr = filegetsslsm(e$,comm_ch[13],"=",1,k_sr$,sr.)
+		if rec_sr <= 0
+			clear sr.
+			sr.Name$ = "NOT ON FILE!"
+		end if
+		!if p61$[129,129]="S" ! we need ship date
+		!Endif  ! no - we use julian date in the key
+		Call PrintLine()
+		SkipThisOne2: !
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CreateCommissionAdjustments
+
+Sub ReadHistoryHeader()
+Try
+	Mat Read #comm_ch[8],invh_rec,0;H0;
+	Mat Read #comm_ch[8],invh_rec,104;H5;
+	Mat Read #comm_ch[8],invh_rec,512;OREF;
+	if p61$[129,129]="S" ! need ship to fields
+		Mat read #comm_ch[11],OREF[4],154;SRN;
+	endif
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadHistoryHeader
+
+Sub ReadAmalgHistoryHeader()
+Try
+	Mat Read #comm_ch[17],invha_rec,278;SLSM;
+	Mat Read #comm_ch[17],invha_rec,318;SCOM;
+	Mat Read #comm_ch[17],invha_rec,348;SMER;
+	Mat Read #comm_ch[17],invha_rec,378;SCST;
+	Mat Read #comm_ch[17],invha_rec,444;HMAT$;
+	Mat Read #comm_ch[17],invha_rec,548;CSPLT;
+	Mat Read #comm_ch[17],invha_rec,568;commsrvchg;
+	Mat Read #comm_ch[17],invha_rec,598;SplitFlag;
+	Mat Read #comm_ch[17],invha_rec,600;CommBase;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadAmalgHistoryHeader
+
+Sub ReadHistoryTotals()
+Try
+	Mat Read #comm_ch[9],OREF[5],8;T2;
+	Mat Read #comm_ch[9],OREF[5],328;TOT;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadHistoryTotals
+
+Sub CreateCommissionRecord()
+try
+	If H5[7] = 6 exit sub ! order type 6
+	IF H5[7]=36 OR H5[7]=37 exit sub ! "EVAP - No Update
+	REFNO=OREF[1]
+	if h0[0] = 31 REFNO=h0[7]
+	For X5 = 0 To 4 ! run through for mult-slsm splits
+		IF SplitFlag=0 AND X5>0 exit sub ! done if no splits
+		If SLSM[X5] = 0 exit sub ! no rep # - no commission
+		clear s1[]
+		clear s2[]
+		clear s3[]
+		clear s4[]
+		clear  s6[]
+		clear cs7[]
+		clear cs9[]
+		clear ocs1[]
+		clear commsrvchg
+		comm_key$ = " ",comm_key$
+		comm_key$[1,3] = SLSM[X5] Using "###"
+		comm_key$[4,13] = REFNO Using "##########"
+		comm_key$[14,14] = "1"
+		if h0[0] = 31 comm_key$[14,14] = "6"
+		Search #commamalg_ch,2,1;comm_key$,commamalg_rec,E \ If E>1 error 11000
+		if not(e)
+			! for splits this record might already exist being built as
+			! part of another salesrep - this is ok - nothing more to
+			! do here
+			goto SkipCommissionBuild
+		end if
+		E = 2 \ Search #commamalg_ch,1,0;comm_key$,commamalg_rec,E \ If E error 11000
+		Search #commamalg_ch,4,1;comm_key$,commamalg_rec,E \ If E error 11000
+		SMAT$ = " ",SMAT$
+		CS7[1] = REFNO;cs7[2]=csplt[x5]
+		if h0[0] = 31 cs7[0] = OREF[1]
+		S1[0] = SLSM[X5];S1[1] = H0[7];S1[2] = SLSM[X5 + 5];S1[3] = H0[8]
+		If SplitFlag=1 ! " was P61$[72,72]="Y" ! "commission Split
+			If X5>0 Let S1[2]=Slsm[5] ! "comm % is only on main slsm
+		Else ! "not splitting one comm $
+			if SplitFlag=0 Let CSPLT[x5]=100 ! "split always 100 to the guy
+		Endif
+		S2[0] = 0;S2[1] = 0
+		S6[0] = 0;S6[1] = 0
+		CS7 = 0 \ if h0[0] = 31 cs7[0] = OREF[1]
+		if SplitFlag <> 2
+			LET cs7[2]=csplt[x5] ! commission split %
+			LET SplitType = 0
+		else
+			let cs7[2] = SLSM[x5+5]
+			Let SplitType = csplt[x5]
+		end if
+		If SplitFlag = -1 Goto L_2762
+		! "on splits - record ttl inv$ in each slsm
+		S2[0] = S2[0] + T2[1];S6[0] = S6[0] + T2[17] ! tot sales / cost $
+		If P9$[35,35] = "Y" Let S2[0] = S2[0] + T2[5] ! inc freight
+		If P9$[36,36] = "Y" Let S2[0] = S2[0] - T2[3] ! inc ord discount
+		S6[1] = S6[1] + T2[18] ! tot average cost
+		If P9$[37,37] = "Y" Let S6[0] = S6[0] + T2[20] ! inc freight cost
+		S6[0] = S6[0] + TOT[2] ! add misc charge cost for profit
+		If P9$[38,38] = "Y" Let S2[0] = S2[0] + T2[6] ! inc other charges
+		S2[0] = S2[0] + TOT[1] ! add misc charge for profit
+		L_2762: SMAT$[1,2] = HMAT$[1,2]
+		! for category splits - sales and costs are only the
+		! amounts specifically for that rep
+		if SplitFlag = -1
+			Let S2[0] = S2[0] + SMER[X5]
+			Let S6[0] = S6[0] + SCST[X5]
+			Let S6[1] = 0
+		end if
+		S2[1] = S2[1] + SCOM[X5] ! commisson rate
+		If H5[7] = 10 Let S1[2] = 0 \ S2[1] = 0 \ S2[0] = 0
+		S3[0] = H5[7]
+		S3[1] = H0[1]
+		S4[0] = ARMONTH
+		ocs1[0] = s2[1]
+		ocs1[1] = s1[2]
+		ocs1[2] = s2[0]
+		ocs1[3] = s6[0]
+		call WriteAmalgCommRec()
+		SkipCommissionBuild: !
+	Next X5
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! CreateCommissionRecord
+
+sub WriteAmalgCommRec()
+try
+	Mat Write #commamalg_ch,commamalg_rec,0;S1
+	Mat Write #commamalg_ch,commamalg_rec,16;S2
+	Mat Write #commamalg_ch,commamalg_rec,28;S3
+	Mat Write #commamalg_ch,commamalg_rec,36;S4
+	Mat Write #commamalg_ch,commamalg_rec,40;S6
+	Mat Write #commamalg_ch,commamalg_rec,52;SMAT$
+	Mat Write #commamalg_ch,commamalg_rec,54;CS7
+	Mat Write #commamalg_ch,commamalg_rec,72;CS9
+	mat write #commamalg_ch,commamalg_rec,112;ocs1
+	MAT WRITE #commamalg_ch,commamalg_rec,100;COMMSRVCHG
+	mat write #commamalg_ch,commamalg_rec,136;SplitFlag
+	mat write #commamalg_ch,commamalg_rec,138;SplitType;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! WriteAmalgCommRec
+
+sub AdjustCommission()
+try
+	! sc. is current commission record
+	! origCommission is original commission dollars
+	! sca. is amalgamated commission record
+	! do the bulk of the processing here
+	commAdjust = sca.CommDollars - sc.OrigCommDollars
+	let comma_key$=" ",comma_key$
+	let comma_key$[1,3] = sc.Salesman using "###"
+	let comma_key$[4,13] = sc.Invoice using "##########"
+	let comma_key$[26,26]=H_sort$[29,29] ! type 1 or 6
+	chk_auditrecord: !
+	LET comma_key$[14,15]=TIM(8) USING "&&"   !"year
+	LET comma_key$[16,17]=TIM(9) USING "&&"   !"month
+	LET comma_key$[18,19]=TIM(10) USING "&&"  !"date
+	LET comma_key$[20,21]=TIM(11) USING "&&"  !"hour
+	LET comma_key$[22,23]=TIM(12) USING "&&"  !"minute
+	LET comma_key$[24,25]=TIM(13) USING "&&"  !"second
+	SEARCH #comma_ch,2,1;comma_key$,comma_rec,E
+	IF NOT(E)
+		SIGNAL 3,20
+		goto chk_auditrecord:
+	ENDIF
+	clear AS1[]
+	clear AS2[]
+	clear AS3[]
+	clear source$
+	clear as_$
+	clear AORIGCOMM
+	clear as4[0]
+	clear as5[]
+
+	LET AS1[0]=sc.Salesman
+	let AS1[1]=val(comma_key$[26,26])
+	let AS1[2]=0;AS1[3]=0
+	LET AS2[0]=sc.CustCode
+	LET AS2[1]=GetUIDRec(e$, intCo, userid$)
+	LET AS3[0]=sc.CommDollars
+	LET AS3[1]=sc.CommDollars + commAdjust
+	LET AS3[2]=sc.Invoice
+	LET AS3[3]=sc.Order
+	LET AS3[4]=comma_key$[14,19]  !"yymmdd
+	LET AS3[5]=comma_key$[20,25]  !"hhmmss
+	let source$="450amalg"+b$
+	let as_$="COMMISSION ADJUSTMENT DUE TO AMALGAMATION"
+	let AORIGCOMM=sc.OrigCommDollars
+	let as4[0] = 9
+	let as4[1] = 0
+	let as5[0] = sc.CommPercent
+	let as5[1] = (as3[1] / (sc.InvCMDollars - sc.CostLoadedFrght)) * 100
+	let as5[2] = sc.InvCMDollars
+	let as5[3] = sc.InvCMDollars
+	let as5[4] = sc.CostLoadedFrght
+	let as5[5] = sc.CostLoadedFrght
+	let as5[6] = 0
+	if not(auditMode)
+		!"Insert New Audit key
+		LET E=2 \ SEARCH #comma_ch,1,0;comma_key$,comma_rec,E
+		IF E error 11000
+		SEARCH #comma_ch,4,1;comma_key$,comma_rec,E
+		IF E error 11000
+		let comma_key2$=" ",comma_key2$
+		let comma_key2$[1,6]=sc.CustCode using "######"
+		let comma_key2$[7,29]=comma_key$[4,26]
+		LET comma_key2$[30,32] = comma_key$[1,3]
+		SEARCH #comma_ch,4,2;comma_key2$,comma_rec,E \ IF E error 11000
+		call WriteCommAuditRec()
+	end if
+	sc.CommDollars = as3[1]
+	sc.CommPercent = as5[1]
+	if not(auditMode) write record #commopen_ch,comm_rec,0;sc.;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! AdjustCommission
+
+Sub ReadCommAuditRec()
+try
+	Mat Read #comma_ch,comma_rec;AS1
+	Mat Read #comma_ch,comma_rec,8;AS2
+	Mat Read #comma_ch,comma_rec,16;AS3
+	Mat Read #comma_ch,comma_rec,52;SOURCE$
+	Mat Read #comma_ch,comma_rec,62;AS_$
+	Read #comma_ch,comma_rec,122;AORIGCOMM
+	Mat Read #comma_ch,comma_rec,128;AS4
+	Mat Read #comma_ch,comma_rec,132;AS5;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadCommAuditRec
+
+Sub WriteCommAuditRec()
+try
+	Mat Write #comma_ch,comma_rec;AS1
+	Mat Write #comma_ch,comma_rec,8;AS2
+	Mat Write #comma_ch,comma_rec,16;AS3
+	Mat Write #comma_ch,comma_rec,52;SOURCE$
+	Mat Read #comma_ch,comma_rec,62;AS_$
+	Write #comma_ch,comma_rec,122;AORIGCOMM
+	Mat Write #comma_ch,comma_rec,128;AS4
+	Mat Write #comma_ch,comma_rec,132;AS5;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! ReadCommAuditRec
+
+Sub PrintHeader()
+Try
+	if lineNo < maxLines + 1 exit sub ! no need to print a header
+	! need to print one
+	if pageNo > 0 print #0;"\14\" ! form feed
+	pageNo = pageNo + 1
+	Print #0;" - SERP450AMALG -"; Tab (Int(66 - (Len(pageHeading$) / 2)));pageHeading$
+	tmp$ = "" \ Call Time(tmp$)
+	Print #0; Tab 1;"DATE ";tmp$;
+	Print #0; Using "PAGE ###"; Tab 119;pageNo
+	Print #0;""
+	Print #0;"SALES REP";Tab 37;"CUSTOMER BILLTO";Tab 77;
+	if p61$[129,129]="S"
+		Print #0;"SHP DATE";
+	Else
+		Print #0;"INV DATE";
+	Endif
+	Print #0;tab 88;"ORDER TYPE"; tab 100;
+	Print #0;"INVOICE #";tab 110;
+	if p61$[129,129]="S"
+		Print #0;"SHIP TYPE"; Tab 121;"NUMBER";
+	Endif
+	print #0; ""
+	print #0; tab 8; "INV MERCH $"; tab 22; "INV COST $"; tab 36;
+	print #0; "AMALG MERCH $"; tab 50; "AMALG COST $"; tab 64;
+	print #0; "ORIG COMMISN"; tab 78; "NEW COMMISN"; tab 92;
+	print #0; "ADJUSTMENT"; tab 106;
+	print #0; ""
+	print #0;""
+	lineNo = 6
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintHeader
+
+
+
+Sub PrintLine()
+Try
+	if toBrowser
+		tmp$ = ""
+		tmp$ = tmp$,rtrim$(H_sort$[1,3])," - ",rtrim$(sr.Name$),fdel$
+		tmp$ = tmp$,rtrim$(H_sort$[4,9])," - ",rtrim$(cust.Name$),fdel$
+		if p61$[129,129]="S" 
+			let JDate=h_sort$[10,15] ! H0[10] using "&&&&&&"
+			tmp2$=JDate$(Jdate) ! from jul to MM/DD/YYYY
+		else ! could do the same for both options (jdate in sort key)
+			tmp2$ = PDate$(sc.InvCmDate) !  using "&&&&&&"
+			! call formatdate(tmp2$) ! to MM/DD/YYYY
+		Endif
+		tmp$ = tmp$,tmp2$,fdel$
+		if val(H_sort$[16,17]) = 2
+			tmp$ = tmp$,"DIRECT",fdel$
+		else
+			tmp$ = tmp$,"NON-DIRECT",fdel$
+		end if
+		tmp$ = tmp$,str$(sc.Invoice),fdel$
+		tmp$ = tmp$,ltrim$(sc.OrigInvCMDollars using pmask$),fdel$
+		tmp$ = tmp$,ltrim$(sc.OrigCost using pmask$),fdel$
+		tmp$ = tmp$,ltrim$(SALES using pmask$),fdel$
+		tmp$ = tmp$,ltrim$(COST using pmask$),fdel$
+		tmp$ = tmp$,ltrim$(sc.OrigCommDollars using pmask$),fdel$
+		tmp$ = tmp$,ltrim$(sca.CommDollars using pmask$),fdel$
+		tmp$ = tmp$,ltrim$((sca.CommDollars - sc.OrigCommDollars) using pmask$),fdel$
+		If p61$[129,129]="S"
+			tmp2$="BILL TO"
+			x0=k_sort$[10,10] ! k_sort is actual - h_sort is made to look like billto option
+			if x0=1 or x0=2 let tmp2$="SHIP TO"
+			if x0=4 let tmp2$="DIFF CUST"
+			tmp$=tmp$,tmp2$,fdel$ ! ship type
+			tmp$=tmp$,k_sort$[11,16],fdel$ ! ship number
+		Endif
+		call addtostr(e$,rstr$,tmp$+rdel$)
+	else
+		call PrintHeader()
+		print #0;ltrim$(H_sort$[1,3])+" - "+rtrim$(sr.Name$);
+		print #0;tab 37;ltrim$(H_sort$[4,9])+" - "+rtrim$(cust.Name$);
+		!tmp2$ = sc.InvCmDate using "&&&&&&"
+		!call formatdate(tmp2$)
+		if p61$[129,129]="S" ! uses ship date (does not read invh so use jul date in key)
+			let JDate=h_sort$[10,15] ! H0[10] using "&&&&&&"
+			tmp2$=JDate$(Jdate) ! from jul to MM/DD/YYYY
+		else ! could do the same for both options (jdate in sort key)
+			tmp2$ = PDate$(sc.InvCmDate) !  using "&&&&&&"
+			! call formatdate(tmp2$) ! let's do MM/DD/YYYY
+		Endif
+		print #0; tab 77;tmp2$; tab 88;
+		if val(H_sort$[16,17]) = 2
+			tmp2$ = "DIRECT"
+		else
+			tmp2$ = "NON-DIRECT"
+		end if
+		print #0; tmp2$; tab 100;
+		print #0; Str$(sc.Invoice); tab 110;
+		If p61$[129,129]="S"
+			tmp2$="BILL TO"
+			x0=k_sort$[10,10] ! k_sort is actual - h_sort is made to look like billto option
+			if x0=1 or x0=2 let tmp2$="SHIP TO"
+			if x0=4 let tmp2$="DIFF CUST"
+			Print #0;tmp2$; ! ship type
+			Print #0; tab 121;k_sort$[11,16]; ! ship number
+		Endif
+		print #0; ""
+		lineNo = lineNo + 1
+		print #0; tab 8; sc.OrigInvCMDollars using pmask$;
+		print #0; tab 22; sc.OrigCost using pmask$;
+		print #0; tab 36; SALES using pmask$;
+		print #0; tab 50; COST using pmask$;
+		print #0; tab 64; sc.OrigCommDollars using pmask$;
+		print #0; tab 78; sca.CommDollars using pmask$;
+		print #0; tab 92; (sca.CommDollars - sc.OrigCommDollars) using pmask$;
+		print #0; tab 106;
+		print #0; ""
+		lineNo = lineNo + 1
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintLine

@@ -1,0 +1,1018 @@
+!
+! 203rf - RF Pick Queue Generation - loosely based on serp203b.odcs - truck order packing.
+!
+! loadsave -w -n 100,10 -o prog/dxport/203rf.dl4 src/203rf.src
+!
+! Some hooks placed in for ERPScheduler, but this is a multi-block ID program for zones
+! and trucks, so it is not complete and requires further discussions.
+!
+
+Declare Intrinsic Sub DateToJulian,VerifyDate,getglobals,date
+Option Default Dialect IRIS1
+!
+include "src/copyright.inc"
+Declare Intrinsic Sub FormatDate
+Declare Intrinsic Sub FindF,String
+Declare Intrinsic Function FindChannel
+External Lib "ubsfunc.dl4"
+Declare External function Buildsort,openfile
+
+External Lib "libgeneral.lib"
+! Declare External Sub getsession,AddToStr,SetOutPut,CreateNetStatus
+Declare External Sub CreateNetStatus
+Declare External Sub ERPCronSuccess
+Declare External Function GetParameter$
+
+include "src/inc/filerfpickq.inc"
+
+! local subs / functions
+Declare Sub OpenFilesReadControl,GetParameters,DayOfWeek
+Declare Sub LoadZones,SelectAndQueueOrders,UnpackHolds,CheckQtyShipped
+Declare Sub RecalcTotalSellAndShip,ReadCustomer,QueueSordlotsForOrder
+Declare Sub ReadOrderHeader,GetWarehouseLocation,DoRASLAllocations
+Declare Function SkipOrder
+Declare Sub ReadOrderLine,ReadProductLocation
+Declare Sub BuildStockBinSort,AddToRfPickQueue,UpdateOnPicklist
+Declare Sub SelectAndQueueIndividualOrders,InitRfPickQueueRec
+
+try
+
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+! ========================== DIMENSION VARIABLES
+
+Dim rfpickq. as rfpickq
+Dim 1%,sortType,reverseStop,exactShip,skipOnHold
+Dim 1%,srt[2],l3[3],S2[1]
+Dim 1%,H4[2],wn1[6],CHOPEN[20]
+Dim 2%,S9[9],L4[3]
+Dim 2%,H0[12],H5[16],S5,X1[20],TRUCK,CURDATE
+Dim 2%,ROADNET,JDDATE,JWDATE
+Dim 3%,locsrt,r[99],ols3[5],itemcntr
+Dim 3%,T9[20],S0[1],T2[25]
+DIM 3%,L7[12],L5[3]
+Dim 3%,SRN[4],SSNUM,tot_sell,tot_sellamt,TOT_ship
+Dim 3%,FILEDISP[2,50],begTruck,endTruck
+Dim s3$[33],k13$[60]
+Dim sortKey$[50],rfQueueKey$[100],k4$[50],L1$[60]
+dim ploc$[20],floc$[6],sloc$[6],tloc$[6]
+Dim BinSortKey$[55],x$[20],t2$[8],Zone$[10],TRUCK$[50]
+Dim K1$[50],K2$[20],K3$[20],tempk2$[20],A1$[156]
+Dim F$[16],P9$[50],chk$[50],k5$[50]
+Dim S1$[118],S2$[20],P61$[256],PICKLIST$[1],LOC$[6]
+dim SRT$[20],TIER$[1],TIEB$[2],indord$[700]
+
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100],msg$[250],pdffilename$[100],mergedir$[200]
+Dim 2%,uport,tmp$[500],tmp2$[500],prid$[2],pmode$[2],custom_customer$[100]
+
+Dim action$[30],options$[30],userid$[8],b$[200],3%
+Dim action1$[30],action2$[30],action3$[30] ! actions for programs
+Dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1000] ! .net delimiters
+Dim WebStr$[1000],Message$[200],blockid$[100]
+b$ = " ",b$
+! Dim U_TRUCK$[1000][10]
+Dim U_ZONE$[1000][10]
+
+dim 3%
+
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+call OpenFilesReadControl()
+call GetParameters()
+if blockid$ = "203rf" and indord ! first block and individual orders
+	blockid$ = "203rf2" ! were not getting second screen
+else ! not indord
+	call LoadZones()
+end if
+
+if blockid$ = "203rf" goto OutEnd:
+!-------------------------------------------------------------
+! FROM HERE FORWARD, MUST BE 203rf2 (SECOND BLOCK ID) *OR*
+! we are from FIRST BLOCK ID, but doing individual orders
+if indord
+	! do individual
+	call SelectAndQueueIndividualOrders()
+
+else
+	! do batches
+	call SelectAndQueueOrders()
+end if
+
+OutEnd: ! ========================== END
+if blockid$ = "203rf" ! set up for next block ID
+	! set up for a call to get the next group of variables
+	Call env(2,"NEXTBLOCK","203rf2")
+	Call dxset("U_ZONES",U_ZONE$[])
+	Call dxset("U_ZONECNT",str$(ZONECNT))
+	Call setoutput(e$,rstr$,1) !1 flag puts 0 status section, puts </page> in
+else ! 2nd block ID, we're done
+	call CreateNetStatus(e$,0,str$(itemcntr)+" items added to unassigned RF Queue",WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+end if
+Else
+  include "src/callmainerrnet.inc"
+End Try
+end
+stop
+!
+!--------------------------------------------------------------
+
+
+!--------------------------------------------------------------
+! INTERNAL SUBROUTINES / FUNCTIONS
+!--------------------------------------------------------------
+
+sub OpenFilesReadControl()
+try
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	blockid$ = rtrim$(GetParameter$("BLOCKID"))
+	! control file already open - read control info
+	Mat Read #1,3,172;CURDATE;
+	Mat Read #1,19,50;P9$; ! "various flags
+	Mat Read #1,61,0;P61$;
+	Mat read #1,115,60;custom_customer$;
+	custom_customer$=UCase$(Trim$(custom_customer$))
+	if p9$[41,41] <> "Y" and P9$[41,41] <> "W"
+		e$ = "This option is valid for RASL only, RASL flag not set!"
+		error 10000
+	end if
+	! other files
+	filedisp[0,2] = 1840 ! ROH
+	filedisp[0,3] = 1856 ! shipto
+	filedisp[0,4] = 1888 ! ROL
+	filedisp[0,5] = -1808 ! cust
+	filedisp[0,6] = -1792 ! prod
+! 	filedisp[0,7] = -1968 ! mess
+! 	filedisp[0,8] = -2128 ! nonstock
+	filedisp[0,9] = -1 ! sortfile
+! 	filedisp[0,10] = -2944 ! sordflen
+! 	filedisp[0,11] = -1824 ! slsm
+! 	filedisp[0,12] = -672 ! msdfle
+	filedisp[0,13] = -2320 !
+	filedisp[0,14] = -1872 ! totals
+! 	filedisp[0,15] = -720 ! custnotes
+	filedisp[0,16] = -1728 ! ccodes
+! 	filedisp[0,17] = -2784 ! hazname
+! 	filedisp[0,18] = -1664 ! entered by
+	filedisp[0,19] = -1312 ! ordkit
+ 	filedisp[0,20] = -480 ! ovrlyparam
+ 	filedisp[0,21] = -1 ! spec scrn
+ 	filedisp[0,22] = -1 ! spec scrn
+! 	filedisp[0,23] = -688 ! division
+	filedisp[0,24] = -2768 ! whinfo
+	filedisp[0,25] = -208 ! prodloc
+! 	filedisp[0,26] = -2352 ! alternate item
+! 	filedisp[0,27] = -1216 ! source file
+! 	filedisp[0,28] = -1744 ! prodwhse
+! 	filedisp[0,29] = -2032 ! misc charges
+! 	filedisp[0,30] = -2112 ! ship list
+	filedisp[0,31] = -2736 ! wh loc 
+! 	filedisp[0,32] = -2272
+	filedisp[0,33] = -1920 ! zone file
+! 	filedisp[0,34] = -2400 ! vendor file
+ 	filedisp[0,35] = -1 ! tag file
+ 	filedisp[0,36] = -1 ! cust ship notes
+ 	filedisp[0,37] = -1 ! contlist
+ 	filedisp[0,38] = -1 ! docdeliv
+ 	filedisp[0,39] = -1 ! fax log file
+ 	filedisp[0,40] = -1 ! email log file
+! 	filedisp[0,41] = -2176 ! sales tax file
+! 	filedisp[0,42] = -928 ! misc
+	!-----------------------------------------------------------------------------
+	! "======================== open files
+	For I = 2 To 42
+		If filedisp[ptype,I] <> -1 and filedisp[ptype,I] <> 0 ! "no file on this channel
+			Read #1,88,Abs(filedisp[ptype,I]);F$;
+			If I <> 20 Or P9$[2,2] = "M"
+				If filedisp[ptype,I] > 0
+					Open #I,F$
+				Else
+					Ropen #I,F$ ! negative for read only
+				End If
+			End If
+		else
+			select case i
+				case 35
+					f$ = "3/SORDROLTAG"+str$(intCO)
+					ropen #i,f$
+				case 36
+					f$ = "2/CUSTSHNOTE"+str$(intCO)
+					ropen #i, f$
+			end select
+		End If
+	Next I
+
+	If P9$[2,2] = "M" ! mfg                                     
+		Mat Read #20,2;N1; \ If N1 Let OVRLY2 = 9
+		Mat Read #20,3;N1; \ If N1 Let OVRLY3 = 9
+		try
+			Read #1,16,32;F$;
+			F1 = 0 \ Open #21,F$ \ If F1 Let OVRLY2 = 0
+			Read #1,16,48;F$;
+			F1 = 0 \ Open #22,F$ \ If F1 Let OVRLY3 = 0
+		else
+			Let F1 = Spc(8)
+		end try
+	End If
+	if custom_customer$="SWP"
+		LET CH_UPCXF=55                                   
+		LET F$="2/upcxref"+STR$(intCO)                        
+		ROPEN #CH_UPCXF,F$                                
+		LET CH_CSTGRP=56                                  
+		LET F$="2/custgrp"+STR$(intCO)                        
+		ROPEN #CH_CSTGRP,F$                               
+	endif
+	rfpctl_ch = openfile(-9602) \ if rfpctl_ch<0 error 42 ! RF PICK CONTROL FILE
+	rfpq_ch = openfile(9603) \ if rfpq_ch<0 error 42 ! RF PICK QUEUE FILE
+	! do sort files
+	ch_sort = buildsort(e$, 25, 0)
+	if ch_sort<0 e$="Error build sortwork!" \ error 10000
+	! READ RF PICK CONTROLS
+	mat read #rfpctl_ch,1,0;sortType;
+	mat read #rfpctl_ch,1,2;reverseStop;
+	mat read #rfpctl_ch,1,4;exactShip;
+	mat read #rfpctl_ch,1,6;skipOnHold;
+	BinSortKey$=" ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"     
+	s9[4]=203
+	S9[9] = 2033
+	S9[5] = 2033
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetParameters()
+try
+
+	IF CUSTOM_CUSTOMER$="ACTION"
+		LET S9[7]=1               
+	ENDIF  
+	LET X1[15]=0                    
+
+
+	indord$ = rtrim$(GetParameter$("INDORD"))
+	if indord$[1,3]>"   "
+		let indord=1
+		if indord$[len(indord$)]<>"," let indord$=indord$+","  ! add a trailing comma
+	else
+		indord=0  ! individual order list
+	end if
+	! if we are doing individual orders,
+	! nothing else matters
+	pickedBy = GetParameter$("PICKEDBY") 
+	if indord
+		exit sub ! all done
+	else
+		! not individual orders
+		! cannot assign a bulk generate
+		if pickedBy
+			e$ = "Cannot assign picked by unless do individual orders."
+			error 10000
+		end if
+	end if
+	!
+	! get the ship date to print for
+	!
+	tmp$ = GetParameter$("u_deliverydate")
+	if tmp$ = ""
+		tmp$=CURDATE using "&&&&&&"
+		call dxset("u_deliverydate", tmp$[3]+tmp$[1,2])
+		e=0
+	else
+		Call date(tmp$,tmp$,6,e)
+	end if
+	if not(e)
+		x$ = tmp$[3,4]+"/"+tmp$[5,6]+"/"+tmp$[1,2]
+		call DateToJulian(1, tmp$)
+		JDDATE=tmp$
+	else
+		e$="Error in date conversion!" \ error 10000
+	end if
+	call DayOfWeek() !!DAY
+
+	!
+	! get the warehouse to print for
+	!
+	wh = GetParameter$("u_whse")
+	if wh < 1 or wh > 99
+		e$ = "Invalid warehouse!" \ error 10000
+	end if
+	If P9$[41,41] = "W"
+		MAT  READ #24,wh-1,122;wn1; ! used for rasl by WH
+		if not(wn1[4])   !"if whse NOT RASL
+			e$ = "Warehouse is not flagged as RASL!" \ error 10000
+		end if
+	end if
+	!
+	! get the reprint flag
+	!
+	s9 = 0 \ tmp$ = ucase$(GetParameter$("u_reprint")) \ if tmp$ = "Y" s9 = 1 
+	s9 = s9 + 1 ! s9 = 1, no, 2, yes 
+	if custom_customer$="GTI" and s9=2
+		let s9=4
+	endif
+	if s9 < 1 or s9 > 99
+		e$ = "Invalid reprint flag!" \ error 10000
+	end if
+
+	!
+	! get the picklist flag
+	!
+	picklist$ = ucase$(GetParameter$("u_picklist"))
+
+	!
+	! get the starting stop number
+	!
+	call dxget("u_startingstop", tmp$) \ ssnum = tmp$
+	if blockid$ = "203top" call dxset("u_startingstop", tmp$)
+
+	!
+	! get the starting order number
+	!
+	s0 = GetParameter$("u_startord")
+
+	!
+	! get the ending order number
+	!
+	s0[1] = GetParameter$("u_endingord")
+	if (s0[1] = 0) s0[1]=999999
+
+	if blockid$ = "203rf2"
+		allZones = 0 \ tmp$ = ucase$(GetParameter$("ALLZONES")) \ if tmp$ = "Y" allZones = 1
+		begTruck = GetParameter$("BEG_TRUCK")
+		endTruck = GetParameter$("END_TRUCK")
+		if endTruck = 0 let endTruck = 999999
+	end if
+
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub DayOfWeek() ! ========================== Day Of Week
+try
+	Z1 = X$[7,8] \ Z2 = X$[1,2] \ Z3 = X$[4,5]
+	If Z1 < 85 Let Z1 = Z1 + 100
+	Z4 = Z2 + 1 \ Z5 = Int(1 / Z4 + .7) \ Z6 = Z1 - Z5 \ Z7 = Z4 + 12 * Z5
+	Z8 = Int(Z7 * 30.6001) + Int(Z6 * 365.25) + Z3 \ Z9 = Z8 - 7 * (Int(Z8 / 7))
+	F = Z9 + 1 \ If F < 1 e$="Error in day conversion!" \ error 10000
+	If F > 7 e$="Error in day conversion!" \ error 10000
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub LoadZones()
+try
+	if blockid$ = "203rf" or allZones ! load all zones if "allZones" selected
+		!
+		! FIRST RUN THROUGH OR ALL ZONES IF SELECTED: LOAD ALL ZONES FOR DELIVERY DATE
+		!
+		zone$=""
+		! =============== SORT THE ZONES THAT SHIP FOR THIS DATE
+		K1$ = " ",K1$
+		do
+			If P61$[34,34] <> "Y"
+				Search #33,3,1;K1$,V1,E \ If E > 2 error 11000
+				If E exit do
+				Mat Read #33,V1,36;T2$;
+				If T2$[F,F] <> "Y" Goto NextZone ! "zone don't ship
+				Zone$ = K1$
+			Else
+				Search #2,3,1;K1$,V1,E \ If E > 2 error 11000
+				If E exit do !"display the trucks that ship
+				X2 = K1$[1,2] \ If X2 > 10 exit do
+				Mat Read #2,V1,0;H0;
+				Mat Read #2,V1,78;H4;
+				Mat Read #2,V1,104;H5;
+				If H4[2] <> WH Goto NextZone
+				If H5[7] = 21 Or H5[7] = 22 Or H5[7] = 5 Or H5[7] = 12 Or H5[7] = 2 Goto NextZone ! "repair order
+				if custom_customer$="SWP" if H5[7]=9 goto NextZone
+				x2 = h0[10]
+				IF X2 AND X2<>999999
+					tmp$=x2 USING "&&&&&&"
+					call DateToJulian(1, tmp$)
+					X2=tmp$
+				end if                          
+				if exactShip
+					If X2 <> JDDATE Goto NextZone ! not shipped, but pick up older ones.
+				else
+					If X2 > JDDATE Goto NextZone ! "Alt <>JDDate " all not yet shipped
+				end if
+				V1 = H0[2]
+				Mat Read #3,V1,126;S2$;
+				Zone$ = S2$[19,20]
+			End If
+			! insert zone
+			sortKey$ = " ",sortKey$ \ sortKey$ = "}",Zone$
+			Search #ch_sort,4,1;sortKey$,V1,E \ If E > 1 error 11000
+		NextZone: !
+		loop
+
+		! ============ LOAD ZONES UP FOR POSSIBLE SELECTION
+		K1$ = "}" \ X = 5
+		ZONECNT=0
+		do
+			Search #ch_sort,3,1;K1$,V1,E \ If E > 2 error 11000
+			If E exit do
+			If K1$[1,1] <> "}" exit do
+			U_ZONE$[ZONECNT]=trim$(k1$[2])
+			ZONECNT = ZONECNT+1
+		loop
+	else
+		!
+		! 2nd RUN THROUGH - RELOAD ALL ZONES SELECTED FROM SCREEN
+		!
+		zonecnt = GetParameter$("u_zonecnt")
+		for i = 0 to zonecnt - 1
+			tmp$ = GetParameter$("zones"+str$(i))
+			if tmp$ <> ""
+				sortKey$ = " ",sortKey$ \ sortKey$ = "}",tmp$
+				Search #ch_sort,4,1;sortKey$,V1,E \ If E > 1 error 11000
+			end if
+		next i
+	end if
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub SelectAndQueueIndividualOrders()
+try
+	do
+		tmp$=indord$[KPOS+1] TO ",":KPOS
+		if kpos = 0 exit do
+		ord=tmp$
+		pass = 0
+		For i = 1 To 4
+			K1$[1,2] = i Using "##" ! "status
+			K1$[3,8] = ord Using "######" ! "order # (6 digit)
+			Search #2,2,1;K1$,V1,E
+			If E > 1 error 11000
+			If Not(E)
+				pass = i ! found it - pass contains status
+				i = 4
+			End If
+		Next i
+		If pass
+			call ReadOrderHeader()
+			if not(SkipOrder())
+				! OK - not skipping this order - let's add it.
+				wh = H4[2]
+				if reverseStop
+					T9 = 0 \ T9 = 9000 - H4[1]
+				else
+					T9 = H4[1]
+				end if
+				call InitRfPickQueueRec()
+				call GetWarehouseLocation()
+				Call DoRASLAllocations()
+				call QueueSordlotsForOrder()
+				call UpdateOnPicklist()
+			end if
+		end if
+	loop
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub SelectAndQueueOrders()
+try
+	K1$ = " ",K1$;K1$[1,2] = S9[0] Using "##"
+	K1$[3] = S0[0] Using "######" ! starting order number
+	Search #2,2,1;K1$,V1,E \ If E > 2 error 11000
+	gotFirst = 0 \ If Not(E) gotFirst = 1
+	do
+		if not(gotFirst)
+			Search #2,3,1;K1$,V1,E \ If E > 2 error 11000
+			If E exit do
+		else
+			gotFirst = 0
+		end if
+		call ReadOrderHeader()
+		!
+		! all kinds of issues with automatically looking
+		! for status 3-4 on reprint if an order range is
+		! selected.  the next check below checks
+		! for order number too high and just exits (in which
+		! case it will never look at add'l statuses). There is
+		! no check for next statuses to make sure order number
+		! is not too low as well
+		!
+! 		if s9[0]=2  ! "task#57578 -If reprint - look for status 2-4
+! 			if h0>4 exit do
+! 		else
+		If H0 > S9[0] exit do ! "hit next status
+! 		end if
+		If H0[7] > S0[1] exit do ! "order # too high
+
+		if SkipOrder() goto skipOrder
+
+		! OK - not skipping this order - let's add it.
+		if reverseStop
+			T9 = 0 \ T9 = 9000 - H4[1]
+		else
+			T9 = H4[1]
+		end if
+		call InitRfPickQueueRec()
+		call GetWarehouseLocation()
+		Call DoRASLAllocations()
+		call QueueSordlotsForOrder()
+		call UpdateOnPicklist()
+	skipOrder: !
+	loop
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub InitRfPickQueueRec()
+try
+	! sort types
+	! 1 = TRUCK/ZONE/STOP/ORDER/RASL BIN/LINE
+	! 2 = TRUCK/STOP/ORDER/RASL BIN/LINE (NO ZONE)
+	clear rfpickq.
+	rfpickq.Spare$ = " ",rfpickq.Spare$
+	rfpickq.VarSortkey$ = " ",rfpickq.VarSortkey$
+	rfpickq.BinSort$ = " ",rfpickq.BinSort$	
+	rfpickq.Truck = S5
+	rfpickq.TruckStop = T9
+	rfpickq.PickedBy = pickedBy
+	rfpickq.Order = H0[7]
+	rfpickq.VarSortkey$[1,6] = rfpickq.Truck Using "######"
+	rfpickq.Zone$ = S2$[19,20]
+	tmp$ = Tim(4) Using "&&&&&&"
+	rfpickq.GenDate = tmp$[5,6],tmp$[1,4] ! YYMMDD
+	rfpickq.GenTime = tim(11) * 10000 + tim(12) * 100 + int(tim(13)) ! HHMMSS
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub ReadOrderHeader()
+try
+	Mat Read #2,V1,0;H0;
+	MAT  READ #2,V1,56;TOT_SELL;
+	MAT  READ #2,V1,104;H5;
+	Mat Read #3,H0[2],8;S1$;
+	Mat Read #3,H0[2],126;S2$;
+	Mat Read #3,H0[2],146;S5;
+	Mat Read #3,H0[2],154;SRN;
+	Mat Read #2,V1,78;H4;
+	Mat Read #14,H0[3],8;T2;
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub UpdateOnPicklist()
+try
+	s1$[118,118] = "2" ! show on picklist
+	Mat write #3,H0[2],8;S1$;
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub DoRASLAllocations()
+try
+	CHOPEN[0]=1;CHOPEN[1]=6;CHOPEN[2]=2;CHOPEN[3]=4 
+	CHOPEN[4]=19;CHOPEN[5]=16
+	CHOPEN[7]=31;CHOPEN[9]=0                        
+
+	TMPS94 = s9[4];TMPS95=s9[5];s9[2] = V1;s9[4] = 203
+	CTRL=1
+	Call "MXRASL5.dl4",into,ctrl,s9[],CHOPEN[]
+	s9[4] = TMPS94
+	s9[5] = tmps95
+	! mxrasl5 closes all channels??
+	Try Open #1,"CNTRL/cntrl" + Str$(intCO) else rem
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetWarehouseLocation()
+try
+	! ===== get whse location info              
+	LET tmp$=wh USING "##";tmp$[3]="  @    "               
+	SEARCH #31,2,1;tmp$,R[31],E \ IF E>1 error 11000    
+	IF E=1
+		LET SRT[1]=2;SRT[2]=3;LOCSRT=0
+	else
+		MAT  READ #31,R[31],40;SRT;                               
+		READ #31,R[31],46;LOCSRT;                                 
+	end if
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub QueueSordlotsForOrder()
+try
+	! sort lines by bin location in sordlot
+	LET K4$=" ",K4$
+	LET K4$=rfpickq.Order USING "######"                             
+	do ! order line loop
+		SEARCH #4,3,1;K4$,R[4],E                                 
+		IF E>2 error 11000                                 
+		IF E=2 exit do                               
+		IF val(K4$[1,6])<>rfpickq.Order exit do
+		! skip repair lines
+		IF K4$[10,10]="B" OR K4$[10,10]="C" OR K4$[10,10]="A" goto NextOrderLine
+
+		call ReadOrderLine()
+
+		! skip zlines
+		if s2[0]=3  goto NextOrderLine ! "zline
+
+		! skip non-product commodity codes
+		if L1$[17,20]="LABR" OR L1$[17,20]="MACH" OR L1$[17,20]="TIME" goto NextOrderLine
+
+		if not(l7[4]) goto NextOrderLine ! nothing shipped!
+
+		! initialize the part of the records
+		! that are line specific
+		rfpickq.Whse = H4[2]
+		if l4[3] rfpickq.Whse = l4[3]
+
+		!
+		! At this point it should be a line we would normally want
+		! to add into the queue, however, it is not allowed if
+		! the order line is already in the active queue anywhere
+		!
+		tmp$ = " ",tmp$
+		tmp$[1,6] = rfpickq.Order using "######"
+		tmp$[7,10] = l3[2] using "####"
+		tmp2$ = tmp$
+		search #rfpq_ch,3,4;tmp$,r_rfpq,e \ if e>2 error 11000
+		if not(e) and tmp$[1,10] = tmp2$[1,10] goto NextOrderLine
+
+		rfpickq.OrderLine = l3[2]
+		rfpickq.Product$ = l1$[1,12]
+		rfpickq.VendProd$ = s3$[1,20]
+		! default number to pick as number being shipped
+		rfpickq.Qty2Pick = L7[4]
+
+		! if line is non-stock
+		IF L3[0]=1
+			let rfpickq.Bin$ = "nonstk"
+			let rfpickq.BinSort$ = "}}}}"+rfpickq.Bin$
+			call AddToRfPickQueue()
+			GOTO NextOrderLine
+		end if
+		
+		if H5[7]=15 and ORef[1] ! "bill and hold, already invoiced(no sordlot rec)
+			call ReadProductLocation()
+			let rfpickq.Bin$ = ploc$[13,18] 
+			let rfpickq.BinSort$ = "}}}}"+rfpickq.Bin$
+			call AddToRfPickQueue()
+			GOTO NextOrderLine
+		endif 
+
+		IF H5[7]=3 ! Indirect
+			call ReadProductLocation()
+			if L3[1]=0 !"stock update flag = "N"
+				LET rfpickq.Bin$ = "nonstk"
+			else
+				rfpickq.Bin$ = ploc$[13,18]
+			endif
+			let rfpickq.BinSort$ = "}}}}"+rfpickq.Bin$
+			call AddToRfPickQueue()
+			goto NextOrderLine 
+		ENDIF 
+		! loop through sordlots for the order line
+		LET K13$=" ",K13$;K13$=K4$[1,9]
+		do
+			SEARCH #13,3,3;K13$,R[13],E \ IF E>2 error 11000   
+			IF K13$[1,9]<>K4$[1,9] OR E exit do ! not same order or line
+			! check to make sure right warehouse for transfers
+			IF H5[7]=16 AND H4[2]<>VAL(K13$[10,11]) goto NextSordlot:
+			IF K13$[30,32]="KIT" GOTO NextSordlot:
+			MAT  READ #13,R[13],60;OLS3; ! need for quantities
+			if not(OLS3[1]) goto NextSordlot: ! nothing to pick
+			rfpickq.Qty2Pick = OLS3[1]
+			rfpickq.Bin$ = K13$[12,17]
+			call BuildStockBinSort()
+			rfpickq.BinSort$ = SRT$[1,10]
+			call AddToRfPickQueue()
+		NextSordlot: !
+		loop
+	NextOrderLine: !
+	loop 
+	LET PLOC$=" ",PLOC$          
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub ReadProductLocation()
+try
+	tmp$ = " ",tmp$
+	floc$ = " ",floc$
+	sloc$ = " ",sloc$
+	tloc$ = " ",tloc$
+	tmp$[1,12] = rfpickq.Product$[1,12] ! "product code
+	do
+		prodloc_loop: !
+		ploc$ = " ",ploc$
+		Search #25,3,1;tmp$,R[25],E
+		If E > 2 error 11000
+		if E or tmp$[1,12] <> rfpickq.Product$[1,12] exit do
+		WHSENO = tmp$[13,14]
+		If WHSENO <> H4[2] Goto NextProdloc
+		Mat Read #25,R[25],0;ploc$;
+		Mat Read #25,R[25],18;PL1;
+		If PL1[1] <> 1
+			If sloc$[1,2] = "  "
+				sloc$ = ploc$[13,18]
+			Else
+				If tloc$[1,2] = "  "
+					tloc$ = ploc$[13,18]
+				End If
+			End If
+		Else
+			If floc$[1,2] = "  "
+				Let floc$ = ploc$[13,18]
+			else
+				if sloc$[1,2] = "  " let sloc$ = ploc$[13,18]
+			end if
+		End If
+	NextProdloc: !
+	loop
+	If floc$[1,2] = "  "
+		floc$ = sloc$
+		sloc$ = tloc$
+	End If
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+! ==============extra routine for location sort           
+sub BuildStockBinSort()
+try
+	LET LOC$=K13$[12,17]
+	IF SRT[1]<2 OR SRT[1]>3 LET SRT[1]=2                                 
+	IF LOC$[1,5]="STOCK" GOTO NoBinOrSort:                                   
+	LET BIN=0 \ IF SRT[1]=2 LET BIN=LOC$[3,5];TIER$=LOC$[6,6]            
+	IF SRT[1]=3 LET BIN=LOC$[4,6];TIER$=LOC$[3,3]                        
+	IF BIN<=0 OR BIN>999 OR FRA(BIN) GOTO NoBinOrSort:                       
+	LET TIEB$="  "                                                       
+	IF LOCSRT=0 GOTO NoBinOrSort:                                            
+	IF LOCSRT=1                                                          
+		LET BIN1=BIN                                                       
+		IF FRA(BIN/2) LET BIN1=BIN+1                                       
+		LET BIN1=BIN1/2                                                    
+		LET X=INT(BIN1/53) \ LET X=X+1                                     
+		LET X1=54-((X-1)*54-BIN1)-54+X                                     
+		LET TIEB$=BinSortKey$[X,X],BinSortKey$[X1,X1]                                    
+	ENDIF                                                                
+	LET SRT$[1,4]=LOC$[1,2],TIEB$                                        
+	IF LOCSRT=2 LET SRT$[5,7]=BIN USING "#&&";SRT$[8,8]=TIER$[1,1]       
+	IF LOCSRT=1 LET SRT$[5,5]=TIER$[1,1];SRT$[6,8]=BIN USING "#&&"       
+	GOTO SortCompleted:  
+
+	NoBinOrSort: ! no bin or sort order as is
+	LET SRT$="   0",LOC$                      
+
+	SortCompleted: !
+	IF LEN(SRT$)<10 LET SRT$=SRT$,"          "
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub ReadOrderLine()
+try
+	MAT  READ #4,R[4],8;L3;                                           
+	MAT  READ #4,R[4],16;L4;                                           
+	mat  read #4,r[4],140;L1$;
+	MAT  READ #4,r[4],168;L7;                                                   
+	MAT  READ #4,R[4],256;S2;      
+	MAT  READ #4,R[4],370;S3$;
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+Function SkipOrder() ! returns 1 if we should skip order, 0 if not
+try
+	IF H5[7]=2 OR H5[7]=5 or H5[7]=9 or H5[7]=11 or H5[7]=12 exit Function 1
+	IF H0[10]=999999 exit Function 1
+	if skipOnHold and T2[21] exit Function 1 ! on hold
+	call UnpackHolds()
+	IF T9[0] exit Function 1 ! "on CREDIT hold, skip
+	IF TOT_SELL=0 AND T2[0]=0 exit Function 1
+	IF TOT_SELL IF T2[1]=0 IF T2[15]=0 IF T2[16]=0 IF T2[17]=0  exit Function 1
+	if not(indord) !individual orders don't check ship date, picklist, etc.
+		LET X2=H0[10]
+		IF X2
+			tmp$=x2 USING "&&&&&&"
+			call DateToJulian(1, tmp$)
+			X2=tmp$
+		end if
+		JWDATE = X2                        
+		if  exactShip 
+			If JWDATE <> JDDATE exit Function 1 ! "don't ship yet
+		else
+			If JWDATE > JDDATE exit Function 1 ! "don't ship yet
+		end if
+		If PICKLIST$ = "Y" And S1$[118,118] <> "2" exit Function 1
+		If PICKLIST$ = "N" And S1$[118,118] = "2" exit Function 1
+		If ROADNET And SRN[0] <> 2 exit Function 1
+		K3$ = " ",K3$ \ K3$ = "}",S2$[19,20]
+		Search #ch_sort,2,1;K3$,V2,E \ If E > 1 error 11000
+		If E exit Function 1 ! "don't ship this zone
+		if s5 < begTruck or s5 > endTruck exit Function 1
+		If WH <> H4[2] exit Function 1 ! "check whse
+		If SSNUM !"starting stop number
+			If H4[1] > SSNUM exit Function 1
+		End If
+	end if
+	! CUSTOM checks to skip the order - need any for standard flags?
+! 	if custom_customer$="MORRISETTE"     
+! 		call CheckQtyShipped()
+! 		if qty_flag=0 exit Function 1
+! 	endif                                
+! 	if custom_customer$="SSI" 
+! 		call RecalcTotalSellAndShip() ! in case of negatives or free goods  
+! 		iF TOT_SELL=0 and TOT_SELLAMT=0 and TOT_SHIP=0 and T2[1]=0 and T2[15]=0 and T2[16]=0 and T2[17]=0 exit Function 1    !"no ship qty
+! 		!"backordered
+! 		IF TOT_SELL=0 AND TOT_SELLAMT=0 AND TOT_SHIP=0 AND T2[0]=0 exit Function 1
+! 	endif
+! 	IF CUSTOM_CUSTOMER$<>"SOUTHJERSEY"                     
+! 		IF PICKLIST$ = "N" AND S1$[118,118]<>" " exit Function 1
+! 	ENDIF                                                  
+! 	IF CUSTOM_CUSTOMER$="OMAHA"   
+! 		LET NOPICK=0                
+! 		call ReadCustomer()
+! 		IF NOPICK exit Function 1
+! 	ENDIF                         
+! 	if custom_customer$="SWP"
+! 		IF H5[7]<>4 AND H5[7]<>15
+! 			IF T2[24]<>0 AND T2[1]=0 exit Function 1
+! 			IF TOT_SELL=0 AND T2[0]=0 exit Function 1
+! 		else 
+! 			if H5[7]=15 		! "cct118928
+! 				IF TOT_SELL=0 exit Function 1
+! 			endif
+! 		endif
+! 	endif
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end Function 0
+
+! UNPACK T2[21] TO T9[x]
+sub UnpackHolds()
+try
+	X2 = T2[21]
+	For K = 0 To 12
+		T9[K] = Sgn(Fra(X2 / 2)) \ X2 = Int(X2 / 2)
+	Next K
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub CheckQtyShipped()
+try
+	! for o/t 4 & 15 check if any shipped - custom for Morrisette
+	LET QTY_FLAG=0;AMT_FLAG=0                                                      
+	LET CHK$=" ",CHK$ \ LET CHK$[1,6]=H0[7] USING "######"                         
+	! search ROL
+	do
+		SEARCH #4,3,1;CHK$,CHK_REC,E                                         
+		IF E exit do
+		LET ORDNUM=CHK$[1,6]                                                           
+		IF ORDNUM<>H0[7] exit do
+		MAT  READ #4,CHK_REC,168;L7;                                                   
+		MAT  READ #4,CHK_REC,32;L5;                                                    
+		IF L7[4] LET QTY_FLAG=1                                                        
+		IF L5[3] LET AMT_FLAG=1                                                        
+	loop
+	IF AMT_FLAG IF NOT(QTY_FLAG) IF H0[0]=1
+		!"================= increase status - custom for Morrisette    
+		LET K2$[1,2]=2 USING "##"                                              
+		LET K2$[3,8]=H0[7] USING "######"                                      
+		SEARCH #2,4,1;K2$,R[2],E 
+		If e > 1 error 11000
+		LET K2$[1,2]=1 USING "##"                                              
+		SEARCH #2,5,1;K2$,R[2],E  
+		If e > 1 Error 11000                                                 
+		LET H0[0]=2                                                            
+		MAT  WRITE #2,R[2],0;H0;                                               
+	end if
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub RecalcTotalSellAndShip()
+try
+	!------------------ custom codes for some customers
+	LET K4$=" ",K4$                                                       
+	LET TOT_SELLAMT=0                                                     
+	LET TOT_SHIP=0                                                        
+	LET K4$=H0[7] USING "######"                                          
+	do ! "thru lines on order                                  
+		SEARCH #4,3,1;K4$,R[4],E 
+		IF E=2 exit do
+		LET SCR=K4$[1,6] 
+		IF SCR<>H0[7] exit do
+		MAT  READ #4,R[4],32;L5;                                              
+		MAT  READ #4,R[4],168;L7;                                             
+		IF L5[3]>0 LET TOT_SELLAMT=TOT_SELLAMT+L5[3] ! count only positive    
+		IF L7[4]>0 LET TOT_SHIP=TOT_SHIP+L7[4] ! count only positive          
+	loop
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub ReadCustomer()
+try
+	LET K5$=" ",K5$;K5$=H0[4] USING "######"                   
+	IF H0[1]<>H0[4] LET K5$=H0[1] USING "######"               
+	SEARCH #5,2,1;K5$,R5,E \  If e > 1 error 11000
+	MAT  READ #5,R5,0;A1$;                                     
+	IF A1$[141,141]="Y"                                        
+		LET NOPICK=1                                             
+		IF H0[0]=1                                               
+			LET TEMPK2$[1,2]=2 USING "##"                          
+			LET TEMPK2$[3,8]=H0[7] USING "######"                  
+			SEARCH #2,4,1;TEMPK2$,V1,E                             
+			IF E error 11000
+			LET TEMPK2$[1,2]=1 USING "##"                          
+			SEARCH #2,5,1;TEMPK2$,V1,E                             
+			IF E error 11000
+			LET H0[0]=2                                            
+			MAT  WRITE #2,V1,0;H0;                                 
+		ENDIF                                                    
+	ENDIF                                                      
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub AddToRfPickQueue()
+try
+	! build variable sort key based on sort type selected
+	rfpickq.VarSortkey$ = " ",rfpickq.VarSortkey$
+	if sortType = 1 or sortType = 2
+		!
+		! VarSortkey$[01,06] = TRUCK 
+		! VarSortkey$[07,08] = ZONE (or blank if sort = 2)
+		! VarSortkey$[09,12] = STOP (could be reverse) 
+		! VarSortkey$[13,18] = ORDER #
+		! VarSortkey$[19,28] = BIN SORT
+		!
+		rfpickq.VarSortkey$[1,6] = rfpickq.Truck using "######"
+		if sortType = 1 rfpickq.VarSortkey$[7,8] = rfpickq.Zone$
+		rfpickq.VarSortkey$[9,12] = rfpickq.TruckStop using "####"
+		rfpickq.VarSortkey$[13,18] = rfpickq.Order using "######"
+		rfpickq.VarSortkey$[19,28] = rfpickq.BinSort$[1,10]
+	end if
+	! variable part of key built
+	! need to see what sequence number we need
+	! use directory 3 to get a sequence number,
+	! it is picked by (will always be 0 for new)
+	! and the squence number
+	tmp$ = " ",tmp$
+	tmp$[1,2] = rfpickq.Whse using "##"
+	tmp$[3,6] = rfpickq.PickedBy using "####"
+	tmp$[7,16] = "9999999999"
+	search #rfpq_ch,2,3;tmp$,r_rfpq,e \ if e>1 error 11000
+	if not(e) ! not good!  no sequence numbers left
+		e$ = "No more sequence numbers left to add to queue - fatal error!"
+		error 10000
+	end if
+	search #rfpq_ch,6,3;tmp$,r_rfpq,e \ if e>2 error 11000
+	if e ! nothing on file yet
+		rfpickq.Sequence = 10
+	else ! something on file
+		if val(tmp$[7,16]) + 10 < 9999999999
+			rfpickq.Sequence = val(tmp$[7,16]) + 10
+		else
+			rfpickq.Sequence = val(tmp$[7,16]) + 1
+		end if
+	end if
+	r_rfpq = 0
+	r_rfpq = fileupdaterfpickq(e$,rfpq_ch,"a",r_rfpq,rfpickq.)
+	if r_rfpq < 0
+		e$ = "ERROR ADDING rfpickq RECORD: "+str$(r_rfpq)+" "+e$
+		error 10000
+	end if
+	itemcntr = itemcntr + 1
+else ! main subroutine try
+	include "src/callsuberr.inc"
+end try
+end sub
+

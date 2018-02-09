@@ -1,0 +1,419 @@
+! >>> Program mx013f3
+!
+! description Dayend- Converts Future Order type 5 to type 1 - allocated qty on orders for lines
+! loadsave -w -n 100,10 -o prog/dxport/mx013f3.dl4 src/mx013f3.src
+!
+! ERPScheduler Enabled
+!
+include "src/copyright.inc"
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: MAY  8, 2007  14:08:48
+Rem /w2/papermaster/r2005//usr/acct/txc/work/r2005/mx0/mx013f3.src (univ2) [txc] {62920}
+Rem  Copyright (c) 2007 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+! Custom_customer$ code
+! Acme - task#13575/cct224115 - for o/t=5(future), allocate date before actual 
+!                allocation date in order(day minus 1).Once order is allocated,
+!                to status=2 (as all orders go in at status 2) and set ship date
+!                to allocation date plus 1)
+
+include "src/inc/fileedittrack.inc" ! edit tracking
+
+Declare Intrinsic Sub DateToJulian,InpBuf,String,Time,VerifyDate
+!Option Default Dialect IRIS1
+External Lib "libgeneral.lib"
+Declare External Sub suberr,mainerr,GetSession,AddToStr,SetOutput,CreateNetStatus
+External Lib "libprodwh.lib"   
+Declare External Sub mxwhcreate
+External Lib "libedittrack.lib"   
+Declare External Sub MakeEdittrack
+External Lib "ubsfunc.dl4"
+Declare External Function OpenMySQLMirror
+Include "src/inc/sql_prod.inc"
+Rem MX013F3     ALLOCATE QTY ON ORDER FOR LINES
+Rem
+Rem AUTHOR: DD
+Try
+Enter IntCo,rstr$,Message$,eof,r8,h5[],j1 
+!If Err 0 Gosub ERR_TRAP
+Dim ETR. as edittrack ! EDITTRACKING
+Dim 2%,S9[9],3%,R5,H1,V1,CFIN[8],PASSINFO[20]
+!Chain Read R8,H5,J1
+dim 2%,HH5[16]
+Dim 1%,L3[3],H4[2],W1[2],W0[3],WH8[47],WHSE,CH[24],UN[2],EUN[2],fchan[10]
+Dim 2%,H0[12],L4[3],B[24],W2[9],WH7[3],W7[5],SHIPDATE,WHBLD[2]
+Dim 3%,S7[12],A[33],W3[24],W5[25],WH9[23],PLV[1],WHLV[1]
+Dim K1$[50],K20$[60],W1$[32],A$[156],W2$[16],WHPROD$[12]
+Dim P9$[50],P60$[50],P61$[256],K5$[40],K14$[50],C2$[20],B$[100]
+Dim 2%,DT3[1],JSDATE,JWDATE,SCRATCH$[80],X$[20],3%
+Dim 2%,L6[5],LCO[1],LTAX2
+Dim 3%,L5[3],S3[17],OLM[6],UNF[6],LTAX1,OREF[5]
+Dim 1%,DCLVL,MCTXBL[9],LS2[1]
+Dim 2%,MCODE[9],T1[1],JRNL
+Dim 3%,MCHARGE[9,1],T2[25],TOT[4],TOT1[1],ETNQTY[2],ETOQTY[2]
+dim custom_customer$[30]
+Dim WebStr$[600],e$[500]
+Dim buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+Try close #1 Else Rem
+! #8 order header file
+! #11 order lines file
+! #3 product file
+! #20 prodwhse
+B$=" ",B$
+let x$="cntrl/CNTRL"+STR$(intco)
+open #1,x$
+! ----------------------------------------------
+mat read #1,115,60;custom_customer$;
+custom_customer$ = rtrim$(custom_customer$)
+! ----------------------------------------------
+if custom_customer$="ACME" LET ORIGTYPE=H5[7]
+
+H5[7] = J1
+Mat Read #1,3,188;SHIPDATE;
+X2 = SHIPDATE \ Gosub L_7820 \ X2 = 0
+If X2 Let JSDATE = X2 Else Gosub L_7650
+Mat Read #1,19,50;P9$;
+Mat Read #1,60,50;P60$;
+Mat Read #1,61,0;P61$;
+!If Err 0 Rem
+try Close #18 Else Rem
+Try Close #21 Else Rem
+!If Err 0 Gosub ERR_TRAP
+Read #1,88,928;X$[1,16];
+Open #18,X$
+Read #1,88,1728;X$[1,16];
+Open #21,X$
+sqlChan = OpenMySQLMirror(e$)
+Mat Read #8,R8,0;H0;
+Mat Read #8,R8,78;H4;
+MAT  READ #8,R8,512;OREF;
+if custom_customer$="ACME"
+	if origtype=5 if h5[7]=1 let h0[10]=h5[10]
+endif
+WHSE = H4[2]
+K1$ = H0[7] Using "######"
+X2 = H0[10] \ If H0[10] <> 999999 Gosub L_7820 \ X2 = 0
+JWDATE = X2
+L_2010: Search #11,3,1;K1$,R1,E \ If E > 2 Gosub err_search
+If E Goto L_9000
+X2 = K1$[1,6] \ If X2 <> H0[7] Goto L_9000
+Mat Read #11,R1,16;L4
+Mat Read #11,R1,8;L3
+Mat Read #11,R1,140;C2$
+Mat Read #11,R1,168;S7
+Mat Read #11,R1,256;LS2
+If LS2[0] = 3 Let L3[0] = 1
+If L3[2] > 900 Goto L_2010
+If L3[0] = 1 Goto L_2010
+WHSE = L4[3] \ If WHSE <= 0 Or WHSE > 99 Let WHSE = H4[2]
+If L3[1] = 1 Let X1 = -1 \ Gosub L_2700
+!! EDITTRACK
+LET ETOQTY[0]=s7[2] ! orig order qty   
+LET ETOQTY[1]=s7[4] ! orig ship qty    
+LET ETOQTY[2]=s7[3] ! orig bo qty  
+L3[1] = 1
+If C2$[17,20] = "LABR" Or C2$[17,20] = "TIME" Or C2$[17,20] = "MACH" Let L3[1] = 0
+If H5[7] = 2 Or H5[7] = 5 Or H5[7] = 7 Let L3[1] = 0
+If L3[1] = 1 ! "now update avail/ship
+  Gosub CHK_AVAIL
+  X1 = 1 \ Gosub L_2700
+End If 
+Mat Write #11,R1,8;L3;
+Goto L_2010
+L_2700: Rem UPDTE
+If L3[0] Return 
+If X1 = 0 Return 
+If L3[1] = 0 Return 
+Mat Read #3,L4,0;A$
+Mat Read #3,L4,256;A
+Mat Read #3,L4,156;B
+Mat Read #3,L4,990;PLV
+A[3] = A[3] + ((S7[4]) * X1)
+If JSDATE >= JWDATE ! "SHIPDATE>=H0[10]
+  Let PLV[0] = PLV[0] + ((S7[4]) * X1) 
+End If 
+If JSDATE < JWDATE ! " SHIPDATE<H0[10]
+  Let PLV[1] = PLV[1] + ((S7[4]) * X1)
+End If 
+Mat Write #3,L4,256;A;
+Mat Write #3,L4,990;PLV
+if sqlChan >= 0 ! MySQL enabled and channel opened
+	e = prod_UpdateSQLFromDL4(e$, intCo, a$[140,151], sqlChan, 3)
+	if e <> 1 ! returns the number of records add/updated/deleted
+		gosub ERR_SEARCH
+	end if
+end if
+Gosub L_5000
+Return 
+L_5000: Rem "===================================== prodwhse file
+K20$ = " ",K20$
+K20$[1,12] = A$[140,151]
+K20$[13,14] = WHSE Using "##"
+Search #20,2,1;K20$,R20,E \ If E > 1 Gosub err_search
+If E = 1 Gosub L_5150
+L_5060: Gosub L_5800
+W3[2] = W3[2] + (S7[4] * X1)
+If JSDATE >= JWDATE ! "SHIPDATE>=H0[10]
+  Let WHLV[0] = WHLV[0] + ((S7[4]) * X1)
+End If 
+If JSDATE < JWDATE ! " SHIPDATE<H0[10]
+  Let WHLV[1] = WHLV[1] + ((S7[4]) * X1) 
+End If 
+Gosub L_5900
+Return 
+L_5150: Rem "========= create new record
+WHPROD$[1,12] = A$[140,151];WHBLD[0] = 20;WHBLD[1] = WHSE;WHBLD[2] = B[24]
+!Call "MXWHCREATE",WHPROD$,WHBLD[]
+Call mxwhcreate(e$,IntCo,WHProd$,Whbld[])
+e$ = ""                 
+R20 = WHBLD[2];E = 0;WHBLD[2] = 0
+Return 
+L_5800: Rem "======================================= read prodwhse rec
+Mat Read #20,R20,78;W3
+Mat Read #20,R20,780;WHLV
+Return 
+L_5900: Rem "======================================= write prodwhse rec
+Mat Write #20,R20,78;W3
+Mat Write #20,R20,780;WHLV;
+Return 
+CHK_AVAIL: Rem "see what's available
+If L3[0] Return 
+If L3[1] = 0 Return 
+QTYORD = S7[3] + S7[4]
+If QTYORD <= 0 Return 
+Mat Read #3,L4,0;A$
+K20$ = " ",K20$
+K20$[1,12] = A$[140,151]
+K20$[13,14] = WHSE Using "##"
+Search #20,2,1;K20$,R20,E \ If E > 1 Gosub err_search
+If E = 1 Gosub L_5150
+Gosub L_5800
+QTYAVL = W3[0] - W3[2]
+If P9$[28,28] = "Y" Let QTYAVL = QTYAVL + W3[1]
+If QTYAVL <= 0 ! "no avail - no shipqty
+  S7[3] = QTYORD
+  S7[4] = 0
+  Goto RETOTLINE
+End If 
+If QTYAVL < QTYORD ! "not enough to ship - bo some
+  S7[4] = QTYAVL
+  S7[3] = QTYORD - QTYAVL
+End If 
+If QTYAVL >= QTYORD ! "there is enough
+  S7[4] = QTYORD
+  S7[3] = 0
+End If 
+RETOTLINE: Rem "as a qty on line may have changed - need retotal
+Mat Read #11,R1,32;L5
+Mat Read #11,R1,56;L6
+Mat Read #11,R1,250;UN
+Mat Read #11,R1,260;S3
+Mat Read #11,R1,404;OLM
+MAT  READ #11,R1,446;EUN
+Mat Read #11,R1,452;UNF
+Mat Read #11,R1,494;LCO
+Mat Read #11,R1,508;LTAX1
+Mat Read #11,R1,538;LTAX2
+If H5[7] = 8 Or H5[7] = 16 ! "consignment/no price or cost
+  L5[1] = 0;LCO = 0;LCO[1] = 0
+  L5[2] = 0
+  S3[0] = 0;S3[1] = 0
+  L6[1] = 0
+End If 
+If UNF[5] <= 0 Let UNF[5] = 1
+S3[4] = FNR(Abs((L6[4] * S7[4]) / UNF[5]))
+If S3[8] = -3 Let S3[9] = S3[0] Else Let S3[9] = FNR(S3[0] * S7[4])
+If S3[11] = -3 Let S3[10] = S3[1] Else Let S3[10] = FNR(S3[1] * S7[4])
+CHBASE = 0
+If S3[11] = -3 And S7[2] Let CHBASE = (S3[1] / S7[2]) Else Let CHBASE = S3[1]
+NETCOST[0] = L5[1] + CHBASE
+L5[0] = FNR(S7[2] * OLM[3])
+S3[13] = FNR(S7[2] * NETCOST[0])
+If H5[7] = 15 ! "bill and hold
+  L5[3] = FNR(S3[7] * OLM[3])
+  S3[12] = FNR(S3[7] * NETCOST[0])
+Else 
+  L5[3] = FNR(S7[4] * OLM[3])
+  S3[12] = FNR(S7[4] * NETCOST[0])
+End If 
+If UN[1] = -2
+  L5[0] = FNR(OLM[3]) * Sgn(S7[2]);L5[3] = FNR(OLM[3]) * Sgn(S7[4])
+  S3[12] = FNR(NETCOST[0] * Sgn(S7[4]));S3[13] = FNR(NETCOST[0] * Sgn(S7[2]))
+End If 
+If P60$[42,42] = "Y" And L6[5] Let LTAX1 = FNR(L5[3] * (LTAX2 / 100))
+Mat Write #11,R1,32;L5
+Mat Write #11,R1,56;L6
+Mat Write #11,R1,168;S7
+Mat Write #11,R1,260;S3
+Mat Write #11,R1,404;OLM
+Mat Write #11,R1,494;LCO;
+Mat Write #11,R1,508;LTAX1
+Mat Write #11,R1,538;LTAX2;
+!! EDITTRACK
+LET ETNQTY[0]=s7[2] 
+LET ETNQTY[1]=s7[4] 
+LET ETNQTY[2]=s7[3] 
+IF ETOQTY[0]<>ETNQTY[0] or ETOQTY[1]<>ETNQTY[1] or ETOQTY[2]<>ETNQTY[2]
+	GOSUB WRITE_EDITTRACK:
+endif
+Return 
+GET_CUST: Rem "need cust record & cfin
+K5$ = " ",K5$;K5$ = H0[4] Using "######"
+Search #5,2,1;K5$,R5,E \ If E > 1 Gosub ERR_SEARCH
+If Not(E)
+  Mat Read #5,R5,544;CFIN;
+Else 
+  CFIN[8] = 0
+End If 
+Return 
+READ_ROT: Rem "need for call
+Mat Read #10,H0[3],0;T1;
+Mat Read #10,H0[3],8;T2;
+Mat Read #10,H0[3],164;JRNL;
+Mat Read #10,H0[3],168;MCODE;
+Mat Read #10,H0[3],208;MCHARGE;
+Mat Read #10,H0[3],328;TOT;
+Mat Read #10,H0[3],358;MCTXBL;
+Mat Read #10,H0[3],378;DCLVL;
+Mat Read #10,H0[3],386;TOT1;
+Return 
+GET_SLSM: Rem "need
+K14$ = " ",K14$;K14$ = H0[11] Using "###"
+Search #14,2,1;K14$,R,E \ If E > 1 Gosub ERR_SEARCH
+If Not(E)
+  V1 = R
+Else 
+  V1 = 0
+End If 
+Return 
+
+WRITE_EDITTRACK:  REM WRITE OUT CHANGE TO SHIP/BO IS THERE IS A CHANGE
+ETR.OrdNum=H0[7]
+ETR.LineNum=L3[2]
+ETR.Status=H0[0]
+ETR.ProdCode$=C2$[1,12]  !! USUALLY L2$
+ETR.accesscode$="Day End"+b$
+! etoqty
+ETR.OrgQtyOrd = ETOQTY[0]
+ETR.OrgQtyShip= ETOQTY[1]
+ETR.OrgQtyBO = ETOQTY[2]
+! etnqty
+ETR.NewQtyOrd = ETNQTY[0]
+ETR.NewQtyShip = ETNQTY[1]
+ETR.NewQtyBO = ETNQTY[2]
+ETR.ETACTION=1  ! LINE WAS EDITED
+IF L3[0]                      
+   LET ETR.UMSell=EUN[0];ETNONSTOCK=1 
+ELSE                             
+   LET ETR.UMSell=UN[0];ETNONSTOCK=0  
+ENDIF 
+ETR.InvNum=OREF[1]
+ETR.OrgOrdTot=T2[0]
+ETR.CustNum=H0[4]
+ETR.Printer=0
+ETR.Slsm=H0[11]
+ETR.OrgUnitPrice=OLM[3]
+ETR.NewUnitPrice=OLM[3]
+ETR.UMPrice=UN[1]  !! PRICE
+ETR.UMCost=UN[2]  !! COST
+ETR.OrgLoadCost=L5[1]   
+ETR.NewLoadCost=L5[1]   
+ETR.UnitNetWgt=L6[4]	!!UNIT NET WEIGHT
+ETR.NetWgtFact=UNF[5]	!!NET WEIGHT FACTOR
+ETR.SpareNU$ = B$
+FOR J=0 TO 10 \ FCHAN[J]=-1 \ NEXT J
+Call MakeEdittrack(e$,intco,fchan[],ETR.) 
+!CALL "MAKEEDITTRACK9",etorder,etline,etstat,etprod$,etoqty[],etnqty[],etaction,etunit,\
+!	etnonstock,etinvoice,etorigtot,etcust,etprint,etsls,etunitprice[],\
+!	etpunit[],etloadcost[],etwgt[],fchan[]
+RETURN
+
+L_7650: Rem GET JULIAN DATE
+SCRATCH$ = "" \ Call Time(SCRATCH$)
+SCRATCH$[13] = "" \ Call VerifyDate(SCRATCH$,X$,E) \ If E Gosub err_search
+SHIPDATE = X$
+Call DateToJulian(1,X$,X$,E) \ If E Gosub err_search
+X2 = X$[1,5]
+JSDATE = X2
+Return 
+X$ = " ",X$ \ X$[10] = ""
+X$[1,3] = Int(X2 / 10 ^ 2 - Int(X2 / 10 ^ 4) * 10 ^ 2) + 10 ^ 2 Using "###"
+X$[4,6] = Fra(X2 / 10 ^ 2) * 10 ^ 2 + 10 ^ 2 Using "###"
+X$[7,9] = Int(X2 / 10 ^ 4) + 10 ^ 2 Using "###"
+X$[4,4] = "/" \ X$[7,7] = "/" \ X$ = X$[2]
+Return 
+DT3[0] = X2;FLAG = 1;X$ = " "
+Call "JULIANUTIL",DT3[],X$,FLAG
+Return 
+Call VerifyDate(X$,X$,E) \ If E Let X$ = "    "
+X2 = X$[1,6] \ Return 
+L_7820: Rem  CONVERT YYMMDD TO JULIAN (RETURN=NOGOOD, +1=OKAY)
+If X2 <= 0 Return 
+X$ = X2 Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Return 
+X2 = X$[1,5] \ Return 1
+DT3[0] = X2;DT3[1] = X2;FLAG = 0
+Call "JULIANUTIL",DT3[],X$,FLAG
+Return 
+X$ = X2 Using "&&&&"
+DT3[0] = X$[1,2];DT3[1] = X$[3,4]
+If DT3[0] > 67 Let DT3[0] = 1900 + DT3[0]
+If DT3[0] < 68 Let DT3[0] = 2000 + DT3[0]
+X$[1,4] = DT3[0] Using "&&&&";X$[5,6] = DT3[1] Using "&&"
+X2 = X$[1,6] \ Return 
+L_9000: Rem DONE
+Rem we have to now retotal whole order (the one we just processed)
+Gosub GET_CUST
+Gosub READ_ROT
+Gosub GET_SLSM
+Mat Read #8,R8,104;HH5;
+if hh5[7]=5 ! FUTURE ORDERS
+	let hh5[7]=1 ! need to be set to 1 so that ordertotal can calc the delivery charge
+	Mat Write #8,r8,104;HH5;
+endif
+Rem This is the call "ORDERTOTAL" Way (let's do it this way)
+CH[2] = 23;CH[3] = 3;CH[4] = 4;CH[5] = 5
+CH[6] = 20;CH[7] = 9;CH[8] = 8;CH[9] = 10;CH[10] = 11
+CH[11] = 12;CH[12] = 18;CH[13] = 14;CH[14] = 15
+CH[15] = 16;CH[16] = 17;CH[17] = 21
+PASSINFO[0] = 1
+PASSINFO[1] = 1
+PASSINFO[2] = 0
+PASSINFO[3] = 1
+PASSINFO[4] = 0
+If P60$[40,40] = "S" Let PASSINFO[4] = 1
+PASSINFO[5] = 0
+PASSINFO[6] = 1
+PASSINFO[10]=99 ! by arterm misc code calc
+H1 = R8
+S9[0] = 0;S9[2] = 0
+S9[4] = 266                                        
+Call "ordertotal",S9[],H1,PASSINFO[],CH[],T1[],T2[],MCODE[],MCHARGE[],TOT[],MCTXBL[],DCLVL,R5,V1,CFIN[]
+goto outend:
+ERR_SEARCH: Rem                                           
+ ENUM = E;ELINE = Spc(16);CTERR = 0                        
+ If E = 5 Let CTERR = Err(8)                               
+ e$ = "RETURN STATUS",(E + (CTERR * .001))                 
+ e$ = e$,"/ STATEMENT",ELINE," IN PROGRAM " + Msc$(4)      
+ Goto ERR_MSG ! Error 10000                                
+ Return ! End                                              
+ ERR_MSG: ! send message                                   
+ ReturnStatus = 1 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)   
+ Let message$=message$+" Dayend Not Completed. "                                         
+ Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)    
+ Call AddToStr(e$,rstr$,WebStr$)                           
+ Call SetOutPut(e$,rstr$)                                  
+ End                         
+Rem need anything else before exit?
+OUTEND: Rem "std exit
+!End 
+try Close #18 Else Rem
+Try Close #21 Else Rem
+if sqlChan <> -1
+	try close #sqlChan else rem
+end if
+Else
+include "src/callmainerrnet.inc"
+end try
+End ! the whole program

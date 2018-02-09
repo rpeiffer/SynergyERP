@@ -1,0 +1,291 @@
+! libcustupdate.lib
+!
+! supporting library of customer update routines for browser
+!
+! 1.0 09/17/07
+!
+! loadsave -w -n 100,10 -o prog/dxport/libcustupdate.lib src/libcustupdate.src
+!
+include "src/copyright.inc"
+!
+! sub & functions for list library
+!
+!  S  UpdCustCollNt    Update Customer's Collection Call Notes
+
+
+include "src/inc/filecust.inc" ! "customer file
+include "src/inc/filecallnotes.inc" ! collection notes file
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$,Formatdate2$
+Declare External Sub ArBuck,Utage5,UserCntrl
+
+Declare Intrinsic Sub Env,FormatDate,JuliantoDate,DatetoJulian
+Declare Intrinsic Sub programdump
+
+
+! --------------------------------------------------------------------------------------
+External Sub UpdCustCollNt(e$,Cust$,CustRec,CustChan,CtlChan,intCo,ReturnStatus,Message$,cust. as cust)
+  ! Updates the customer's Collection Notes
+  !
+  ! e$         : error message
+  ! Cust$      : Cust #
+  ! CustRec	   : Customer Record #
+  ! CustChan   : customer file channel
+  ! CTLChan    : Control file channel
+  ! intCo      : company id #
+  ! ReturnStatus	: status for .net
+  ! Message$	: Message for .net
+  ! Cust.      : customer data
+try
+!
+   dim 1%,tmp1,Dir,CNC,row,nrow,Cdir,a5[10]
+	dim 2%,tmp2,tmpcnt,ARDate,X2
+    dim 3%,tmp3,CNRec,CurrCall,CurrFDate,CurrDate,CNZRec,Status
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[500]
+    dim tmp$[200],tmp1$[200],WebStr$[500],Message$[200],cmode$[3]
+	dim CustKey$[64],Mode$[2],blank$[100],P61$[256],CNKey$[64]
+	dim P9$[50],P60$[50],P1$[60],X$[10],CNKey1$[64],umode$[3],prgnm$[40]
+	dim MsgUBS$[50],userid$[10],a2$[50]
+!
+	dim CNote. as callnotes
+!	dim cust. as cust  ! "we passed it!
+!
+	! call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$) ! not needed?
+!
+	try
+		read #CTLChan,0,108;ARDate; ! system AR Date
+	else
+		CTLChan=OpenFile(-9999,intCo) \ if CTLChan=-1 Error 42 ! "closed somewhere?
+	end try
+	read #CTLChan,0,108;ARDate; ! system AR Date (for call date)
+	mat read #CTLChan,19,50;p9$; ! system flags
+	mat read #CTLChan,60,50;p60$; ! system flags
+	mat read #CTLChan,61,0;P61$; ! system flags
+	Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	  Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Call UserCntrl(USERID$,A2$,A5[],status,intCo)
+	blank$=" ",blank$
+	prgnm$="libcustupdate.lib/UpdCustCollNt"
+	MsgUBS$=" Please call Universal Business Systems"
+
+    CNC=OpenFile(736,intCo) \ if CNC = -1 Error 42 ! not found = Collection Call Notes
+	! not readonly open - 
+	X2=TIM(6) ! today julian
+	tmp$=JDate$(x2) ! julian to mm/dd/yyyy
+	tmp1$=Formatdate2$(tmp$) ! convert mm/dd/yyyy to yyyymmdd
+	CurrDate=tmp1$[3,8] ! only need yymmdd (can be zero)
+	! We know customer is valid - it's checked in custu
+	! return status & message passed in as:  1 & OK
+	if a5[6]=0
+		returnstatus=0
+		message$="User can not edit notes"
+		goto UCCNDone
+	Endif
+	! check on main data
+	Call DXGet("callmode",cmode$) \ CMode$=UCase$(cmode$)
+	CMode$=RTrim$(CMode$) ! "A = ADD  E=EDIT   D=DELETE
+	If CMode$<>"A" and CMode$<>"E" and CMode$<>"D"
+	  Let ReturnStatus=0
+	  Let Message$="Bad data. Mode="+CMode$
+	Endif
+	Call DXGet("numoflines",tmp$)
+	tmp3=tmp$
+	If tmp3<0 or tmp3>999 ! bad data
+	  Let ReturnStatus=0
+	  Let Message$="Bad data. Numoflines="+Str$(tmp3)
+	Endif
+	Call DXGet("callnumber",tmp$)
+	Let tmp2=tmp$
+	If ReturnStatus=1 and tmp2>0 and tmp2<=99999 ! still okay - call # is 5 digits ONLY
+	 CurrCall=tmp2 ! retain call #
+	 Call DXGet("FUD",tmp$) ! followup date
+	 tmp1$=Formatdate2$(tmp$) ! convert mm/dd/yyyy to yyyymmdd
+	 CurrFDate=tmp1$[3,8] ! only need yymmdd (can be zero)
+	 Select Case CMode$
+
+	  Case "A"
+		Clear CNote. ! add - start clear data
+		Let CNote.CoCallNo=CurrCall ! call#
+		CNote.CustomerCode=Cust.CustomerCode ! cust #
+		CNote.CallDate=CurrDate ! or ARDate ! call date
+		Call DXGet("numoflines",tmp$)
+		Let row=tmp$
+		Let CNote.FollowUpDate=CurrFDate ! same fu for all lines
+		Call DXGet("DTS",tmp1$) ! date & time stamp?
+		CNote.CallNote$=tmp1$+blank$
+		CNote.sLine=0 ! zero is for date/time stamp
+		CNKey$=CNote.CustomerCode Using "######"
+		CNKey$[7]=CNote.CoCallNo Using "#####"
+		CNKey$[12]=CNote.sLine Using "###"
+		mode$="=";Dir=1;nrow=0
+		CNRec=filegetcallnotes(e$,CNC,mode$,dir,CNKey$,CNote.) ! see if there
+		If CNRec<=0 ! okay - add (does not read record if not found above)
+			mode$="a";CNRec=0
+			Status=fileupdatecallnotes(e$,CNC,mode$,CNRec,CNote.)
+			If Status<0 ! means an error
+			  ReturnStatus=0
+			  Message$=e$+" in "+Prgnm$+MsgUBS$ ! message from 'fileupdate'
+			Endif
+			For tmp1=1 to row ! add all message lines
+			  Call DXGet("callmessage"+Str$(tmp1),tmp$)
+			  tmp$=tmp$+blank$ ! blank fill it
+			  for x=1 to len(tmp$) ! need to strip control chars - i guess
+				if tmp$[x,x]<" " or tmp$[x,x]>"~"
+					let tmp$[x,x]=" " ! replace with space?
+				Endif
+			  Next x
+			  If tmp$[1,70]<>blank$[1,70] ! don't add null/blank lines!
+				CNote.CallNote$=tmp$
+				nrow=nrow+1 ! # lines added
+				CNote.sLine=nrow
+				! all other fields remain the same?
+				mode$="a";CNRec=0
+				Status=fileupdatecallnotes(e$,CNC,mode$,CNRec,CNote.)
+				If Status<0 ! means an error
+					ReturnStatus=0
+					Message$=e$+" in "+Prgnm$+MsgUBS$ ! message from 'fileupdate'
+				Endif
+			  Endif ! of text to add
+			Next tmp1
+		Else ! already on file
+		  ReturnStatus=0
+		  Message$="Call "+Str$(CurrCall)+" already on file"
+		Endif
+
+	  !
+	  Case "E"
+		Clear CNote. ! start with clean slate
+		CNote.CoCallNo=CurrCall
+		CNote.CustomerCode=Cust.CustomerCode
+		CNote.CallDate=CurrDate ! or ARDate ! call date
+		Call DXGet("numoflines",tmp$)
+		Let row=tmp$
+		CNote.sLine=0 ! zero is for date/time stamp
+		CNKey$=CNote.CustomerCode Using "######"
+		CNKey$[7]=CNote.CoCallNo Using "#####"
+		CNKey$[12]=CNote.sLine Using "###" ! key for line 0
+		mode$="=";Dir=1
+		CNRec=filegetcallnotes(e$,CNC,mode$,dir,CNKey$,CNote.) ! see if there
+		CNZRec=CNRec ! retain record # for line zero
+		If CNZRec>0 And Row>0 ! updated messages also
+			Let CNote.FollowUpDate=CurrFDate
+			Status=0;umode$="c"
+			Status=fileupdatecallnotes(e$,CNC,umode$,CNRec,CNote.) ! update line 0
+			If Status<0 ! means an error
+			  ReturnStatus=0
+			  Message$=e$+" in "+Prgnm$+MsgUBS$ ! message from 'fileupdate'
+			Endif
+			CNKey1$=CNKey$ ! start AFTER line zero
+			mode$=">";dir=1
+			Do
+				CNRec=filegetcallnotes(e$,CNC,mode$,dir,CNKey1$,CNote.)
+			    If CNRec<0 Or CNKey1$[1,11]<>CNKey$[1,11] Exit Do
+				Status=0;umode$="d"
+				Status=fileupdatecallnotes(e$,CNC,umode$,CNRec,CNote.)
+				If Status<0 ! means an error
+					ReturnStatus=0
+					Message$=e$+" in "+Prgnm$+MsgUBS$ ! message from 'fileupdate'
+				Endif
+			Loop
+			! deleted previous lines 1+, now add back passed lines
+			Read record #CNC,CNZRec,0;CNote.; ! reread record zero
+			nrow=0 ! no. rows/lines
+			For tmp1=1 to row
+				Call DXGet("callmessage"+Str$(tmp1),tmp$)
+				tmp$=tmp$+blank$
+				for x=1 to len(tmp$) ! need to strip control chars - i guess
+					if tmp$[x,x]<" " or tmp$[x,x]>"~"
+						let tmp$[x,x]=" " ! replace with space?
+					Endif
+				  Next x
+				If tmp$[1,70]<>blank$[1,70]
+					CNote.CallNote$=tmp$
+					nrow=nrow+1
+					CNote.sLine=nrow ! no of added lines
+					CNote.CallDate=CurrDate ! or ARDate ! call date
+					! all other fields remain the same?
+					mode$="a";CNRec=0
+					Status=fileupdatecallnotes(e$,CNC,mode$,CNRec,CNote.)
+					If Status<0 ! means an error
+						ReturnStatus=0
+						Message$=e$+" in "+Prgnm$+MsgUBS$ ! message from 'fileupdate'
+					Endif
+				Endif ! message to add (don't add blank lines!)
+			Next tmp1
+		Else ! updated followup only?
+		  If CNZRec>0 ! update followup date ONLY
+			Let CNote.FollowUpDate=CurrFDate ! just want yymmdd
+			Status=0;mode$="c" ! update/change only
+			Status=fileupdatecallnotes(e$,CNC,mode$,CNZRec,CNote.)
+			If Status<0 ! means an error
+			  ReturnStatus=0
+			  Message$=e$+" in "+Prgnm$+MsgUBS$ ! message from 'fileupdate'
+			Endif
+			mode$=">";Dir=1;CNKey1$=CNKey$
+			Do
+			  CNRec=filegetcallnotes(e$,CNC,mode$,dir,CNKey1$,CNote.)
+			  If CNRec<0 Or CNKey1$[1,11]<>CNKey$[1,11] Exit Do
+			  
+			  Status=0;umode$="c"
+			  Let CNote.FollowUpDate=CurrFDate ! just want date changed
+			  Status=fileupdatecallnotes(e$,CNC,umode$,CNRec,CNote.)
+			  If Status<0 ! means an error
+				ReturnStatus=0
+				Message$=e$+" in "+Prgnm$+MsgUBS$ ! message from 'fileupdate'
+			  Endif
+			Loop
+		  Else ! line 0 NOT FOUND
+		    ReturnStatus=0
+			Message$="Call "+Str$(CurrCall)+" not found on Edit"
+		  Endif ! of fu update only
+		Endif ! of what up dating
+
+ 
+ Case "D" ! delete
+		Clear CNote. ! start with clean slate
+		CNote.CoCallNo=CurrCall
+		CNote.CustomerCode=Cust.CustomerCode
+		cnkey$=" ",cnkey$
+		CNKey$=CNote.CustomerCode Using "######"
+		CNKey$[7]=CNote.CoCallNo Using "#####"
+		CnKEY1$=CNKEY$[1,11]
+		let deleteflag=0
+		mode$=">";dir=1
+		Do
+			CNRec=filegetcallnotes(e$,CNC,mode$,dir,CNKey1$,CNote.)
+		    If CNRec<0 Or CNKey1$[1,11]<>CNKey$[1,11] Exit Do
+			Status=0;umode$="d"
+			Status=fileupdatecallnotes(e$,CNC,umode$,CNRec,CNote.)
+			If Status<0 ! means an error
+				ReturnStatus=0
+				Message$=e$+" in "+Prgnm$+MsgUBS$ ! message from 'fileupdate'
+			Endif
+			let deleteflag=deleteflag+1
+		Loop
+		if not(deleteflag) 
+			let returnstatus=0
+			Message$="Call "+Str$(CurrCall)+" not found on Delete"
+		Else ! line 0 NOT FOUND
+		    ReturnStatus=1
+			Message$="Call "+Str$(CurrCall)+" Deleted"
+		 
+		Endif ! of what up dating
+
+	 End Select
+	Else ! bad call number or other main data
+	  If ReturnStatus=1 ! still valid(no other problems precede)
+		ReturnStatus=0
+		Message$="Bad Call Number "+Str$(tmp2)+" passed"
+	  Endif
+	Endif
+	UCCNDone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! UpdCustCollNt
+! --------------------------------------------------------------------------------------

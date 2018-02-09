@@ -1,0 +1,600 @@
+! librebates.lib
+!
+! loadsave -w -n 100,10 -o prog/dxport/librebates.lib src/librebates.src
+! 
+! does a rebates calculation based on parameters sent (taken from rebates program)
+!rebates
+! Author: nate 4/10/95
+! Purpose: To calculate either the system rebate cost, salesman rebate cost,
+!          or both.
+! Updated: nate 6/13/97 -- fix sign reversal in markup/down calculation
+!  convert to an external lib & Call
+!
+! 02/24/2012 - ADD COST GROUP Rebate (this changes param[7,3])
+!
+! this is the new version and is a call from an external lib
+!
+External Sub rebates(e$,parameter[],prodcode$,status,...)
+! e$ = Error messages
+! Parameter[10,4] ! file channel & records
+! prodcode$[12] ! product code
+! status ! 0=ok, 1=Not found 2+ = errors
+! optional debug,dlog$ ! debug 0/1 & debug log name
+! optional rstr$  ! needed for report programs
+
+Try	Enter debug,... Else debug=0
+Try Enter dlog$,... Else dim dlog$[30]
+Try Enter rstr$  Else Dim rstr$[500]
+! if additional (optional) vars needed add ,... to last one & add new here
+!
+!
+include "src/copyright.inc" ! dx
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+External Lib "serpmxload5l.dl4"
+Declare External Sub Mxload5l
+Declare Intrinsic Sub DateToJulian
+!External Lib "oldcalls.lib"
+Try 
+  Declare Intrinsic Function FindChannel,Trim$
+  Declare Intrinsic Sub programdump,env
+  !
+  Dim 1%,VNM2[2] ! ,VNFX,VNBASE
+  Dim 2%,VNM3[1],VGRP ! VNMKUP[3]
+  Dim 3%,vnm1[17],VNM4[2]
+  Dim VNM1$[200],VNM2$[72],VNID$[17],VNM3$[60] !,VNMKUPTYP$[4]
+  dim buttonlist$[5,50],nextlist$[5,100] !error handling variables
+  dim action$[30],options$[30],UserId$[10],tmp$[1000]
+  Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10] ! ,rstr$[2000]
+  Dim P61$[256]
+  Dim a$[156],hz$[90],pr_a2$[30],c1$[32],psn$[20],u3$[60]
+  Dim 1%,llc,pftb[3],PFU1[20],lm[1],upct,pr_po[1]
+  Dim 2%,a2,a3[2],b[24],pr_c4[10],pfco[3],plc[3],psn[1],u2,u4[1]
+  Dim 3%,a1[7],A[33],pf_load2,PFU2[6],plv[1],prparc[3],u3,pfn[1]
+  Dim 3%,LBSOrd,prec[2]
+  !
+  !
+  Dim W1$[32],W2$[24],WH3$[24]
+  Dim 2%,w2[9],W7[14],WH7[3]
+  Dim 1%,W0[3],W1[2],WH8[47],whparc[5],WHRPLN,whlm[1]
+  Dim 3%,w3[24],W5[25],WH9[25],WHLV[2],whmisc[6],WHLBS[1]
+  !
+  !
+  Dim 1%,RCN$[70]
+  Dim 3%,RCN3[3]
+  !
+  !
+  Dim 1%,RB$[12],SPUDA2$[30]
+  Dim 1%,rbum[1],rb[2],rbwh,rbl1[1]
+  Dim 2%,rb1[5],RBMIN,RBCOM
+  Dim 3%,RB3[6],RBN,rb5[2]
+  !
+  Dim 1%,prod$[50],prodwhse$[50],vendtag$[50],rbdtl$[50],rbhdr$[50],cust$[50]
+  Dim 1%,p9$[50],p60$[50],X$[20]
+  Dim 2%,DT3[1],JSDate,JDate[5],START_CONTRACT,FINAL_CONTRACT
+  Dim msg$[256],pgmName$[20],custom_customer$[30]
+  DIM 3%,PREVIOUS_RBSLCOST,PREVIOUS_RBCOST,PREVIOUS_RB_BASECOST         
+  DIM 3%,PREVIOUS_RB_BASECOST_TYPE,PREVIOUS_BASE,PREVIOUS_REC_RCONTRACTH
+  DIM 3%,PREVIOUS_REC_REBATEDTL,PREVIOUS_CONTRACT,orig_vendor                       
+  
+  Dim 3%
+  ! Enter parameter[],prodcode$,status,intCo,debug,dlog$
+  	RptRun=0 ! variable signalling report has run this (web thing)
+   If rstr$<>"" Let RptRun=1
+  ! can't getsession - will wipe out passed data
+  ! call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+  Call DXGet("S_USER.ID",userid$) \ userid$ = Ucase$(userid$) !user id
+   userid$=userid$,"        "
+   Call DXGet("S_USER.APPID",tmp$) !company #
+   try let intCo=Val(tmp$) else let intCo=1 !company #
+
+  debugDetail = 0
+  ! if UCase$(RTrim$(Userid$))="JIMS" let dlog$="tmp/jrbtlog";debug=1;debugdetail=1
+  if dlog$="" let debug=0 ! no file - no log
+  pgmName$ = "rebates"
+  msg$ = "start...program " + pgmName$ \ Gosub Updatelog
+  If Not(parameter[0,0])
+    ch_cntrl = OpenFile(-9999,IntCo) \ if ch_cntrl=-1 Error 42
+  Else 
+    ch_cntrl = parameter[0,0]
+  End If 
+  true = 1;false = 0
+  status = 1
+  LET REBATE_FOUND=FALSE
+  Mat Read #ch_cntrl,19,50;p9$;
+  If p9$[32,32] = "Y" Let whsepr = 1
+  mat read #ch_cntrl,61,0;p61$; ! more flags
+  Mat read #ch_cntrl,115,60;custom_customer$;
+  Custom_customer$=UCASE$(Trim$(custom_customer$))
+  LET LOWEST_FLAG=1
+  if custom_customer$="ATHENS" let LOWEST_FLAG=0 ! "cct228750 - set =0 CUSTOM
+  ch_prod = parameter[1,0]
+  ch_prwh = parameter[2,0]
+  ch_vendtag = parameter[3,0]
+  ch_rcontracth = parameter[4,0]
+  ch_rebatedtl = parameter[5,0]
+  Rec_Prod = parameter[1,1]
+  Rec_PrWh = parameter[2,1]
+  whse = parameter[1,2]
+  customer = parameter[2,2]
+  ignore_customer = parameter[3,2]
+  Current_Date = parameter[4,2]
+  let future=0
+  if Current_Date <0
+  let future=1
+  let Current_Date=abs(Current_Date)
+  endif
+  price_type = parameter[5,2]
+  start_contract = parameter[6,2]
+  final_contract = parameter[7,2]
+  X2 = Current_Date \ Gosub YMD2JUL \ X2 = 0
+  JSDate = X2            
+  Gosub calc_costs
+  parameter[1,1] = Rec_Prod
+  parameter[2,1] = Rec_PrWh
+  parameter[3,1] = REC_VENDTAG
+  parameter[4,1] = rec_rcontracth
+  parameter[5,1] = REC_REBATEDTL
+  If status Let contract = 0
+  parameter[1,3] = rbcost
+  parameter[2,3] = rbslcost
+  parameter[4,3] = rb_basecost
+  parameter[5,3] = rb_basecost_type
+  parameter[6,3] = CstBASE
+  parameter[7,3] = type  ! rebate type (by product, by commodity, etc) NOW 1-8
+  parameter[8,3] = contract
+  IF DEBUG ! SEND FINAL
+	MSG$=" Contract "+Str$(Contract)
+	msg$=msg$+" RCost "+str$(rbcost)
+	msg$=msg$+" RSCost "+str$(rbslcost)
+	gosub updatelog
+  Endif
+ Goto Outend
+! outend is completion of program
+Get_Vendor: !
+orig_vendor=vendor! always set to itself
+vendtag$ = " ",vendtag$
+vendtag$[1,6] = vendor Using "######"
+Search #ch_vendtag,2,1;vendtag$,REC_VENDTAG,E
+If Not(E)
+  !
+  Mat Read #ch_vendtag,REC_VENDTAG,0;VNM1$
+  Mat Read #ch_vendtag,REC_VENDTAG,200;VNM2
+  Mat Read #ch_vendtag,REC_VENDTAG,206;vnm1
+  Mat Read #ch_vendtag,REC_VENDTAG,314;VNM2$
+  Mat Read #ch_vendtag,REC_VENDTAG,386;VNM3
+  Mat Read #ch_vendtag,REC_VENDTAG,394;VNID$
+  Mat Read #ch_vendtag,REC_VENDTAG,398;VNM3$
+  !Mat Read #ch_vendtag,REC_VENDTAG,458;VNFX
+  !Mat Read #ch_vendtag,REC_VENDTAG,460;VNBASE
+  Mat Read #ch_vendtag,REC_VENDTAG,458;VGRP
+  MAT  READ #CH_VENDTAG,REC_VENDTAG,462;VNM4
+  !Mat Read #ch_vendtag,REC_VENDTAG,462;VNMKUP ! MARKUP POSSIBLY? 
+  !Mat Read #ch_vendtag,REC_VENDTAG,482;VNMKUPTYP$ ! NOT ON LAYOUT?
+  !
+  Unlock #ch_vendtag
+  If vnm1[17] < 1 Or vnm1[17] > 6 Let vnm1[17] = 4
+  if vnm4[1] let vendor=vnm4[1]!use rebate contract vendor first
+Else 
+  vnm1[17] = 4
+End If 
+Return 
+Get_ProdWhse: !
+If Rec_PrWh>0 Let E = 0 \ Goto Get_ProdWhse2
+prodwhse$ = " ",prodwhse$
+prodwhse$[1,12] = prodcode$[1,12]
+prodwhse$[13] = whse Using "##"
+Search #ch_prwh,2,1;prodwhse$,Rec_PrWh,E \ If E > 2 error 11000
+Get_ProdWhse2: If E
+  w3 = 0;w2 = 0
+  Mat w3 = Zer
+  Mat w2 = Zer
+Else 
+  !
+  Mat Read #ch_prwh,Rec_PrWh,0;W1$
+  Mat Read #ch_prwh,Rec_PrWh,32;W1
+  Mat Read #ch_prwh,Rec_PrWh,38;w2
+  Mat Read #ch_prwh,Rec_PrWh,78;w3
+  Mat Read #ch_prwh,Rec_PrWh,228;W5
+  Mat Read #ch_prwh,Rec_PrWh,384;whparc
+  Mat Read #ch_prwh,Rec_PrWh,396;W2$
+  Mat Read #ch_prwh,Rec_PrWh,420;W0
+  Mat Read #ch_prwh,Rec_PrWh,428;WH7
+  Mat Read #ch_prwh,Rec_PrWh,444;WH8
+  Mat Read #ch_prwh,Rec_PrWh,540;WH9
+  Mat Read #ch_prwh,Rec_PrWh,696;W7
+  Mat Read #ch_prwh,Rec_PrWh,756;WH3$
+  Mat Read #ch_prwh,Rec_PrWh,780;WHLV
+  Mat Read #ch_prwh,Rec_PrWh,798;WHRPLN
+  Mat Read #ch_prwh,Rec_PrWh,800;whmisc
+  Mat Read #ch_prwh,Rec_PrWh,842;whlm
+  !
+  Unlock #ch_prwh
+  if p61$[125,125]="Y" let W2[3]=B[24] ! always Prod vend
+End If 
+Return 
+Get_Product: !
+If Rec_Prod>0 Let E = 0 \ Goto Get_Product2
+prod$ = " ",prod$
+prod$[1,12] = prodcode$[1,12]
+Search #ch_prod,2,1;prod$,Rec_Prod,E
+Get_Product2: ! 
+If Not(E)
+  !
+  Mat Read #ch_prod,Rec_Prod,0;a$
+  Mat Read #ch_prod,Rec_Prod,156;b
+  Mat Read #ch_prod,Rec_Prod,256;A
+  Mat Read #ch_prod,Rec_Prod,460;a1
+  Mat Read #ch_prod,Rec_Prod,508;a2
+  Mat Read #ch_prod,Rec_Prod,512;PFU1
+  Mat Read #ch_prod,Rec_Prod,554;PFU2
+  Mat Read #ch_prod,Rec_Prod,596;prparc
+  Mat Read #ch_prod,Rec_Prod,620;lm
+  Mat Read #ch_prod,Rec_Prod,624;pr_po
+  Mat Read #ch_prod,Rec_Prod,630;llc
+  Mat Read #ch_prod,Rec_Prod,632;psn$
+  Mat Read #ch_prod,Rec_Prod,652;psn
+  Mat Read #ch_prod,Rec_Prod,660;u2
+  Mat Read #ch_prod,Rec_Prod,664;LBSOrd
+  Mat Read #ch_prod,Rec_Prod,670;u4
+  Mat Read #ch_prod,Rec_Prod,678;u3
+  Mat Read #ch_prod,Rec_Prod,684;u3$
+  Mat Read #ch_prod,Rec_Prod,744;hz$
+  Mat Read #ch_prod,Rec_Prod,834;a3
+  Mat Read #ch_prod,Rec_Prod,846;pftb
+  Mat Read #ch_prod,Rec_Prod,854;upct
+  Mat Read #ch_prod,Rec_Prod,856;c1$
+  Mat Read #ch_prod,Rec_Prod,894;pr_c4
+  Mat Read #ch_prod,Rec_Prod,938;pf_load2
+  Mat Read #ch_prod,Rec_Prod,944;pr_a2$
+  Mat Read #ch_prod,Rec_Prod,974;pfco
+  Mat Read #ch_prod,Rec_Prod,990;plv
+  Mat Read #ch_prod,Rec_Prod,1002;plc
+  Mat Read #ch_prod,Rec_Prod,1018;pfn
+  !
+  Unlock #ch_prod
+Else 
+  status = 4
+  Return 
+End If 
+Return 1
+
+calc_costs: ! main start of program
+Gosub Get_Product \ Return 
+Gosub Get_ProdWhse
+Gosub SetWhse
+If w2[3] Let vendor = w2[3] Else Let vendor = b[24]
+if p61$[125,125]="Y" let vendor = b[24]
+gosub SETPEND
+Gosub Get_Vendor
+gosub calc_load ! added by txc 222930 do mxload5 call to insure that loaded costs are right
+IF debug and debugdetail ! 
+	msg$="PROD "+A$[140,151]+" WH "+Str$(w1[0])+" VEND "+Str$(vendor)
+	gosub updatelog
+	! other data
+	msg$="Cust "+Str$(customer)
+    Msg$=msg$+" IGNC "+Str$(ignore_customer)
+	msg$=msg$+" CDT "+Str$(Current_Date)
+    msg$=msg$+" PTP "+Str$(price_type)
+	msg$=msg$+" SCT "+str$(start_contract)
+	msg$=msg$+" ECT "+Str$(final_contract)
+	gosub updatelog
+Endif
+rebates: !
+rbcost = 0;rbslcost = 0;type = 0;rb_basecost = 0;CONTRACT=0
+LET PREVIOUS_RBCOST=-1
+If ignore_customer = false And customer <= 0
+  status = 3
+  Return 
+End If 
+next_type: !
+type = type + 1 \ If type > 8 Goto exit_rebates
+rbhdr$ = vendor Using "######" + start_contract Using "######"
+next_rebate: !
+Search #ch_rcontracth,3,4;rbhdr$,rec_rcontracth,E \ If E > 2 error 11000
+IF E OR VAL(RBHDR$[1,6])<>VENDOR                  
+  IF REBATE_FOUND                                 
+    LET RBSLCOST=PREVIOUS_RBSLCOST                
+    LET RBCOST=PREVIOUS_RBCOST                    
+    LET RB_BASECOST=PREVIOUS_RB_BASECOST          
+    LET RB_BASECOST_TYPE=PREVIOUS_RB_BASECOST_TYPE
+    LET BASEC=PREVIOUS_BASE                        
+    LET REC_RCONTRACTH=PREVIOUS_REC_RCONTRACTH    
+    LET REC_REBATEDTL=PREVIOUS_REC_REBATEDTL      
+    LET CONTRACT=PREVIOUS_CONTRACT                
+    GOTO EXIT_REBATES:                            
+  ELSE                                            
+    LET RBSLCOST=0                                
+    LET RBCOST=0                                  
+    LET RB_BASECOST=0                             
+    LET BASEC=0                                    
+    LET REC_RCONTRACTH=0                          
+    LET REC_REBATEDTL=0                           
+    LET CONTRACT=0                                
+    GOTO NEXT_TYPE:                               
+  ENDIF                                           
+ENDIF  !"end of rebates for this vendor and rebate
+if debug and debugdetail let msg$="Check key "+RTrim$(rbhdr$) \ gosub updatelog
+contract = rbhdr$[7,12]
+If final_contract And final_contract < contract
+  rbhdr$[7,12] = "999999"
+  Goto next_rebate
+End If 
+cust$ = " ",cust$
+If type < 5 And ignore_customer = false
+  cust$[1,6] = customer Using "######"
+  cust$[7,12] = rbhdr$[7,12]
+  Search #ch_rcontracth,2,2;cust$,rec_rcontracth,E
+  If E Goto next_rebate
+End If 
+If type >= 5
+  cust$[1,6] = price_type Using "PT### "
+  cust$[7,12] = rbhdr$[7,12]
+  Search #ch_rcontracth,2,2;cust$,rec_rcontracth,E
+  If E Goto next_rebate
+End If 
+rbdtl$ = " ",rbdtl$
+If type = 1 Or type = 5
+  rbdtl$[1,12] = prodcode$[1,12];rbdtl$[13] = rbhdr$[7,12]
+End If 
+! 2 or 5 was commodity - now it cost group? No Other way to keep checking level
+if type=2 or type=6
+	let rbdtl$[1,1]="-";rbdtl$[2,12]=a$[116,126];rbdtl$[13]=rbhdr$[7,12]
+endif 
+If type = 3 Or type = 7
+  rbdtl$[1,1] = "*";rbdtl$[2,5] = a$[152,155];rbdtl$[13] = rbhdr$[7,12]
+End If 
+If type = 4 Or type = 8
+  rbdtl$[1,1] = "#";rbdtl$[13] = rbhdr$[7,12]
+End If 
+Search #ch_rebatedtl,2,2;rbdtl$,REC_REBATEDTL,E
+If E > 1 error 11000
+If E Goto next_rebate
+!
+Mat Read #ch_rebatedtl,REC_REBATEDTL,12;rb1
+Mat Read #ch_rebatedtl,REC_REBATEDTL,36;rbum
+Mat Read #ch_rebatedtl,REC_REBATEDTL,40;rb
+Mat Read #ch_rebatedtl,REC_REBATEDTL,118;rbwh
+Mat Read #ch_rebatedtl,REC_REBATEDTL,126;rbl1
+Mat Read #ch_rebatedtl,REC_REBATEDTL,138;rb5
+!
+Unlock #ch_rebatedtl
+if debug and debugdetail let msg$="Rebate line "+Rbdtl$ \ gosub updatelog
+X2 = rb1[2] \ Gosub YMD2JUL \ X2 = 0
+JDate[0] = X2
+X2 = rb1[4] \ If X2 <> 999999 Gosub YMD2JUL \ X2 = 0
+JDate[1] = X2
+If JDate[0] > JSDate Goto next_rebate
+If rb1[4] If JDate[1] < JSDate Goto next_rebate
+If whsepr If rbwh If rbwh <> whse Goto next_rebate
+If type <> 1 And type <> 5 Let rbum[0] = PFU1[rbum[0]];rbum[1] = PFU1[rbum[1]]
+status = 0
+LET REBATE_FOUND=TRUE
+rb_basecost = 0
+rb_basecost_type = vnm1[17]
+If whsepr
+  If vnm1[17] = 1 Let rb_basecost = w3[17]
+  If vnm1[17] = 2 Let rb_basecost = w3[14]
+  If vnm1[17] = 3 Let rb_basecost = w3[15]
+  If vnm1[17] = 4 Let rb_basecost = w3[16]
+  If vnm1[17] = 5 Let rb_basecost = w3[18]
+  if vnm1[17] = 6 let rb_basecost = whmisc[2]
+End If 
+If Not(whsepr) Or rb_basecost = 0
+  If vnm1[17] = 1 Let rb_basecost = b[8]
+  If vnm1[17] = 2 Let rb_basecost = pf_load2
+  If vnm1[17] = 3 Let rb_basecost = b[21]
+  If vnm1[17] = 4 Let rb_basecost = b[10]
+  If vnm1[17] = 5 Let rb_basecost = pr_c4[4]
+  if vnm1[17] = 6 let rb_basecost = prparc[2]
+End If 
+If Not(rb_basecost)
+  If whsepr Let rb_basecost = w3[16] Else Let rb_basecost = b[10]
+  rb_basecost_type = 4
+End If 
+if debug and debugdetail let msg$="Base Cost "+Str$(rb_basecost) \ gosub updatelog
+If rb[0] = 1
+  rbcost = (rb_basecost * ((100 - rb5[0]) / 100))
+End If 
+If rb[0] = 2
+  CNVTU[0] = 0;CNVTU[1] = rbum[0];CNVTU[2] = 2;CNVTA = rb_basecost
+  Gosub CONVERT
+  CNVTA = (AMOUNT - rb5[0]);CNVTU[0] = rbum[0];CNVTU[1] = 0 \ Gosub CONVERT
+  rbcost = AMOUNT
+End If 
+If rb[0] = 3
+  rbcost = rb5[0]
+  IF RB1[5]=2 or RB1[5]=5 !  commodity code or cost group
+	LET CNVTU[0]=RBUM[1];CNVTU[1]=0;CNVTU[2]=2;CNVTA=RBCOST
+	GOSUB CONVERT:                                         
+	LET RBCOST=AMOUNT                                      
+  ENDIF                                                    
+End If 
+if debug and debugdetail let msg$=" Rebate cost "+str$(RBCost) \ gosub updatelog
+If (rbl1[0] = 1 Or rbl1[0] = 2)
+  If whsepr
+    If rbl1[1] = 1 Let CstBASE = w3[18]
+    If rbl1[1] = 2 Let CstBASE = w3[17]
+    If rbl1[1] = 3 Let CstBASE = w3[16]
+    If rbl1[1] = 4 Let CstBASE = rbcost
+    If rbl1[1] = 5 Let CstBASE = w3[14]
+  Else 
+    If rbl1[1] = 1 Let CstBASE = pr_c4[4]
+    If rbl1[1] = 2 Let CstBASE = b[8]
+    If rbl1[1] = 3 Let CstBASE = b[10]
+    If rbl1[1] = 4 Let CstBASE = rbcost
+    If rbl1[1] = 5 Let CstBASE = pf_load2
+  End If 
+End If 
+If rbl1[0] = 1
+  rbslcost = (CstBASE * ((100 + rb5[1]) / 100))
+End If 
+If rbl1[0] = 2
+  CNVTU[0] = 0;CNVTU[1] = rbum[1];CNVTU[2] = 2;CNVTA = CstBASE
+  Gosub CONVERT
+  CNVTU[0] = rbum[1];CNVTU[1] = 0;CNVTU[2] = 2;CNVTA = (AMOUNT + rb5[1])
+  Gosub CONVERT
+  rbslcost = AMOUNT
+End If 
+If rbl1[0] = 3
+  rbslcost = rb5[1]
+  IF RB1[5]=2 or rb1[5]=5 !  commodity code or cost group
+	  LET CNVTU[0]=RBUM[1];CNVTU[1]=0;CNVTU[2]=2;CNVTA=RBSLCOST
+	  GOSUB CONVERT:                                           
+	  LET RBSLCOST=AMOUNT                                      
+  ENDIF                                                      
+End If 
+If rbl1[0] = 4
+  rbslcost = 0
+End If 
+if debug and debugdetail let msg$=" RBslcost "+Str$(rbslscost) \ gosub updatelog
+IF RBCOST<PREVIOUS_RBCOST OR PREVIOUS_RBCOST=-1 OR PREVIOUS_RBCOST=0
+  LET PREVIOUS_RBSLCOST=RBSLCOST                
+  LET PREVIOUS_RBCOST=RBCOST                    
+  LET PREVIOUS_RB_BASECOST=RB_BASECOST          
+  LET PREVIOUS_RB_BASECOST_TYPE=RB_BASECOST_TYPE
+  LET PREVIOUS_BASE=BASEC                        
+  LET PREVIOUS_REC_RCONTRACTH=REC_RCONTRACTH    
+  LET PREVIOUS_REC_REBATEDTL=REC_REBATEDTL      
+  LET PREVIOUS_CONTRACT=CONTRACT                
+ENDIF                                           
+IF NOT(LOWEST_FLAG)
+  LET RBHDR$[7]="999999"                        
+ENDIF                                           
+GOTO NEXT_REBATE:                               
+exit_rebates: ! 
+if not(contract)
+	if vendor<>orig_vendor! was first looking with rebate cont vendor
+		let vendor=orig_vendor
+		goto rebates:
+	end if
+end if
+Return 
+SetWhse: !
+If p9$[32,32] = "Y"
+  X2 = w3[19] + w3[20] + w3[21] + w3[22] + w3[23] + w3[24]
+  If whparc[1] Let pr_c4[3] = whparc[1] Else If X2 Let pr_c4[3] = 0
+  For X2 = 20 To 25
+    If Not(w3[X2 - 1]) Let w3[X2 - 1] = A[X2]
+  Next X2
+  If Not(whlm[0]) And Not(w3[17]) Let whlm[0] = lm[0]
+  If Not(w3[17]) Let w3[17] = b[8]
+  If Not(whlm[1]) And Not(w3[14]) Let whlm[1] = lm[1]
+  If Not(w3[14]) Let w3[14] = pf_load2
+  If Not(w3[15]) Let w3[15] = b[21]
+  If Not(w3[16]) Let w3[16] = b[10]
+  If Not(w3[18]) Let w3[18] = pr_c4[4]
+  If Not(whmisc[2]) Let whmisc[2] = prparc[2]
+  If whparc[0] Let b[22] = whparc[0]
+  If whparc[1] Let pr_c4[3] = whparc[1]
+  If Not(w2[3]) Let w2[3] = b[24]
+  if p61$[125,125]="Y" let W2[3]=B[24] ! always Prod vend
+End If 
+Return 
+!
+
+YMD2JUL: Rem
+If x2<=0 Return
+X$ = X2 Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Return 
+X2 = X$[1,5]
+Return 1
+
+calc_load: REM WHO KNOWS
+IF P9$[32,32]="Y"
+	IF WHLM[0]
+		LET WH=Whse;LTBL=WHLM[0];CNVTA=0
+		GOSUB Loadcall: \ LET W3[17]=CNVTA
+	ENDIF 
+	IF WHLM[1]
+		LET WH=whse;LTBL=WHLM[1];CNVTA=0
+		GOSUB Loadcall: \ LET W3[14]=CNVTA
+	ENDIF 
+ELSE 
+	IF LM[0]
+		LET WH=0;LTBL=LM[0];CNVTA=0
+		GOSUB Loadcall: \ LET B[8]=CNVTA
+	ENDIF 
+	IF LM[1]
+		LET WH=0;LTBL=LM[1];CNVTA=0
+		GOSUB Loadcall: \ LET PF_LOAD2=CNVTA
+	ENDIF 
+ENDIF 
+RETURN 
+
+loadcall: REM IDUNNO
+LET OTYPE=1
+prec[0]=rec_prod
+LET PREC[2]=0-CURRENT_DATE 
+!CALL "MXLOAD5",OTYPE,WH,LTBL,PREC[],CNVTA
+CALL MXLOAD5L(e$,OTYPE,WHSE,LTBL,PREC[],CNVTA,IntCo,rstr$)
+RETURN
+rem look for pending cost changes 
+SETPEND: REM "Set any pending (if needed)
+ IF NOT(FUTURE) RETURN 
+ IF PRPARC[0] LET HLDCOST=B[8];B[8]=PRPARC[0]
+ IF PFTB[0] LET B[22]=PFTB[0]
+ IF PFTB[1] LET PR_C4[3]=PFTB[1]
+ LET X2=PFCO[1] \ GOSUB YMD2JUL: \ LET X2=0
+ LET JDATE[1]=X2
+ IF PFCO[0] AND JDATE[1]<=JSDATE ! "Pending Base and within Eff Date
+   LET HLDCOST=PR_C4[4];PR_C4[4]=PFCO[0]
+ ENDIF 
+ LET X2=PLC[1] \ GOSUB YMD2JUL: \ LET X2=0
+ LET JDATE[1]=X2
+ IF PLC[0] AND JDATE[1]<=JSDATE ! "Pending Last and within Eff Date
+   LET HLDCOST=B[10];B[10]=PLC[0]
+ ENDIF 
+ IF WHSEPR
+   IF WHMISC[0] LET HLDCOST=W3[17];W3[17]=WHMISC[0]
+   IF WHPARC[4] LET WHPARC[0]=WHPARC[4]
+   IF WHPARC[5] LET WHPARC[1]=WHPARC[5]
+   LET X2=W7[3] \ GOSUB YMD2JUL: \ LET X2=0
+   LET JDATE[1]=X2
+   IF W7[2] AND JDATE[1]<=JSDATE LET HLDCOST=W3[18];W3[18]=W7[2]
+   LET X2=W7[13] \ GOSUB YMD2JUL: \ LET X2=0
+   LET JDATE[1]=X2
+   IF W7[7] AND JDATE[1]<=JSDATE LET HLDCOST=W3[16];W3[16]=W7[7]
+ ENDIF 
+ RETURN 
+!
+CONVERT: Rem
+If CNVTU[2] = 3 Or CNVTU[2] = 4 Goto CVTSTARTA
+If (CNVTU[2] = 1 Or CNVTU[2] = 5) And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto CVTDONE
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto CVTDONE
+If CNVTU[2] = 0 Goto CVTSTARTA
+If Not(CNVTA) Let AMOUNT = 0 \ Goto CVTDONE
+CVTSTARTA: Rem
+Call "MXPRCONV5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,e$,rstr$
+! if e$ error 10000 ! NO NO NO!!
+If CNVTU[2] = 0 Goto CVTDONE
+If FLAG Let E = FLAG \ error 11000
+AMOUNT = CNVTA
+CVTDONE: Return 
+!
+Updatelog: !
+If Not(debug) Return 
+System "echo ''" + Msc$(0)+" "+Rtrim$(Userid$) + " " + msg$ + "'' >> " + dlog$
+Return 
+
+Outend: !
+msg$ = "doing...end of " + pgmName$ \ Gosub Updatelog
+Else
+	! this is strictly called as a subroutine
+	! NO mainerr calls allowed
+	!
+	include "src/callsuberr.inc"
+	!If not(RptRun)
+		!include "src/callmainerr.inc"
+	!Else ! reports
+	!	Include "src/callmainerrnet.inc"
+	!Endif
+  !If Spc(8) <> 10000
+    !call env(2,"PROGNAME",msc$(4))
+    !call programdump()
+    !Call suberr(e$,Spc(8),Spc(10),Msc$(2))
+  !End If 
+  !Call mainerr(e$,Spc(8),buttonlist$[],nextlist$[])
+end try
+End Sub! the whole program
+End

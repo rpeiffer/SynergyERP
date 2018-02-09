@@ -1,0 +1,1690 @@
+! serp286.dl4
+!
+! Quote Order Create (PM program 286)
+!
+! 1.0 12/28/2009 - already selected quote - check invty & create order
+!  
+! loadsave -w -n 100,10 -o prog/dxport/serp286.dl4 src/serp286.src
+!
+! 11/2011 - add in po check / entry (as no check in serpqteh at all)
+! 08/2012 - add in adjust ship to available in required - no fail for it
+!
+include "src/copyright.inc"
+! internal files needed
+
+Include "src/inc/fileccodes.inc" ! u/m file
+Include "src/inc/filecommhead.inc" ! commodity
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+Include "src/inc/filewhinfoz.inc" ! wh info file (rec 0 fix)
+include "src/inc/fileprtdefault.inc" ! port default
+Include "src/inc/fileqordhead.inc" ! quote roh,ros,rot files
+Include "src/inc/fileqol.inc" ! lines
+Include "src/inc/fileordhead.inc" ! order roh,ros,rot files
+Include "src/inc/filerolz.inc" ! order lines
+Include "src/inc/filecust.inc" ! customer
+Include "src/inc/fileshiplist.inc" ! shiplist
+Include "src/inc/filesproddesc.inc" ! ns rol
+Include "src/inc/fileqproddesc.inc" ! ns qol
+include "src/inc/fileedittrack.inc" ! edit tracking
+include "src/inc/sql_prod.inc" ! SQL defintions
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$,buildsort
+Declare External Function ChkAltItem$,formatdate2$,getuidrec
+Declare External Sub UserCntrl,getportdefault
+Declare External Function OpenMySQLMirror ! new function
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "libcustlist.lib"
+Declare External Sub CustList
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,UMDList,ProdGroup
+Declare External Function getpravail,getumrec,ChkPrdUM
+
+External Lib "libprodwh.lib"
+Declare External Sub mxwhcreate
+Declare External Function getWhAvail,getmillflg
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "librasl.lib"
+Declare External Sub allocordlot,chkwhrasl
+
+External Lib "libedittrack.lib"
+Declare External Sub MakeEdittrack
+
+External Lib "ubscredck.dl4"
+Declare External Sub GetCredCk
+
+! internal subs/functions 
+
+Declare Intrinsic sub programdump,env,Logic,FindF,Time
+Declare Intrinsic Sub DateToJulian,JulianToDate,Stringsearch
+Declare Intrinsic Function findchannel
+
+Declare Sub Openfiles,updatelog
+Declare Sub SetPRtoRol,LineCopy,StkChk
+Declare Sub Mssgs,Kitcpy,ChkLNQty,shipqtychk
+Declare Sub SDFROMZONE,chkordnum,BudgChk
+Declare Sub UpdtProd,NSUpdt,ShpHist
+Declare Sub ROLTAGCPY,edttrak,resetQOH
+Declare Function chkdatefrmt$,getnxtline
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[3000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200],F1$[16]
+	Dim Prod$[12],IKey$[60],P9$[50],P60$[50],P61$[256],Custom_customer$[30]
+	Dim QMask$[20],PMask$[20],Key1$[60],HKey$[60],work$[100]
+	Dim Key2$[64],KCM$[50],K1$[50],Mode$[2],Cust$[10],OrigPO$[20]
+	Dim TUID$[10],UCA2$[50],KeyQOH$[60],X$[20],KeyQOL$[60]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2],UCA5[10]
+	Dim 2%,Q0[1],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim 1%,X1[9],Chan[50],T9[11],CH[20]
+	Dim 2%,CurDate,custno,cc1[12]
+	Dim 2%,x2[9],sysdate,OrdNum,ShipDate,OrderNo,RASL[2]
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR,SHR,SDR,tmprec[5],WHBld[5]
+	Dim 3%,CNVTA,Amount,X3[20],R[99],Chans[20],FChan[30],FRec[99]
+	Dim 3%,S9[20],t2[24],X4,PSP[9]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/p286.log" ! fields for DEBUG
+
+	DEF FNR(H)=INT(ABS(H)*100+.5)*.01*SGN(H)
+	
+	Dim umc. as ccodes ! u/m file
+	Dim PR. as prod ! product file
+	Dim PW. as prodwhse ! prodwhse file
+	Dim WHI. as whinfo ! wh info file
+	Dim comd. as commhead ! commodity
+	dim prt. as prtdefault ! port defaults
+	dim cust. as cust ! customer
+	dim bcust. as cust ! Billto
+	dim sl. as shiplist 
+	dim qoh. as qoh ! Quote head
+	dim qos. as qos ! Quote ship
+	dim qot. as qot ! Quote totals
+	dim qol. as qol ! Quote lines
+	Dim roh. as roh
+	Dim ros. as ros
+	Dim rot. as rot
+	Dim rol. as rolnew
+	Dim Nstk. as sproddesc ! non-stock file
+	Dim ETR. as edittrack ! EDITTRACKING
+	dim sql_prod. as sql_prod
+
+	! call dxopen() ! already done in oemenu
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp286"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action2$=UCase$(Action2$)
+	ACtion2$=RTrim$(Action2$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	GAct=0 ! action not found
+	if debugdetail
+		dmsg$="SERP286 ACTION1 "+action1$
+		If Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	
+
+	MAT  READ #CTLC,3,172;SysDate;
+	Read #ctlc,3,188;ShipDate; ! for inv levels
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	mat read #ctlc,115,60;custom_customer$;
+	Close #CTLC ! close read only
+	Call OpenFiles() ! open any/all files
+	custom_customer$=UCase$(RTRIM$(custom_customer$))
+	Mat Read #CTLC,115,40;Q0;
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	DEF FNP(X)=SGN(X)*(INT(ABS(X)*10^Q0[1]+.5)/10^Q0[1])
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	TUID$=UserID$+Blank$
+	If Len(TUID$)>10 let TUID$[11]=""
+	Call UserCntrl(TUID$,UCA2$,UCA5[],status,intCo)
+	Let COST_LEV[0]=UCA5[0]
+	Let COST_LEV[1]=UCA5[1]
+	Let COST_LEV[2]=UCA5[2]
+	Let COST_LEV[3]=UCA5[3]
+	Let COMM_LEV=UCA5[4]
+	let rec_uac=GetUIDRec(e$,IntCo,TUID$)
+	call GetPortDefault(e$,IntCO,TUID$,portnum,rec_uac,prt.) ! get port default
+	tmp$=Tim(8) using "&&"
+	tmp$[3]=TIM(9) using "&&"
+	tmp$[5]=TIM(10) using "&&"
+	CurDate=tmp$[1,6] ! yymmdd
+	ReturnStatus=0;ofail=1
+	Message$="ACTION1 NOT FOUND"
+	select case action1$
+	 Case "ORDCREATE" ! ALL IS DONE HERE!		doc=QTOrd-CreateOrder.doc
+		Returnstatus=1
+		Message$="OK"
+		call LineCopy()
+		if debugdetail
+			dmsg$="Order "
+			if ofail dmsg$=dmsg$+"not " Else dmsg$=dmsg$+Str$(roh.ordnum)+" "
+			dmsg$=dmsg$+"Created "+Message$
+			Call updatelog(debug)
+		Endif
+		! send data back to web
+		Clear List$[]
+		List$[0]=bsdel$,"RESULT",fdel$
+		List$[1]="QUOTEID",fdel$,"ORDERID",fdel$,"MESSAGE",fdel$
+		Webstr$=Str$(qoh.OrdNum),fdel$
+		If OFail
+			webstr$=webstr$,"0",fdel$
+			if returnstatus=1 let webstr$=webstr$,"NO ORDER CREATED",fdel$
+			if returnstatus=0 or returnstatus=2 let webstr$=webstr$,"FAILED "+Message$,fdel$
+		Else ! ok
+			webstr$=webstr$,Str$(roh.ordnum),fdel$,"ORDER CREATED",fdel$
+		Endif
+		List$[2]=webstr$
+		List$[3]=esdel$
+		Call addtostr(e$,rstr$,List$[])
+
+		! end of Scanlines
+	end select
+
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+
+  if debugdetail
+		dmsg$="End of Program serp286" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC=OpenFile(9999,intCo) \ If CTLC = -1 Error 42 !control - read/write!
+	CCC=OpenFile(-1728,IntCo) \ IF CCC=-1 Error 42 ! u/m file
+	CMC=OpenFile(-2288,IntCo) \ if CMC=-1 Error 42 ! commodity
+	PRC=OpenFile(1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	WHI=OpenFile(-2768,IntCo) \ if whi=-1 Error 42 ! wh info file (rec 0 fix)
+	CUC=OpenFile(1808,IntCo) \ if cuc=-1 Error 42 ! customer
+	SMC=OpenFile(-1824,Intco) \ if SMC=-1 Error 42 ! salesman file
+	SLC=OpenFile(-2112,IntCo) \ if slc=-1 Error 42 ! shiplist
+	QOH=OpenFile(1280,IntCo) \ if QOH=-1 Error 42 ! quote head
+	QOS=OpenFile(-1392,IntCo) \ if QOS=-1 Error 42 ! quote ship
+	QOT=OpenFile(-2656,IntCo) \ if QOT=-1 Error 42 ! quote ttls
+	QOL=OpenFile(-1344,IntCo) \ if QOL=-1 Error 42 ! quote lines
+	ROH=OpenFile(1840,IntCo) \ if ROH=-1 Error 42 ! order head
+	ROS=OpenFile(1856,IntCo) \ if ROS=-1 Error 42 ! order ship
+	ROT=OpenFile(1872,IntCo) \ if ROT=-1 Error 42 ! order ttls
+	ROL=OpenFile(1888,IntCo) \ if ROL=-1 Error 42 ! order lines
+	PLTC=OpenFile(2528,IntCo) \ if PLTC = -1 Error 42 ! PRODLOT
+	SLTC=OpenFile(2320,IntCo) \ if SLTC = -1 Error 42 ! SORDLOT
+	QNS=Openfile(-1424,IntCo) \ if QNS=-1 Error 42 ! ns quote line
+	RNS=Openfile(2128,IntCo) \ if RNS=-1 Error 42 ! ns order line
+	QKC=Openfile(1296,IntCo) \ if QKC=-1 Error 42 ! kit quote
+	OKC=Openfile(1312,IntCo) \ if OKC=-1 Error 42 ! kit order
+	Ch_Ctax = openfile(-928,intCo) \ If Ch_Ctax = -1 Error 42    !"cust tax type file
+	sqlChan = OpenMySQLMirror(e$)
+
+ 	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+Userid$+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Function chkDateFrmt$(DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY
+! if not make it MM/DD/YYYY
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE" or DIn$="0"
+	  Let DOut$=UCase$(DIn$)
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function DOut$ ! chkDateFrmt$
+! 
+!--------------------------------------------------------------------
+
+Sub SetPRtoRol()
+! set up prod (PR.) with line values (stock & NonStock)
+ Try
+	Dim 1%,PFU1[20]
+	Dim 3%,PFU2[6]
+	IF ZLINE GOTO L30099:                                          
+	LET pr.LbsUnit=qol.LbsUnit;pr.LbsFact=qol.WgtFactor
+	IF NOT(pr.LbsUnit) LET pr.LbsUnit=1;qol.WgtFactor=1    
+	LET pr.CubicFeet=qol.CubeUnit;pr.CubicFtFactor=qol.CubeFactor
+	IF NOT(pr.CubicFtFactor) LET pr.CubicFtFactor=1;qol.CubeFactor=1
+	LET pr.BaseUM=qol.UMBase;pr.UM2=qol.UMSell                     
+	LET pr.UM3=qol.UMPrice;pr.UM4=qol.UMCost                               
+	LET pr.UM5=qol.UMPurch                                          
+	LET pr.UM6=0;pr.UM7=0;pr.UM8=0                               
+	LET pr.UMStkDefault=qol.UMSell;Pr.UMSellDefault=qol.UMSell;pr.UMPurchDefault=qol.UMPurch             
+	LET pr.UMCostDefault=qol.UMCost;pr.UMPriceDefault=qol.UMPrice                              
+	IF NOT(NonSTK) GOTO L30060:                                   
+	LET pr.UMPrdtnDefault=qol.UMSell;pr.UMUpChrg=qol.UMBase;pr.UMBrknQty=qol.UMBase              
+	IF pr.UMCostDefault=-3 OR pr.UMPriceDefault=-3 ! "Catch Wgt Itm N/S              
+		LET pr.CatchWgtItm=-3;qol.CatchWgtItem=pr.CatchWgtItm                                 
+	ELSE                                                            
+		LET pr.CatchWgtItm=0;qol.CatchWgtItem=0                                         
+	ENDIF                                                           
+	LET pr.UMPack=qol.UMSell;pr.UMSize=qol.UMSell                               
+	L30060: LET pr.UM2Fact=qol.SellFactor;pr.UM3Fact=qol.PriceFactor                     
+	LET pr.UM4Fact=qol.CostFactor;pr.UM5Fact=qol.PurchFactor                              
+	LET pr.UM6Fact=0;pr.UM7Fact=0;pr.UM8Fact=0 
+	! below gets rid of dupes - not easy with names - so load into pfu1,pfu2
+	PFU1[0]=pr.BaseUM
+	pfu1[1]=pr.UM2;PFU2[0]=pr.UM2Fact
+	Pfu1[2]=pr.UM3;pfu2[1]=pr.UM3Fact
+	pfu1[3]=pr.UM4;pfu2[2]=pr.UM4Fact
+	pfu1[4]=pr.UM5;pfu2[3]=pr.UM5Fact
+	FOR X1=1 TO 4                                                   
+		FOR X2=0 TO X1-1                                              
+			IF PFU1[X1]=PFU1[X2] LET PFU1[X1]=0;PFU2[X1-1]=0            
+		NEXT X2                                                       
+	NEXT X1 
+	! now reload checked um's to names
+	pr.BaseUM=PFU1[0]
+	pr.UM2=pfu1[1];pr.UM2Fact=PFU2[0]
+	pr.UM3=Pfu1[2];pr.UM3Fact=pfu2[1]
+	pr.UM4=pfu1[3];pr.UM4Fact=pfu2[2]
+	pr.UM5=pfu1[4];pr.UM5Fact=pfu2[3]
+L30099: ! finito
+	
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! SetPRtoRol
+! 
+!--------------------------------------------------------------------
+Sub LineCopy()
+! main routine - can/will call off to other routines
+  Try
+	Dim filename$[50],chkpo$[20],KeyRoh$[60],3%,CFIN[8]
+	call dxget("QTENUM",tmp$)
+	QTENum=tmp$
+	If qtenum<=0 or qtenum>999999 or fra(qtenum)
+		returnstatus=0
+		message$="Invalid Quote Number"
+		goto LCDone
+	Endif
+	Call dxget("CUSTID",tmp$)
+	CustID=tmp$
+	if custid<=0 or custid>999999 or fra(custid)
+		returnstatus=0
+		message$="Invalid Customer Number"
+		goto LCDone
+	Endif
+	! something about 291 creating an order from single line?
+	! yes, 291 can call this with create for a SINGLE LINE!!
+	call dxget("QLINENO",tmp$)
+	let x2=tmp$  ! will pass the line number?
+	if x2>0 and x2<1000 and not(fra(x2))
+		let PSP[6]=291;PSP[7]=x2 ! as mx286a has it!!
+	endif
+	k1$=" ",k1$
+	k1$=Custid using "######"
+	CUR=filegetcust(e$,CUC,"=",1,K1$,cust.)
+	if CUR<=0
+		returnstatus=0
+		message$="Customer not on file"
+		goto LCDone
+	Endif
+	if custom_customer$="PHILLIPS"
+		if cust.CreditCode=5
+			returnstatus=0
+			message$="Customer Credit Code = 5 - Order Aborted"
+			Goto LCDone
+		Endif
+	Endif ! custom
+	if cust.PrepaidMin=1 ! yes it has wrong label but it's a Y
+		returnstatus=0
+		message$="This customer is Point of Sale Only - Can't create Order"
+		goto LCDone
+	Endif
+	keyqoh$=" ",keyqoh$
+	keyqoh$[1,7]=custid using "#######" 
+	keyqoh$[8,13]=QteNum using "######"
+	KEYqOH$[14]="" ! no space
+	mode$="=" ! search mode 2
+	dir=2
+	clear chan[]
+	clear qoh.
+	clear qos.
+	clear qot.
+	CHAN[0]=QOH
+	CHAN[1]=QOS
+	CHAN[2]=QOT
+	Rec_qoh=filegetqohz(e$,chan[],mode$,dir,keyqoh$,qoh.,qos.,qot.)
+	if rec_qoh<0
+		let returnstatus=0
+		let message$="Quote Number ",keyqoh$[8,13]," Not On File"
+		Goto LCDone
+	endif
+	if p61$[106,106]="Y" ! quote holds check
+		if qoh.HoldOver=0 and qot.HoldCode<>0
+			let returnstatus=0
+			let message$="Quote Number ",keyqoh$[8,13]," is on HOLD"
+			Goto LCDone
+		endif
+	Endif ! quote holds		
+	origPO$=qoh.custpo$ ! save it
+	call dxget ("PO",tmp$) ! in case of change on 286
+	if RTrim$(tmp$)<>"" ! not sent - keep same
+		qoh.custpo$=tmp$+Blank$
+		write record #QOH,rec_qoh,0;qoh.; ! WRITE NOW - re-read below
+	Endif
+	! have quote/cust - check PO required (in case removed from quote entry/edit)
+	if cust.porequiredflag <>0 and cust.porequiredflag<>2 
+		if rtrim$(qoh.custpo$)=""
+			let returnstatus=2
+			let message$="Purchase Order is required by this Customer. "
+			goto LCDone
+		endif
+		if UCase$(rtrim$(qoh.custpo$))="VERBAL"
+			let returnstatus=2
+			let message$="Purchase Order is required by this Customer. "
+			goto LCDone
+		endif
+	endif
+	if returnstatus=1 and cust.porequiredflag>1 ! ok - deep check PO
+		! CHECK ORDERS ONLY!
+		Ch_tmproh=findchannel()
+		read #ctlc,88,1840;filename$;
+		filename$=rtrim$(filename$)
+		ropen #ch_tmproh,filename$
+		let keyroh$=" ",keyroh$
+		let keyroh$[1,6]=custid using "######"
+		DO
+			search #ch_tmproh,3,2;keyroh$,rec_tmp,e ! do not use rec_roh
+			if e>0 exit do
+			let tmp3=keyroh$[1,6]\if tmp3<>custid exit do
+			!let tmp3=-1 ! keyroh$[7,12]
+			!if orderid<>tmp3 ! check all orders for customer
+				mat read #ch_tmproh,rec_tmp,446;chkpo$;
+				if UCase$(chkpo$[1,20])=UCase$(qoh.custpo$[1,20])
+					let returnstatus=2
+					let message$="Purchase Order in used on Order "+keyroh$[7,12]+". "
+					try close #ch_tmproh else rem
+					goto LCDone
+					exit do
+				endif
+			!endif
+		loop
+		try close #ch_tmproh else rem
+	endif
+	If returnstatus<>1 goto LCDone ! something awry
+	! got order - now check lines first
+	
+	LNFail=0 ! no lines failed
+	Call ChkLNQty() ! check quote lines - called QINVCHK on native
+	!If P60$[27,27]="E" AND LNFAIL ! we create now - just adjust ship qty
+	!	returnstatus=0
+	!	message$="Check for stock failed"
+	!	GOTO LCDone ! not enough - get out NOW
+	!Endif
+	!IF P60$[27,27]<>"N" AND LNFAIL
+		!RETURNSTATUS=0  ! there will be lines listed - web should show them!
+		!message$="Insufficient stock - check the order lines"
+	!Endif
+	LNFAIL=0 ! NO LONGER FAILS due to lines
+	! ok - we're doing this
+	! set up header,ship,totals
+	clear roh.
+	clear ros.
+	clear rot.
+	read record #QOH,rec_qoh,0;roh.; ! can read quotes using roh?
+	rec_qos=qoh.ShipRec
+	read record #QOS,rec_qos,0;ros.;
+	rec_qot=qoh.TotRec
+	read record #QOT,rec_qot,0;rot.;
+	rot.DelivChrgLvl=cust.DeliverChgLevel
+	! check shiplist
+	key1$=" ",key1$
+	key1$=roh.CustNum using "######"
+	key1$[7,7]="."
+	key1$[8]=ros.ShipCode using "&&&&&&"
+	SLR=filegetshiplist(e$,SLC,"=",1,key1$,sl.)
+	if slr>0
+		rot.DelivChrgLvl=sl.DeliveryChrgLvl
+	Endif
+	! check billto
+	key1$=" ",key1$
+	key1$=cust.CustomerBillTo using "######"
+	search #CUC,2,1;Key1$,R,e
+	if e let cust.CustomerBillTo=Custid
+	roh.BillTo=cust.CustomerBillTo ! set to curr billto
+	roh.OrdDate=curdate;roh.ShipDate=curdate
+	roh.InvDate=0;roh.DueDate=curdate
+	CALL SDFROMZONE() ! calc a shipdate
+	! okay - get new order
+	Read #CTLC,20,86;ordnum
+	NxtNum: ordnum=ordnum+1
+	if ordnum>999998
+		OFAIL=1
+		returnstatus=0
+		message$="Order Numbers past limit"
+		goto LCDone
+	Endif
+	oused=0
+	Call chkordnum() \ if oused goto nxtnum
+	write #CTLC,20,86;ordnum;
+	roh.Ordnum=ordnum
+	roh.Status=95;roh.OrgStatus=1
+	X$=tim(11) using "&&";x$[3]=".";x$[4]=tim(12) using "&&" ! ;x$[5]=tim(13) using "&&"
+	roh.TimeEnt=x$  ! AS HH.MM
+	roh.DateEnt=curdate
+	rot.Subtot=0;rot.OrdTot=0;rot.MdseOrdAmt=0
+	roh.Lockport=rec_uac
+	ros.OrdNum=ordnum;rot.OrdNum=ordnum
+	roh.InvNum=0;roh.PoCopyNum=0
+	clear roh.SpareNu$ ! =blank$[1,2] ! -NEVER USE IT (LEAVE NULL!)
+	roh.Blankforkey$=blank$
+	ros.NU$=blank$
+	Clear ros.SpareNu$ ! =blank$[1,10]
+	Clear rot.SpareNu$ ! =blank$[1,10]
+	roh.BOCTR=0 ! can't be BO yet!
+	LET roh.XferAuth=0;roh.AuthBy=0;roh.AuthDate=0
+	IF P61$[54,54]="N" AND roh.OrdType=16 ! "no auth/req - Authorize NOW
+	  LET roh.XferAuth=1;roh.AuthBy=-1;roh.AuthDate=curdate
+	ENDIF
+	LET roh.PickBy=0;roh.SentToUps=0;roh.Ot19Comp=0
+	roh.SpareFiller$=blank$
+	LET roh.InvNum=0;roh.InvsRec=0;roh.InvtRec=0
+	roh.OrgOrd=0;roh.OrgOrd1=0 ! do not use quote values!!
+	mat read #CUC,CUR,544;CFIN;
+	roh.COMMSVGCHG=CFin[8] ! set it
+	! slsm check
+	if smc>0
+		key1$=" ",key1$
+		key1$=roh.SlsmNum using "###"
+		Search #SMC,2,1;Key1$,R[4],E
+		IF E let roh.SlsmNum=cust.SalesmanCode
+		key1$=" ",key1$
+		key1$=roh.SlsmNum using "###"
+		Search #SMC,2,1;Key1$,R[4],E ! in case we need curr slsm rec #
+	Endif
+	! budget/blanket check
+	! call BudgChk() ! not implemented
+	clear chan[]
+	CHAN[0]=ROH
+	CHAN[1]=ROS
+	CHAN[2]=ROT
+	clear tmprec[]
+	mode$="a"
+	! Write the order file
+	roh.SpareNu$=blank$[1,10]
+	roh.Blankforkey$=blank$
+	let upstatus=fileupdaterohz(e$,chan[],mode$,tmprec[],roh.,ros.,rot.)
+	let rec_roh=tmprec[0]
+	let rec_ros=tmprec[1]
+	let rec_rot=tmprec[2]
+	
+	! okay - now lines and rest of files
+	KeyQol$=" ",KeyQol$
+	KeyQol$[1,6]=qoh.OrdNum Using "######"
+	if PSP[6]=291 and PSP[7] let keyqol$[7]=PSP[7]-1 using "###" ! as mode 3
+	do
+		QLR=filegetqol(e$,QOL,">",1,keyQol$,qol.)
+		if QLR<=0 exit do
+		x2=keyqol$[1,6] \ if x2<>qoh.ordnum exit do
+		! also if create from 291 line check
+		if PSP[6]=291 and PSP[7]
+			x2=keyqol$[7,9] \ if x2<>PSP[7] exit do
+		endif
+		read record #QOL,QLR,0;rol.; ! read w/rol vars
+		rol.UpdtStk=1
+		let whse=roh.wh \ if rol.Whse>0 and rol.Whse<100 let Whse=rol.Whse
+		rol.Whse=Whse ! make sure it's there!
+		if rol.NStkItem=0
+			PRR=rol.PDRecNum
+			Read Record #PRC,PRR,0;pr.;
+			call stkchk() ! PRODGRP
+		Else ! nonstk
+			rol.UpdtStk=0 ! never happen
+			clear pr.
+		Endif
+		tmp$=rol.ComdtyCode$
+		if tmp$="LABR" or tmp$="TIME" or tmp$="MACH" let rol.UpdtStk=0
+		if roh.OrdType=2 or roh.OrdType=5 or roh.OrdType=13 let rol.UpdtStk=0
+		IF P60$[22,22]="N" AND roh.OrdType=3 let rol.UpdtStk=0
+		RPRLINE=0;tmp$=rol.RepairLine$
+		IF (roh.OrdType=21 OR roh.OrdType=22) AND rol.LineNum=0 AND (tmp$="A" OR tmp$="B" OR tmp$="C") LET RPRLINE=1
+		if RPRLINE let rol.UpdtStk=0
+		let rol.OrdNum=roh.OrdNum
+		rol.LinePrint=0;rol.PrintDate=0;rol.PrintTime=0
+		rol.PrevQtyBill=0;rol.InvNum=0
+		if rol.NStkItem let rol.UpdtStk=0
+		milf=0
+		if not(rol.NStkItem) and not(RPRLine) and rol.UpdtStk=0 ! is it mill? do check NOW
+			milf=getmillflg(e$,intco,PWC,rol.ProdCode$,rol.Whse,roh.ordtype)
+			if milf>0 ! it is - back order all per dd
+				let rol.qtybo=rol.qtyship
+				let rol.qtyship=0
+			endif
+		endif
+		rol.SpareNU1$=blank$;rol.Blankforkey$=blank$
+		Call shipqtychk() ! check/adjust
+		clear rol.sparenu$ ! dl4 fix
+		rol.SpareNU3$=blank$;OrderNo=roh.OrdNum
+		X2=GetNxtLine(orderno) ! GET NEXT LINE# 
+		IF RPRLINE LET X2=0 ! THEY HAVE NO LINE # (JUST A B C)
+		rol.linenum=x2;E=0;rlr=0
+		RLR=fileupdaterolz(e$,ROL,"a",e,rol.)
+		if RLR<=0
+			returnstatus=0
+			message$="Error adding new Order line"
+			goto LCDone
+		Endif
+		if rol.KitDesignation$="KIT" Call kitcpy() ! kit copy before prod rasl
+		if not(rol.NStkItem) ! prod - update onord/rasl/etc
+			! first check/add prodwhse
+			K1$=" ",k1$
+			K1$=rol.ProdCode$,Whse Using "##"
+			PWR=filegetprodwhse(e$,PWC,"=",1,k1$,pw.)
+			if PWR<=0
+				Clear pw.
+				Whbld[0] = PWC
+				Whbld[1] = rol.Whse
+				Whbld[2] = Pr.PrimVend
+				Prod$=rol.ProdCode$+Blank$
+				Call mxwhcreate(e$,IntCo,Prod$,Whbld[])        
+				PWR = Whbld[2];e$ = "" 
+				read record #PWC,PWR,0;pw.;
+			Endif
+			if rol.UpdtStk Call UpdtProd() ! on ord/locations - ord & kits
+		Else ! is N/S
+			IF NOT(RPRLINE) Call NSUPDT() ! also change ROL w/new prod & rec
+		Endif ! of stk/non
+		! line item copies
+		IF NOT(RPRLINE) call shphist() ! we'll copy 286a
+		IF NOT(RPRLINE) call ROLTAGCPY() ! roltag copy
+		If P60$[44,44]="Y" CALL edttrak() ! record in edittracker
+	Loop ! next Quote Line
+	! do remainder of files
+	! as serpordh will treat as edit instead of new - NEED CREDIT CHECK/HOLD!
+	clear chan[]
+	chan[1] =ctlc    ! cntrl file
+    chan[2] =CUC ! customer file
+	chan[3] = 0	 ! saract file ** not opened **
+	chan[4] = 0      ! credit check file ** not opened ** ch_credck
+	chan[5] =ROH	 ! order header
+	chan[6] =ROT ! order total
+	chan[7] =ROS ! order ship to
+	work$=""
+	flag=1 ! \ if docchng let flag=0 ! 0=wrt crdchk file, 1=Do not write(serpordh writes)
+	cc1[1]=cust.CustomerCode;cc1[4]=cust.CustomerBillTo
+	h1=rec_roh;T2[0]=rot.OrdTot
+	call getcredck(chan[],CC1[1],CC1[4],h1,T2[0],intCo,ReturnStatus,Message$,flag,work$)
+	if flag ! failed it - set hold
+		X4 = rot.HoldCode ! T2[21]
+		For K = 0 To 11
+		  T9[K] = Sgn(Fra(X4 / 2))
+		  X4 = Int(X4 / 2)
+		Next K
+		If Flag ! CREDIT_ON_HOLD
+		  T9[0] = 1
+		Else 
+		  T9[0] = 0
+		End If 
+		X4 = 0
+		Mat Read #1,66,0;F1$;
+		If F1$[1,1] <= " " Let T9[0] = 0
+		Mat Read #1,66,16;F1$;
+		If F1$[1,1] <= " " Let T9[1] = 0
+		Mat Read #1,66,48;F1$;
+		If F1$[1,1] <= " " Let T9[3] = 0
+		Mat Read #1,66,96;F1$;
+		If F1$[1,1] <= " " Let T9[6] = 0
+		Mat Read #1,66,112;F1$;
+		If F1$[1,1] <= " " Let T9[7] = 0
+		For K = 0 To 11
+		  If T9[K] Let X4 = X4 + 2 ^ K
+		Next K
+		rot.HoldCode=X4 ! T2[21] = X4
+		Write Record #ROT,Rec_rot,0;rot.; ! #10,H0[3],134;T2[21];
+		if T9[0]=1 ! Do credit alert
+			clear X2[]
+			clear X3[]
+			X3[0]=3 ! alert #3
+			X2[1]=ctlc;X2[2]=CUC;X2[3]=SMC
+			X2[4]=roh;X2[5]=ros;X2[6]=rot
+			X3[1]=CUR;X3[2]=roh.CustNum;X3[3]=roh.SlsmNum
+			X3[4]=rec_roh
+			clear tmp$
+			call "libalertproc.lib",tmprec[],chan[],tmp$
+		Endif
+	Endif
+	call mssgs() ! copy/create special messages
+	call resetqoh() ! change quote status
+	OFAIL=0 ! completed okay
+	if Cust.LastOrderDate<=0 ! new order on customer
+		clear X2[]
+		clear X3[]
+		X3[0]=2 ! alert #2
+		X2[1]=ctlc;X2[2]=CUC;X2[3]=SMC
+		X2[4]=roh;X2[5]=ros;X2[6]=rot
+		X3[1]=CUR;X3[2]=roh.CustNum;X3[3]=roh.SlsmNum
+		X3[4]=rec_roh
+		clear tmp$
+		call "libalertproc.lib",tmprec[],chan[],tmp$
+	Endif
+	let cust.LastOrderDate=roh.OrdDate
+	write record #CUC,CUR,0;cust.;
+	! NOTE: THE NEXT STEP IS ORDER TOTALS DISPLAY
+	! THIS WILL DO A CALL ORDERTOTAL & MXSLSCOM5 (LIKE NATIVE CHAINING TO MX201H/L/D)
+	LCDone: ! finished
+	if rec_qoh>0 ! reset original PO
+		if qoh.custpo$<>OrigPO$ ! changed - return to original po? Lets do it
+			qoh.custpo$=OrigPO$
+			write record #QOH,rec_qoh,0;qoh.;
+		Endif
+	Endif
+	IF LNFAIL LET OFAIL=1
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! LineCopy
+! 
+!--------------------------------------------------------------------
+Sub ChkLNQty()
+! called qinvchk on PM
+! does for all inv lines 
+  Try
+	clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"PRODSNOQTY",fdel$
+	Webstr$="LINENO",fdel$,"PRODID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+	webstr$=webstr$,"QTYSHIP",fdel$,"QTYAVL",fdel$,"QTYSHORT",fdel$
+	webstr$=webstr$,"UM",fdel$
+	List$[1]=webstr$
+	row=2
+	If p60$[27,27]="N" Goto bpqchk ! no check at all
+	if qoh.ordtype=2 or qoh.ordtype=5 or qoh.OrdType=13 Goto bpqchk ! direct/future - no adj
+	IF P60$[22,22]="N" AND qoh.ordtype=3 Goto bpqchk ! indirect - no adj 
+	Key1$=" ",key1$
+	Key1$[1,6]=Qtenum using "######"
+	if PSP[6]=291 and PSP[7] let k1$[7]=PSP[7]-1 using "###" ! 1 less so does selected
+	IF P60$[27,27]="N" GOTO bpqchk ! does not care
+	do
+		qlr=filegetqol(e$,QOL,">",1,key1$,qol.)
+		if qlr<=0 exit do
+		x2=key1$[1,6] \ if x2<>qtenum exit do
+		if PSP[6]=291 and PSP[7] ! single line!!
+			x2=k1$[7,9] \ if x2<>PSP[7] exit do ! 
+		endif
+		RPRLINE=0;tmp$=qol.RepairLine$
+		IF (qoh.OrdType=21 OR qoh.OrdType=22) AND qol.LineNum=0 AND (tmp$="A" OR tmp$="B" OR tmp$="C") LET RPRLINE=1
+		if qol.NStkItem=0
+			let qol.UpdtStk=1 ! updt=y
+			tmp$=Qol.ComdtyCode$
+			if tmp$="LABR" or tmp$="TIME" or tmp$="MACH" let Qol.UpdtStk=0
+			if qoh.OrdType=2 or qoh.OrdType=5 or qoh.OrdType=13 let qol.UpdtStk=0
+			IF P60$[22,22]="N" AND qoh.OrdType=3 let qol.UpdtStk=0
+			if RPRLINE LET qol.UpdtStk=0
+			If qol.UpdtStk=0 Goto bpqline ! no stk update - inv item
+			PRR=qol.PDRecNum
+			read record #PRC,PRR,0;pr.;
+			Key2$=" ",key2$
+			key2$=Qol.ProdCode$,qoh.Wh using "##"
+			PWR=filegetprodwhse(e$,PWC,"=",1,Key2$,pw.)
+			if pwr<=0 clear pw.
+			tmp3=pw.QtyOnHand-pw.QtyOnOrd
+			IF qol.QtyShip>tmp3 ! too much - fail it!
+				LNFail=LNFail+1
+				webstr$=Str$(qol.LineNum),fdel$,RTrim$(qol.ProdCode$),fdel$
+				webstr$=webstr$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.Desc2$),fdel$
+				Call SetPRtoRol() ! set pr. to qol vars
+				cnvtu[0]=0;cnvtu[1]=qol.UMSell;cnvtu[2]=1
+				CNVTA=qol.QtyShip
+				X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+				webstr$=webstr$,LTrim$(X3 using QMask$),fdel$ ! ship
+				CNVTA=tmp3
+				X3[1]=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+				webstr$=webstr$,LTrim$(X3[1] using QMask$),fdel$ ! avail
+				x3[2]=x3-x3[1]
+				webstr$=webstr$,LTrim$(X3[2] using QMask$),fdel$ ! short=ship-avl
+				tmp$=XUnit$(qol.umsell,ccc)
+				webstr$=webstr$,tmp$,fdel$ ! sell um
+				List$[row]=webstr$
+				Let row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			Endif ! not 'nuff
+			bpqline: ! bypass line!
+		Endif ! Stock Item
+	Loop 
+	bpqchk: ! not flagged
+	List$[row]=esdel$
+	call addtostr(e$,rstr$,List$[]) ! add list to string (even if NONE)
+	if debugdetail
+		dmsg$="Line Qty Checked " \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! ChkLNQty
+! 
+!--------------------------------------------------------------------
+Sub SDFROMZONE()
+! using zone - calc shipdate
+  Try
+	Dim 2%,ZNTrk,ZNLDTM,vDATE
+	dim 2%, cuttime,dt3[1],CURTIM[9]
+	Dim 3%,Param[6]
+	Dim t2$[7],sdate$[50]
+	MAT  READ #ctlc,182,84;CUTTIME;
+	if cuttime<=0 let cuttime=24 ! always a day away -- from build order
+	ZFC=openfile(-1920,Intco) \ if zfc=-1 exit sub
+	vDATE=roh.shipdate
+	if p61$[34,34]="Y" ! cust-multi zone
+		if ros.ShipCust=0 let ros.ShipCust=roh.CustNum
+		if roh.OrdDate=0 let roh.OrdDate=Sysdate
+		tmp$=ros.Zone$
+		x2[0]=ros.ShipCust;x2[1]=ros.ShipCode;x2[2]=roh.OrdDate
+		x2[3]=roh.Div;x2[4]=roh.Wh;x2[5]=roh.ShipDate;x2[6]=roh.StopNum
+		call "mxohcszone",X2[0],x2[1],x2[2],x2[3],x2[4],x2[5],tmp$,x2[6],IntCo
+		ros.zone$=tmp$+Blank$
+	Endif
+	k1$=" ",k1$
+	k1$=ros.Zone$
+	search #ZFC,2,1;K1$,R[2],E
+	if not(e)
+		mat read #ZFC,R[2],28;znldtm;
+		mat read #ZFC,R[2],32;zntrk;
+		LET ROS.Truck=zntrk
+	ELSE
+		ZnLdtm=0
+	Endif
+	X2=roh.Shipdate
+	IF P61$[34,34]="Y" ! bypass if multizone
+		let vdate=roh.Shipdate
+		goto ZDDone
+	Endif
+	IF E GOTO badzone ! needs zone to calc!
+	X$=x2 using "&&&&&&"
+	call datetojulian(1,X$,x$,E) \ if e let x$=Str$(TIM(6)) ! goto ZDDone
+	x2=x$[1,5]
+	x2=x2+ZnLdTm
+	LET  sdate$="" 
+	Call Time(SDATE$)
+	LET CURTIM[0]=SDATE$[15,16] ! HOUR                                      
+	LET CURTIM[1]=SDATE$[18,19]  ! MINUTER                                    
+	LET CURTIM[2]=SDATE$[21,22]  ! SECOND                                    
+	LET CURTIM[3]=CURTIM[0]*10000+CURTIM[1]*100+CURTIM[2]  ! TIME CALC                 
+	IF CURTIM[3]>CUTTIME 
+		LET x2=x2+1 ! a day away 
+	Endif
+	! additional checking needed
+	LET VDATE=X2;STAT=0;WARN=0;PARAM[0]=roh.wh;PARAM[1]=roh.div
+	CALL "validdate",vdate,STAT,WARN,PARAM[] 
+	let tmp3=vdate ! 1st check - see if lead time is on a holiday
+	if P60$[16,16]="Y" ! CALC SHIPDATE BY zone days
+		if roh.ordtype<>4 and roh.ordtype<>15 and roh.ordtype<>16
+			mat read #ZFC,R[2],36;t2$; ! zone days
+			x=0;x1=0;x1[1]=0 ! first see if any days ship!! avoid eloop
+			for i=1 to 7 ! use matrix - not individ
+			  if t2$[i,I]="Y" let x=x+1
+			next i
+			if x>0 ! has at least 1 day!
+				ZNNXTDAY: ! loop until shipping day for zone
+				x1=x1+1
+				ZNNXTCHK: ! check it if holiday change
+				x$=TMP3 USING "&&&&&"
+				Call JulianToDate(1,X$,X$,E) ! julian to MM/DD/YY
+				IF NOT(E)
+					J1 = X$[7,8] \ J2 = X$[1,2] \ J3 = X$[4,5]
+					If J1 < 85 Let J1 = J1 + 100
+					Z4 = J2 + 1 \ Z5 = Int(1 / Z4 + .7) \ Z6 = J1 - Z5 \ Z7 = Z4 + 12 * Z5
+					Z8 = Int(Z7 * 30.6001) + Int(Z6 * 365.25) + J3 \ Z9 = Z8 - 7 * (Int(Z8 / 7))
+					I = Z9 + 1
+					If T2$[I,I] = "N"
+						if x1>14 goto bpdloop ! give 14 tries - give up
+						let tmp3=tmp3+1
+						goto znnxtday
+					 BPDLoop: ! end or bypass
+					endif ! if Y - ok
+					LET VDATE=TMP3;STAT=0;WARN=0;PARAM[0]=roh.wh;PARAM[1]=roh.div
+					CALL "validdate",vdate,STAT,WARN,PARAM[]  
+					If tmp3<>vdate and x1[1]<15 ! 2nd chk
+						let tmp3=vdate ! 2nd check
+						let x1[1]=x1[1]+1
+						goto ZNNXTCHK
+					Endif
+				endif
+			Endif ! zone has ship days
+		Endif ! valid order type
+	Endif ! calc ship date flag
+	x2=tmp3 ! mv back to orig
+	x$=X2 using "#####"
+	call juliantodate(1,X$,X$,E) \ if e goto ZDDone
+	let tmp$=x$[7,8],x$[1,2],x$[4,5]
+	x2=tmp$[1,6]
+	badzone: ! bad zone - still chk holidays!
+	Let roh.shipdate=x2
+	let roh.duedate=x2
+	LET VDATE=X2;STAT=1;WARN=0;PARAM[0]=roh.wh;PARAM[1]=roh.div
+	CALL "validdate",VDATE,STAT,WARN,PARAM[]                
+	ZDDone: ! finished
+	Let roh.shipdate=vdate
+	let roh.duedate=vdate
+	if ZFC
+		try close #ZFC Else REM
+	Endif
+	if debugdetail
+		dmsg$="Ship Date Calculate " \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! SDFROMZONE
+! 
+!--------------------------------------------------------------------
+SUB chkordnum()
+! see if used anywhere
+  Try
+	Dim a$[60]
+	a$=" ",a$
+	a$[3]=ordnum using "######"
+	For X=1 to 99
+		a$[1,2]=x using "##"
+		search #ROH,2,1;a$,R[3],E
+		if not(e) let oused=1;x=99
+	Next X
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! chkordnum
+! 
+!--------------------------------------------------------------------
+Sub BudgChk()
+! checks budget/blanket po
+  Try
+	! IN 286 this does not change blanket po
+	! and if budget fails - continues on - just message
+	! so for now - ignore this - as 286 does
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! BudgChk
+! 
+!--------------------------------------------------------------------
+Function getnxtline(OrderNum)
+! get first available order line number
+ Try
+	Dim OLK$[60]
+	Dim 3%,LRec,NRec
+
+	Dim CRol. as rolnew ! do not use rol. or nrol.!(would overwrite)
+	dim cnstk. as sproddesc ! pm also checks nonstk file
+	
+	X2=1
+	CHKNXTLN: ! loop til not found (get first available line)
+	OLK$=" ",OLK$
+	OLK$[1,6]=OrderNum Using "######"
+	OLK$[7,9]=X2 Using "###"
+	OLK$[11]="" ! cut to length
+	LRec=filegetrolz(e$,ROL,"=",1,OLK$,crol.)
+	If LRec>0 ! found a line with same number
+		x2=x2+1
+		if x2>999 Error 10000 ! bomb it!
+		goto chknxtln
+	Endif ! not found - check sproddesc
+	NRec=filegetsproddesc(e$,RNS,"=",1,OLK$,cnstk.)
+	If NRec>0 ! found a line with same number
+		x2=x2+1
+		if x2>999 Error 10000 ! bomb it!
+		goto chknxtln
+	Endif ! not found - drop thru and send back
+	e$="" ! clear any not found messg
+	if debugdetail
+		dmsg$="Get new Line No "+Str$(rol.OrdNum)+"-"+Str$(X2) \ Call updatelog(debug)
+	Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function X2 ! getnxtline
+! 
+!--------------------------------------------------------------------
+Sub UpdtProd()
+! update prod & whse qtys
+  Try
+	tmp$=ShipDate Using "&&&&&&"
+	Call DateToJulian(1,tmp$,tmp1$,F)
+	IF F let tmp1$=""
+	JDate[1]=tmp1$;F=0 ! julian sys shipdate
+	tmp$=roh.ShipDate Using "&&&&&&"
+	if roh.ShipDate<>999999 Call DateToJulian(1,tmp$,tmp1$,F)
+	If f let tmp1$=""
+	JDate[2]=tmp1$ ! julian ord shipdate
+	Read record #PRC,PRR,0;PR.
+	If PWR>0 Read Record #PWC,PWR,0;pw.
+	X3=ROL.QtyShip
+	if roh.OrdType=4 or roh.OrdType=15 let x3=rol.QtyOrd-rol.PrevQtyShip-rol.QtyBO
+	IF roh.OrdType=15 AND roh.BOCTR<>0 LET x3=0        
+	IF roh.OrdType=15 AND roh.BOCTR=0 LET x3=rol.QtyOrd
+	pr.QtyOnOrd=pr.QtyOnOrd+X3
+	pw.QtyOnOrd=pw.QtyOnOrd+x3
+	IF JDATE[1]>=JDATE[2]
+		LET pr.Lvl1Qty=pr.Lvl1Qty+x3
+		Let pw.Lvl1Qty=pw.Lvl1Qty+x3
+	ELSE
+		LET pr.Lvl2Qty=pr.Lvl2Qty+x3
+		Let pw.Lvl2Qty=pw.Lvl2Qty+x3
+	Endif
+	if pr.CatchwgtItem$="Y"
+		X=1 \ if rol.QtyOrd<0 let x=-1 ! neg ord/ship (wgt always +)
+		IF roh.OrdType=15 AND roh.BOCTR<>0 LET x=0 ! NO QTY
+		pr.LbsOnOrder=pr.LbsOnOrder+(rol.ExtNetWgt*x)
+		pw.LbsOnOrder=pw.LbsOnOrder+(rol.ExtNetWgt*x)
+	Endif
+	Write Record #PRC,PRR,0;PR.;
+	!
+	if sqlChan >= 0 ! MySQL enabled and channel opened
+		call prod_DL4SQLConvert(e$,"FROMDL4",PR.,sql_prod.,PRR)
+		e = prod_SQLAddUpdate(e$,sqlChan,sql_prod.) ! mode="a" or "c"
+		if e <> 1 ! returns the number of records add/updated/deleted
+			error 11000 ! do bad update stuff
+		end if
+	end if
+	!
+	If PWR>0 Write Record #PWC,PWR,0;pw.;
+	! do allocate to none/stock location now!
+	Call ChkWhRasl(e$,intco,Ctlc,WHI,rol.Whse,RASL[])
+	!Atype=0 ! \ if credit let Atype=1
+	!FChan[0]=ROH;FChan[1]=ROL;FChan[2]=SLTC;FChan[3]=PLTC
+	!FRec[0]=rec_roh;FRec[1]=RLR ! if only lines can use allocordlot
+	!call Allocordlot(e$,intCo,AType,FChan[],FRec[],Rasl,Status)
+	S9[2]=Rec_roh;S9[3]=0;S9[4]=286 ! determine program #?
+	S9[12]=RLR ! PASS THE LINE JUST UPDATED (new single line mxrasl5)
+	FChan[0]=1;FChan[1]=PRC;FCHan[2]=ROH;FChan[3]=ROL
+	FChan[4]=OKC;FChan[5]=ccc;FChan[6]=PLTC;FChan[7]=0
+	FChan[8]=SLTC;FChan[9]=0 ! as it MAY have kits - use mxrasl5
+	! Call dxsave(0,"/tmp/oqcrt.txt!") ! using mxrasl allows kit update
+	Call "MXRASL5.DL4",intco,Ctlc,S9[],FChan[]
+	if debugdetail
+		dmsg$="New Line Allocated " \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! UpdtProd
+! 
+!--------------------------------------------------------------------
+Sub NSUpdt()
+! update / transfer Non-Stock
+  try
+	If rol.ProdCode$[1,1]="Z" exit sub ! message line?
+	if rol.LineType=3 exit sub ! definitely message line
+	if RPRLINE exit sub ! no proddesc record!
+	QNR=qol.PDRecNum
+	read record #QNS,QNR,0;NStk.; ! read quote w/sproddesc
+	NStk.OrdNum=roh.OrdNum
+	NStk.LineNum=rol.LineNum
+	NStk.OrdLineRec=RLR
+	Nstk.ProdCode$=roh.Ordnum using "######","-",Rol.LineNum Using "&&&",blank$
+	NStk.Unused$=Blank$
+	NStk.SpareNu$=Blank$
+	!NStk.NS_UDA's added to both qproddesc & sprodddesc and transferred!!
+	clear NStk.Spare$ ! dl4 fix ! NStk.Spare$[1,50]=Blank$
+	nsr = fileupdatesproddesc(e$,rns,"a",0,nstk.) 
+	If nsr > 0 ! record new nonstk record & product code in Order Line
+		 rol.PDRecNum = nsr 
+		 rol.ProdCode$=NStk.ProdCode$
+		 Write record #ROL,RLR,0;rol.;
+    Else
+		Message$="Error "+Str$(nsr)+" on NStk add"
+	Endif 
+	If RLR>0 and NSR>0 ! new nonstk line - send alert
+		clear x2[]
+		clear x3[]
+		tmp$=""
+		x2[1]=ctlc;x2[2]=ROL;x2[4]=ROH;X2[5]=ROS;X2[6]=ROT;x2[7]=CCC
+		x2[8]=CUC ! x2[]=file channels
+		X3[0]=21;x3[1]=nstk.Buyer;x3[2]=RLR;x3[3]=rec_roh
+		x3[4]=rol.QtyOrd;x3[5]=rol.QtyBO;x3[6]=rol.QtyShip ! qty: ord,bo,ship (as entered)
+		! x3=vars 0=alert,1=buyer,2=ordline,3=ordhead
+		call "libalertproc.lib",x3[],x2[],tmp$
+	Endif
+	if debugdetail
+		dmsg$="New NonStock Line Created "+Message$ \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! NSUpdt
+! 
+!--------------------------------------------------------------------
+Sub ShpHist()
+! as done in 286a
+  Try
+	Dim Flg$[6],K5$[60],s6$[6]  ! s6$ not used anywhere?
+	DIM S$[30],3%,S7[20]
+! L_6500: REM SHIP HIST
+	 MAT  READ #1,60,6;FLG$;
+	 IF FLG$[1,1]="N" Exit sub
+	 If RPRLINE exit sub
+	 chan=findchannel()
+	 READ #CTLC,88,2496;K5$[1,16];
+	 OPEN #Chan,K5$
+	 LET K5$=" ",K5$;K5$[1,6]=roh.CustNum USING "######";K5$[7,12]=roh.OrdNum USING "######"
+	 LET K5$[12,14]=rol.LineNum USING "###" \ LET K5$[15,20]="000000"
+	 LET E=2
+	 SEARCH #Chan,1,0;K5$,R[9],E
+	 IF E Exit Sub ! GOSUB ERR_SEARCH:
+	 LET K5$[21,26]=R[9] USING "######"
+	 SEARCH #Chan,4,1;K5$,R[9],E
+	 IF E Exit Sub ! GOSUB ERR_SEARCH:
+	 LET S$=" ",S$ \ FOR X=0 TO 20 \ LET S7[X]=0 \ NEXT X
+	 LET S$[1,10]=roh.CustPO$;S$[11,13]=S6$[1,3];S$[14,16]=ROL.Desc2$[28,30]
+	 LET S7[0]=ROH.OrdNum;S7[1]=ROH.OrdNum;S7[2]=0;S7[3]=rol.LineNum;S7[4]=rol.QtyOrd
+	 LET S7[5]=0;S7[6]=0;S7[7]=rol.UnitPrice;S7[8]=rol.ExtOrdAmt;S7[9]=roh.OrdDate
+	 LET S7[10]=0 \ LET S7[11]=0
+	 LET S7[12]=roh.CustNum;S7[13]=rol.PDRecNum;S7[14]=rol.NStkItem
+	 LET S7[15]=rol.QtyBO
+	 MAT  WRITE #Chan,R[9],0;S$;
+	 MAT  WRITE #Chan,R[9],30;S7;
+	 Try Close #Chan Else Rem
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! ShpHist
+! 
+!--------------------------------------------------------------------
+Sub kitcpy()
+! will copy (if valid) and update - from mx286k(sort of)
+  Try
+	DIM KL$[58],K2$[60],UM$[4]
+	DIM K3$[60],K4$[60],K5$[60],K6$[30],K7$[30],PN$[20]
+	DIM K8$[30],F$[16]
+	DIM 3%,L5[3],L7[4],KL3[1],P3[3],S3[3],BM,B3[17]
+	DIM 3%,COST,AMNT,BMAMT,TCOST,WGHT,INVNO,whavail
+	! DIM 3%,T1,T2[24],T3,T4,T5,T6,T7,T8,T9
+	DIM 1%,QW0,W0,L3[2],KL1[5],Z9[47],S1[3],BM1[3]
+	DIM 1%,C,D,E,I,M,M1,X,X1,Y9,WHSE,QWHSE
+	DIM 2%,QH0[12],H0[12],QH5[16],H5[16],KL2[1],S2[3],L4[3]
+	DIM 2%,B[24],C4[8],R4,R8,R9,V1,V4
+	IF P9$[22,22]<>"Y" GOTO KCDone
+	Dim KPr. as prod
+	Dim KPw. as prodwhse
+	If rol.NStkItem let DA=99 ! ng - delete
+	if rol.LineType<>0 let DA=99 ! only stk inv
+	If rol.UpdtStk=0 let DA=99 ! no stk - no kit!!
+	K1$=" ",k1$
+	K1$=Qoh.Ordnum using "######",Qol.LineNum using "###"
+	NxtQKln: ! next kit line
+	Search #QKC,3,1;K1$,R[11],E
+	if e goto KCDone
+	X2=k1$[1,6] \ if x2<>qoh.ordnum goto KCDone
+	X2=K1$[7,9] \ if x2<>qol.Linenum goto KCDone
+	
+	IF DA ! DELETE it
+		Search #QKC,5,1;K1$,R,E
+		if not(e)
+			let e=3;R=R[11]
+			search #QKC,1,0;K1$,R,E
+		Endif
+		Goto NxtQKLn
+	Endif
+	! OK - SO we're copying
+	MAT  READ #QKC,R[11],0;KL$; 
+	MAT  READ #QKC,R[11],58;KL1;
+	MAT  READ #QKC,R[11],70;KL2;
+	MAT  READ #QKC,R[11],78;KL3;
+	LET X=KL1[1];KL1[3]=0 \ IF KL1[5]=-2 LET KL1[3]=1
+	If rol.UpdtStk=0 let KL1[3]=1 ! can't mix line stkupt=n with stk kits
+	IF KL1[5]=-2 GOTO L_6285:     
+	LET PN$=" ",PN$;PN$=KL$[13,24]
+	KPRR=filegetprod(e$,PRC,"=",1,PN$,kpr.)
+	if KPRR<=0 LET KL1[3]=1;KL1[5]=-2
+	L_6285: ! bypass prod read
+	If KL1[5]=-2 !	goto MessgLn
+		KL1[3]=1
+		clear kpr.
+		LET KPR.ProdCode$="Z "+Blank$
+	Endif
+	If roh.OrdType=2 or roh.OrdType=5 let KL1[3]=1
+	tmp$=KPr.ComdtyCode$
+	if tmp$="LABR" or tmp$="TIME" or tmp$="MACH" let KL1[3]=1
+	X=KL1[1]
+	if kl1[3]=0 let KQty=KL3[1] Else KQty=0
+	!
+	if KQty
+		whavail=getwhavail(e$,intco,PWC,PN$,Whse)
+		if whavail<KQty 
+			if whavail>0
+				KQty=whavail  !! check vs available
+			else
+				KQty=0
+			endif
+		endif
+	endif
+	! SET UP Order Kit Line
+	LET K3$=" ",K3$
+	K3$[1,6]=Roh.OrdNum USING "######";K3$[7,9]=rol.LineNum USING "###"
+	LET K3$[10,12]=X USING "&&&"
+	SEARCH #OKC,2,1;K3$,R46,E \ IF NOT(E) GOTO L_6670:
+	Let E=2;R=0
+	Search #OKC,1,0;K3$,R,E \ if e goto KCDone
+	Let R46=R
+	Search #OKC,4,1;K3$,R46,E \ if e goto KCDone
+	L_6670: LET KL$=" ",KL$;KL$[1,12]=rol.ProdCode$;KL$[13,24]=KPR.ProdCode$
+	LET KL$[25,28]=KPR.ComdtyCode$ \ IF KL1[5]=-2 LET KL$[13,24]="Z           "
+	LET KL1[0]=WHSE;KL1[1]=X;KL1[2]=rol.LineNum;INVNO=0
+	IF KL1[5]=-2 LET KL1[3]=1
+	IF roh.OrdType=2 OR roh.OrdType=5 LET KL1[3]=1
+	LET KL2[0]=roh.OrdNum;KL2[1]=roh.CustNum
+	LET KL3[0]=Kpr.CostLoad;KL3[1]=KQty
+	IF roh.OrdType=8 LET KL3[0]=0
+	MAT  WRITE #OKC,R46,0;KL$;
+	MAT  WRITE #OKC,R46,58;KL1;
+	MAT  WRITE #OKC,R46,70;KL2;
+	MAT  WRITE #OKC,R46,78;KL3;
+	MAT  WRITE #OKC,R46,90;INVNO;
+	iF KL1[3]<>1
+		! UPDATE PROD & WHSE
+		k2$=" ",K2$;K2$=kpr.ProdCode$,Whse Using "##"
+		Search #PWC,2,1;K2$,KPWR,E
+		if e
+			Clear kpw.
+			Whbld[0] = PWC
+			Whbld[1] = Whse
+			Whbld[2] = KPr.PrimVend
+			Prod$=KPR.ProdCode$+Blank$
+			Call mxwhcreate(e$,IntCo,Prod$,Whbld[])        
+			KPWR = Whbld[2];e$ = "" 
+		Endif
+		Read record #PWC,KPWR,0;kpw.
+		LET kpr.QtyonPWO=kpr.QtyonPWO+KQty
+		let kpw.QtyOnOrd=kpw.QtyOnOrd+KQty
+		write record #PRC,KPRR,0;kpr.;
+		!
+		if sqlChan >= 0 ! MySQL enabled and channel opened
+			call prod_DL4SQLConvert(e$,"FROMDL4",KPR.,sql_prod.,KPRR)
+			e = prod_SQLAddUpdate(e$,sqlChan,sql_prod.) ! mode="a" or "c"
+			!e = prod_SQLDelete(e$,sqlChan,sql_prod.) ! mode="d"
+			if e <> 1 ! returns the number of records add/updated/deleted
+				error 11000 ! do bad update stuff
+			end if
+		end if
+		!
+		write record #PWC,KPWR,0;kpw.;
+		! do allocate to none/stock location now! - NO it does when line updated
+		!Call ChkWhRasl(e$,intco,Ctlc,WHI,Whse,RASL[])
+		!X3[0]=0;X3[1]=0;x3[2]=rec_roh;x3[3]=0;x3[4]=286;x3[9]=rol.LineNum
+		!X3[12]=RLR
+		!FChan[0]=ctlc;FChan[1]=PRC;FChan[2]=ROH;FChan[3]=ROL
+		!FChan[4]=OKC;FChan[5]=CCC;FChan[6]=PLTC;FChan[8]=SLTC
+		! call Allocordlot(e$,intCo,AType,FChan[],FRec[],Rasl,Status)
+		! don't know if this works for kits!! (when ordline updated - it does kits!)
+		! Call "mxrasl5.dl4",intco,Ctlc,X3[],FChan[] ! unrem if can do kit only
+		if debugdetail
+		 dmsg$="Kit Lines Copied " \ Call updatelog(debug)
+		Endif
+	Endif
+	Goto NxtQKLn
+
+	KCDone: ! finished
+	if DA ! no good
+		let rol.KitDesignation$=Blank$
+		Write record #ROL,RLR,0;rol.;
+	Endif
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! kitcpy
+! 
+!--------------------------------------------------------------------
+Sub ROLTAGCPY()
+! copy quote roltag to Order roltag
+  Try
+	DIM 1%,LINENUM,QUOTE                                       
+	DIM 3%,TL2[1]                                              
+	DIM LPONUM$[30],LJOBNUM$[30],PSNUM$[30],MSG1$[30],MSG2$[30]
+	DIM ORDKEY$[40],Sparenu$[2],MSGS$[750]
+	if RPRLINE exit sub ! no roltag - don't even try it
+	QTC=openfile(9938,IntCo) \ if qtc=-1 exit sub
+	OTC=openfile(9950,Intco) \ if otc=-1 goto RTCDone
+	OrdKey$=qoh.Ordnum Using "######",qol.Linenum using "###"
+	Search #QTC,2,1;OrdKey$,R,E
+	if e goto RTCDone ! not found - get out
+	Mat Read #QTC,r,0;TL2;
+	mat read #QTC,R,12;LineNum;
+	mat read #QTC,R,14;LPONum$;
+	mat read #QTC,R,44;LJobNum$;
+	mat read #QTC,R,74;PSNum$;
+	mat read #QTC,R,104;MSG1$;
+	mat read #QTC,R,134;MSG2$;
+	mat read #QTC,R,164;MSGS$;
+	Sparenu$=" " ! for blank in key for sql
+	k1$=" ",k1$
+	k1$[1,6]=roh.Ordnum using "######"
+	K1$[7,9]=rol.Linenum using "###"
+	Search #OTC,2,1;k1$,R[1],e
+	if not(e) goto RTCDone
+	Let e=2;R[1]=0
+	Search #OTC,1,0;K1$,R[1],E
+	if e goto RTCDone
+	Search #OTC,4,1;k1$,R[1],E
+	if e goto RTCDone
+	tl2[0]=rol.status
+	let tl2[1]=roh.ordnum
+	linenum=rol.linenum
+	Mat Write #OTC,r[1],0;TL2;
+	mat Write #OTC,R[1],12;LineNum;
+	mat Write #OTC,R[1],14;LPONum$;
+	mat Write #OTC,R[1],44;LJobNum$;
+	mat Write #OTC,R[1],74;PSNum$;
+	mat Write #OTC,R[1],104;MSG1$;
+	mat Write #OTC,R[1],134;MSG2$;
+	mat write #OTC,R[1],164;MSGS$;
+	mat write #OTC,R[1],998;Sparenu$;
+	RTCDone: ! finished
+	If qtc try close #QTC Else REM
+	If otc try close #OTC Else REM
+	if debugdetail
+		dmsg$="RolTag Copied" \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! ROLTAGCPY
+! 
+!--------------------------------------------------------------------
+Sub Mssgs()
+! copy special messages - create 
+  Try
+	DIM M1$[40],SNU$[1],K2$[60]
+	Dim 2%,M2,3%,M3
+	QOM=openfile(2672,Intco) \ if qom=-1 goto SPCDone
+	ROM=openfile(1968,Intco) \ if rom=-1 goto SPCDone
+	! first copy existing quote to order
+	K1$=" ",k1$
+	K1$[1,6]=qoh.ordnum using "######"
+	Do
+		Search #QOM,3,1;k1$,R,E
+		if e exit do
+		x2=k1$[1,6] \ if x2<>qoh.ordnum exit do
+		! x2=k1$[7] \ if x2>800 exit do ! no internals? - does it on native
+		Mat read #QOM,r,0;m1$;
+		mat read #QOM,R,40;m2;
+		mat read #QOM,R,44;m3;
+		k2$=" ",k2$
+		k2$[1,6]=roh.ordnum using "######"
+		k2$[7]=k1$[7] ! keep same line
+		if custom_customer$="AMERICANOSMENT"
+			if qoh.ordtype=21 or qoh.ordtype=22
+				let m2=k2$[7,9]
+				if m2>200 and m2<401
+					let m2=m2+200
+					let k2$[7,9]=m2 using "###"
+				endif
+			endif
+		endif				
+		Search #ROM,2,1;k2$,R[1],E
+		if e ! not found - add it
+			let e=2;R[1]=0
+			Search #ROM,1,0;k2$,R[1],E
+			if e goto bpmsg
+			search #ROM,4,1;k2$,R[1],E
+			if e goto bpmsg
+			let m2=k2$[7] ! just in case
+			let m3=roh.ordnum
+			SNU$=" "
+			mat write #ROM,r[1],0;m1$;
+			mat write #ROM,R[1],40;m2;
+			mat write #ROM,R[1],44;m3;
+			mat write #ROM,R[1],50;snu$;
+		bpmsg: ! problem - bypass
+		Endif
+	Loop ! next quote message
+	! okay - add message to quote & order
+	for x=801 to 999
+		K1$=" ",K1$
+		K1$[1,6]=QOH.ordnum using "######"
+		k1$[7,9]=x using "###"
+		search #QOM,2,1;k1$,R,E
+		if e ! found open #
+			let e=2;r=0
+			search #QOM,1,0;k1$,R,e
+			if e goto bpqmadd
+			let k1$[10,10]=" " ! make sure full 10 chars!
+			search #QOM,4,1;k1$,R,E
+			if e goto bpqmadd
+			LET M1$=" ",M1$
+			LET M1$[1,8]="ORDER #:" \ LET M1$[10,15]=ROH.ORDNUM USING "######"
+			X$=Pdate$(curdate)
+			LET M1$[20,27]="CREATED " \ LET M1$[30,39]=X$
+			let m2=x;m3=qoh.ordnum
+			snu$=" "
+			mat write #QOM,r,0;m1$;
+			mat write #QOM,R,40;m2;
+			mat write #QOM,R,44;m3;
+			mat write #QOM,R,50;snu$;
+			BPQMadd: ! problem - bypass
+			x=1000
+		Endif ! add created message
+	Next X
+	for x=801 to 999
+		K1$=" ",K1$
+		K1$[1,6]=ROH.ordnum using "######"
+		k1$[7,9]=x using "###"
+		search #ROM,2,1;k1$,R,E
+		if e ! found open #
+			let e=2;r=0
+			search #ROM,1,0;k1$,R,e
+			if e goto bpomadd
+			let k1$[10,10]=" " ! make sure full 10 chars!
+			search #ROM,4,1;k1$,R,E
+			if e goto bpomadd
+			LET M1$=" ",M1$
+			LET M1$[1,8]="Quote #:" \ LET M1$[10,15]=qoh.ordnum USING "######"
+			let m2=x;m3=roh.ordnum
+			snu$=" "
+			mat write #ROM,r,0;m1$;
+			mat write #ROM,R,40;m2;
+			mat write #ROM,R,44;m3;
+			mat write #ROM,R,50;snu$;
+			BPOMadd: ! problem - bypass
+			x=1000
+		Endif ! add created message
+	Next X
+	SPCDone: ! finished
+	If QOM try close #QOM Else REM
+	If ROM try close #ROM Else REM
+	if debugdetail
+		dmsg$="Special Message Copied " \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! Mssgs
+! 
+!--------------------------------------------------------------------
+Sub resetQOH()
+! change quote status back 
+  Try
+	let OStat=qoh.status ! curr key
+	let qoh.status=4 ! order created
+	qoh.Lockport=0
+	!qoh.OrgOrd=roh.ordnum ! ? NO - USES OLD VARIABLE!?
+	qoh.spare4=roh.ordnum ! h5[6] on native
+	! ALWAYS RESET FROM 95? ! not on test!
+	IF Ostat=0 let OStat=95
+	k1$=" ",k1$
+	k1$=OStat using "##"
+	K1$[3]=qoh.ordnum using "######"
+	if ostat<>qoh.status
+	Search #QOH,5,1;k1$,R,E
+	endif
+	k1$[1,2]=qoh.status using "##"
+	let r=rec_qoh
+	Search #QOH,4,1;k1$,R,E
+	qoh.OrgStatus=0
+	write record #QOH,rec_qoh,0;qoh.;
+	if debugdetail
+		dmsg$="Quote Status Reset " \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! resetQOH
+! 
+!--------------------------------------------------------------------
+Sub edttrak()
+! record new line in edittrack
+  Try
+	If P60$[44,44]<>"Y" exit sub ! not flagged
+	clear etr.
+	clear fchan[]
+	etr.EtAction = 11 ! new
+	fChan[0]=-1;fchan[1]=-1 ! no files open - etrack/usercntrl
+	etr.OrdNum=rol.OrdNum
+	etr.LineNum=rol.LineNum
+	etr.Status=roh.OrgStatus \ IF etr.Status<=0 let etr.Status=roh.Status
+	etr.ProdCode$=rol.ProdCode$
+	etr.OrgQtyOrd=0;etr.NewQtyOrd=rol.QtyOrd
+	etr.OrgQtyShip=0;etr.NewQtyShip=rol.QtyShip
+	etr.OrgQtyBO=0;etr.NewQtyBO=rol.QtyBO
+	e$=""
+	! date,time,port,access gotten in call
+	etr.AccessCode$=Userid$+Blank$
+	etr.UMSell=rol.UMSell
+	etr.NstkFlag=rol.NStkItem
+	etr.OrgOrdTot=rot.OrdTot
+	etr.CustNum=roh.CustNum
+	etr.InvNum=roh.InvNum
+	etr.Slsm=roh.SlsmNum
+	etr.OrgUnitPrice=0
+	etr.NewUnitPrice=rol.UnitPrice
+	etr.UMPrice=rol.UMPrice
+	etr.UMCost=rol.UMCost
+	etr.OrgLoadCost=0
+	etr.NewLoadCost=rol.UnitCost
+	etr.UnitNetWgt=rol.LbsUnit
+	etr.NetWgtFact=rol.WgtFactor
+	etr.SpareNU$=Blank$
+	if etr.etaction=11 or etr.etaction=2 ! add SET ORIG=NEW/cURR on ADD or DELETE
+		etr.OrgQtyOrd=etr.NewQtyOrd
+		etr.OrgQtyShip=etr.NewQtyShip
+		etr.OrgQtyBO=etr.NewQtyBO
+		etr.OrgUnitPrice=etr.NewUnitPrice
+		etr.OrgLoadCost=etr.NewLoadCost
+	Endif	
+	Call MakeEdittrack(e$,IntCo,fchan[],etr.)
+	if debugdetail
+		dmsg$="Edit track "+Str$(etr.OrdNum)+" line "+Str$(etr.LineNum) \ Call updatelog(debug)
+	Endif
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! edttrak
+! 
+!--------------------------------------------------------------------
+Sub Stkchk()
+! check prodgroup for 
+  Try
+	! read prod already
+	! first check/add prodwhse
+	K1$=" ",k1$
+	K1$=rol.ProdCode$,rol.Whse Using "##"
+	PWR=filegetprodwhse(e$,PWC,"=",1,k1$,pw.)
+	if PWR<=0 clear pw.
+	If PW.ProdGrp>0 ! has a group
+		Pram[0]=roh.OrdType !  \ if TScan=2 Let Pram[0]=0-OType
+		Pram[1]=PW.ProdGrp
+		Pram[5]=0 ! file not opened
+		![0]=Order or (-)PO Type
+		! [1]=Product Group
+		! [2]=Allow on Ord/PO (1=y, 0=N)
+		! [3]=Update Stock (1=y, 0=N)
+		! [4]=On Price List (0/1)
+		! [5]=Channel of 2/ProdGrp#
+		Call ProdGroup(e$,intco,Pram[])
+		rol.UpdtStk=Pram[3] ! update Stock
+	Endif
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! Stkchk
+! 
+!-------------------------------------------------------------------- 
+Sub shipqtychk()
+! check avail and adjust if needed
+  Try
+	Dim 3%,CHBase,NetCost
+	Avail=0 ! for nonstocks
+	Clear pw.
+	If p60$[27,27]="N" Goto SQCDone ! no check at all
+	if not(rol.NStkItem) and not(RPRLine) and not(rol.UpdtStk) and milf !failed mill check
+		goto sqcm  !! need to recalc extended amounts
+	endif
+	if rol.KitDesignation$="KIT" goto SQCDone ! don't adjust kit lines
+	if NOT(rol.NStkItem) AND rol.UpdtStk=0 Goto SQCDone ! no stk update - inv item
+	if roh.ordtype=2 or roh.ordtype=5 Goto SQCDone ! direct/future - no adj
+	IF P60$[22,22]="N" AND roh.ordtype=3 Goto SQCDone ! indirect - no adj 
+	if rol.NStkItem=0 
+		! using pr.
+		K1$=" ",k1$
+		K1$=rol.ProdCode$,Whse Using "##"
+		PWR=filegetprodwhse(e$,PWC,"=",1,k1$,pw.)
+		if PWR<=0
+			Clear pw.
+		Endif
+		Avail=pw.QtyOnHand-pw.QtyOnOrd \ If p9$[28,28] = "Y" let avail=avail+pw.QtyOnPO
+		NWA: ! no whse - no avail
+		If rol.QtyShip>0 and rol.QtyShip>avail ! too much
+			if avail<0 let avail=0 ! so ship=0
+			let rol.QtyShip=Avail
+			let rol.QtyBO=rol.QtyOrd-rol.QtyShip ! backorder
+		Endif
+	Endif
+	if p61$[76,76]="Y" and rol.NStkItem ! auto bo non-stocks flag
+		let rol.QtyBO=rol.QtyOrd;rol.QtyShip=0
+	Endif
+sqcm: if cust.BoSAllowedFlag=0 let rol.QtyBo=0 ! no bo's for customer!?
+	! now retotal line (as 201d does not) - from mxline
+	IF rol.WgtFactor<=0 LET rol.WgtFactor=1
+	LET rol.ExtNetWgt=FNR(ABS((rol.LbsUnit*rol.QtyShip)/rol.WgtFactor))
+	LET ORDWT=(rol.LbsUnit*rol.QtyOrd)/rol.WgtFactor ! "extended weight ordered
+	! not recalc'ing the net price 
+	IF rol.UMCutCost=-3 AND rol.QtyOrd LET CHBASE=(rol.CutCost/rol.QtyOrd) ELSE  LET CHBASE=rol.CutCost
+	LET NETCOST=rol.UnitCost+CHBASE
+	IF rol.LoadUpchrg
+	  IF rol.LoadUpchrg <0
+		LET NETCOST=NETCOST+ABS(rol.LoadUpchrg )
+	  ELSE
+		LET NETCOST=NETCOST+(NETCOST*(rol.LoadUpchrg /100))
+	  ENDIF
+	ENDIF
+	! LET X2=16 \ GOSUB L_15500: \ LET X2=11 \ GOSUB L_15000: ! TO COST THEN BACK - NETCOST/W CUT             
+	!cnvtu[0]=0;cnvtu[1]=rol.UMCost;cnvtu[2]=2
+	!IF rol.UMCost>0 AND rol.numout LET CNVTA=(NETCOST/rol.numout) ELSE  LET CNVTA=NETCOST
+	!X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	!cnvtu[0]=rol.UMCost;cnvtu[1]=0;cnvtu[2]=6
+	!IF rol.UMCost>0 AND rol.NUMOUT LET CNVTA=x3*rol.NumOut ELSE  LET CNVTA=x3
+	!Netcost=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	IF rol.UMCutChrg=-3 LET rol.ExtCutChg=rol.CutChrg ELSE  LET rol.ExtCutChg=FNR(rol.CutChrg*rol.QtyShip)
+	IF rol.UMCutCost=-3 LET rol.ExtCutCost=rol.CutCost ELSE  LET rol.ExtCutCost=FNR(rol.CutCost*rol.QtyShip)
+	LET rol.ExtOrdAmt=FNR(rol.QtyOrd*rol.NetPrice)
+	LET rol.ExtLoadOrd=FNR(rol.QtyOrd*NETCOST)
+	IF roh.ordtype=4 OR roh.ordtype=15 ! "bill and hold
+	  IF roh.ordtype=15 
+		if roh.BOCTR=0 let rol.CurrBillQty=rol.QtyOrd Else let rol.CurrBillQty=0
+	  Endif
+	  if roh.ordtype=4 let rol.CurrRelQty=rol.qtyship
+	  if roh.ordtype=4 and custom_customer$="MORRISETTE" let rol.CurrBillQty=rol.QtyShip
+	  LET rol.ExtShipAmt=FNR(rol.CurrBillQty*rol.NetPrice)
+	  LET rol.ExtLoadShip=FNR(rol.CurrBillQty*NETCOST)
+	ELSE
+	  LET rol.ExtShipAmt=FNR(rol.QtyShip*rol.NetPrice)
+	  LET rol.ExtLoadShip=FNR(rol.QtyShip*NETCOST)
+	ENDIF
+	IF rol.UMPrice=-2 ! lot
+	  LET rol.ExtOrdAmt=FNR(rol.NetPrice)*SGN(rol.QtyOrd)
+	  IF roh.ordtype=4 OR roh.ordtype=15
+		LET rol.ExtShipAmt=FNR(SGN(rol.CurrBillQty)*rol.NetPrice)
+	  ELSE
+		LET rol.ExtShipAmt=FNR(rol.NetPrice)*SGN(rol.QtyShip)
+	  ENDIF
+	ENDIF
+	IF rol.UMCost=-2 ! LOT
+	  LET rol.ExtLoadOrd=FNR(NETCOST*SGN(rol.QtyOrd))
+	  IF roh.ordtype=4 OR roh.ordtype=15
+        LET rol.ExtLoadShip=FNR(NETCOST*SGN(rol.CurrBillQty))
+	  ELSE
+		LET rol.ExtLoadShip=FNR(NETCOST*SGN(rol.QtyShip))
+	  ENDIF
+	ENDIF
+	rol.ExtGLCost=FNR(rol.QtyShip*rol.UnitGLCost)
+	rol.ExtNetWgt=FNR(Abs((rol.QtyShip*rol.LbsUnit)/rol.WgtFactor))
+		if roh.OrdType=8 or roh.OrdType=16 ! cons/trans - no price/cost
+			rol.UnitCost=0;rol.CostOrigin=0;rol.RebtContract=0
+			rol.UnitPrice=0;rol.CutChrg=0;rol.CutCost=0
+			rol.LineDisc=0;rol.ExtOrdAmt=0;rol.ExtShipAmt=0
+			rol.LineDiscPct=0;rol.ExtCutChg=0;rol.ExtCutCost=0
+			rol.ExtLoadShip=0;rol.ExtLoadOrd=0;rol.NetPrice=0
+			rol.TaxAmt=0;rol.LoadUpchrg=0;rol.UpChrg=0
+		Endif
+		If p61$[46,46]="Y" and Credit and roh.shiptype=3 ! price fix - no cost
+			rol.UnitCost=0;rol.CostOrigin=0;rol.RebtContract=0
+			rol.CutCost=0;rol.ExtCutCost=0;rol.ExtLoadShip=0;rol.ExtLoadOrd=0
+			rol.LoadUpchrg=0
+		Endif
+
+	SQCDone: ! finished
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! shipqtychk
+! 
+!-------------------------------------------------------------------- 

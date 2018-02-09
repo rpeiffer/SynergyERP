@@ -1,0 +1,677 @@
+! serp219.dl4
+!
+! Product Inventory Transaction Inquiry (PM program 219/785)
+!
+! 1.0 04/10/2009
+!  USE "invttrans.dl4" for list generation
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp219.dl4 src/serp219.src
+!
+!
+include "src/copyright.inc"
+! internal files needed
+
+Include "src/inc/fileccodes.inc" ! u/m file
+Include "src/inc/filecommhead.inc" ! commodity
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+Include "src/inc/filewhinfoz.inc" ! wh info file (rec 0 fix)
+include "src/inc/fileprtdefault.inc" ! port default
+Include "src/inc/filebrktbl.inc" ! break table
+Include "src/inc/fileordhead.inc" ! roh,ros,rot files
+Include "src/inc/filerolnew.inc" ! lines
+Include "src/inc/filecust.inc" ! customer
+Include "src/inc/filepwsales.inc" ! prodwhse sales
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$,buildsort
+Declare External Function ChkAltItem$,formatdate2$,getuidrec
+Declare External Sub UserCntrl,getportdefault
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,UMDList
+Declare External Function getpravail,getumrec,ChkPrdUM
+
+External Lib "libprodwh.lib"
+Declare External Function getWhAvail
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+! internal subs/functions 
+
+Declare Intrinsic sub programdump,env,Logic,FindF
+Declare Intrinsic Sub DateToJulian,JulianToDate
+Declare Intrinsic Function findchannel
+
+Declare Sub Openfiles,updatelog,sndprod,ProdDtls
+Declare Function chkdatefrmt$
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[3000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],HKey$[60]
+	Dim Key2$[64],KCM$[50],K1$[50],Mode$[2]
+	Dim TUID$[10],UCA2$[50],UTYPE$[10],TRANTYP$[512]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2],UCA5[10]
+	Dim 2%,Q0[1],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim 1%,X1[9],2%,CurDate,cust
+	Dim 2%,x2[9],sysdate,Vend,DOTp
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR,SHR,SDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99],Chans[20]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/p219.log" ! fields for DEBUG
+
+	DEF FNR(H)=INT(ABS(H)*100+.5)*.01*SGN(H)
+	
+	Dim umc. as ccodes ! u/m file
+	Dim PR. as prod ! product file
+	Dim PW. as prodwhse ! prodwhse file
+	Dim WHI. as whinfo ! wh info file
+	Dim comd. as commhead ! commodity
+	dim prt. as prtdefault ! port defaults
+	dim cust. as cust ! customer
+	dim pws. as pwsales ! prod/whse sales
+
+	! call dxopen() ! already done in menu
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp219"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action2$=UCase$(Action2$)
+	ACtion2$=RTrim$(Action2$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	GAct=0 ! action not found
+	if debugdetail
+		dmsg$="SERP219 ACTION1 "+action1$
+		If Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	
+
+	MAT  READ #CTLC,3,172;SysDate;
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #ctlc,108,0;TRANTYP$;
+	Call OpenFiles() ! open any/all files
+	Mat Read #CTLC,115,40;Q0;
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	DEF FNP(X)=SGN(X)*(INT(ABS(X)*10^Q0[1]+.5)/10^Q0[1])
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	TUID$=UserID$+Blank$
+	If Len(TUID$)>10 let TUID$[11]=""
+	Call UserCntrl(TUID$,UCA2$,UCA5[],status,intCo)
+	Let COST_LEV[0]=UCA5[0]
+	Let COST_LEV[1]=UCA5[1]
+	Let COST_LEV[2]=UCA5[2]
+	Let COST_LEV[3]=UCA5[3]
+	Let COMM_LEV=UCA5[4]
+	let rec_uac=GetUIDRec(e$,IntCo,TUID$)
+	call GetPortDefault(e$,IntCO,TUID$,portnum,rec_uac,prt.) ! get port default
+	tmp$=Tim(8) using "&&"
+	tmp$[3]=TIM(9) using "&&"
+	tmp$[5]=TIM(10) using "&&"
+	CurDate=tmp$[1,6] ! yymmdd
+	ReturnStatus=0
+	Message$="ACTION1 NOT FOUND"
+	select case action1$
+	case "PRODSEARCH" ! product scan						doc=ITInq-ProdScan.doc
+		!
+		Let ReturnStatus=1
+		Message$="OK"
+		X2=0 ! IT'S Normal TYPE SCAN
+		Call ProdList(e$,IntCo,List$[],maxcnt,ctlc,prc,pwc,x2,debugdetail,dblog$,UserId$)
+		If E$<>""
+		  Let ReturnStatus=0
+		  Message$=E$
+		Endif
+		call AddToStr(e$,rstr$,List$[])
+		
+		if debugdetail
+			dmsg$="Product Search sent "+Message$ \ Call updatelog(debug)
+		Endif
+		GAct=1 ! okay
+		! end of prodsearch
+	case "SYSFLAGS" ! send up flags							doc=ITInq-GetSysFlags.doc
+		GAct=1 ! ok
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		List$[0]=bsdel$,"SYSFLAGS",fdel$
+		Webstr$="COSTLEVAVC",fdel$,"DFWHSE",fdel$,"COSTLEVPOC",fdel$
+		List$[1]=webstr$
+		TMP$=Str$(cost_lev[0])
+		Webstr$=tmp$[1,1],fdel$,Str$(prt.wh),fdel$,Str$(COST_LEV[2]),fdel$
+		List$[2]=webstr$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		
+		! send whse List
+		Clear list$[]
+		List$[0]=bsdel$,"WHSELIST",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$
+		List$[2]="0",fdel$,"ALL WHSES",fdel$
+		row=3
+		for x=0 to 98 ! translate to 1-99
+				Try 
+					read record #WHI,x,0;whi.;
+				Else
+					clear whi.
+				End try
+				tmp$=RTrim$(whi.WhName$)
+				if tmp$<>""
+					webstr$=Str$(X+1),fdel$,tmp$,fdel$
+					List$[row]=webstr$
+					row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+				Endif
+		Next x
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		! send otype List
+		Clear list$[]
+		List$[0]=bsdel$,"TRTYPELIST",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$
+		List$[2]="0",fdel$,"ALL TYPES",fdel$
+		row=3;tmp$=" ",tmp$
+		for x=1 TO 34
+			X1=(X-1)*15
+			tmp1$=RTrim$(TRANTYP$[1+X1,15+x1])
+			if tmp1$="" let tmp1$="Trans # "+str$(x)
+			if tmp1$<>""
+				webstr$=Str$(X),fdel$,tmp1$,fdel$
+				List$[row]=webstr$
+				row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			Endif
+		Next x
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		! SEND TIME FRAME LIST
+		Clear List$[]
+		List$[0]=bsdel$,"TRTIMELIST",fdel$
+		List$[1]="ID",fdel$,"DESC",fdel$
+		List$[2]="0",fdel$,"6 months",fdel$
+		List$[3]="1",fdel$,"1 year",fdel$
+		List$[4]="2",fdel$,"2 years",fdel$
+		List$[5]="99",fdel$,"All on file",fdel$
+		List$[6]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="System Flags & droplists sent "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of sysflags
+	case "GETPROD" ! get prod details (individual)			doc=ITInq-GetProduct.doc
+		ReturnStatus=1
+		Message$="OK"
+		Call dxget("PRODID",tmp$)
+		tmp1$=chkaltitem$(e$,intco,tmp$)
+		tmp1$=RTrim$(tmp1$)
+		If tmp1$<>"" ! found an altitem
+		  Prod$=UCase$(tmp1$)+Blank$ ! use this instead of add'l calls
+		Else ! not found
+		  Prod$=UCase$(tmp$)+Blank$ ! use what we got
+		Endif
+		If Len(Prod$)>12 let Prod$[13]=""
+		PrR=filegetprod(e$,PRC,"=",1,prod$,PR.) ! product mode=2 dir=1
+		!
+		! initialize status
+		if PrR<0 ! Product record not found
+			clear PR.
+			ReturnStatus=0
+			Message$="Error, Product not found"
+			goto ProdInvld
+		Endif
+		CALL dxget("WHSE",tmp$)
+		Whse=tmp$
+		if whse<0 or whse>99
+			ReturnStatus=0
+			Message$="Error, Warehouse Invalid"
+			goto ProdInvld
+		Endif
+		Call sndprod()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		call proddtls()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		ProdInvld: ! prod nogood
+		if debugdetail
+			dmsg$="Product sent "+Prod$+" "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of getprod
+	case "NXTPROD" ! want next id							doc=ITInq-GetNextProduct.doc
+		ReturnStatus=1
+		Message$="OK"
+		Call dxget("CURRPROD",tmp$)
+		Prod$=UCase$(tmp$)+Blank$ ! fill to 12
+		PRR=filegetprod(e$,PRC,">",1,prod$,PR.) ! product mode=3 dir=1
+		! initialize status
+		if PrR<0 ! Product record not found
+			clear PR.
+			ReturnStatus=0
+			Message$="Error, End of file"
+			goto NProdInvld
+		Endif
+		CALL dxget("WHSE",tmp$)
+		Whse=tmp$
+		if whse<0 or whse>99
+			ReturnStatus=0
+			Message$="Error, Warehouse Invalid"
+			goto NProdInvld
+		Endif
+		Call sndprod()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		call proddtls()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		NProdInvld: ! prod nogood
+		if debugdetail
+			dmsg$="Next Product sent "+Prod$+" "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of NXTPROD
+	case "PRODUMCHG" ! changed um - resend					doc=ITInq-ProductUMChg.doc
+		ReturnStatus=1
+		Message$="OK"
+		Call dxget("PRODID",tmp$)
+		tmp1$=chkaltitem$(e$,intco,tmp$)
+		tmp1$=RTrim$(tmp1$)
+		If tmp1$<>"" ! found an altitem
+		  Prod$=UCase$(tmp1$)+Blank$ ! use this instead of add'l calls
+		Else ! not found
+		  Prod$=UCase$(tmp$)+Blank$ ! use what we got
+		Endif
+		If Len(Prod$)>12 let Prod$[13]=""
+		PrR=filegetprod(e$,PRC,"=",1,prod$,PR.) ! product mode=2 dir=1
+		!
+		! initialize status
+		if PrR<0 ! Product record not found
+			clear PR.
+			ReturnStatus=0
+			Message$="Error, Product not found"
+			goto ProdUInvld
+		Endif
+		CALL dxget("WHSE",tmp$)
+		Whse=tmp$
+		if whse<0 or whse>99
+			ReturnStatus=0
+			Message$="Error, Warehouse Invalid"
+			goto ProdUInvld
+		Endif
+		!Call sndprod()
+		!call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		call proddtls()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		ProdUInvld: ! prod nogood
+		if debugdetail
+			dmsg$="Product details sent "+Prod$+" "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of getprod
+	case "GETTRANS" ! wants the list						doc=ITInq-GetProductTrans.doc
+		ReturnStatus=1
+		Message$="OK"
+		Call dxget("PRODID",tmp$)
+		Prod$=UCase$(tmp$)+Blank$
+		If Len(Prod$)>12 let Prod$[13]=""
+		PrR=filegetprod(e$,PRC,"=",1,prod$,PR.) ! product mode=2 dir=1
+		!
+		! initialize status
+		if PrR<0 ! Product record not found
+			clear PR.
+			ReturnStatus=0
+			Message$="Error, Product not found"
+			goto SIProdInvld
+		Endif
+		if debugdetail
+			dmsg$="Chain to Product Trans "+Prod$+" "+Message$
+			Call updatelog(debug)
+		Endif
+		close ! files reopened in invttrans
+		chain "invttrans.dl4"
+		SIProdInvld: ! prod nogood
+		if debugdetail
+			dmsg$="Product Trans sent "+Prod$+" "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of GETTRANS
+	end select
+
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+
+  if debugdetail
+		dmsg$="End of Program serp219" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	CCC=OpenFile(-1728,IntCo) \ IF CCC=-1 Error 42 ! u/m file
+	CMC=OpenFile(-2288,IntCo) \ if CMC=-1 Error 42 ! commodity
+	PRC=OpenFile(-1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(-1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	WHI = OpenFile(-2768,IntCo) \ if whi = -1 Error 42 ! wh info file (rec 0 fix)
+	CUC = OpenFile(-1808,IntCo) \ if cuc = -1 Error 42 ! customer
+	WSC = OpenFile(-9963,IntCo) \ if wsc = -1 Error 42 ! PW Sales
+	PSC=OpenFile(-2080,IntCo) \ if psc = -1 Error 42 ! Prodsls
+ 	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+Userid$+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Function chkDateFrmt$(DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY
+! if not make it MM/DD/YYYY
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE" or DIn$="0"
+	  Let DOut$=UCase$(DIn$)
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function DOut$ ! chkDateFrmt$
+! 
+!--------------------------------------------------------------------
+Sub sndprod()
+! send product info
+ Try
+	
+	List$[0]=bsdel$,"PRODDATA",fdel$
+		Webstr$="ID",fdel$,"DESC1",fdel$,"DESC2",fdel$,"VENDOR",fdel$,"UM",fdel$
+		List$[1]=webstr$
+		WebStr$=Prod$,fdel$,RTrim$(pr.desc1$),fdel$,RTrim$(pr.desc2$),fdel$
+		Webstr$=WebStr$,Str$(pr.PrimVend),fdel$
+		tmp$=XUnit$(pr.UMStkDefault,ccc)
+		webstr$=webstr$,tmp$,fdel$ ! Default Stock U/M
+		List$[2]=WebStr$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		! send the UM Lists NOW? (also sent in invtrans.dl4)
+		Clear List$[]
+		tmp$="QTY" ! pass it
+		Call UMDList(e$,tmp$,PRC,PRR,List$[],IntCo,Pr.)
+		If E$<>""
+			  Let ReturnStatus=0
+			  Message$=E$
+		Endif
+		List$[0]=bsdel$,"QTYUM",fdel$ ! change sectionname
+		! call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndprod
+! 
+!--------------------------------------------------------------------
+Sub ProdDtls()
+! send warehouse specific details (prod already read/sent!)
+  Try
+	dim 1%,Mth[12,2],armonth,f
+	dim 3%,SLS[12],USG[12],W5[12],S0[12,2]
+	dim 3%,YTDQ,YTDD,CostAvg,CostPO,W9[12]
+	DIM M3$[40]
+	M3$="JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC"
+	read #ctlc,0,120;armonth;
+	tmp$=Sysdate using "&&&&&&"
+	f=armonth
+	FOR R=1 TO 12  ! set up months in reverse order (this month on top)                    
+		LET Mth[R,1]=F-R+1                  
+		IF Mth[R,1]<1 LET Mth[R,1]=Mth[R,1]+12
+	NEXT R  
+	Let showadjusage=0 ! 0=show actual, 1=show adjusted
+	Call DXGet("UM",tmp$)
+	if tmp$="" let tmp$=XUNIT$(pr.UMStkDefault,ccc)
+	X2=GetUMRec(e$,CCC,TMP$,IntCo,Pr.)
+	let UMG=ChkPrdUM(e$,X2,IntCo,Pr.)
+	If Not(UMG) 
+		returnStatus=0
+		Message$="U/M "+tmp$+" not valid for product"
+		Goto PWProdInvld
+	Endif
+	UMR=x2
+	call dxget("USGTYPE",tmp$)
+	tmp$=UCase$(RTrim$(tmp$))
+	if tmp$<>"A" and tmp$<>"D" let tmp$="A" ! A=actual/D=adjusted
+	If tmp$="D" let showadjusage=1
+	clear USG[]
+	clear SLS[]
+	K1$=" ",k1$
+	k1$=Prod$;PWR=0;WSR=0
+	if whse>0
+		! if whse and or whse pricing
+		k1$[13]=whse using "##"
+		PWR=filegetprodwhse(e$,PWC,"=",1,k1$,pw.)
+		if PWR<=0
+			clear pw.
+			CostAvg=pr.CostAvg
+			CostPo=pr.CostPO
+		Endif
+		if p9$[32,32]="N" ! no whse price/cost
+			CostAvg=pr.CostAvg
+			CostPo=pr.CostPO
+		Else
+			if pw.CostAvg let CostAvg=pw.CostAvg Else CostAvg=pr.CostAvg
+			if pw.CostLastPo let CostPO=pw.CostLastPo Else CostPo=pr.CostPO
+		Endif
+		If PWR>0
+			mat read #PWC,PWR,228;W5; ! i like for for next
+			mat read #PWC,PWR,540;w9; ! adjusted
+			for R=1 to 12
+				If W9[r] and showadjusage
+					let USG[r]=USG[r]+W9[r] 
+				else ! show actual
+					let USG[r]=USG[r]+W5[r]
+				endif
+			Next R
+			pwsr=filegetpwsales(e$,WSC,"=",1,k1$,pws.)
+			if pwsr>0
+				mat READ #wsc,pwsr,14;s0;   ! pwsales 
+			endif
+			For R=1 to 12
+				Sls[r]=sls[r]+S0[r,0]
+			Next R
+			YTDQ=S0[0,0]
+			YTDD=S0[0,1]
+		endif
+	Else ! prod details
+		MAT READ #PSC,PRR,16;S0;
+		For R=1 to 12
+			Sls[r]=sls[r]+S0[r,0]
+		Next R
+		YTDQ=S0[0,0]
+		YTDD=S0[0,1]
+		Do
+			PWR=filegetprodwhse(e$,PWC,">",1,k1$,pw.)
+			if k1$[1,12]<>Prod$ Exit do
+			if PWR<=0 exit do
+			mat read #PWC,PWR,228;W5; ! i like for the for next
+			mat read #PWC,PWR,540;W9; ! adj usage
+			for R=1 to 12
+				If W9[r] and showadjusage
+					let USG[r]=USG[r]+W9[r]
+				else ! show actual
+					let USG[r]=USG[r]+W5[r]
+				Endif
+			Next R
+		Loop
+		CostAvg=pr.CostAvg
+		CostPo=pr.CostPO
+		PW.QtyOnHand=PR.QtyOnHand
+		PW.QtyOnOrd=PR.QtyOnOrd+PR.QtyonPWO
+		PW.QtyOnPO=PR.QtyOnPO
+		PW.MinStkLvl=pr.MinQty
+		PW.MaxStkLvl=pr.MaxQty
+		pw.EOQOrdQty=PR.EconOrdQty
+	Endif
+	! OK - NOW load 'er up
+	Clear List$[]
+	List$[0]=bsdel$,"PRODDTLS",fdel$
+	WebStr$="UM",fdel$,"COSTAVG",fdel$,"COSTPO",fdel$
+	Webstr$=WebStr$,"MINQTY",fdel$,"MAXQTY",fdel$
+	Webstr$=WebStr$,"ONHAND",fdel$,"AVAIL",fdel$
+	Webstr$=WebStr$,"ONORDER",fdel$,"ONPO",fdel$
+	Webstr$=WebStr$,"REORDER",fdel$,"YTDQTY",fdel$
+	Webstr$=WebStr$,"YTDDOLS",fdel$
+	List$[1]=webstr$
+	tmp$=XUNIT$(UMR,CCC)
+	Webstr$=tmp$,fdel$
+	cnvtu[0]=0;cnvtu[1]=UMR;cnvtu[2]=2
+	cnvta=CostAvg
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	If Cost_Lev[0]=0 LET X3=0
+	WebStr$=Webstr$,LTrim$(X3 using PMask$),fdel$
+	cnvta=CostPO
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	If Cost_Lev[2]=0 LET X3=0
+	WebStr$=Webstr$,LTrim$(X3 using PMask$),fdel$ ! po cost
+	cnvtu[0]=0;cnvtu[1]=UMR;cnvtu[2]=1
+	cnvta=PW.MinStkLvl
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	WebStr$=Webstr$,LTrim$(X3 using QMask$),fdel$ ! min
+	cnvtu[0]=0;cnvtu[1]=UMR;cnvtu[2]=1
+	cnvta=PW.MaxStkLvl
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	WebStr$=Webstr$,LTrim$(X3 using QMask$),fdel$ ! max
+	cnvta=PW.QtyOnHand
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	WebStr$=Webstr$,LTrim$(X3 using QMask$),fdel$ ! on hand
+	cnvta=PW.QtyOnHand-PW.QtyOnOrd
+	if P9$[28,28]="Y" LET CNVTA=CNVTA+PW.QtyOnPO
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	WebStr$=Webstr$,LTrim$(X3 using QMask$),fdel$ ! avail
+	cnvta=PW.QtyOnOrd
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	WebStr$=Webstr$,LTrim$(X3 using QMask$),fdel$ ! on ORDER
+	cnvta=PW.QtyOnPO
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	WebStr$=Webstr$,LTrim$(X3 using QMask$),fdel$ ! on po
+	cnvta=PW.EOQOrdQty
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	WebStr$=Webstr$,LTrim$(X3 using QMask$),fdel$ ! REORDER
+	cnvta=YTDQ
+	X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	WebStr$=Webstr$,LTrim$(X3 using QMask$),fdel$ ! ytd qty
+	X3=YTDD
+	WebStr$=Webstr$,LTrim$(X3 using QMask$),fdel$ ! ytd dollars
+	List$[2]=webstr$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! send usage & Sales as 2 add'l sections
+	Clear list$[]
+	List$[0]=bsdel$,"USAGES",fdel$
+	webstr$=""
+	FOR R=1 TO 12
+		F=MTH[R,1]
+		Webstr$=webstr$,M3$[F*3-2,F*3],fdel$
+	Next R
+	List$[1]=webstr$
+	Webstr$=""
+	For R=1 to 12
+		F=MTH[R,1]
+		cnvtu[0]=0;cnvtu[1]=UMR;cnvtu[2]=1
+		cnvta=USG[f]
+		X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=Webstr$,LTrim$(X3 using QMask$),fdel$ ! mthly usage
+	Next R
+	List$[2]=webstr$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	Webstr$=""
+	Clear list$[]
+	List$[0]=bsdel$,"SALES",fdel$
+	FOR R=1 TO 12
+		F=MTH[R,1]
+		Webstr$=webstr$,M3$[F*3-2,F*3],fdel$
+	Next R
+	List$[1]=webstr$
+	Webstr$=""
+	For R=1 to 12
+		F=MTH[R,1]
+		cnvtu[0]=0;cnvtu[1]=UMR;cnvtu[2]=1
+		cnvta=SLS[f]
+		X3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		WebStr$=Webstr$,LTrim$(X3 using QMask$),fdel$ ! mthly sales
+	Next R
+	List$[2]=webstr$
+	List$[3]=esdel$
+	PWProdInvld: ! bad juju
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! ProdDtls
+! 
+!--------------------------------------------------------------------
+ 

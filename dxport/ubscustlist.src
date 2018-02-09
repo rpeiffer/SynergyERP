@@ -1,0 +1,315 @@
+!Program Name: ubscustlist
+! loadsave -w -n 100,10 -o prog/dxport/ubscustlist.dl4 src/ubscustlist.src
+!                                                  
+!Last Updated:                                     
+!zyc 09/01/04 cct182085 modified path for include  
+!zyc 09/16/04 cct182589 using dir 5 - 2/scustomer#
+!zyc 09/24/04 cct182799 using smart mask
+!rce 10/10/05  salesgroup
+!rce 06/14/06  fix endless loop problem
+!rce 09/15/06  added billto
+!
+Include "src/copyright.inc"
+
+Include "src/cuvars.inc"
+dim cus.[12000] as cInfo,k$[20]
+declare external sub custlist
+declare sub updatelog,errTrap
+
+Dim 1%,arrSales[999]
+
+call custlist(1,999,"a",cus.[],ii,ss,11000,k$, arrSales[])
+stop
+
+External Sub CustList(intCo,intSalesMan,debug,dlog$,strSearch$,logic$,what$, cus.[] as cInfo, ii, ss, iLimit, Key1$, cust, arrSales[])
+Try
+
+Declare Intrinsic Function FindChannel,Trim$
+Declare External Function XMLFile$,FDate$,BaseName$,FMTPhone$,OpenFile
+Declare Intrinsic Sub DXGet,DXPut,StringSearch
+External Lib "ubsfunc.dl4"
+
+Include "src/ubscustomer.inc"
+
+Dim CUK$[12],SMK$[20],P9$[50],P61$[256],e$[300]
+
+Dim CU. As Customer
+
+
+Dim 1%,debugDetail
+! Variables for Channel#'s
+Dim 2%,CUC,CTLC,SMC
+! Variables for Search Record#
+Dim 3%,CUR,CTLR,SMR
+! Variables for Search Error
+Dim 2%,CUE,CTLE,SME
+
+
+Dim Sales$[35], Temp$[100]
+Dim SLS$[3],CO$[1]
+Dim Msg$[256],pgmName$[20]
+Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5],keyvar$[30]
+
+Dim 3%,ARS[5]
+Dim 2%, t2
+Dim 2%, Q0[1]
+Dim 3% 
+
+debugDetail=0
+pgmName$="ubscustlist"
+msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+ii=0
+
+SLS$=intSalesMan Using "###" ! Passed Salesman
+CO$=Str$(intCo) ! Company
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+
+CUC= OpenFile(-1808,intCo)  \ If CUC=-1  Error 42    
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42    
+SMC= OpenFile(-1824,intCo)  \ If SMC=-1  Error 42    
+
+Read #CTLC,19,50;P9$; ! What is this?
+Mat Read #CTLC,115,40;Q0; 
+
+If not(Q0[1]) let Q0[1]=2                                                       
+Let Dec$="#",Dec$;Qmask$="---,---,--#"                                          
+If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask      
+If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask        
+Let Emask$="-$$$,$$$,$$$,$$$.##"                         !ext. price mask       
+
+
+If SLS$="999" Then
+  CUK$=""   !Key1$
+Else
+  CUK$=SLS$ !Key1$
+End If
+
+if key1$ > "" let CUK$ = key1$
+
+arrayloop: !
+if arrSales and sls$<>"999"
+	if key1$
+		t2 = key1$[1,3]  ! salescode
+		for counter = 0 to 999
+			if arrSales[counter]=t2 goto end_find_key1
+		next counter
+		if counter=999 let key1$ = "" \ counter=0
+		cuk$=arrsales[counter] using "###"
+	else
+		cuk$=arrsales[counter] using "###"
+	endif
+Endif
+
+end_find_key1: ! set to key1
+
+if cust let CUK$ = cust using "######" ! overrides all
+if cust let strsearch$ = ""  ! if they pass a custcode use it only
+
+CUTOP: Rem Loop Through Customer on Salesman directory (default sort)
+if cust
+	Search #CUC,2,1;CUK$,CUR,CUE
+	if val(cuk$)=cust
+		CUE=0  ! goto SLSPassed
+	else
+		CUE=22
+	endif
+else
+	Search #CUC,3,5;CUK$,CUR,CUE
+endif
+
+Try Read Record #CUC,CUR; CU.; else clear CU.
+
+If intSalesMan=999 goto SLSPassed ! all reps
+
+if arrsales and not(cust) ! using salesgroup
+	If val(cuk$[1,3]) <> arrSales[counter]
+		Let cue=22
+		counter=counter+1
+		key1$ = ""
+		if arrSales[counter] and counter<1000 goto arrayloop  ! if more loop
+	endif
+endif
+      
+!
+	If arrSales                                       
+		for x=0 to 999                          
+			if arrSales[x]=CU.C1[2] goto SLSPassed:
+			if not(arrSales[x]) counter=999 ! skip to end 
+		next x
+	Endif                                             
+!
+If intSalesMan=CU.C1[2] goto SLSPassed:          
+!
+goto CUEND  !Security.                               
+
+SLSPassed: !  passed tests
+If CUE Then
+   Keyvar$=""
+   Goto CUEND:
+End If
+
+If debugDetail                                                      
+   msg$="doing...Search #CUC: CUK$="+CUK$+" CUR="+CUR \ Call updatelog(debug) 
+   If CUE msg$="error...Search error "+CUE  \ Call updatelog(debug) 
+Endif 
+
+If CU.A1$[21,30] = "          " Let CU.A1$[21,30]="         0" ! Phone# Fix
+
+! Perform Search Tests on fields.
+If Trim$(strSearch$)="" Goto FoundCust:
+
+!Custname
+If What$="1" Then
+   Call StringSearch(UCase$(CU.A1$[31,60]),UCase$(strSearch$),P)
+   If logic$="1" If P=1 Goto FoundCust:
+   If logic$<>"1" If p<>-1 Goto FoundCust:
+   Goto CUTop:
+End If
+
+!Contact
+If What$="2" Then
+   Call StringSearch(UCase$(CU.A1$[1,20]),UCase$(strSearch$),P)
+   If logic$="1" If P=1 Goto FoundCust:
+   If logic$<>"1" If P<>-1 Goto FoundCust:
+   Goto CUTop:
+End If
+
+!Salesman
+!Call StringSearch(UCase$(Sales$),UCase$(strSearch$),P)
+!If P<>-1 Goto FoundCust:
+! Phone
+!Call StringSearch(UCase$(CU.A1$[21,30]),UCase$(strSearch$),P)
+!If P<>-1 Goto FoundCust:
+!Addr1
+!Call StringSearch(UCase$(CU.A1$[61,90]),UCase$(strSearch$),P)
+!If P<>-1 Goto FoundCust:
+!Addr2
+!Call StringSearch(UCase$(CU.A1$[91,120]),UCase$(strSearch$),P)
+!If P<>-1 Goto FoundCust:
+
+!City
+If What$="3" Then
+   Call StringSearch(UCase$(CU.A1$[121,135]),UCase$(strSearch$),P)
+   If logic$="1" If P=1 Goto FoundCust:
+   If logic$<>"1" If P<>-1 Goto FoundCust:
+   Goto CUTop:
+End If
+
+!State
+If What$="4" Then
+   Call StringSearch(UCase$(CU.A1$[136,137]),UCase$(strSearch$),P)
+   If logic$="1" If p=1 goto FoundCust:
+   If logic$<>"1" If P<>-1 Goto FoundCust:
+   Goto CUTop:
+End If
+
+!State
+If What$="5" Then
+   Call StringSearch(UCase$(CU.A2$[1,10]),UCase$(strSearch$),P)
+   If logic$="1" If p=1 goto FoundCust:
+   If logic$<>"1" If P<>-1 Goto FoundCust:
+   Goto CUTop:
+End If
+
+!uda1
+If What$="6" Then
+   Call StringSearch(UCase$(CU.U2$[1,20]),UCase$(strSearch$),P)
+   If logic$="1" If p=1 goto FoundCust:
+   If logic$<>"1" If P<>-1 Goto FoundCust:
+   Goto CUTop:
+End If
+Goto CUTop:
+FoundCust: Rem
+
+! Get SalesMan
+
+SMK$=CU.C1[2] Using "### "
+Temp$=SMK$
+
+Search #SMC,2,1;SMK$,SMR,SME
+If SMK$[1,4] <> Temp$ Let SME=22
+
+If debugDetail                                                      
+   msg$="doing...Search #SMC: SMK$="+SMK$+" SMR="+SMR \ Call updatelog(debug) 
+   If SME msg$="error...Search error "+SME  \ Call updatelog(debug) 
+Endif  
+If SME=0 Then
+	Mat Read #SMC,SMR;Sales$[1,30];
+Else
+	Sales$="-NOF-"
+End If
+
+Temp$=Sales$
+Sales$=""
+For X1=1 to Len(Temp$)
+	If Temp$[X1,X1]="'" Then
+           Sales$=Sales$,"\\"
+        End If
+	Sales$=Sales$,Temp$[X1,X1]
+Next X1
+
+
+If ii < iLimit Then
+   cus.[ii].SLSNo$=Str$(CU.C1[2])
+   cus.[ii].SLSName$=Trim$(Sales$)
+   cus.[ii].CustNumber$=Str$(CU.C1[1])
+   cus.[ii].Billto$=Str$(CU.C1[4])
+   cus.[ii].CustName$=CU.A1$[31,60]
+   cus.[ii].Contact$=CU.A1$[1,20]
+   If Trim$(cus.[ii].Contact$)="" Let cus.[ii].Contact$="n/a"
+   cus.[ii].addr1$=cu.a1$[61,90]
+   cus.[ii].addr2$=cu.a1$[91,120]
+   cus.[ii].City$=CU.A1$[121,135]
+   cus.[ii].State$=CU.A1$[136,137]
+   cus.[ii].Zip$=CU.A2$[1,10]
+   Try  ! papermaster doesnt validate phone# so we have to trap here
+   	cus.[ii].Phone$=FMTPhone$(Val(CU.A1$[21,30]))
+   Else
+   	cus.[ii].Phone$=" "
+   End Try
+   If Trim$(cus.[ii].Phone$)="" Let cus.[ii].Phone$="."
+   cus.[ii].ARBal$=(CU.C4[0]+CU.C4[2]+CU.C4[3]+CU.C4[4]+CU.C4[5]-CU.C4[1]) Using Emask$  !"--,---,---.##"
+   cus.[ii].NetSalesMTD$=CU.C5[2] Using Emask$  !"--,---,---.##"
+   cus.[ii].NetSalesYTD$=CU.C5[3] Using Emask$  !"--,---,---.##"
+   cus.[ii].Start$="START"
+
+   ii=ii+1
+   Keyvar$=CUK$
+   if ii > ilimit goto CUEND
+   if cust goto CUEND
+   Goto CUTop:
+End If
+
+
+CUEnd: Rem End it all !
+if not(cue) let key1$ = keyvar$
+
+Close #CUC,#CTLC,#SMC
+msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+ss=0
+Exit Sub
+Else
+  ss=spc(10)
+  Call errTrap(pgmName$)
+include "src/callsuberr.inc"
+End Try
+
+
+Sub updatelog(debug)                                        
+	If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub   
+
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+		
+
+ss=Spc(10)
+
+End Sub
+

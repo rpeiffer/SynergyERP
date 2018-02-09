@@ -1,0 +1,164 @@
+rem orderserlno - check orders vs serial numbers
+rem one option will be to check that order has the right number of serial numbers
+rem assigned and put order on hold (code 11) if there is a problem
+
+! loadsave -w -n 100,10 -o prog/dxport/orderserlno.dl4 src/orderserlno.src
+
+include "src/copyright.inc"
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile
+
+External Lib "libgeneral.lib"  
+
+Declare Sub PACK_HOLDS,UNPACK_HOLDS
+
+include "src/inc/fileordhead.inc" 
+Include "src/inc/filerolz.inc"
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+dim rstr$[3000]
+!Dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20]
+!Dim action$[20],action1$[20],options$[20],Action2$[20],userid$[8]
+DIM p60$[50]
+dim 3%
+
+enter ordernum,...
+try enter opt else opt=1   !! only here in case other options get added
+
+rem opt=1	put order on hold if serial number not assigned properly
+
+TRY
+	if ordernum<=0 or ordernum>999999 goto outend:  !! bad order number passed in
+
+	!Call getsession(e$,CTLC,options$,action$,userid$,IntCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)                                        
+
+	select case opt
+	case 1
+		Dim ROH. As roh ! order header file
+		dim rot. as rot ! order total file
+		Dim rol. As rolnew ! order lines 
+		! sordflen
+		DIM sn1$[54]
+		dim 1%,sn1
+		dim 2%,sn0[1]
+		dim 3%,sninvno
+
+		dim k1$[100],k2$[100],k3$[100],tmp$[100],a$[156]
+		dim 1%,ch_roh,ch_rol,holdcodeflag[12]
+		dim 3%,r[10]
+
+		!try 
+			!Call dxopen()
+		!	dxflg=1
+		!else
+		!	dxflg=0
+		!end try
+		!Call dxget("S_USER.AppID",tmp$) !company #              
+		!Try Let IntCo = Val(tmp$) Else Let IntCo = 1 !company # 
+
+		intco = GetParameter$("S_USER.AppID") !company #
+		ctlc = openfile(-9999,IntCo) \ If ctlc = -1 Error 42 !control 
+		Mat Read #ctlc,60,50;p60$;
+		IF P60$[25,25]="N" goto outend
+
+		Let ch_roh=OpenFile(-1840,intco) \ if ch_roh=-1 Error 42
+		Let ch_rot=OpenFile(1872,intco) \ if ch_rot=-1 Error 42
+		k1$=" ",k1$
+		for i=1 to 99
+			k1$[1,2]=i using "##"
+			k1$[3,8]=ordernum using "######"
+			search #ch_roh,2,1;k1$,r[1],e
+			if e>2 Let e$ = "orderserlno search roh " \ Error 11000
+			if not(e) then i=200  ! early abort
+		next i
+		if i=100 goto outend  ! no order header found
+		Read Record #ch_roh,r[1],0;ROH.;
+		Read Record #ch_rot,roh.totrec;rot.;
+		if roh.status >= 9 and roh.status <= 11  goto outend  ! credit memo, won't check
+		if roh.status>=90 and (roh.OrgStatus >= 9 and roh.OrgStatus <= 11)  goto outend  ! credit memo, won't check
+		if roh.OrdType = 2 GOTO outend  ! direct
+		call unpack_holds()
+
+		!call dxget("u_snhold",tmp$) 
+		!try snhold=val(tmp$) else snhold=11  !! use 99 if u_snhold not set in prog/custom/sfsystem.txt
+		snhold = GetParameter$("u_snhold") !company #
+		if holdcodeflag[snhold] goto outend ! hold already set
+		! will let other order types check line flags
+
+		Let ch_rol=OpenFile(-1888,intco) \ if ch_rol=-1 Error 42
+		Let ch_flen=OpenFile(-2944,intco) \ if ch_flen=-1 Error 42
+		Let ch_prod=OpenFile(-1792,intco) \ if ch_prod=-1 Error 42
+		k2$=" ",k2$
+		k2$[1,6]=k1$[3,8]
+		rol_loop: search #ch_rol,3,1;k2$,r[2],e
+		if e>2 Let e$ = "orderserlno search rol " \ Error 11000
+		if not(e) and k2$[1,6]=k1$[3,8]
+			Read Record #ch_rol,r[2],0;ROL.;
+			IF NOT(ROL.NStkItem) and ROL.UpdtStk and ROL.qtyship>0
+				!not nonstock and updating inventory, and some shipped
+				try mat read #ch_prod,rol.PDRecNum,0;A$;  else a$=" ",a$
+				if A$[8,8]="Y"
+					flen_count=0
+					k3$=" ",k3$
+					K3$[1,9]=K2$[1,9]  !  OOOOOOLLLSERIAL # (30) 
+					flen_loop: search #ch_flen,3,1;K3$,R[3],E
+					if e>2 Let e$ = "orderserlno search sordflen " \ Error 11000
+					if not(e) and K3$[1,9]=K2$[1,9]
+						mat read #ch_flen,r[3],0;sn1$;
+						mat read #ch_flen,r[3],54;sn0;
+						mat read #ch_flen,r[3],62;sn1;
+						if sn1$[1,12]=ROL.prodcode$ then flen_count=flen_count+1
+						goto flen_loop
+					endif
+					if flen_count<>rol.qtyship
+						holdcodeflag[snhold]=1  !! set hold of qty don't match up
+						call pack_holds()
+						Write Record #ch_rot,roh.totrec;rot.;
+					endif
+				endif
+			endif
+			goto rol_loop	
+		endif
+
+	case else
+	end select
+
+	OUTEND: REM GET OUTTA HERE
+	IF CTLC and ctlc<>1 then close #ctlc
+	if ch_roh then close #ch_roh
+	if ch_rot then close #ch_rot
+	if ch_rol then close #ch_rol
+	if ch_flen then close #ch_flen
+	if ch_prod then close #ch_prod
+else
+	include "src/callmainerrnet_call.inc"
+end try
+
+END
+
+sub unpack_holds()
+TRY
+	dim 1%,ctr,tmp3
+	tmp3=rot.HoldCode
+	For CTR = 1 To 12                         
+	   holdcodeflag[CTR] = Sgn(Fra(tmp3 / 2))  
+	   tmp3 = Int(tmp3 / 2)                    
+	Next CTR                                  
+else
+	include "src/callsuberr.inc"
+end try
+END SUB
+
+sub pack_holds()
+try
+	dim 1%,ctr,tmp3
+	tmp3 = 0                                              
+	For CTR = 0 To 11                                     
+		If holdcodeflag[CTR + 1] Let tmp3 = tmp3 + 2 ^ CTR  
+	Next CTR                                              
+	rot.HoldCode = tmp3                       
+else
+	include "src/callsuberr.inc"
+end try
+END SUB

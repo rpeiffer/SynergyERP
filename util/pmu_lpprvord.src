@@ -1,0 +1,336 @@
+! lpprvord - Check/fill the additional Previous Order Date/Qty
+!
+! loadsave -w -n 100,10 -o prog/util/pmu_lpprvord.dl4 src/pmu_lpprvord.src
+!
+! PMUPGRADER ROUTINE
+
+! task 18828!
+! needed a way to load the new previous order date & qty's
+! as History is in Invoice # order - it is basically in date order
+! so we load it as we find it.
+
+external lib "ubsfunc.dl4"
+declare intrinsic sub programdump,datetojulian
+Declare Intrinsic Sub InpBuf,String,Time
+Declare Intrinsic Function findchannel
+! Option Default Dialect IRIS1
+include "src/utilcopyright.inc"
+dim e$[300]
+
+ENTER COID,GROUPID,DBAK$,CH_LOG,COREDUMP,E,...
+! if "fromUpgrade" don't send print statements with
+! control strings as this is being executed via
+! a job not attached to terminal.  Be sure to send
+! all output to ch_log as this will be reviewed and
+! sent back to software repository
+try
+	enter fromUpgrade
+else
+	dim 1%,fromUpgrade
+end try
+try ! main try
+LET E=99
+!
+include "src/dim.pmupgrade.i"
+
+dim lp$[12], lp2$[84], lpmt$[2], tmpprod$[20],cslk$[14],B4Key$[8]
+dim 1%, lpc3[4], ai, lpeun[2], lpwh, lpcpt, PPPUserID
+dim 2%, lpsl,lpc1[2],lpr1[3],lpc5[3],lpPCDate,lpCSDT,LPDept,PPPCID[1]
+Dim 2%, prvod[2], 3%,prvoq[3] ! new flds
+dim 3%, lpc2[2], lpc4[3], lpr[4], lpunf[6], perm[1], lpLPerm, lpcurr[1]
+dim 3%, lpfperm[1],lpunit[1], InvNum
+
+Dim 1%,L3[3],S2[1]
+Dim 2%,H0[12],L4[3],L9[1]
+Dim 3%,ORef[5],Srn[5],L7[12],S3[17]
+Dim L1$[20],S3$[34]
+
+DIM ANS$[20],FILE$[20],FT$[2],X$[20],DPWIDX$[200],a1$[60]
+DIM K1$[50],LU$[2],NK1$[50],K2$[50],K3$[50],K4$[50],K5$[50]
+DIM 1%,FLAG,K1SIZE,K2SIZE,DSLS$[200]
+DIM Ftemp$[16],F$[16],P9$[50],P61$[256],CMD$[400]
+DIM 1%,FFILE$[200],WORK$[200],blank$[200]
+DIM 2%,D3[1],X2,SC2[8]
+DIM 3%,R1,R2,R3,i,r[99]
+B4Key$=" ",B4Key$
+blank$=" ",blank$
+LET TRUE=1;FALSE=NOT(TRUE)
+try close #1 else rem
+ROPEN #1,"cntrl/cntrl"+STR$(COID)
+MAT READ #1,19,50;P9$;
+Mat Read #1,61,0;p61$;
+If P61$[64,64] = "Y" ! "ship list last price
+	ftemp$="3/sllstprc"+Str$(COID)
+	LET ROW=23;COL=0
+	Open #2,Ftemp$
+
+	x2=chf(302) ! file size wrds
+	Close #2
+	If X2<200 ! "it's NOT done
+		Let LOGMSG$="File "+Ftemp$+" is not expanded "
+		Gosub DO_WRITE_LOG:
+		Goto DO_Exit:
+	Endif
+	ftemp$="3/sllstprc"+Str$(COID)
+	Open #2,Ftemp$
+Endif
+Read #1,88,1792;f$;
+ROpen #3,f$ ! prod file
+read #1,88,1376;f$;
+Open #4,f$ !! last price
+FFIle$=F$
+Read #1,88,1136;F$;
+ropen #5,F$		!! Inv History (header)
+Read #1,88,1152;f$;
+ROpen #6,f$   !! Inv Hist (Ship)
+Read #1,88,1184;f$
+ROpen #7,f$  !! Inv Hist (Lines)
+
+CONVERT_FILE: REM"Convert the given file
+LET ROW=23;COL=0
+if not(fromUpgrade) PRINT @COL,ROW;"Add Last Order Dates "+FFILE$;
+LET COL=COL+13+LEN(FFILE$)
+LET CH=7 \ GOSUB GET_ACTIVE_RECS:
+LET LOGMSG$="Estimated number of records to process: "+STR$(ACTRECS)
+GOSUB DO_WRITE_LOG:
+
+maxrec=0
+LOGMSG$="Clear previous order date/qty"
+gosub do_write_log:
+K1$=" ",k1$
+CLPLOOP: ! 
+search #4,3,1;k1$,r4,e \ if e goto doslpfle
+clear prvod[]
+clear prvoq[]
+Mat Write #4,r4,424;prvod;
+mat write #4,r4,436;prvoq;
+goto clploop:
+doslpfle: !
+k1$=" ",k1$
+if P61$[64,64]<>"Y" goto strtupdt:
+cslploop: ! 
+search #2,3,1;k1$,r2,e \ if e goto strtupdt:
+Mat Write #2,r2,424;prvod;
+mat write #2,r2,436;prvoq;
+goto cslploop:
+
+StrtUpdt: ! 
+k1$=" ",k1$
+OLDFLELOOP: REM "Loop thru all Invoices - Dir 2 (cust/inv)
+SEARCH #5,3,2;K1$,R5,E \ IF E=2 GOTO COPYDONE:
+if e>2
+	LOGMSG$ = "ERROR "+str$(e)+" during search of backed up file"
+	gosub DO_WRITE_LOG
+	call programdump()
+endif
+GOSUB READ_rec: ! "read hist file info (head/ship)
+IF H0[0]=31 GOTO OLDFLELOOP: ! NO CREDITS
+x2=H0[9] \ gosub YMD2Jul \ goto oldfleloop:
+JODate=x2
+Let K2$=" ",k2$
+Let k2$[1,10]=k1$[7]
+HLFLELOOP: ! history lines
+Search #7,3,1;k2$,R7,E \ if e=2 goto OLDFLELOOP:
+if k2$[1,10]<>k1$[7,16] goto oldfleloop: ! diff inv
+Mat Read #7,r7,8;L3;
+Mat Read #7,r7,16;L4;
+Mat Read #7,r7,140;L1$;
+Mat Read #7,R7,160;L9;
+Mat Read #7,r7,168;L7;
+Mat Read #7,r7,256;S2;
+Mat Read #7,r7,260;S3;
+Mat Read #7,R7,370;S3$;
+LET REC=REC+1
+IF NOT(FRA(REC/100)) GOSUB DISPLAY_PROGRESS: ! to screen or log
+If S2[0] = 3 Goto HLFLELOOP: ! message - ignore
+If L7[2] = 0 Goto HLFLELOOP: ! no ship - ignore
+if L3[0] = 1 Goto HLFLELOOP: ! non-stock - why bother
+If P61$[25,25] = "N" And Int(S3[16]) = 1 Goto HLFLELOOP:
+If P61$[25,25] = "P" And Fra(S3[16]) Goto HLFLELOOP:
+Let Cust=H0[4] ! "start w/ordering customer
+! build last price key
+A1$ = " ",A1$ !;! A1$[1,6] = H0[4] Using "######"
+let A1$[1,6] = Cust Using "######"
+If P9$[44,44] = "Y" Let A1$[7,10] = L9[1] Using "####" Else Let A1$[7,10] = "   0"
+A1$[11,22] = L1$[1,12]
+A1$[23,30] = "        "
+If L3[0] And S3$[1,3] <> "   " ! "non stock
+  K4$ = " ",K4$;K4$[1,20] = S3$[1,20]
+  Search #3,2,1;K4$,V2,E ! \ If E > 2 Gosub ERR_SEARCH
+  If E ! no prod with venditem - so use it
+    A1$[11,30] = S3$[1,20]
+  End If ! if there is - use nstk prod
+End If 
+Let A1$[31]="" ! no vend/commod
+let k4$=A1$
+Search #4,2,1;k4$,R4,e
+if e=1 goto HLFLELOOP: ! no last price - ignore
+Mat Read #4,R4,16;lpc1;
+Mat read #4,r4,168;lpr;
+mat read #4,r4,424;prvod;
+mat read #4,r4,436;prvoq;
+mat read #4,r4,468;invnum;
+IF LPR[2]=0 GOTO HLFLELOOP: ! NO PREV DATE - 1ST SHIP BYPASS REST?
+X2 = prvod[0] \ Gosub YMD2JUL \ X2 = 0
+JDATE[0] = X2 ! new 2nd prev ord date
+X3=h0[7] \ IF OREF[2] LET X3=OREF[2] ! use orig order if backorder (added 09/13)
+!If JODATE <= JDATE[0] And X3 <= LPC1[1] Goto L_2405 ! curr orddate<=last orddate AND currord#<=lastord#
+! can't do a check as we are loading previous orders!
+If LPC1[1] = H0[7] or LPC1[2]=H0[9] ! curr last price ord=this ord
+	let invnum=Oref[1] ! newly added field
+	goto wrt_clp:
+Endif
+if h0[9]=lpr[2] 
+	let prvoq[0]=L7[2] ! same date as prev - update that qty
+	goto wrt_clp:
+Endif
+! prev ord dates & qtys
+if jodate>jdate[0] ! > prev last - update it -- same or less - ignore
+	let prvod[2]=prvod[1]
+	let prvod[1]=prvod[0]
+	let prvod[0]=H0[9] ! lpr[2]
+	!LPR[2] = lpC1[2]
+	!lpC1[2] = H0[9]
+	let prvoq[3]=prvoq[2]
+	let prvoq[2]=prvoq[1]
+	let prvoq[1]=L7[2] ! prvoq[0]
+	! C2[0] = L7[2] ! moved - if not updating ord&date, why update qty?
+endif
+Wrt_clp: ! 
+Mat Write #4,r4,424;prvod;
+mat write #4,r4,436;prvoq;
+mat write #4,r4,468;invnum;
+L_2405: ! bypass lp update
+! NOW SHIP LIST LAST PRICE
+If p61$[64,64]<>"Y" goto HLFLELOOP:
+if not(SHLLP) goto HLFLELoop: ! no shiplist this order
+K5$ = " ",K5$;K5$[1,6] = A1$[1,6]
+  K5$[7,12] = LPSL Using "&&&&&&"
+  If P9$[44,44] = "Y" Let K5$[13,16] = L9[1] Using "####" Else Let K5$[13,16] = "   0"
+  K5$[17] = A1$[11]
+ K5$[37]=""
+Search #2,2,1;k5$,R2,e ! cut the commod
+if e=1 goto HLFLELOOP: ! no last price - ignore
+Mat Read #2,R2,16;lpc1;
+Mat read #2,r2,168;lpr;
+mat read #2,r2,424;prvod;
+mat read #2,r2,436;prvoq;
+IF LPR[2]=0 GOTO HLFLELOOP: ! NO PREV DATE - 1ST SHIP BYPASS REST?
+X2 = prvod[0] \ Gosub YMD2JUL \ X2 = 0
+JDATE[0] = X2
+X3=h0[7] \ IF OREF[2] LET X3=OREF[2] ! use orig order if backorder (added 09/13)
+! If JODATE <= JDATE[0] And X3 <= LPC1[1] Goto L_2504 ! curr orddate<=last orddate AND currord#<=lastord#
+! as we are loading previous orders - no check
+If LPC1[1] = H0[7] OR LPC1[2]=H0[9] ! order or date match curr last
+	let invnum=Oref[1] ! newly added field
+	goto wrt_slp:
+Endif
+if h0[9]=lpr[2]
+	let prvoq[0]=L7[2] ! same date as prev - update qty
+	goto wrt_slp:
+Endif
+! prev ord dates & qtys
+if jodate>jdate[0] ! > prev last - update it -- same or less - ignore
+	let prvod[2]=prvod[1]
+	let prvod[1]=prvod[0]
+	let prvod[0]=H0[9] ! lpr[2]
+	!LPR[2] = LPC1[2]
+	!LPC1[2] = H0[9]
+	let prvoq[3]=prvoq[2]
+	let prvoq[2]=prvoq[1]
+	let prvoq[1]=L7[2] ! prvoq[0]
+	! C2[0] = L7[2] ! moved - if not updating ord&date, why update qty?
+endif
+Wrt_slp: ! 
+Mat Write #2,r2,424;prvod;
+mat write #2,r2,436;prvoq;
+mat write #2,r2,468;invnum;
+L_2504: ! bypass sllp.
+GOTO HLFLELOOP:
+
+YMD2JUL: Rem  REM  CONVERT YYMMDD TO JULIAN (RETURN=NOGOOD, +1=OKAY)
+If X2 <= 0 Return 
+X$ = X2 Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Return 
+X2 = X$[1,5]
+Return 1
+
+COPYDONE: REM "Copy is Done 
+XferDone: ! "
+LET LOGMSG$="Finished with file update"
+GOSUB DO_WRITE_LOG:
+! CLOSE #2,#3,#4,#5,#6,#7
+Goto DO_EXIT:
+
+
+READ_rec: REM Read File
+Mat Read #5,R5,0;H0; ! ord #,date
+Mat read #5,r5,512;Oref; ! shiprec
+Let R6=Oref[4]
+Mat read #6,R6,154;SRN; ! ship type
+! quick check for if shiplist is used
+Let SHLLP = 0
+if p61$[64,64]="Y" 
+  If (SRN[3] = 1 Or SRN[3] = 2) And SRN[2] = H0[4] Let SHLLP = 1
+  LPSL = SRN[1]
+  If SHLLP ! "okay - still using Ship List last price
+    !If Err 0 Rem
+    !Close #89
+    !If Err 0 Gosub ERR_TRAP
+	CHAN1=Findchannel()
+    Read #1,88,2112;K5$[1,16];
+    Ropen #Chan1,K5$
+    K5$ = H0[4] Using "######";K5$[7,7] = "."
+    K5$[8] = LPSL Using "&&&&&&"
+    Search #Chan1,2,1;K5$,R[36],E ! \ If E > 1 Gosub ERR_SEARCH
+    If E Let SHLLP = 0
+    Close #Chan1
+    If SHLLP Let CSLK$ = K5$
+  End If 
+Endif
+RETURN 
+
+DO_EXIT: REM---------------- Exit the upgrade -----------------------------------
+LET E=0
+GOTO OUTEND:
+
+DO_BACKUP: REM"Backup the given file
+CALL "sysfbackup",FCODE$,COID,GROUPID,ORIG$,DBAK$,OWRITE$,MODE,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+IF E GOTO OUTEND:
+RETURN 
+
+DO_BUILD: REM"Build the given file
+CALL "Sysfbuild",FCODE$,COID,GROUPID,PTH$,OWRITE$,ROW,COL,CH_LOG,DFILE$,REASON$,E,fromUpgrade
+IF E GOTO OUTEND:
+RETURN 
+
+include "src/rtn.pmupgrade.i"
+
+
+OUTEND: REM"Final exit (be sure to set e=0 if successful before branching here)
+try CLOSE #1 Else Rem
+try Close #2 Else Rem
+try Close #3 Else Rem
+try close #4 Else Rem
+try close #5 Else Rem
+try close #6 Else Rem
+try close #7 Else Rem
+END 
+else ! main try
+	e = spc(8)
+	If Spc(8) <> 10000
+		dim msc4$[100] \ msc4$=msc$(4)
+		if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+		call env(2,"PROGNAME",msc4$)
+		if spc(8) = 11000
+			call utilsearcherr(e$, e, Spc(10))
+		else
+			Call utilsuberr(e$,Spc(8),Spc(10),Msc$(2))
+		end if
+		call programdump()
+	End If
+	Call utilmainerr(e$,Spc(8))
+	If ch_log <> -1
+		Print #ch_log;e$
+	End If
+end try

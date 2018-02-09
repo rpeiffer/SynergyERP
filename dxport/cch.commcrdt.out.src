@@ -1,0 +1,849 @@
+! >>> Program cch.commcrdt.out
+!
+! description  send cch a credit to commit to their files
+!
+! loadsave -w -n 100,10 -o prog/dxport/cch.commcrdt.out.dl4 src/cch.commcrdt.out.src
+!
+! 1.0 mm/dd/yyyy change?
+!
+include "src/copyright.inc" ! dx
+!
+Rem CCH.COMMCRDT.OUT - CREATE A Credit FILE FOR 1 ORDER
+Rem 220549/ 221505
+Rem Called program for CREDIT ACCEPT ONLY
+Rem WILL NOT HANDLE MIXED POSITIVE/NEGATIVE LINES!!!
+Rem Per CCH: DO NOT SEND NEGATIVE VALUES!!! OR "&"'s !!!?
+! as cch does not handle CREDITS in a useful way, they ONLY have 1 step calls
+! so we have to use 2 calls and it involves 3 different xml
+! files: Credits status 9-11 use an order type Calculate_DS_ED so user can edit,
+!  change, delete credits. Accept then discards the Calculate() and sends a
+!  loss as a ProcessAttributedReturn_DS which CCH treats as a one step transaction
+!  ALL PROCESS() types AUTO-COMMIT (similar to accept) and CAN NOT BE CHANGED,DELETED
+!  We will hope that sending the same data in the Calculate() and Process() result in
+!  the same tax amount, as it should, but you never know and a check is added in the 
+!  cxmlfle.in which parses the 4000+ char response and sends the TransId from that 
+!  Process() back to the credit accept.
+!
+! uses text file stored in txt/ to create data file
+! 
+! PASS IN: Order Rec # & Channels & transid$(CREDIT)
+!  Dim 1%,cChan[9],3%,OrdRec,transid$[20]
+! [1]=Cust, [2]=ROH, [3]=ROS, [4]=ROT, [5]=ROL, [6]=TAXCODE
+! [7]=TaxType(Customer), [8]=SPROD, [9]=InvMsg
+! [9] IS MAX - any more need to change dim in 247.src 
+! ERP ALSO: ,intco,rstr$  ! (COID# and response string)
+! PASS OUT: Credit flag,cm#,Channels,respfile name,transid$(used for credit prior to accept)
+
+! VARIABLES DEFINED IN txt file= (~var~ format)
+!!  IF template txt file changed/added CHECK/CHANGE THIS PROGRAM
+! SHIPDATE- On Credits, this is DATE INV'D (EFFECTIVE DATE FOR CCH)
+! CCHOID - Transid from CCH for resubmit of order/commit of order
+! CCHDPC - Default CCH Code from progdflt
+! PMOHC  - Papermaster Order Handling charge
+! PMCS   - PM Cash sale Location (if from 251)
+! PMORDNO- PM Order Number
+! CCHSERNO-Customer's ID Number from progdflt
+! PMFRT  - PM Freight charge
+! PMTX   - PM Customer Tax exempt #
+! PMTAXI - Tax Exempt Issuer
+! PMTAXR - Tax Exempt Reason(CCH CODE) ALWAYS 010
+! PMSCITY- Ship to City
+! PMSNAME- Ship to Name
+! PMSCTRY- Ship to Country
+! PMSZIP - Ship to Zip Code
+! PMSST  - Ship to State
+! PMSADD1- Ship to Address 1
+! PMSADD2- Ship to Address 2
+! LNNOS  - ID values of lines sent(xml thing)
+! --- ORDER LINES -- one for each line
+! TTLLNS - total # of lines sent
+! LNNO   - The order line key 000000lll
+! PMOLN  - The line #
+! PMPRD  - PM Product code
+! PMOQTY - PM Ship Qty (base as integer only!)
+! PMEPRC - Extended Price
+! CCHPC  - CCH ProdCode for line if known
+! --- FILE HEADER -- send first after detail complete
+! Content-Length: wc -c (char count of whole detail file)
+! Changed to create/send a PERL Script and give result file name(data coming back)
+! then pass this file name & Order Number to cch.xmlfle.in
+!
+!! text file for credit template: txt/cch.commitcrdtr.xmlo (returns)
+!! text file for credit template: txt/cch.commitcrdtl.xmlo (loss/price)
+!! text file for credit template: txt/cch.commitcrdtar.xmlo (returns for an invoice)
+!! file for storing order & cch transid: 7/CCHORDTRANS#
+!  once an order sent & returned - store OOOOOOTT-24-TT (ttl-30 char)
+!  when invoice/credit accepted - remove from file
+!  and store transid in history file(messages 801+)
+!! file sent: YYYYMMDDHHMMSSOOOOOO.pl
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: MAR  6, 2008  12:34:01
+Rem /w2/papermaster/r2005//usr/acct/jcs/work/custom/htberry.r9/cch.commcrdt.out.src (univ2) [jcs] {35653}
+Rem  Copyright (c) 2008 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare Intrinsic Sub DateToJulian,FindF,FormatDate,InpBuf,String,Time,VerifyDate,programdump
+declare intrinsic function FindChannel
+!Option Default Dialect IRIS1
+
+If Err 0 Gosub ERR_TRAP
+Enter ORDREC,CCHAN[],TRANSID$,intco,rstr$
+Rem {begin src/inc/dim.getchan.i}
+Dim 1%,CHNL
+Dim 3%,CHNLSCR,CHNLFREE
+Rem {end dim.getchan.i}
+Dim WRKLINE$[500],TMPLINE$[500],VAR$[10],WORK$[500],TEMP$[500]
+Dim FLE$[30],RETVAL$[512],CCHSERNO$[20],CCHDPC$[10],DIRTO$[64]
+Dim CCHOID$[20],S1$[118],S2$[20],A1$[142],A2$[30],A3$[22],L1$[20]
+Dim S3$[33],K1$[64],K2$[64],K3$[64],K4$[64],XMLFLE$[30],TMPFLE$[30]
+Dim X$[20],VARNM$[40],CCHPC$[10],LOGFNM$[40],SPACES$[200],TEXNO$[20]
+Dim TAXDESC$[20],TAXTDESC$[36],INXMLFLE$[30],UDA$[20],M1$[40],K9$[60]
+Dim HCCHTID$[40]
+Dim LV1$[500],LV2$[500],LV3$[500],LV4$[500],LV5$[500],LV6$[500]
+Dim LV7$[500],LV8$[500],LV9$[500]
+Dim 1%,X,X1[9],COID,CH_CNTRL,CH_CUST,CH_ROL,CH_ROS,CH_ROT,CH_ROL,CH_TMPL,CH_PROD
+Dim 1%,L3[3],S2[1],H3[1],H4[2],TCB,CH_ROH,CH_TAX,POS0,POS1,POS2,POS3,CH_DTL
+Dim 1%,CH_CCHTRNS,TTLLNS,LDLN,LNNO,SCR,STTAXE,CREDIT,CH_TAXT,FLESENTO
+Dim 2%,X2[9],H0[12],MCODE[9],L4[3],H6[8],JDATE[5]
+Dim 3%,X3[9],SRN[5],T2[25],MCHARGE[9,1],L5[3],L7[12]
+Dim 3%,ROSREC,ROTREC,ROLREC,OREF[5],R[99],PMOHC,E,H
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim WebStr$[256],msg$[100],message$[200]
+SPACES$ = " ",SPACES$
+FLESENTO = 0;returnstatus=1
+message$="OK"
+If TRANSID$[1,6] <> "CREDIT" Goto OUTEND
+TRANSID$ = ""
+If ORDREC <= 0 Goto OUTEND
+COID = IntCo ! Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64)
+CH_CNTRL = 1
+X2 = 0
+Try
+X3 = Chf(CH_CNTRL)
+Else
+	x2=49
+End try
+If X2 ! cntrl not open
+  Open #1,"cntrl/cntrl" + Str$(COID)
+End If 
+If CCHAN[1] <= 0 ! No cust
+  CHNL = 97 \ Gosub GETCHAN
+  If CHNL > 1 Let CCHAN[1] = CHNL
+  Read #CH_CNTRL,88,1808;FLE$[1,16];
+  Ropen #CCHAN[1],FLE$
+  CCHAN[1] = 0 - CCHAN[1]
+End If 
+CH_CUST = Abs(CCHAN[1])
+If CCHAN[2] <= 0 ! no roh
+  CHNL = 97 \ Gosub GETCHAN
+  If CHNL > 1 Let CCHAN[2] = CHNL
+  Read #CH_CNTRL,88,1840;FLE$[1,16];
+  Open #CCHAN[2],FLE$
+  CCHAN[2] = 0 - CCHAN[2]
+End If 
+CH_ROH = Abs(CCHAN[2])
+If CCHAN[3] <= 0 ! no ros
+  CHNL = 97 \ Gosub GETCHAN
+  If CHNL > 1 Let CCHAN[3] = CHNL
+  Read #CH_CNTRL,88,1856;FLE$[1,16];
+  Open #CCHAN[3],FLE$
+  CCHAN[3] = 0 - CCHAN[3]
+End If 
+CH_ROS = Abs(CCHAN[3])
+If CCHAN[4] <= 0 ! no rot
+  CHNL = 97 \ Gosub GETCHAN
+  If CHNL > 1 Let CCHAN[4] = CHNL
+  Read #CH_CNTRL,88,1872;FLE$[1,16];
+  Open #CCHAN[4],FLE$
+  CCHAN[4] = 0 - CCHAN[4]
+End If 
+CH_ROT = Abs(CCHAN[4])
+If CCHAN[5] <= 0 ! no rol
+  CHNL = 97 \ Gosub GETCHAN
+  If CHNL > 1 Let CCHAN[5] = CHNL
+  Read #CH_CNTRL,88,1888;FLE$[1,16];
+  Ropen #CCHAN[5],FLE$
+  CCHAN[5] = 0 - CCHAN[5]
+End If 
+CH_ROL = Abs(CCHAN[5])
+If CCHAN[6] <= 0 ! no TAX
+  CHNL = 97 \ Gosub GETCHAN
+  If CHNL > 1 Let CCHAN[6] = CHNL
+  Read #CH_CNTRL,88,2176;FLE$[1,16];
+  Ropen #CCHAN[6],FLE$
+  CCHAN[6] = 0 - CCHAN[6]
+End If 
+CH_TAX = Abs(CCHAN[6])
+If CCHAN[7] <= 0 ! no TAXTYPE
+  CHNL = 97 \ Gosub GETCHAN
+  If CHNL > 1 Let CCHAN[7] = CHNL
+  Read #CH_CNTRL,88,928;FLE$[1,16];
+  Ropen #CCHAN[7],FLE$
+  CCHAN[7] = 0 - CCHAN[7]
+End If 
+CH_TAXT = Abs(CCHAN[7])
+If CCHAN[8] <= 0 ! no SPROD
+  CHNL = 97 \ Gosub GETCHAN
+  If CHNL > 1 Let CCHAN[8] = CHNL
+  Read #CH_CNTRL,88,1792;FLE$[1,16];
+  Ropen #CCHAN[8],FLE$
+  CCHAN[8] = 0 - CCHAN[8]
+End If 
+CH_PROD = Abs(CCHAN[8])
+If CChan[9]<=0 ! no invflem
+  Let CHNL=97 \ gosub getchan
+  If CHNL>1 Let CChan[9]=CHNL
+  FLE$="4/SORDFLEMH"+STR$(COID)
+  ROpen #CCHan[9],Fle$
+  Let CCHan[9]=0-CChan[9] ! "show we opened
+Endif
+Let CH_INVM=ABS(CChan[9])
+! now get CCH Info
+CHNL = 97 \ Gosub GETCHAN
+If Err 0 Gosub ERR_TRAP
+If CHNL > 1 ! valid channel
+  Call "progdflt","CCH","",CHNL,RETVAL$
+  If RETVAL$[1,5] = "@@@@@" Let RETVAL$ = " ",RETVAL$
+  CCHSERNO$ = RETVAL$[1,20]
+  CCHDPC$ = RETVAL$[21,27]
+  DIRTO$ = RETVAL$[31,95]
+  LOGFNM$ = RETVAL$[100,139]
+Else ! "NO DEFAULTS!?
+  Message$="NO DEFAULTS DEFINED!"
+  returnstatus=0
+  Goto OUTDONE
+End If 
+CCHSERNO$=trim$(CCHSERNO$)
+CCHDPC$=trim$(CCHDPC$)
+DIRTO$=trim$(DIRTO$)
+If CCHSERNO$ = "" Or DIRTO$ = "" ! "NEED THESE!! Or CCHDPC$="" OR
+  Message$="MISSING DEFAULT VALUES!"
+  returnstatus=0
+  Goto OUTDONE
+End If 
+LOGFNM$=trim$(LOGFNM$)
+If LOGFNM$ = "" ! no name defined - hardcode default name
+  LOGFNM$ = "1/cchcalcdsout.log"
+End If 
+If CCHDPC$ = "" Let CCHDPC$ = "0000000"
+If DIRTO$ = "" Or DIRTO$[1,10] = SPACES$[1,10] Let DIRTO$ = "/tmp/"
+!FLE$ = "txt/cch.commitcrdtr.xmlo" ! cch name = processunattributedreturn_ds
+Fle$="txt/cch.commitcrdtar.xmlo" ! cch name = processattributedreturn_ds (default - copied from inv#)
+Call FindF(FLE$,H)
+If Not(H)
+  Message$="TEMPLATE FILE NOT FOUND"
+  returnstatus=0
+  Goto OUTDONE
+End If 
+CHNL = 97 \ Gosub GETCHAN
+If Err 0 Gosub ERR_TRAP
+If CHNL > 1 ! valid
+  CH_TMPL = CHNL
+  Open #CH_TMPL,FLE$
+Else 
+  Message$="TEMPLATE FILE NOT OPENED"
+  returnstatus=0
+  Goto OUTDONE
+End If 
+FLE$ = "7/CCHORDTRANS" + Str$(COID)
+CHNL = 97 \ Gosub GETCHAN
+If Err 0 Gosub ERR_TRAP
+Call FindF(FLE$,H)
+If Not(H) ! not found - build
+  WORK$ = "[1:256] " + FLE$
+  Build #CHNL,WORK$
+  R = 15;E = 0
+  Search #CHNL,0,1;K1$,R,E \ If E Gosub ERR_SEARCH
+  R = 15;E = 0
+  Search #CHNL,0,2;K1$,R,E \ If E Gosub ERR_SEARCH
+  R = 1
+  Search #CHNL,0,0;K1$,R,E \ If E Gosub ERR_SEARCH
+  Close #CHNL
+End If 
+If CHNL > 1 ! valid
+  CH_CCHTRNS = CHNL
+  Open #CH_CCHTRNS,FLE$
+Else 
+  Message$="TRANSACTION FILE NOT OPENED"
+  returnstatus=0
+  Goto OUTDONE
+End If 
+JDATE[0] = Tim(6)
+Mat Read #CH_ROH,ORDREC,0;H0;
+Mat Read #CH_ROH,ORDREC,52;H3;
+Mat Read #CH_ROH,ORDREC,78;H4;
+Mat Read #CH_ROH,ORDREC,408;H6;
+Mat Read #CH_ROH,ORDREC,512;OREF;
+Read #CH_TAX,H4[0],412;TCB;
+If TCB <> 1 Goto OUTDONE
+CREDIT = 0
+If H0[0] >= 9 And H0[0] <= 12 Let CREDIT = 1
+If H0[0] >= 90 ! in process/edit/etc
+  If H6[2] >= 9 And H6[2] <= 12 Let CREDIT = 1
+End If 
+If T2[1] < 0 Let CREDIT = 1
+Let cpfrminv=0 ! not copied is default
+if oref[1]<>h0[7] ! copy from invoice? - check it
+	K9$=" ",K9$ ! as when copied it checks the cust,etc we won't do that here!
+	K9$[1,10]=OREF[1] USING "##########"
+	INVMLOOP: ! LOOP INVOICE
+	SEARCH #CH_INVM,3,1;K9$,R[9],E
+	X3=K9$[1,10] \ IF X3<>OREF[1] LET E=2
+	IF NOT(E) ! NO PROB
+		MAT READ #CH_INVM,R[9],0;M1$;
+		IF M1$[1,9]="CCH TID: " ! GOT A LIVE ONE!
+			HCCHTID$=M1$[10]
+			Call TRIM$(HCCHTID$) ! trim all spaces fore and aft
+			IF HCCHTID$[1,4]<>"    " AND HCCHTID$[1,1]<>"" ! has data
+				LET CPFRMINV=1
+			ENDIF
+		ENDIF
+		GOTO INVMLOOP
+	ENDIF
+	! FALL THRU IF DONE
+Else
+	cpfrminv=0 ! NOT COPIED
+endif
+STTAXE = 0
+Mat Read #CH_TAX,H4[0],0;TAXDESC$;
+Call String(1,TAXDESC$)
+POS0 = 1;POS1 = 0
+Search TAXDESC$[POS0],"EXEMPT",POS1
+If POS1 Let STTAXE = 1
+ROSREC = H0[2]
+ROTREC = H0[3]
+Mat Read #CH_ROS,ROSREC,8;S1$;
+Mat Read #CH_ROS,ROSREC,126;S2$;
+Mat Read #CH_ROS,ROSREC,154;SRN;
+Mat Read #CH_ROT,ROTREC,8;T2;
+Mat Read #CH_ROT,ROTREC,168;MCODE;
+Mat Read #CH_ROT,ROTREC,208;MCHARGE;
+Rem IF T2[0]=0 GOTO OUTDONE:
+If SRN[4] > 0 And SRN[4] < Chf(CH_TAXT)
+  STTAXE = 0
+  Mat Read #CH_TAXT,SRN[4],0;TAXTDESC$;
+Else 
+  TAXTDESC$ = " ",TAXTDESC$
+End If 
+Call String(1,TAXTDESC$)
+POS0 = 1;POS1 = 0
+Search TAXTDESC$[POS0],"EXEMPT",POS1
+If POS1 Let STTAXE = 1
+K1$ = " ",K1$;K1$ = H0[4] Using "######"
+Search #CH_CUST,2,1;K1$,R[2],E \ If E > 1 Gosub ERR_SEARCH
+If E = 1 Goto OUTDONE
+Mat Read #CH_CUST,R[2],0;A1$;
+Mat Read #CH_CUST,R[2],348;A2$;
+Mat Read #CH_CUST,R[2],388;A3$;
+CCHOID$ = " ",CCHOID$
+K2$ = " ",K2$;K2$ = H0[7] Using "######"
+Search #CH_CCHTRNS,2,1;K2$,R,E \ If E > 1 Gosub ERR_SEARCH
+If Not(E) ! found it - get trans
+  CCHOID$ = K2$[7]
+End If 
+CCHOID$=trim$(CCHOID$)
+If CCHOID$ = "" Let CCHOID$ = " "
+K3$ = " ",K3$;K3$[1,6] = H0[7] Using "######"
+TTLLNS = 0
+TOTNOLINES: Rem tot lines
+Search #CH_ROL,3,1;K3$,R[3],E \ If E = 2 Goto TTLLDONE
+If E Gosub ERR_SEARCH
+X2 = K3$[1,6] \ If X2 <> H0[7] Goto TTLLDONE
+Mat Read #CH_ROL,R[3],32;L5;
+Mat Read #CH_ROL,R[3],256;S2;
+If L5[3] < 0 Goto TOTNOLINES
+If S2[0] = 3 Goto TOTNOLINES
+TTLLNS = TTLLNS + 1
+Goto TOTNOLINES
+TTLLDONE: Rem finished
+PMOHC = 0
+If T2[4] > 0 ! only can use positives
+  PMOHC = PMOHC + T2[4]
+End If 
+If T2[6] > 0 ! only can use positives
+  PMOHC = PMOHC + T2[6]
+End If 
+CCHPC$ = CCHDPC$
+TEXNO$ = ""
+If (CREDIT And H3[1] = 3) or cpfrminv=0 ! Price Error - need different xml template file
+  Close #CH_TMPL
+  If (Credit and H3[1]=3) 
+	FLE$ = "txt/cch.commitcrdtl.xmlo" ! cch name = processunattributedloss_ds
+	let cpfrminv=0 ! can not have cpfrminv - it is always UNAttributed
+  ELSE
+		Let Fle$="txt/cch.commitcrdtr.xmlo" ! cch name = processunattributedreturn_ds
+  endif
+  Call FindF(FLE$,H)
+  If Not(H)
+    Message$="CREDIT TEMPLATE FILE NOT FOUND"
+    returnstatus=0
+    Goto OUTDONE
+  End If 
+  Open #CH_TMPL,FLE$
+End If 
+TEMP$ = "" \ Call Time(TEMP$)
+WORK$ = TEMP$[1,13]
+X1 = 5
+Call VerifyDate(WORK$,X$,E,X1)
+WORK$ = X$[1,8]
+WORK$[9] = Tim(11) Using "&&"
+WORK$[11] = Tim(12) Using "&&"
+WORK$[13] = Tim(13) Using "&&"
+WORK$[15] = H0[7] Using "&&&&&&"
+XMLFLE$ = WORK$ + ".pl"
+INXMLFLE$ = WORK$ + "in.txt"
+TMPFLE$ = "/tmp/" + WORK$[1,14] + Spc(6) Using "&&&&"
+CHNL = 90 \ Gosub GETCHAN
+If Err 0 Gosub ERR_TRAP
+CH_DTL = CHNL
+Build #CH_DTL, + TMPFLE$ + "!"
+TEMPLT_LOOP: Rem read until detail done
+WRKLINE$ = ""
+Gosub READ_TEMPLATE
+If WRKLINE$ = "" Goto ORDDONE
+If WRKLINE$[1,6] = "DOHEAD" Goto ORDDONE
+Gosub PARS_LINE
+If Not(POS1) ! no variable
+  Print #CH_DTL;WRKLINE$
+Else ! need to insert a variable
+  If VARNM$ <> "LNNO" ! "don't send line detail here
+    If (TTLLNS <= 0 And VARNM$ = "LNNOS") ! "No line detail to send
+      Rem DO NOTHING
+    Else 
+      Print #CH_DTL;WRKLINE$[1,POS1 - 1];
+    End If 
+  End If 
+  ! we took out EFFECTIVE DATE on comment from CCH (as this is the POST TO DATE!!)
+  If VARNM$ = "SHIPDATE" ! "on credits - send date
+    X2 = H0[10];X$ = X2 Using "&&&&&&"
+    Call DateToJulian(1,X$,X$,E) \ If E Let X$ = "0"
+    JDATE[1] = X$
+    JDATE[2] = JDATE[0] - JDATE[1]
+    If JDATE[2] < 0 Or JDATE[2] > 400 ! future or >1 yr is NO GOOD
+      X$ = XMLFLE$[3,8]
+      X2 = X$[1,6]
+    End If 
+    X$ = X2 Using "&&&&&&"
+    X1 = 4
+    Call FormatDate(X$,X$,E,X1)
+    WORK$ = X$[7,10] + "-" + X$[1,2] + "-" + X$[4,5] + "T11:14:37"
+    Print #CH_DTL;WORK$;
+  End If 
+  If VARNM$ = "CCHOID" ! trans id that the credit is against (attributed to)
+    !Print #CH_DTL;" "; ! always treat as new trans so no previous one
+	if cpfrminv=0 Print #CH_DTL;" "; !  NO previous id to attribute to
+	if cpfrminv=1 print #CH_DTL;HCCHTID$; ! send copied from ID$
+  End If 
+  if Varnm$="CCHRID" ! referred ID? Per CCH - DO NOT USE - you will get an error if you populate this field
+	Print #CH_DTL;" "; !   something about a Parent/Child program that Berry is not set up for
+  Endif
+  If VARNM$ = "CCHDPC" ! default CCH prod
+    Print #CH_DTL;CCHDPC$;
+  End If 
+  If VARNM$ = "PMOHC" ! pm handling
+    X$ = Abs(PMOHC) Using "-------#.##"
+    X$=trim$(X$)
+    Print #CH_DTL;X$;
+  End If 
+  If VARNM$ = "PMCS" ! location
+    Print #CH_DTL;" ";
+  End If 
+  If VARNM$ = "PMORDNO" ! PM trans id (order #)
+    X$ = H0[7] Using "######"
+    X$=trim$(X$)
+    Print #CH_DTL;X$;
+  End If 
+  If VARNM$ = "CCHSERNO" ! cch cust id
+    Print #CH_DTL;CCHSERNO$;
+  End If 
+  If VARNM$ = "PMFRT" ! freight charge
+    X$ = Abs(T2[5]) Using "-------#.##"
+    If T2[5] < 0 Let X$ = "0.00"
+    X$=trim$(X$)
+    Print #CH_DTL;X$;
+  End If 
+  If VARNM$ = "PMTX" ! tax exempt no
+    TEMP$ = A2$[11,28]
+    TEMP$=trim$(TEMP$)
+    If TEMP$ = "" And STTAXE ! none for Cust but code says exempt
+      TEMP$ = "EXEMPT"
+    End If 
+    Print #CH_DTL;TEMP$;
+    TEXNO$ = TEMP$
+  End If 
+  If VARNM$ = "PMTAXI" ! tax exempt Issuer
+    If TEXNO$ <> "" ! has tax no - send customer state
+      If TEXNO$ <> "EXEMPT"
+        X$ = A1$[136,137]
+        If X$ = "" Or X$[1,2] = "  " Let X$ = S1$[106,107]
+        Print #CH_DTL;X$;
+      End If 
+      If TEXNO$ = "EXEMPT" ! ship to state needed
+        X$ = S1$[106,107]
+        If X$[1,1] = "" Or X$[1,2] = "  " Let X$ = A1$[136,137]
+        X$=trim$(X$)
+        Print #CH_DTL;X$;
+      End If 
+    Else 
+      Print #CH_DTL;"  ";
+    End If 
+  End If 
+  If VARNM$ = "PMTAXR" ! tax exempt reason
+    If TEXNO$ <> "" ! has tax no - send reason
+      Print #CH_DTL;"010";
+    Else 
+      Print #CH_DTL;"  ";
+    End If 
+  End If 
+  If VARNM$ = "PMORDTTL" ! order total
+    X3 = T2[1] + T2[5] + PMOHC
+    Rem Let X$=X3 Using "-------#.##" ! NO TOTAL SENT IF LINES ARE SENT(CCH)
+    X$ = "0"
+    X$=trim$(X$)
+    Print #CH_DTL;X$;
+  End If 
+  If VARNM$ = "PMSCITY" ! ship to city
+    TEMP$ = S1$[91,105]
+    If TEMP$[1,1] = "" Or TEMP$[1,5] = "     " Let TEMP$ = A1$[121,135]
+    TEMP$=trim$(TEMP$)
+    WORK$ = TEMP$
+    Gosub CHK4CHARS
+    TEMP$ = WORK$
+    Print #CH_DTL;TEMP$;
+  End If 
+  If VARNM$ = "PMSNAME" ! ship to name
+    TEMP$ = S1$[1,30]
+    If TEMP$[1,1] = "" Or TEMP$[1,5] = "     " Let TEMP$ = A1$[31,60]
+    TEMP$=trim$(TEMP$)
+    WORK$ = TEMP$
+    Gosub CHK4CHARS
+    TEMP$ = WORK$
+    Print #CH_DTL;TEMP$;
+  End If 
+  If VARNM$ = "PMSCTRY" ! ship to country
+    TEMP$ = S2$[1,15]
+    If TEMP$[1,1] = "" Or TEMP$[1,5] = "     " Let TEMP$ = A3$[7,21]
+    TEMP$=trim$(TEMP$)
+    X2 = TEMP$ \ If X2 <> 0 Let TEMP$ = ""
+    WORK$ = TEMP$
+    Gosub CHK4CHARS
+    TEMP$ = WORK$
+    Print #CH_DTL;TEMP$;
+  End If 
+  If VARNM$ = "PMSZIP" ! ship to zip
+    TEMP$ = S1$[108,117]
+    If TEMP$[1,1] = "" Or TEMP$[1,5] = "     " Let TEMP$ = A2$[1,10]
+    TEMP$=trim$(TEMP$)
+    WORK$ = TEMP$
+    Gosub CHK4CHARS
+    TEMP$ = WORK$
+    Print #CH_DTL;TEMP$;
+  End If 
+  If VARNM$ = "PMSST" ! ship to state
+    TEMP$ = S1$[106,107]
+    If TEMP$[1,1] = "" Or TEMP$[1,2] = "  " Let TEMP$ = A1$[136,137]
+    TEMP$=trim$(TEMP$)
+    WORK$ = TEMP$
+    Gosub CHK4CHARS
+    TEMP$ = WORK$
+    Print #CH_DTL;TEMP$;
+  End If 
+  If VARNM$ = "PMSADD1" ! ship to address 1
+    TEMP$ = S1$[31,60]
+    If TEMP$[1,1] = "" Or TEMP$[1,5] = "     " Let TEMP$ = A1$[61,90]
+    TEMP$=trim$(TEMP$)
+    WORK$ = TEMP$
+    Gosub CHK4CHARS
+    TEMP$ = WORK$
+    Print #CH_DTL;TEMP$;
+  End If 
+  If VARNM$ = "PMSADD2" ! ship to address 2
+    TEMP$ = S1$[61,90]
+    If TEMP$[1,1] = "" Or TEMP$[1,5] = "     " Let TEMP$ = A1$[91,120]
+    TEMP$=trim$(TEMP$)
+    WORK$ = TEMP$
+    Gosub CHK4CHARS
+    TEMP$ = WORK$
+    Print #CH_DTL;TEMP$;
+  End If 
+  If VARNM$ = "TTLLNS" ! total # lines
+    Print #CH_DTL;Str$(TTLLNS);
+  End If 
+  If TTLLNS > 0 And VARNM$ = "LNNOS" ! needs to know what lines will follow & how many?
+    For X1 = 1 To TTLLNS
+      Print #CH_DTL;"LN";Str$(X1);
+      If X1 <> TTLLNS ! on all but last
+        Print #CH_DTL;WRKLINE$[POS2 + 1]
+        Print #CH_DTL;WRKLINE$[1,POS1 - 1];
+      End If 
+    Next X1
+  End If 
+  If VARNM$ <> "LNNO" ! no line detail yet!
+    If (TTLLNS <= 0 And VARNM$ = "LNNOS") ! "No line detail to send
+      Rem DO NOTHING
+    Else 
+      Print #CH_DTL;WRKLINE$[POS2 + 1]
+    End If 
+  End If 
+  POS0 = 1;POS3 = 0
+  Search WRKLINE$[POS0],"<tns:OrderLineItem id=",POS3
+  If POS3 ! LINES that repeat for every line sent
+    LV1$ = WRKLINE$;LDLN = 1
+RTLOOP2: Rem loop until last line for lines
+    Gosub READ_TEMPLATE
+    If WRKLINE$ = "" Goto ORDDTLDONE
+    LDLN = LDLN + 1
+    If LDLN = 2 Let LV2$ = WRKLINE$
+    If LDLN = 3 Let LV3$ = WRKLINE$
+    If LDLN = 4 Let LV4$ = WRKLINE$
+    If LDLN = 5 Let LV5$ = WRKLINE$
+    If LDLN = 6 Let LV6$ = WRKLINE$
+    If LDLN = 7 Let LV7$ = WRKLINE$
+    If LDLN = 8 Let LV8$ = WRKLINE$
+    If LDLN = 9 Let LV9$ = WRKLINE$
+    POS0 = 1;POS3 = 0
+    Search WRKLINE$[POS0],"</tns:OrderLineItem>",POS3
+    If POS3 Goto ORDDTLDONE
+    Goto RTLOOP2
+ORDDTLDONE: Rem done with line save
+    K4$ = " ",K4$;K4$[1,6] = H0[7] Using "######"
+    LNNO = 1
+ODLOOP: Rem order detail loop
+    Search #CH_ROL,3,1;K4$,R[4],E \ If E = 2 Goto ORDLNDONE
+    If E Gosub ERR_SEARCH
+    X2 = K4$[1,6] \ If X2 <> H0[7] Goto ORDLNDONE
+    Mat Read #CH_ROL,R[4],8;L3;
+    Mat Read #CH_ROL,R[4],16;L4;
+    Mat Read #CH_ROL,R[4],32;L5;
+    Mat Read #CH_ROL,R[4],140;L1$;
+    Mat Read #CH_ROL,R[4],168;L7;
+    Mat Read #CH_ROL,R[4],256;S2;
+    Mat Read #CH_ROL,R[4],370;S3$;
+    If L5[3] < 0 Goto ODLOOP
+    If S2[0] = 3 Goto ODLOOP
+    If CREDIT ! need qty/extension as negative
+    End If 
+    If L3[0] = 0 And L4[0] > 1 And L4[0] < Chf(CH_PROD) - 1 ! berry loaded CCH PCode in UDA 2(1st alpha uda)
+      Mat Read #CH_PROD,L4[0],684;UDA$;
+      UDA$=trim$(UDA$)
+      If Len(UDA$) <> 7 ! CCH always 7 digits
+        CCHPC$ = CCHDPC$
+      Else ! continue checking look for string or other invalid chars
+        X3 = UDA$
+        If Fra(X3) Or (X3 = 0 And UDA$[1,7] <> "0000000") ! 99.99 or string both no good
+          CCHPC$ = CCHDPC$
+        Else 
+          CCHPC$ = UDA$[1,7]
+        End If 
+      End If 
+    Else ! nonstock/bad record
+      CCHPC$ = CCHDPC$
+    End If 
+    For LDLN = 1 To 9
+      WRKLINE$ = ""
+      If LDLN = 1 Let WRKLINE$ = LV1$
+      If LDLN = 2 Let WRKLINE$ = LV2$
+      If LDLN = 3 Let WRKLINE$ = LV3$
+      If LDLN = 4 Let WRKLINE$ = LV4$
+      If LDLN = 5 Let WRKLINE$ = LV5$
+      If LDLN = 6 Let WRKLINE$ = LV6$
+      If LDLN = 7 Let WRKLINE$ = LV7$
+      If LDLN = 8 Let WRKLINE$ = LV8$
+      If LDLN = 9 Let WRKLINE$ = LV9$
+      If Len(WRKLINE$) > 1
+        Gosub PARS_LINE
+        If POS1 ! has variable
+          Print #CH_DTL;WRKLINE$[1,POS1 - 1];
+          If VARNM$ = "LNNO" ! file line no
+            Print #CH_DTL;"LN";Str$(LNNO);
+          End If 
+          If VARNM$ = "PMOLN" ! order line #
+            Print #CH_DTL;Str$(L3[2]);
+          End If 
+          If VARNM$ = "PMPRD" ! pm item code
+            TEMP$ = L1$[1,12]
+            WORK$ = TEMP$
+            Gosub CHK4CHARS
+            TEMP$ = WORK$
+            TEMP$=trim$(TEMP$)
+            Print #CH_DTL;TEMP$;
+          End If 
+          If VARNM$ = "PMOQTY" ! PM ship qty (INTEGER ONLY! SO BASE U/M)
+            X3 = Abs(L7[4]) \ If X3 <= 0 Let X3 = L7[2]
+            Print #CH_DTL;Str$(X3);
+          End If 
+          If VARNM$ = "PMEPRC" ! extended price
+            TEMP$ = Abs(L5[3]) Using "--------#.##"
+            TEMP$=trim$(TEMP$)
+            Print #CH_DTL;TEMP$;
+          End If 
+          If VARNM$ = "CCHPC" ! cch prod code
+            Print #CH_DTL;CCHPC$;
+          End If 
+          Print #CH_DTL;WRKLINE$[POS2 + 1]
+        Else ! no variable
+          Print #CH_DTL;WRKLINE$
+        End If 
+      End If ! of string exists for variable
+    Next LDLN
+    LNNO = LNNO + 1
+    If LNNO > TTLLNS Goto ORDLNDONE
+    Goto ODLOOP
+ORDLNDONE: Rem line detail done
+  End If ! of line item detail send
+End If 
+Goto TEMPLT_LOOP
+READ_TEMPLATE: Rem read (needs any processing?)
+Read #CH_TMPL;WRKLINE$;
+STRPCCHAR: Rem "remove cr/lf etc
+If Len(WRKLINE$) > 1 if WRKLINE$[Len(WRKLINE$)] < " "
+  WRKLINE$[Len(WRKLINE$)] = ""
+  Goto STRPCCHAR
+End If 
+Return 
+PARS_LINE: Rem See if line holds variables
+VARNM$ = " ",VARNM$
+POS0 = 1;POS1 = 0;POS2 = 0
+Search WRKLINE$[POS0],"~",POS1
+If Not(POS1) Return 
+Let VARNM$ = WRKLINE$[POS1 + 1] To "~" : POS2
+VARNM$ = WRKLINE$[POS1 + 1,POS2 - 1]
+Call String(1,VARNM$)
+Return 
+CHK4CHARS: Rem CCH considers certain characters "invalid"
+If WORK$ = "" Return 
+For X = 1 To Len(WORK$)
+  If WORK$[X,X] = "&" Let WORK$[X,X] = "+"
+  If WORK$[X,X] = "'" Let WORK$[X,X] = "`"
+Next X
+Return 
+ORDDONE: Rem detail done, now header
+Close #CH_DTL
+WORK$ = TMPFLE$ + "H!"
+Build #CH_DTL, + WORK$
+HDR_LOOP: Rem rest is header
+WRKLINE$ = ""
+Gosub READ_TEMPLATE
+If WRKLINE$ = "" Goto FINFILE
+If WRKLINE$[1,6] = "DOHEAD" Goto HDR_LOOP
+Gosub PARS_LINE
+If POS1 ! yes data needed
+  Print #CH_DTL;WRKLINE$[1,POS1 - 1];
+  If VARNM$ = "LENGTH" ! "get byte count of detail file
+    WORK$ = "wc -c " + TMPFLE$ + " > /tmp/WC" + Str$(H0[7]) + Str$(Spc(6))
+    System WORK$,X2
+    If Not(X2) ! no errors
+      WORK$ = "/tmp/WC" + Str$(H0[7]) + Str$(Spc(6))
+      If Err 0 Rem
+      Close #76
+      If Err 0 Gosub ERR_TRAP
+      Open #76,WORK$
+      TEMP$ = "";X3 = 0
+WCR_LOOP: Rem if loop needed
+      Read #76;TEMP$;
+      If TEMP$ <> "" ! hopefully one line w/no blank start/end
+        X3 = TEMP$
+      End If 
+      Close #76
+      Kill WORK$
+      Print #CH_DTL;Str$(X3);
+    End If 
+  End If 
+  Print #CH_DTL;WRKLINE$[POS2 + 1]
+Else 
+  Print #CH_DTL;WRKLINE$
+End If 
+Goto HDR_LOOP
+FINFILE: Rem now add the xml detail
+Print #CH_DTL;""
+Close #CH_DTL
+X2 = 0;X3 = 0
+X$ = "\\"
+WORK$ = "tr -d '" + X$ + "000' < " + TMPFLE$ + "H > " + DIRTO$ + XMLFLE$
+System WORK$,X2
+WORK$ = "tr -d '" + X$ + "000' < " + TMPFLE$ + " >> " + DIRTO$ + XMLFLE$
+System WORK$,X3
+If X2 Or X3 ! unix reported errors
+  Message$="ERROR REPORTED ON FILE COMPILATION"
+  returnstatus=0
+End If 
+DELPTRNS: Rem delete any/all entries for this order
+K1$ = " ",K1$;K1$ = H0[7] Using "######"
+Search #CH_CCHTRNS,2,1;K1$,R,E \ If E > 1 Gosub ERR_SEARCH
+If Not(E) ! found previous DELETE IT! (to prevent old or bad info accumulation)
+  Search #CH_CCHTRNS,5,1;K1$,R,E \ If E Gosub ERR_SEARCH
+  Goto DELPTRNS
+End If 
+WORK$ = TMPFLE$ + "H"
+If Err 0 Rem
+Kill WORK$
+Kill TMPFLE$
+If Err 0 Gosub ERR_TRAP
+ORDFINISH: Rem finish
+!If Not(CREDIT) Print @0,23;'CL';"ORDER "; Else Print @0,23;'CL';"CREDIT ";
+!Print Using "######";H0[7];" ";
+!Print "FILE CREATED. ";
+If X2 Or X3 Message$="UNIX FILE ERROR" ! ; Else Print "NO PROBLEMS";
+If X2 Or X3 returnstatus=0
+Close #CH_TMPL
+Close #CH_CCHTRNS
+If Not(CREDIT) Let TEMP$ = "ORDER: " + H0[7] Using "######"
+If CREDIT Let TEMP$ = "CREDIT: " + H0[7] Using "######"
+TEMP$ = TEMP$ + "  " + Msc$(3)
+TEMP$ = TEMP$ + " CCHTID: " + CCHOID$
+If Not(X2) And Not(X3) Let TEMP$ = TEMP$ + " FILE IS: " + DIRTO$ + XMLFLE$
+If X2 Or X3 Let TEMP$ = TEMP$ + " UNIX ERROR: " + Str$(X2) + " :Headfile  " + Str$(X3) + " :Detlfile "
+WORK$ = "echo " + TEMP$ + " >> " + LOGFNM$
+System WORK$
+If Not(X2) And Not(X3) ! "no errors on file create
+  WORK$ = "chmod +x " + DIRTO$ + XMLFLE$
+  System WORK$,X1
+  !Print @0,22;'CL';"SENDING FILE NOW";
+  WORK$ = DIRTO$ + XMLFLE$ + " " + DIRTO$ + INXMLFLE$
+  System WORK$
+  FLESENTO = 1
+End If 
+OUTDONE: Rem finished or major required file/data missing
+If Err 0 Rem
+For X = 1 To 10
+  If CCHAN[X] <= 0 ! we opened
+    X1 = Abs(CCHAN[X])
+    If X1 > 0 Close #X1
+    CCHAN[X] = 0
+  End If 
+Next X
+If Err 0 Gosub ERR_TRAP
+if returnstatus=0 goto outerr
+OUTEND: Rem outta here
+If FLESENTO And H0[7] ! we sent a file so call read program?
+  TRANSID$ = CCHOID$
+  WORK$ = DIRTO$ + INXMLFLE$
+  Call "cch.cxmlfle.in.dl4",CREDIT,H0[7],CCHAN[],WORK$,TRANSID$,intco,rstr$
+End If 
+End 
+Rem {begin src/inc/rtn.getchan.i}
+GETCHAN: Rem search for open channel (counts down from supplied chnl #)
+CHNL=FindChannel()
+Return 
+OutErr: ! something amiss
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call AddToStr(e$,rstr$,WebStr$)
+call SetOutPut(e$,rstr$)
+End
+Rem {end rtn.getchan.i}
+ERR_SEARCH: Rem
+ENUM = E + 1000;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+MSC$(4)
+Call programdump("tmp/cch.commcrdtoutse!","")
+returnstatus=0
+message$=msg$
+goto OutErr ! alt - send user info
+Rem {begin rtn.error.s}
+ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+!
+include "src/callmainerrnet.inc"
+End 
+Rem {end rtn.error.s}

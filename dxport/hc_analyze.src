@@ -1,0 +1,321 @@
+!
+! description  hypothetical commission, analyze which items cannot
+! have automated hypothetical commission based on last commission
+! run contained in 6/COMMPAIDHYPO#
+!
+! loadsave -w -n 100,10 -o prog/dxport/hc_analyze.dl4 src/hc_analyze.src
+!
+include "src/copyright.inc" ! dx
+External Lib "ubsfunc.dl4"
+Declare External Function buildsort,Openfile
+
+Declare Intrinsic Function findchannel 
+Declare Intrinsic sub findf
+!
+Declare Sub DoSetup,SortCommissionRecs,ProcessCommissionRecs,AccumulateTotals
+Declare Sub PrintRepDetail,PrintHeading,ReadInvHeader,GetSalesRep
+
+include "src/inc/filesslsmcomm.inc"
+include "src/inc/filesslsm.inc"
+
+try
+Def FNR(X) = Sgn(X) * (Abs(Int((Abs(X) + .005) * 100) / 100))
+
+dim sc. as sslsmcomm
+dim sslsm. as sslsm
+
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+dim tmp$[800]
+dim action$[30],options$[30],userid$[8],b$[200],3%,fdel$[10],rstr$[200],bsdel$[10],esdel$[10],rdel$[10]
+dim pmask$[20]
+
+
+dim lineIn$[100],lineOut$[100],k_comm$[100],k_invh$[100],k_sslsm$[100],k_sort$[100]
+dim j8$[8],COMP$[30]
+dim 2%,h5[16],h0[12],pageNo,lineNo
+dim 3%,r_comm,r_invh,oref[5],r_sslsm
+!
+! accums[x,y]
+! x: 0=rep no problem, 1=rep problem, 2=total no problem, 3=total problem
+! y: 0=count,1=sales,2=cost
+!
+dim 3%,accums[3,2]
+dim 3%
+
+!***
+!* M A I N   L O G I C
+!***
+pageNo = 0
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+Call DoSetup()
+Call SortCommissionRecs()
+Call ProcessCommissionRecs()
+
+OUTEND: Rem EXIT ROUTINE
+If j8 ! dx xml
+	Call addtostr(e$,rstr$,esdel$) !end section
+	Call setoutput(e$,rstr$,1) !1 flag puts 0 status section in, puts </page> in
+End If 
+else
+	include "src/callmainerrnet.inc"
+end try
+End
+
+
+!**********************************************************
+! S U B R O U T I N E S
+!**********************************************************
+
+sub DoSetup()
+try
+	let pmask$ = "---------#.##"
+	Read #1,3;COMP$;
+	Mat Read #1,0,100;J8$;
+	! open files
+	tmp$ = "6/COMMPAIDHYPO"+str$(intCO)
+	call findf(tmp$, e)
+	if not(e)
+		e$ = "File not found: "+tmp$
+		error 10000
+	end if
+	ch_log = findchannel()
+	open #ch_log,tmp$
+	ch_sort=BuildSort(e$,25,0) \ if ch_sort<0 error 42 ! build a sortwork keysize=25w/50C
+	ch_comm=OpenFile(-2240,intCO) \ if ch_comm<0 error 42
+	ch_invh=OpenFile(-1136,intCO) \ if ch_invh<0 error 42
+	ch_sslsm=OpenFile(-1824,intCO) \ if ch_sslsm<0 error 42
+	! See if we are going to the browser
+	try
+		J8 = 0 \ J9 = Chf(0) 
+	else
+		J8 = Spc(8)
+	end try
+	If J8 If J8 <> 49 error J8
+	!
+	If J8 ! dx xml, setup rstr$
+		!<section>
+		tmp$ = bsdel$,"HC_ANALYZE",fdel$,rdel$
+		Call addtostr(e$,rstr$,tmp$)
+		tmp$ = "Salesrep",fdel$,"Problem Flag",fdel$
+		tmp$ = tmp$+"# Invoices/CM",fdel$,"Sales Dollars",fdel$
+		tmp$ = tmp$+"Cost",fdel$,"Gross Profit $",fdel$,rdel$
+		Call addtostr(e$,rstr$,tmp$)
+	else !if pdf or print, new method, after edits,setouput,dxclose
+		Call setoutput(e$,rstr$,2) !2 flag puts 0 status section in w/print in process msg, puts </page> in
+	End If 
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub SortCommissionRecs()
+try
+	do
+		! 1-3 = salesrep
+		! 4-13 = invoice / cm #
+		! 14-14 = type
+		! 15-16 = blank
+		READ #ch_log;lineIn$
+		if lineIn$="" exit do
+		LET lineIn$=lineIn$ TO "\15\"
+		! verify commission record exists
+		search #ch_comm,2,1;lineIn$,r_comm,e \ if e error 11000
+
+		! check to see if this is a backorder release - if so
+		! skip it is it will not recalc a new hypothetical rate
+		problemFlag = 0
+		commType = lineIn$[14,14]
+		if commType = 1 OR commType = 6
+			call ReadInvHeader()
+			If H5[7] <> 24 And H5[7] <> 4 And H5[7]<>19
+				if commType = 1 and (OREF[2] Or H0[5]) problemFlag = 1
+				if commType = 6 and (H0[5]) problemFlag = 1
+			end if
+		end if
+		! new key sort:
+		! 1-3 = salesrep
+		! 4 = Flag if we can't process: 0 = no, 1 = yes, we canNOT process
+		! 5-14 = invoice / cm #
+		! 15-15 = type
+		! 16-17 = blank
+		lineOut$ = " ",lineOut$
+		lineOut$[1,3] = lineIn$[1,3]
+		lineOut$[4,4] = str$(problemFlag)
+		lineOut$[5,17] = lineIn$[4,16]
+		search #ch_sort,4,1;lineOut$,r_comm,e \ if e error 11000
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub ReadInvHeader()
+try
+	k_invh$ = " ",k_invh$
+	k_invh$[1,2] = "30"
+	if commType = 6 k_invh$[1,2] = "31"
+	k_invh$[3,12] = lineIn$[4,13]
+	search #ch_invh,2,1;k_invh$,r_invh,e
+	if e error 11000
+	mat read #ch_invh,r_invh,0;h0;
+	mat read #ch_invh,r_invh,104;h5;
+	mat read #ch_invh,r_invh,512;oref;
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub ProcessCommissionRecs()
+try
+	firstOne = 1
+	doingTotals = 0
+	k_sort$ = " ",k_sort$
+	do
+		search #ch_sort,3,1;k_sort$,r_comm,e
+		if e>2 error 11000
+		if e exit do
+		read record #ch_comm,r_comm;sc.;
+		if (firstOne)
+			firstOne = 0
+			currSalesRep = sc.Salesman
+			currProblemFlag = k_sort$[4,4]
+			call GetSalesRep()
+		else
+			if currSalesRep <> sc.Salesman
+				call PrintRepDetail()
+				currSalesRep = sc.Salesman
+				currProblemFlag = k_sort$[4,4]
+				call GetSalesRep()
+				for i = 0 to 1
+					for j = 0 to 2
+						accums[i,j] = 0
+					next j
+				next i
+			end if
+		end if
+		if currProblemFlag <> val(k_sort$[4,4])
+			currProblemFlag = k_sort$[4,4]
+		end if
+		call AccumulateTotals()
+	loop
+	if not(firstOne)
+		call PrintRepDetail()
+		doingTotals = 2
+		call PrintRepDetail()
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetSalesRep()
+try
+	k_sslsm$ = " ",k_sslsm$
+	k_sslsm$[1,3] = currSalesRep using "###"
+	r_sslsm = filegetsslsm(e$,ch_sslsm,"=",1,k_sslsm$,sslsm.)
+	if r_sslsm<0
+		clear sslsm.
+		sslsm.Name$ = "** NOT ON FILE **"
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+
+sub AccumulateTotals()
+try
+	!
+	! accums[x,y]
+	! x: 0=rep no problem, 1=rep problem, 2=total no problem, 3=total problem
+	! y: 0=count,1=sales,2=cost
+	!
+	commType = k_sort$[15,15]
+	multiplier = 1
+	If commType = 6 or commType = 7 or commType = 9 multiplier = -1 ! negative (credit, etc.)
+	accums[currProblemFlag,0] = accums[currProblemFlag,0] + 1
+	accums[currProblemFlag,1] = accums[currProblemFlag,1] + (sc.InvCMDollars * multiplier)
+	accums[currProblemFlag,2] = accums[currProblemFlag,2] + (sc.CostLoadedFrght * multiplier)
+	accums[currProblemFlag+2,0] = accums[currProblemFlag+2,0] + 1
+	accums[currProblemFlag+2,1] = accums[currProblemFlag+2,1] + (sc.InvCMDollars * multiplier)
+	accums[currProblemFlag+2,2] = accums[currProblemFlag+2,2] + (sc.CostLoadedFrght * multiplier)
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub PrintHeading()
+try
+	if j8 exit sub
+	if pageNo > 0 and lineNo < 60 exit sub
+	If pageNo Print #0;"\14\"; ! form feed
+	pageNo = pageNo + 1
+	Print #0; Tab 10;J8$; Tab (64 - Len(COMP$) / 2);COMP$; Tab 120;"PAGE";pageNo
+	Print #0;" - hc_analyze - ";Msc$(3);
+	print #0; Tab 49; "H Y P O T H E T I C A L   A N A L Y S I S"
+	print #0;""
+	print #0;"Salesrep";tab 37;"Problem Flag";tab 50;"# Invoices/CM";
+	print #0;tab 64;"Sales Dollars";tab 78;"Cost Dollars";
+	print #0;tab 92 ;"Gross Profit Dollars"
+	print #0;""
+	lineNo = 5
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub PrintRepDetail()
+try
+	call PrintHeading()
+	! accums[x,y]
+	! x: 0=rep no problem, 1=rep problem, 2=total no problem, 3=total problem
+	! y: 0=count,1=sales,2=cost
+	!
+	if j8
+		if doingTotals let doingTotals = 2
+		for i = (doingTotals) to (1 + doingTotals)
+			if not(doingTotals)
+				tmp$ = str$(currSalesRep)," - ",rtrim$(sslsm.Name$),fdel$
+			else
+				tmp$ = "** TOTALS",fdel$
+			end if
+			if (i MOD 2) = 0
+				tmp$ = tmp$,"N",fdel$
+			else
+				tmp$ = tmp$,"Y",fdel$
+			end if
+			tmp$ = tmp$,str$(accums[i,0]),fdel$
+			tmp$ = tmp$,str$(accums[i,1]),fdel$
+			tmp$ = tmp$,str$(accums[i,2]),fdel$
+			tmp$ = tmp$,str$(accums[i,1] - accums[i,2]),fdel$,rdel$
+			Call addtostr(e$,rstr$,tmp$)
+		next i
+		exit sub
+	end if
+	if not(doingTotals)
+		print #0;str$(currSalesRep);" - ";sslsm.Name$;
+	else
+		print #0;"** TOTALS";
+		let doingTotals = 2 ! offset
+	end if
+	for i = (doingTotals) to (1 + doingTotals)
+		print #0;tab 43;
+		if (i MOD 2) = 0
+			print #0;"N";
+		else
+			print #0;"Y";
+		end if
+		print #0; tab 50;accums[i,0] using "#############";
+		print #0; tab 64;accums[i,1] using pmask$;
+		print #0; tab 78;accums[i,2] using pmask$;
+		print #0; tab 92;(accums[i,1] - accums[i,2]) using pmask$;
+		print #0; ""
+		lineNo = lineNo + 1
+	next i
+else
+	include "src/callsuberr.inc"
+end try
+end sub

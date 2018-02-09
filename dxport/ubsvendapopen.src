@@ -1,0 +1,200 @@
+! ubsvendapopen.src
+!
+! supporting library of vendor routines for browser
+!
+! 1.0 09/17/07
+!
+! loadsave -w -n 100,10 -o prog/dxport/ubsvendapopen.dl4 src/ubsvendapopen.src
+!
+include "src/copyright.inc"
+!
+! sub & functions for list library
+!
+!  S  GetVendAPOpen	get list of open a/p for a20oi file
+
+
+include "src/inc/filea80vm.inc" ! "vendor file
+include "src/inc/fileapa20oi.inc" ! a/p file - current
+
+
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+Declare External Sub UserCntrl
+
+
+
+
+Declare Intrinsic Sub Env,FormatDate,JuliantoDate,DatetoJulian
+
+! --------------------------------------------------------------------------------------
+External Sub Getvendapopen(e$,vers,List$[],maxcnt,intCo,ReturnStatus,Message$)
+  ! Creates a list of the vendor's A/p Detail
+  !
+  ! e$         : error message
+  ! vers		: version - 0=Current A/p Only,
+  ! List$[]    : VEndor Data list
+  ! maxcnt		: max # of lines for list$[]
+  ! intCo      : company id #
+  ! ReturnStatus : .net status
+  ! Message$	: .net message
+try
+!
+   dim 1%,tmp1,Dir,apC,apType,F,ARH,CTLChan,vendChan
+	dim 2%,tmp2,tmpcnt,Age[7],apDate,DT3[5],X2
+	dim 2%,Y,IDate,vendid
+    dim 3%,tmp3,apRec,apBal,vendRec
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[500]
+    dim tmp$[200],tmp1$[200],WebStr$[500],Message$[200]
+	dim vendKey$[64],Mode$[2],blank$[100],P61$[256],apKey$[64]
+	dim P9$[50],P60$[50],P1$[60],Mask$[12],X$[10],vend$[64]
+!
+	dim ApC. as apa20oi
+	
+	dim vend. as a80vm
+!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	Call DXGet("vendid",vend$) \ vendid=vend$
+	vend$=vendid using "######"
+	vend$ = vend$+"            "
+	vend$[7]="" ! "cut after 6 chars
+  ! Open any files for this program
+    CTLChan=OpenFile(-9999,intCo) \ If CTLChan = -1 Error 42
+	vendChan=OpenFile(-2400,intCo) \ If vendChan = -1 Error 42
+	read #CTLChan,0,108;apDate; ! system ap Date
+	mat read #CTLChan,19,50;p9$; ! system flags
+	mat read #CTLChan,60,50;p60$; ! system flags
+	mat read #CTLChan,61,0;P61$; ! system flags
+
+    apC=OpenFile(-9801,intCo) \ if apC= -1 Error 42 ! not found = Accounts Pay - Current
+	
+    P1$= "INVC/MM/C" ! (USE 3 char) "INV S/C NSF D/A LCHGC/M UNCRC/A PMT "
+    
+	! as the type above is going to be used for Ref detail lookup - USE SAME TYPES!
+	Mask$="-------#.##"
+	tmpcnt=maxcnt
+	clear List$[]
+	ReturnStatus = 1
+	Message$="OK"
+!
+ 
+	vend$[7]="" ! make sure its only 6
+	mode$="=" ! "exact match or next
+	Dir=1 ! "of vendor code / Ref
+	vendKey$=vend$
+	vendRec=filegeta80vm(e$,vendChan,mode$,dir,vendKey$,vend.)
+	if vendRec<=0
+	  Clear vend.
+	  ReturnStatus = 0
+	  Message$="vendor Not Found"
+	endif
+	!! heading !!! 
+	List$[0]=bsdel$,"AP OPEN",fdel$
+	WebStr$="ID",fdel$,"Name",fdel$,"Contact",fdel$,"Phone",fdel$
+	List$[1]=WebStr$
+	WebStr$=vend$,fdel$,RTrim$(vend.Name$),fdel$ ! ID & Name
+	webstr$=webstr$+vend.contact$,fdel$
+	webstr$=webstr$+vend.telephonenumber$,fdel$
+	List$[2]=WebStr$
+	List$[3]=esdel$ ! could be 3 sections (1=header,2=current ap)
+	
+	!
+	row=4 ! starting row for data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	vendKey$=vend$
+	if vendRec>0
+	  if vers<=1 ! vers=0 curr only, 1=both curr & hist! , 2=hist only
+	  	List$[row]=bsdel$,"CURRENT AP",fdel$
+		row=row+1
+		WebStr$="Ref No",fdel$
+		WebStr$=WebStr$,"Document",fdel$
+		WebStr$=WebStr$,"Date",fdel$,"Due Date",fdel$,"Disc Date",fdel$
+		Webstr$=WebStr$,"Total",fdel$  
+		WebStr$=WebStr$,"Disc %",fdel$,"Disc $",fdel$
+		Webstr$=WebStr$,"Balance",fdel$	
+		List$[row]=WebStr$
+		row=row+1
+	  apKey$=vend$[1,6]+"" ! "   " (for mode$ >= )
+	  Mode$=">=" ! "match or PREV
+	  Dir=1 ! "start w/ vend/ref (may switch to dir=2 - vend/date order)
+	  Do
+	   apRec=filegetapa20oi(e$,apC,Mode$,dir,apKey$,apC.)
+       if apRec<0 or apKey$[1,len(vendKey$)]<>vendKey$ exit do
+		Mode$=">" ! "get prev/next
+		Dir=1! "dir 1/2
+	    WebStr$=apc.invoicecode$,fdel$ ! 
+	    tmp$=""
+	    if apc.transactiontype>=1 and apc.transactiontype<39 
+		let tmp$=P1$[(apc.transactiontype-1)*3+1,(apc.transactiontype-1)*3+3]
+	    endif
+	    if apc.StatusCode$="9"
+		let tmp$="DEL"
+	    endif
+	    if apc.StatusCode$="6" and not(apc.PaymentNextMo)
+		let tmp$="DEL"
+	    endif
+		
+	    let webstr$=webstr$+tmp$,fdel$
+		if apC.Invoicedate<>0 ! it's yymmdd
+		  tmp$=PDate$(apC.invoiceDate) ! 
+		else
+		  tmp$="        "
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! invoice date
+	        if apC.Duedate<>0 ! it's yymmdd
+		  tmp$=PDate$(apC.DueDate) ! 
+		else
+		  tmp$="        "
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! due date
+		if apC.Discountdate<>0 ! it's yymmdd
+		  tmp$=PDate$(apC.DiscountDate) ! 
+		else
+		  tmp$="        "
+		endif
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! discdate
+		
+		
+	   
+	   tmp3=apc.grossinvoiceamount
+	   WebStr$=WebStr$,RTrim$(tmp3 using Mask$),fdel$ ! Original amount
+	   if apc.terms
+		let apc.terms=apc.terms/100
+	   endif
+	   WebStr$=WebStr$,RTrim$(apc.terms using "###.##%"),fdel$ ! disc %
+	    WebStr$=WebStr$,RTrim$(apc.discountamount using Mask$),fdel$ ! disc amount
+	    let tmp3=0
+	    let tmp3=apc.grossinvoiceamount-apc.paymentcurrentrun-apc.paymentcurrentperi-apc.paymentnextmo
+	    if (APC.DISCOUNTABLEAMOUNT)
+		let tmp3=tmp3-apc.discountamount
+	    endif
+	    WebStr$=WebStr$,RTrim$(tmp3 using Mask$),fdel$ ! Original amount
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+	   Loop
+	  end if  ! of vers
+	  If Vers=1 ! need end of section if both sent
+		 List$[row]=esdel$ ! end of current ap section
+		 row=row+1
+		 if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Endif
+    ! possibilty of current only or both
+	
+	endif ! valid vend rec
+	If apC>0 Close #apC
+
+	!
+	List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! Getvendapopen
+
+
+! --------------------------------------------------------------------------------------

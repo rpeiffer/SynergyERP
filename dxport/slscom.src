@@ -1,0 +1,631 @@
+! >>> Program slscom
+!
+! part of the invoice journal process - called from amalgamate
+!
+! loadsave -w -n 100,10 -o prog/dxport/slscom.dl4 src/slscom.src
+!
+include "src/copyright.inc" ! dx
+
+!
+! from the original code:
+!
+Declare Intrinsic Sub FindF
+!Option Default Dialect IRIS1
+! MXSLSCOM  SALESMAN COMMISSION CALC
+! DAVID DEVITO 03/11/91
+! LAST UPDATE: 03/93 - add product/prodwhse/commodity commiss %
+!    06/06/96 -kmm- made callable, added amalgamation parameters
+! ---------------  notes for rev9 upgrade for Leonard Paper -------------------
+! 11/20/08 vst cct229966 - added rev9 code for:
+! 10/12/04 jcs cct182222 - inv# from 2% to 3% var(keys=10chars,display=8)
+! 02/15/06 dek           - commcode became commhead & commodity
+! 02/15/06 txc cct200654 - dim r34 & r35 handle comm by line better for invoice
+!                           lines copied to credit memo
+! -----------------------------------------------------------------------------
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+Try
+Enter chan[],parm[],rtrn[]
+! If Err 0 Gosub Err_Trap
+Def FNR(H) = Sgn(H) * (Int(Abs(H) * 100 + .5) * .01)
+Def FNW(H) = Sgn(H) * (Int(Abs(H) * 1 + .5) * 1)
+Def FND(H) = FNR(H - (H * D3)) !proportional function (DISCOUNT FRT FRT CST MISC CHRG)
+! D3 SET EACH TIME
+Dim F$[16],F1$[16],P9$[50],K1$[50],K11$[50],K5$[50],K14$[50],HMAT$[2],P60$[50]
+Dim MT$[2],KEY_$[130],F2$[26],PORT_$[26],K9$[50],MAXMT$[1],K80$[50]
+Dim 1%,H4[2],L3[3],SO[20],S2[1],2%,CG1[99,11],L4[3],PCOM,PCOM1
+Dim 1%,chnl,chnlfree
+Dim 1%,ch_cntrl,ch_slsm,ch_rol,ch_prod,ch_prodwhse,ch_cmdty,ch_cust
+Dim 1%,ch_cmtbl,ch_roh,ch_rot
+Dim 2%,slsm[9],MAX[8],S0[7],H5[16],H0[12],CG[13],MCODE[9]
+Dim 3%,T9,T2[25],GP,SSL1[3],scom[4],CP,TOTAL[9],SALE,COST,SALE1,COST1
+Dim 3%,SMER[4],SCST[4],TYPE,GP_DOLLARS,SLSMS3[9],SMER1[4],SCST[4],OLM[6]
+Dim 3%,CATGY[20,1],SALESM[999,4],L5[5],S3[17],CATGY1[20,1],SALESM1[999,1]
+Dim 3%,MAXAMT,COMM,LNCOM[21,2],COMPRV[4,2],A$[156],L2$[20],MCHARGE[9,1],TOT[4]
+Dim 3%,cfin[8],agpd,ad4pft,ac4pft,agp
+Dim 3%,ORef[5],RefNo,ORD
+Dim nextblockid$[8],Message$[400],WebStr$[600],msg$[100]
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp$[800],tmp1$[200],rstr$[300]
+Dim action$[30],options$[30],userid$[8],b$[200],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+Dim blockid$[100],f$[16]
+
+mode = parm[0] ! 0 = normal, -99 from fixcomsn, 1 from amalgamate
+nowrite = parm[1] ! don't update nothin'
+Rec_Roh = parm[2]
+Rec_Slsm = parm[3]
+ad4pft = parm[4] ! amalg $ for profit
+ac4pft = parm[5] ! amalg cost for profit
+agpd = ad4pft - ac4pft
+agp = 0
+If ad4pft Let agp = ((ad4pft - ac4pft) / ad4pft) * 100 ! amalg gp %
+ch_cntrl = chan[1]
+ch_slsm = chan[2]
+ch_rol = chan[3]
+ch_prod = chan[4]
+ch_prodwhse = chan[5]
+ch_cmdty = chan[6]
+ch_cust = chan[7]
+ch_cmtbl = chan[8]
+ch_roh = chan[9]
+ch_rot = chan[10]
+Mat Read #ch_cntrl,19,50;P9$;
+Mat Read #ch_cntrl,60,50;P60$;
+TYPE = P9$[30,30]
+K80$ = " ",K80$
+Gosub Read_Roh ! "read header 
+RefNo = H0[7];Hist = 0;CH_RTO = H0[3]
+If mode = -99 And H0[0] = 30 Let RefNo = ORef[1] ! "from fixcomsn(redo from history)
+! ; @5,17;'BD';"Calculating Commission, please wait. ";'ED'; \ SIGNAL 3,0
+LINECOM = 0
+Gosub open_sort ! "create sort file for prevailing mat code & chk of line comm%
+If H0[0] >= 9 And H0[0] <= 11 And H5[3] Let LINECOM = 0 ! "comm % was overridden 
+For X = 1 To 4 \ slsm[X] = 0 \ Next X
+Gosub Read_Roh ! "read header
+Gosub get_cust
+!-------------------------------------------------------------------------------
+If P9$[14,14] <> "N" And Not(H5[3]) Or ((H0 < 9 Or H0 > 11) And H0 <> 91)
+  If P60$[24,24] = "Y" Or LINECOM Gosub comm_by_line
+End If 
+If P9$[21,21] = "Y" Goto multi_slsm
+! CHECK P9$[14,14] FOR COMMIS TYPE S= SALES , L or P=PROFIT , N= NONE
+If P9$[14,14] = "N" Goto done
+If P9$[14,14] = "P" Or P9$[14,14] = "L"
+profit_calc: ! PROFIT CALC
+  ! T2[1]=MERCH AMT $ T2[3] = ORD DISC $ T2[5] = FREIGHT $
+  ! T2[17]= TOTAL LOAD COST T2[20]= FREIGHT COST
+  SALE = T2[1]
+  If LINECOM Let SALE = LNCOM[21,0] ! "chg to no comm$ line sales
+  COST = T2[17]
+  If LINECOM Let COST = LNCOM[21,1] ! "no comm$ costs total
+  SALE1 = T2[24]
+  COST1 = T2[14]
+  If P9$[35,35] = "Y" Let SALE = SALE + T2[5] \ SALE1 = SALE1 + T2[5]
+  If P9$[36,36] = "Y" Let SALE = SALE - T2[3] \ SALE1 = SALE1 - T2[3]
+  If P9$[37,37] = "Y" Let COST = COST + T2[20] \ COST1 = COST1 + T2[20]
+  If P9$[38,38] = "Y" Let SALE = SALE + (T2[6]) \ SALE1 = SALE1 + (T2[6])
+  SALE = SALE + TOT[1];SALE1 = SALE1 + TOT[1]
+  COST = COST + TOT[2];COST1 = COST1 + TOT[2]
+  TOTAL[0] = SALE - COST
+  TOTAL[1] = SALE1 - COST1
+  GP = 0 \ If SALE1 Let GP = TOTAL[1] / SALE1 * 100
+  GP_DOLLARS = TOTAL[1]
+Else 
+  TOTAL[0] = T2[1] ! mdse subtotal shipped
+  TOTAL[1] = T2[24] ! mdse subtotal ordered
+  GP = 0
+  If H5[13] If T2[1] Let GP = ((H5[13] - H5[14]) / H5[13]) * 100 ! "gp %
+  GP_DOLLARS = H5[13] - H5[14] ! "gross profit $'s
+  If LINECOM Let TOTAL[0] = LNCOM[21,0] ! "total no comm $ shipped
+End If 
+If agpd Let GP_DOLLARS = agpd
+Mat Read #ch_slsm,Rec_Slsm,118;SSL1;
+Mat Read #ch_slsm,Rec_Slsm,862;SLSMS3;
+If H5[3]
+  CP = slsm[5] ! "comm % was over-ridden (mx243c)
+Else 
+  If P60$[24,24] <> "Y" ! not commission by line
+    If SSL1[1] = 0 Let CP = SSL1[0]
+    If H5[7] <> 24 And (ORef[2] Or H0[5])
+      CP = slsm[5]
+    Else 
+      If GP_DOLLARS > 0 And GP_DOLLARS < SLSMS3[0] Let CP = 0 ! < min gp
+      If ad4pft
+        MERCH = ad4pft
+        TAMOUNT = ad4pft
+      Else 
+        MERCH = T2[24]
+        TAMOUNT = T2[24]
+      End If 
+      MAMOUNT = MERCH \ GPAMOUNT = GP_DOLLARS
+      slsm[0] = H0[11] \ X = 0
+      If SSL1[1] Let X = 0 \ Gosub comm_from_grid ! "use grid
+    End If 
+  End If 
+End If 
+If P60$[24,24] = "Y" Or LINECOM
+  scom[0] = scom[0] + LNCOM[0,0] ! "add in previous comm calc'd
+  ! "the above adds in previous line comm$ by prod/whse/commod
+Else 
+  If Not(slsm[0]) Let slsm[0] = H0[11] ! "default to primary
+  slsm[5] = CP ! "comm %
+  If TOTAL[0] If cfin[8] Let TOTAL[0] = TOTAL[0] - FNR((T2[1] * (cfin[8] / 100)))
+  scom[0] = FNR(TOTAL[0] * (CP / 100))
+End If 
+If H5[7] = 10 Or H5[7] = 6 Let scom[0] = 0;slsm[5] = 0 ! "sample/donations
+If Not(nowrite) Gosub write_roh ! "write commission data into header
+Goto done
+!------------------------------------------------------------------------------
+comm_by_line: ! "======= a sprod or commodity comm% was used, go line by line
+slsm[0] = H0[11]
+K11$ = " ",K11$;K11$[1] = RefNo Using "######  0"
+If Hist Let K11$ = RefNo Using "##########  0"
+cbl_loop: !
+CP = 0;PCOM = 0
+Search #ch_rol,3,1;K11$,R11,e
+If e > 2 Gosub Err_Search
+If Not(Hist) Let ORD = K11$[1,6]
+If Hist Let ORD = K11$[1,10]
+If ORD <> RefNo Return ! "hit next order
+If Not(e) And ORD = H0[7]
+  Gosub read_rol ! "read line
+  If S2[0] = 3 Goto cbl_loop ! "z line
+  If ORef[1] And ORef[1] <> H0[7] Gosub L_10000 ! check history for comm%
+  If OLM[4] > 0 Let PCOM = OLM[4] \ Goto L_2220 ! "special line commission %
+  If H5[7] <> 24 And (H0[5] Or ORef[2]) And OLM[5]
+    PCOM = OLM[5]
+    Goto L_2220 !backorder
+  End If 
+  Gosub L_4000 \ If PCOM Goto L_2220 ! "get comm%
+  If L4[1] = 0 Let L4[1] = H0[11] !IF ZERO SET= HEADER
+  K14$ = " ",K14$;K14$ = L4[1] Using "###"
+  Search #ch_slsm,2,1;K14$,R14,e \ If e Gosub Err_Search
+  Mat Read #ch_slsm,R14,118;SSL1;
+  Mat Read #ch_slsm,R14,862;SLSMS3;
+  If H5[3] If H0[0] >= 9 And H0[0] <= 11 Let CP = OLM[5] \ Goto L_2220
+  If SSL1[1] = 0 Let CP = SSL1[0] ! "use % from slsm file
+  ! 
+  GP_DOLLARS = L5[0] - S3[13]
+  GP = 0 \ If L5[0] Let GP = GP_DOLLARS / L5[0] * 100
+  GP_DOLLARS = T2[24] - T2[14]
+  If agpd Let GP_DOLLARS = agpd
+  GPAMOUNT = GP_DOLLARS
+  If ad4pft
+    MAMOUNT = ad4pft
+  Else 
+    MAMOUNT = T2[24]
+  End If 
+  If GP_DOLLARS > 0 And GP_DOLLARS < SLSMS3[0] Let CP = 0
+  If CP Goto L_2220
+L_2200: Gosub get_grid
+  X = 0 \ Gosub comm_from_grid
+L_2220: If Not(PCOM) If CP Let PCOM = CP \ LINECOM = 1
+  If P9$[34,34] = "O"
+    COMM = FNR(L5[0] * PCOM / 100)
+    If P9$[14,14] = "P" Or P9$[14,14] = "L"
+      ! Calculate commission on ordered values
+      COMM = FNR(((L5[0] - S3[13]) - L5[0] * (cfin[8] / 100)) * PCOM / 100)
+      If (L5[0] - S3[13]) < 0
+        PCOM = 100
+        CP = 100
+        COMM = (L5[0] - S3[13])
+      End If 
+    End If 
+  Else 
+    COMM = FNR(L5[3] * PCOM / 100)
+    If P9$[34,34] = "S" If P9$[14,14] = "P" Or P9$[14,14] = "L"
+      ! Calculate commission on shipped values
+      COMM = FNR(((L5[3] - S3[12]) - L5[3] * (cfin[8] / 100)) * PCOM / 100)
+      If (L5[3] - S3[12]) < 0
+        PCOM = 100
+        CP = 100
+        COMM = (L5[3] - S3[12])
+      End If 
+    End If 
+  End If 
+  OLM[5] = PCOM;OLM[6] = COMM
+  If Not(nowrite) Mat Write #ch_rol,R11,404;OLM;
+  LNCOM[0,0] = LNCOM[0,0] + COMM ! "commission total $
+  If L3[3] < 1 Let L3[3] = 1
+  If L3[3] > 20 Let L3[3] = 20
+  LNCOM[L3[3],0] = LNCOM[L3[3],0] + COMM ! "calc'd commission $
+  LNCOM[L3[3],1] = LNCOM[L3[3],1] + L5[3] ! "by ctgy sales
+  LNCOM[L3[3],2] = LNCOM[L3[3],2] + S3[12] ! "by catgy cost
+  Goto cbl_loop
+End If 
+end_cbl_loop: !
+Return 
+!-------------------------------------------------------------------------------
+multi_slsm: ! MULTI SALES MAN
+K11$ = " ",K11$
+If Not(Hist) Let K11$[1,6] = RefNo Using "######"
+If Hist Let K11$[1,10] = RefNo Using "##########"
+ms_loop: !
+Search #ch_rol,3,1;K11$,R11,e \ If e > 2 Gosub Err_Search
+If e Goto end_ms_loop
+ORD = K11$[1,6] \ If Hist Let ORD = K11$[1,10]
+If ORD <> RefNo Goto end_ms_loop ! "hit next order
+!
+Gosub read_rol ! "read line file
+If S2[0] = 3 Goto ms_loop ! "z line
+CATGY[L3[3],0] = CATGY[L3[3],0] + L5[3] ! "sales
+CATGY1[L3[3],0] = CATGY1[L3[3],0] + L5[0]
+CATGY[L3[3],1] = CATGY[L3[3],1] + S3[12] ! "costs
+CATGY1[L3[3],1] = CATGY1[L3[3],1] + S3[13]
+! FREIGHT
+! FREIGHT COST
+! ORDER DISC
+! MISC AMT
+Goto ms_loop
+end_ms_loop: ! ADD UP CAT BY SLSM
+For X = 1 To 20
+  If Not(SO[X]) Let SO[X] = H0[11] ! "none set up, default to main
+  SALESM[SO[X],0] = SALESM[SO[X],0] + CATGY[X,0] ! "sales
+  SALESM[SO[X],1] = SALESM[SO[X],1] + CATGY[X,1] ! "costs
+  SALESM[SO[X],2] = SALESM[SO[X],2] + LNCOM[X,0] ! "line comm $
+  SALESM[SO[X],3] = SALESM[SO[X],3] + LNCOM[X,1] ! "line comm $ sales
+  SALESM[SO[X],4] = SALESM[SO[X],4] + LNCOM[X,2] ! "line comm $ cost
+  SALESM1[SO[X],0] = SALESM1[SO[X],0] + CATGY1[X,0] ! "sales
+  SALESM1[SO[X],1] = SALESM1[SO[X],1] + CATGY1[X,1] ! "costs
+Next X
+count = 0
+For X = 1 To 999
+  If SALESM[X,0] + SALESM[X,1] ! "check for sales+costs
+    If count > 4 Let e = 0 \ Gosub Err_Search ! "count can't exceed 4
+    SMER[count] = SALESM[X,0] ! "sales/merch amt
+    SCST[count] = SALESM[X,1] ! "costs
+    For I = 0 To 2
+      COMPRV[count,I] = SALESM[X,I + 2] ! "previous comm$, sales & cost
+    Next I
+    SMER1[count] = SALESM1[X,0]
+    SCST1[count] = SALESM1[X,1] ! "costs
+    slsm[count] = X ! "sslsm #
+    count = count + 1
+  End If 
+Next X
+For X = 0 To 4
+  If slsm[X]
+    GP = 0
+    If P9$[34,34] = "O" Let GP_DOLLARS = SALESM1[slsm[X],0] - SALESM1[slsm[X],1]
+    If SMER1[X] Let GP = (SMER1[X] - SCST1[X]) / SMER1[X] * 100
+    GP_DOLLARS = SMER[X] - SCST[X]
+    MERCH = SALESM1[slsm[X],0] !  ELSE  LET MERCH=SMER[X]
+    GP_DOLLARS1 = SMER1[X] - SCST1[X]
+    If agpd Let GP_DOLLARS = agpd
+    TAMOUNT = SALESM1[slsm[X],0]
+    MAMOUNT = MERCH \ GPAMOUNT = SMER1[X] - SCST1[X]
+    K14$ = " ",K14$;K14$ = slsm[X] Using "###"
+    Search #ch_slsm,2,1;K14$,R14,e \ If e Gosub Err_Search
+    Mat Read #ch_slsm,R14,118;SSL1;
+    Mat Read #ch_slsm,R14,862;SLSMS3;
+    If H5[3] If H0[0] >= 9 And H0[0] <= 11 Let CP = slsm[X + 5] \ Goto L_3500
+    If SSL1[1] = 0 Let CP = SSL1[0] ! "use % from slsm file
+    If H5[7] <> 24 And (ORef[2] Or H0[5]) Goto L_3480 ! "don't check gp limit
+    If GP_DOLLARS > 0 And GP_DOLLARS < SLSMS3[0] Let CP = 0
+L_3480: If SSL1[1] Gosub comm_from_grid ! "use grid
+    If H5[7] = 10 Or H5[7] = 6 Let CP = 0 ! "sample/donations
+    slsm[X + 5] = CP ! "comm %
+    COMM = 0 ! "variable used for commissionable amount
+L_3500: If P9$[14,14] = "P" Or P9$[14,14] = "L"
+      COMM = FNR(SMER[X] - SCST[X]) - (SMER[X] * (cfin[8] / 100)) ! g/p
+      !IF LINECOM LET COMM=COMM-FNR(COMPRV[X,1]-COMPRV[X,2]) ! -prev cal'd
+      If LINECOM Or P60$[24,24] = "Y"
+        TEMPCOMPRV = FNR((COMPRV[X,1] - COMPRV[X,2]) - (COMPRV[X,1] * (cfin[8] / 100)))
+        COMM = COMM - TEMPCOMPRV
+      End If 
+    End If 
+    If P9$[14,14] = "S"
+      COMM = FNR(SMER[X]) ! "sales
+      If LINECOM Or P60$[24,24] = "Y" Let COMM = COMM - FNR(COMPRV[X,1]) ! "less prev cal'd sales
+    End If 
+    scom[X] = FNR(COMM * (CP / 100)) ! "sales
+    If LINECOM Or P60$[24,24] = "Y" Let scom[X] = scom[X] + COMPRV[X,0] ! "add previous calc'd comm$
+  End If 
+Next X
+If Not(nowrite) Gosub write_roh ! "write commission data into header
+Goto done
+!-------------------------------------------------------------------------------
+L_4000: ! "=================== TRY FOR COMM % FROM SPROD,SPRDWHSE, OR COMMODITY
+Mat Read #ch_slsm,Rec_Slsm,118;SSL1;
+PCOM = 0 \ If S2[0] = 3 Or L3[2] > 990 Return ! "message line
+If L3[0] Goto L_4100 ! "nonstock try Commodity
+Read #ch_prod,L4,224;PCOM;
+If P9$[32,32] <> "Y" Goto L_4080
+Mat Read #ch_prod,L4;A$;
+F1$ = " ",F1$;F1$[1,12] = A$[140,151];F1$[13,14] = WHSE Using "##"
+Search #ch_prodwhse,2,1;F1$,R30,e \ If e Goto L_4080
+Read #ch_prodwhse,R30,54;PCOM1;
+If PCOM1 If Not(PCOM) Let PCOM = PCOM1 ! "does whse override?
+! IF PCOM1 LET PCOM=PCOM1         ! "if so, unrem this line
+L_4080: ! If Product file has %, bypass Commodity
+If PCOM > 0 Goto L_4170
+L_4100: ! "===== try commodity file for commission %
+F1$ = " ",F1$;F1$ = L2$[17,20]
+Search #ch_cmdty,2,1;F1$,R4,e
+If e Goto L_4170
+Read #ch_cmdty,R4,36;PCOM1; ! "was disp 844 
+PCOM = PCOM1
+L_4170: !.
+If SSL1[1] = 0 If SSL1[0] If PCOM Let PCOM = SSL1[0]
+If PCOM < 0 Or PCOM > 100 Or Fra(PCOM * 1000) Let PCOM = 0 ! "invalid comm%
+Return 
+comm_from_grid: ! "===================== FIND COMM % BASED ON GRID
+If H5[7] <> 24 And slsm[X + 5] And (ORef[2] Or H0[5])
+  CP = slsm[X + 5]
+  Goto L_5170 ! "keep % from ori order 
+End If 
+If slsm[X + 5] And H5[10] = 1
+  CP = slsm[X + 5]
+  Goto L_5170 ! "keep % from ori invoice (credit memo entry/copy from)
+End If 
+TOT = 0
+If P60$[24,24] <> "Y" Gosub L_6500
+If CG[12] = 1
+  If GP_DOLLARS < CG[13] Goto L_5140 ! "gp too low.
+End If 
+If agp Let GP = agp ! use amalgamated gp% if exists
+GP = Abs(Int(GP)) !LET GP=ABS(FNW(GP)) see cct#74357 - nate 2/13/95
+If GP > 99 Let GP = 99
+If GP < -99 Let GP = -99
+For REC = GP To 1 Step -1
+  For X5 = 0 To 11
+    If CG1[REC,X5] Goto L_5075
+  Next X5
+Next REC
+L_5075: If GP > REC Let GP = REC
+If GP = 0 Let GP = 1
+REC = GP
+For X5 = 11 To 0 Step -1
+  If CG[X5] <= TAMOUNT Goto L_5150
+Next X5
+L_5140: CP = 0 \ Goto L_5170
+L_5150: CP = CG1[Abs(GP),X5]
+L_5170: Return 
+!-------------------------------------------------------------------------------
+open_sort: ! CREATE SORT FILE
+PORT_$ = Spc(6);PORT_$ = PORT_$[2,Len(PORT_$) - 1]
+F$ = "6/sort"
+KSIZE = 25 ! "directory size in words
+F$ = F$ + PORT_$
+Call FindF(F$,FOUND)
+For count = 99 To 1 Step -1 ! search for an open channel
+  chnl = count
+  Gosub chnlfree
+  If chnlfree Let count = 1
+Next count
+ch_sort = chnl
+try Close #ch_sort else rem
+If FOUND Kill F$ ! "kill existing file
+F2$ = "[1:256] ",F$
+Build #ch_sort,F2$
+Search #ch_sort,0,1;KEY_$,KSIZE,e \ If e Gosub Err_Search
+REC = 1 \ Search #ch_sort,0,0;KEY_$,REC,e \ If e Gosub Err_Search
+! FIND PREVELENT MAT CODE FOR SLSM
+K11$ = " ",K11$;LINECOM = 0
+If Not(Hist) Let K11$[1,6] = RefNo Using "######"
+If Hist Let K11$[1,10] = RefNo Using "##########"
+L_6180: Search #ch_rol,3,1;K11$,R11,e \ If e > 2 Gosub Err_Search
+If e Goto L_6490
+ORD = K11$[1,6] \ If Hist Let ORD = K11$[1,10]
+If ORD <> RefNo Goto L_6490 ! "hit next order
+Gosub read_rol ! "read line file
+If S2[0] = 3 Goto L_6180 ! "z line
+If OLM[4] > 0 Let PCOM = OLM[4] \ Goto L_6240 ! "special commission %
+If H5[7] <> 24 And (H0[5] Or ORef[2]) And OLM[5] Let PCOM = OLM[5] \ Goto L_6240
+Gosub L_4000 ! "try for sprod/commodity comm%
+L_6240: If PCOM Let LINECOM = 1 ! "set flag to show there was a comm% found for line
+K9$ = " ",K9$;L4[1] = 0 ! "always header slsm, multi does not use SORT
+If Not(L4[1]) Let L4[1] = H0[11]
+If P9$[21,21] = "Y" Let K9$[1,3] = L4[1] Using "###" ! "multi slsm
+If P9$[21,21] <> "Y" Let K9$[1,3] = H0[11] Using "###"
+K9$[4,4] = MT$[1,1]
+Search #ch_sort,2,1;K9$,R9,e
+If e
+  e = 2
+  Search #ch_sort,1,0;K9$,R9,e
+  If e Gosub Err_Search
+  Search #ch_sort,4,1;K9$,R9,e
+  If e Gosub Err_Search
+  T9 = 0
+Else 
+  Read #ch_sort,R9,0;T9;
+End If 
+T9 = T9 + L5[0]
+Write #ch_sort,R9,0;T9;
+Goto L_6180
+L_6490: Return 
+L_6500: !
+MAXAMT = 0 \ MAXMT$ = " ",MAXMT$
+K9$ = " ",K9$
+K9$[1,3] = slsm[X] Using "###"
+L_6540: Search #ch_sort,3,1;K9$,R9,e
+If e Goto get_grid
+S9 = K9$[1,3]
+If S9 <> slsm[X] Goto get_grid
+Read #ch_sort,R9,0;T9;
+If T9 > MAXAMT
+  MAXAMT = T9
+  MAXMT$ = K9$[4,4]
+End If 
+Goto L_6540
+get_grid: ! GET CORRECT GRID
+HMAT$ = "  " \ HMAT$[1,1] = MAXMT$[1,1]
+K80$ = " ",K80$
+K80$[1,3] = SSL1[1] Using "###"
+K80$[4,5] = H5[7] Using "##"
+If P60$[24,24] <> "Y" Let K80$[6,6] = MAXMT$[1,1] Else Let K80$[6,6] = MT$[1,1]
+K80$[7] = ""
+Search #ch_cmtbl,2,1;K80$,R80,e
+If Not(e) Goto L_6830
+K80$[4,5] = " 0"
+Search #ch_cmtbl,2,1;K80$,R80,e
+If Not(e) Goto L_6830
+K80$[4,5] = H5[7] Using "##"
+K80$[6,6] = " "
+Search #ch_cmtbl,2,1;K80$,R80,e
+If Not(e) Goto L_6830
+K80$[4,5] = " 0"
+Search #ch_cmtbl,2,1;K80$,R80,e
+If e
+  For CT = 0 To 99
+    If CT < 14 Let CG[CT] = 0
+    For CT1 = 0 To 11 \ CG1[CT,CT1] = 0 \ Next CT1
+  Next CT
+  Goto L_6845 ! "no read of file
+End If 
+L_6830: !
+Mat Read #ch_cmtbl,R80,6;CG;
+Mat Read #ch_cmtbl,R80,62;CG1;
+L_6845: !
+If CG[12] = 1 Let TAMOUNT = MAMOUNT Else Let TAMOUNT = GPAMOUNT
+Return 
+write_roh: ! WRITE COMMIS INFO TO ORDER HEADER
+Mat Write #ch_roh,Rec_Roh,278;slsm;
+Mat Write #ch_roh,Rec_Roh,318;scom;
+Mat Write #ch_roh,Rec_Roh,348;SMER;
+Mat Write #ch_roh,Rec_Roh,378;SCST;
+Mat Write #ch_roh,Rec_Roh,444;HMAT$;
+Return 
+read_rol: ! READ LINE ITEM
+Mat Read #ch_rol,R11,8;L3;
+Mat Read #ch_rol,R11,16;L4;
+Mat Read #ch_rol,R11,32;L5;
+Mat Read #ch_rol,R11,140;L2$;
+Mat Read #ch_rol,R11,256;S2;
+Mat Read #ch_rol,R11,260;S3;
+Mat Read #ch_rol,R11,368;MT$;
+Mat Read #ch_rol,R11,404;OLM;
+Return 
+!-------------------------------------------------------------------------------
+Read_Roh: ! READ HEADER
+Mat Read #ch_roh,Rec_Roh,0;H0;
+Mat Read #ch_roh,Rec_Roh,78;H4;
+Mat Read #ch_roh,Rec_Roh,104;H5;
+Mat Read #ch_roh,Rec_Roh,278;slsm;
+Mat Read #ch_roh,Rec_Roh,318;scom;
+Mat Read #ch_roh,Rec_Roh,348;SMER;
+Mat Read #ch_roh,Rec_Roh,378;SCST;
+Mat Read #ch_roh,Rec_Roh,444;HMAT$;
+Mat Read #ch_roh,Rec_Roh,512;ORef;
+! CLEAR MULTI SLSM
+For X = 0 To 4
+  slsm[X] = 0
+  !in case of H5[3] need com%...
+  If H5[3] If H0[0] >= 9 And H0[0] <= 11 Or H0[0] = 91 Goto L_8530
+  If H5[7] <> 24 And (H0[5] Or ORef[2]) Goto L_8530 !"keep orig com% 
+  slsm[X + 5] = 0
+L_8530: !
+  SMER[X] = 0
+  SCST[X] = 0
+  scom[X] = 0 !
+Next X
+! READ TOTAL FILE
+Mat Read #ch_rot,H0[3],8;T2;
+Mat Read #ch_rot,H0[3],168;MCODE;
+Mat Read #ch_rot,H0[3],208;MCHARGE;
+Mat Read #ch_rot,H0[3],328;TOT;
+WHSE = H4[2] \ If H5[7] = 7 Let WHSE = H5[11] ! "for sprdwhse comm%
+Return 
+!-------------------------------------------------------------------------------
+get_cust: !
+K5$ = " ",K5$
+K5$[1,6] = H0[4] Using "######"
+Search #ch_cust,2,1;K5$,r5,e
+If e Gosub Err_Search
+Mat Read #ch_cust,r5,502;SO;
+Mat Read #ch_cust,r5,544;cfin;
+Return 
+!-------------------------------------------------------------------------------
+L_10000: ! ============================ "get comm% from history
+chnl = 99 \ Gosub GETCHAN
+ch_invh = chnl
+Read #ch_cntrl,88,1136;F$;
+Open #ch_invh,F$ ! " history header file
+Gosub GETCHAN
+ch_invl = chnl
+Read #ch_cntrl,88,1184;F$;
+Open #ch_invl,F$ ! "history lines file
+Dim 1%,HL3[3],3%,HOLM[6]
+Dim 2%,HL4[3],K34$[50],K35$[50]
+Dim 3%,R35,R34
+K34$ = " ",K34$;K35$ = " ",K35$
+K34$ = ORef[1] Using "30##########"
+Search #ch_invh,2,1;K34$,R34,e \ If e > 2 Gosub Err_Search
+If Not(e)
+  K35$ = K34$[3,12]
+invl_loop: !
+  Search #ch_invl,3,1;K35$,R35,e \ If e > 2 Gosub Err_Search
+  If Not(e) And K35$[1,10] = K34$[3,12]
+    Mat Read #ch_invl,R35,8;HL3;
+    Mat Read #ch_invl,R35,16;HL4;
+    Mat Read #ch_invl,R35,404;HOLM;
+    ! set comm% if same prod
+    If HL4[0] = L4[0] If Not(OLM[4]) Let OLM[4] = HOLM[5]
+    Goto invl_loop
+  End If 
+End If 
+Close #ch_invh,#ch_invl
+Return 
+!-------------------------------------------------------------------------------
+GETCHAN: Rem------------------------------------------get an open channel
+For scr = chnl To 1 Step -1
+  chnl = scr
+  Gosub chnlfree
+  If chnlfree
+    scr = 1
+  Else 
+    chnl = 0
+  End If 
+Next scr
+Return 
+!-------------------------------------------------------------------------------
+chnlfree: ! check to see if a channel is being used
+! requires:    chnl = channel #
+! returns:   chnlfree = 0 if being used, 49 if open
+! uses:      e
+try 
+	chnlfree = 0
+	e = Chf(chnl)
+else
+	Let chnlfree = Spc(8)
+end try
+If chnlfree And chnlfree <> 49 Gosub Err_Trap
+Return
+!-------------------------------------------------------------------------------
+! #include #rtn.error.s
+!-------------------------------------------------------------------------------
+done: ! EXIT
+Close #ch_sort
+If Err 0 Rem
+For scr = 0 To 9
+  rtrn[scr] = slsm[scr]
+  If scr < 5 Let rtrn[scr + 10] = scom[scr]
+Next scr
+If Err 0 Gosub Err_Trap
+goto RDone ! End 
+
+ERR_SEARCH: Rem
+	ENUM = E;ELINE = Spc(16);CTERR = 0
+	If E = 5 Let CTERR = Err(8)
+	e$ = "RETURN STATUS",(E + (CTERR * .001))
+	e$ = e$,"/ STATEMENT",ELINE," IN PROGRAM " + Msc$(4)
+
+	Call programdump("tmp/slscomse!","")
+	Goto ERR_MSG ! Error 10000
+Return ! End
+
+ERR_MSG: ! send message
+	ReturnStatus = 1 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)
+	Message$ = e$
+	Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	Call AddToStr(e$,rstr$,WebStr$)
+	Call SetOutPut(e$,rstr$)
+!end
+RDone: ! really done
+else
+err_trap:
+include "src/callsuberr.inc"
+end try
+end

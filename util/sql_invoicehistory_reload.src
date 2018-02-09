@@ -1,0 +1,371 @@
+! 
+! Reload invoice history based on how many months (based on invoice date) we are going back
+! 0 = reload current month
+! 1 = reload last month and current month
+! 2 = reload last 2 months and current month, ....
+!
+!
+! loadsave -w -n 100,10 -o prog/util/sql_invoicehistory_reload.dl4 src/sql_invoicehistory_reload.src
+!
+! sql_invh_reload.dl4
+!
+include "src/utilcopyright.inc"
+!
+Declare External Function GetSessionParameter$
+Declare External Sub ERPCronSuccess
+include "src/inc/sql_invh.inc"
+include "src/inc/fileinvh.inc"
+include "src/inc/sql_invl.inc"
+include "src/inc/fileinvl.inc"
+include "src/inc/sql_invt.inc"
+include "src/inc/fileinvt.inc"
+include "src/inc/sql_invs.inc"
+include "src/inc/fileinvs.inc"
+include "src/inc/sql_invm.inc"
+include "src/inc/fileinvm.inc"
+include "src/inc/sql_invltag.inc"
+include "src/inc/fileinvltag.inc"
+include "src/inc/sql_invcost.inc"
+include "src/inc/fileinvcost.inc"
+include "src/inc/sql_rfpickqh.inc"
+include "src/inc/filerfpickqh.inc"
+!
+Declare Intrinsic Function FindChannel
+Declare Intrinsic sub VerifyDate,DateToJulian
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile
+
+External Lib "mysql_lib.lib"
+Declare External Function MySQLSetRIE
+
+! local subs
+Declare Function SetupSession,OpenFilesReadControl,GetParameters,UpdateInvoiceHistory
+Declare Function UpdateInvoiceHeader,UpdateInvoiceLines,UpdateInvoiceTotals
+Declare Function UpdateInvoiceShip,UpdateInvoiceLineTag,UpdateInvoiceMessages
+Declare Function UpdateInvoiceCost,UpdateRfpickQHistory
+
+Declare sub FatalError
+
+dim invh. as invh
+dim sql_invh. as sql_invh
+dim invl. as invl
+dim sql_invl. as sql_invl
+dim invlt. as invltag
+dim sql_invlt. as sql_invltag
+dim invt. as invt
+dim sql_invt. as sql_invt
+dim invs. as invs
+dim sql_invs. as sql_invs
+dim invm. as invm
+dim sql_invm. as sql_invm
+dim invc. as invcost
+dim sql_invc. as sql_invcost
+dim rfpickqh. as rfpickqh
+dim sql_rfpickqh. as sql_rfpickqh
+
+dim k_invhh$[100],k_invh$[100],k_invl$[100],k_invm$[100]
+dim k_invlt$[100],k_invc$[100],k_rfpickqh$[100]
+
+dim e$[300],tmp$[100],message$[300],SQLStmt$[300]
+dim mysql_db$[50],mysql_server$[100],mysql_user$[50],mysql_password$[50]
+dim currDate$[8],julFirstDate$[5],julLastDate$[5]
+dim %1,isamChan,ch_mysql,ch_invh,intCo,erpCron,noFatalError
+dim %14,r_invh,isamRec,modStatus,e
+
+noFatalError = 1
+if not(SetupSession()) goto outend
+if not(OpenFilesReadControl()) goto outend
+if not(GetParameters()) goto outend
+if not(UpdateInvoiceHistory()) goto outend
+print "Invoice history items processed: ";isamRec
+if erpCron call ERPCronSuccess()
+
+outend:!
+chain ""
+end
+
+!****************************************************************
+! S U B R O U T I N E   S E S S I O N
+!****************************************************************
+
+Function SetupSession()
+	call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+	print ""
+	print "Reload Invoice History Based on Invoice Date"
+	if not(erpCron)
+		modStatus = 100
+		print ""
+		print "Enter company # to process <CR=EXIT> ";
+		input ""tmp$
+		print ""
+		intCo = tmp$
+		if not(intCo)
+			message$ = "No company specified - aborting."
+			call FatalError()
+		else
+			call SetUtilSession(e$,intCo)
+		end if
+	else
+		modStatus = 10000
+		intCo = GetSessionParameter$("COMPANYID")
+	end if
+end function noFatalError
+
+
+Function OpenFilesReadControl()
+	mysql_db$ = GetSessionParameter$("u_mysql_db")
+	mysql_user$ = GetSessionParameter$("u_mysql_user")
+	mysql_password$ = GetSessionParameter$("u_mysql_password")
+	mysql_server$ = GetSessionParameter$("u_mysql_server")
+	mysql_port = GetSessionParameter$("u_mysql_port")
+	ch_invh = OpenFile(-1136,intCo) \ if ch_invh<0 error 42
+	ch_invhkey = OpenFile(-9994,intCo) \ if ch_invhkey<0 error 42
+	ch_invl = OpenFile(-1184,intCo) \ if ch_invl<0 error 42
+	ch_invlt = OpenFile(-9939,intCo) \ if ch_invlt<0 error 42
+	ch_invt = OpenFile(-1168,intCo) \ if ch_invt<0 error 42
+	ch_invs = OpenFile(-1152,intCo) \ if ch_invs<0 error 42
+	ch_invm = OpenFile(-9955,intCo) \ if ch_invm<0 error 42
+	ch_invc = OpenFile(-9913,intCo) \ if ch_invc<0 error 42
+	ch_rfpickqh = OpenFile(-9604,intCo) \ if ch_rfpickqh<0 error 42
+	ch_mysql = MySQLOpen(-1,mysql_db$,0,mysql_user$,mysql_password$,mysql_server$,mysql_port) \ if ch_mysql = -1 error 42
+	mat read #1,0,100;currDate$
+	try
+		call VerifyDate(currDate$)
+	else
+		message$ = "Invalid current date in control record!"
+		call FatalError()
+	end try
+end function noFatalError
+
+Function GetParameters()
+	if not(erpCron)
+		print ""
+		print "Enter number of months to reload / refresh invoice history for."
+		print "0=current month"
+		print "1=last month and current month"
+		print "2=prior 2 months and current month (etc.)"
+		print "11=max"
+		print "Number of months <CR=0>? ";
+		input ""tmp$
+		print ""
+		print ""
+		reloadMonths = tmp$
+	else
+		reloadMonths = GetSessionParameter$("RELOADMONTHS")
+	end if
+	if reloadMonths<0 or reloadMonths>11
+		message$ =  "Number of months to reload must be between 0 and 11."
+		call FatalError()
+		exit function noFatalError
+	end if
+	endYear = currDate$[1,2]
+	endMonth = currDate$[3,4]
+	begYear = endYear
+	if reloadMonths < endMonth
+		begMonth = endMonth - reloadMonths
+	else
+		begYear = endYear - 1
+		begMonth = 12 + (begMonth - reloadMonths)
+	end if
+	tmp$[1,2] = begYear using "&&"
+	tmp$[3,4] = begMonth using "&&"
+	tmp$[5,6] = "01"
+	call DateToJulian(1,tmp$)
+	julFirstDate = tmp$
+	endMonth = endMonth + 1
+	if endMonth > 12
+		endMonth = 1
+		endYear = endYear + 1
+	end if
+	tmp$[1,2] = endYear using "&&"
+	tmp$[3,4] = endMonth using "&&"
+	tmp$[5,6] = "01"
+	call DateToJulian(1,tmp$)
+	julLastDate = tmp$
+	julLastDate = julLastDate - 1
+	if not(erpCron)
+		print "WARNING! - This will insert records from ISAM that don't exist in SQL"
+		print "           for the tables associated with invoice history for the period."
+		print "           It will also update records in SQL from ISAM where the record"
+		print "           exists in both SQL and ISAM for the period."
+		print ""
+		print "           No records will be deleted."
+		print ""
+		print "Continue? (Y/<CR=N>) ";
+		input ""tmp$
+		print ""
+		print ""
+		if ucase$(tmp$) <> "Y"
+			message$ = "Aborted!"
+			call FatalError()
+		end if
+	end if
+end function noFatalError
+
+Function UpdateInvoiceHistory()
+	oldRIE = MySQLSetRIE(e$,ch_mysql,0)
+	k_invhh$ = " ",k_invhh$
+	k_invhh$[1,6] = julFirstDate using "######"
+	do
+		search #ch_invhkey,3,2;k_invhh$,r_invh,e
+		if e exit do
+		if val(k_invhh$[1,6]) > julLastDate exit do
+		if not(UpdateInvoiceHeader()) exit do
+		if not(UpdateInvoiceLines()) exit do
+		if not(UpdateInvoiceTotals()) exit do
+		if not(UpdateInvoiceShip()) exit do
+		if not(UpdateInvoiceMessages()) exit do
+		if not(UpdateInvoiceCost()) exit do
+		if not(UpdateRfpickQHistory()) exit do
+		isamRec = isamRec + 1
+		if (isamRec mod modStatus) = 0
+			print "Invoice history items processed: ";isamRec
+		end if
+	loop
+end function noFatalError
+
+Function UpdateInvoiceHeader()
+	read record #ch_invh,r_invh;invh.
+	! build proper key for conversion routine - should be
+	! key 1 of invh, not invhkey
+	k_invh$ = " ",k_invh$
+	k_invh$[1,2] = k_invhh$[7,8]
+	k_invh$[3,12] = k_invhh$[9,18]
+	call invh_DL4SQLConvert(e$,"FROMDL4",invh.,sql_invh.,r_invh,k_invh$)
+	!
+	! issue - when invoice history purge / archive is run it can leave old records
+	! in invh.  This is not so much a problem, but the old record may have
+	! references to the shipto and total records that are now used by
+	! another record - so we need to delete anything that might reference
+	! the same as these are header records that are moved to archive.
+	!
+	SQLStmt$ = "DELETE FROM invh WHERE ShipRec = "+str$(sql_invh.ShipRec)
+	Search #ch_mysql;SQLStmt$
+	SQLStmt$ = "DELETE FROM invh WHERE TotRec = "+str$(sql_invh.TotRec)
+	Search #ch_mysql;SQLStmt$
+	e = invh_SQLAddUpdate(e$,ch_mysql,sql_invh.)
+	if e = 0
+		message$ = e$ + "   Error inserting/updating header record: "+k_invh$
+		call FatalError()
+	end if
+end function noFatalError
+
+Function UpdateInvoiceLines()
+	k_invl$ = " ",k_invl$
+	k_invl$[1,10] = k_invh$[3,12]
+	do
+		
+		search #ch_invl,3,1;k_invl$,r_invl,e \ if e>2 error 11000
+		if e exit do
+		if k_invl$[1,10] <> k_invh$[3,12] exit do
+		read record #ch_invl,r_invl;invl.
+		call invl_DL4SQLConvert(e$,"FROMDL4",invl.,sql_invl.,r_invl,k_invl$)
+		e = invl_SQLAddUpdate(e$,ch_mysql,sql_invl.)
+		if e = 0
+			message$ = e$ + "   Error inserting/updating line record: "+k_invl$
+			call FatalError()
+			exit do
+		end if
+		if not(UpdateInvoiceLineTag()) exit do
+	loop
+end function noFatalError
+
+Function UpdateInvoiceLineTag()
+	k_invlt$ = " ",k_invlt$
+	k_invlt$[1,13] = k_invl$[1,13]
+	search #ch_invlt,2,1;k_invlt$,r_invlt,e \ if e>1 error 11000
+	if not(e)
+		read record #ch_invlt,r_invlt;invlt.
+		call invltag_DL4SQLConvert(e$,"FROMDL4",invlt.,sql_invlt.)
+		e = invltag_SQLAddUpdate(e$,ch_mysql,sql_invlt.)
+		if e = 0
+			message$ = e$ + "   Error inserting/updating line tag record: "+k_invlt$
+			call FatalError()
+		end if
+	end if
+end function noFatalError
+
+Function UpdateInvoiceTotals()
+	r_invt = invh.TotRec
+	read record #ch_invt,r_invt;invt.
+	call invt_DL4SQLConvert(e$,"FROMDL4",invt.,sql_invt.,r_invt)
+	e = invt_SQLAddUpdate(e$,ch_mysql,sql_invt.)
+	if e = 0
+		message$ = e$ + "   Error inserting/updating total record: "+str$(r_invt)
+		call FatalError()
+	end if
+end function noFatalError
+
+Function UpdateInvoiceShip()
+	r_invs = invh.ShipRec
+	read record #ch_invs,r_invs;invs.
+	call invs_DL4SQLConvert(e$,"FROMDL4",invs.,sql_invs.,r_invs)
+	e = invs_SQLAddUpdate(e$,ch_mysql,sql_invs.)
+	if e = 0
+		message$ = e$ + "   Error inserting/updating ship record: "+str$(r_invs)
+		call FatalError()
+	end if
+end function noFatalError
+
+Function UpdateInvoiceMessages()
+	k_invm$ = " ",k_invm$
+	k_invm$[1,10] = k_invh$[3,12]
+	do
+		search #ch_invm,3,1;k_invm$,r_invm,e \ if e>2 error 11000
+		if e exit do
+		if k_invm$[1,10] <> k_invh$[3,12] exit do
+		read record #ch_invm,r_invm;invm.
+		call invm_DL4SQLConvert(e$,"FROMDL4",invm.,sql_invm.)
+		e = invm_SQLAddUpdate(e$,ch_mysql,sql_invm.)
+		if e = 0
+			message$ = e$ + "   Error inserting/updating message record: "+k_invm$
+			call FatalError()
+			exit do
+		end if
+	loop
+end function noFatalError
+
+
+Function UpdateInvoiceCost()
+	k_invc$ = " ",k_invc$
+	k_invc$[1,10] = k_invh$[3,12]
+	do
+		search #ch_invc,3,1;k_invc$,r_invc,e \ if e>2 error 11000
+		if e exit do
+		if k_invc$[1,10] <> k_invh$[3,12] exit do
+		read record #ch_invc,r_invc;invc.
+		call invcost_DL4SQLConvert(e$,"FROMDL4",invc.,sql_invc.)
+		e = invcost_SQLAddUpdate(e$,ch_mysql,sql_invc.)
+		if e = 0
+			message$ = e$ + "   Error inserting/updating cost record: "+k_invc$
+			call FatalError()
+			exit do
+		end if
+	loop
+end function noFatalError
+
+Function UpdateRfpickQHistory()
+	k_rfpickqh$ = " ",k_rfpickqh$
+	k_rfpickqh$[1,10] = k_invh$[3,12]
+	do
+		search #ch_rfpickqh,3,1;k_rfpickqh$,r_rfpickqh,e \ if e>2 error 11000
+		if e exit do
+		if k_rfpickqh$[1,10] <> k_invh$[3,12] exit do
+		read record #ch_rfpickqh,r_rfpickqh;rfpickqh.
+		call rfpickqh_DL4SQLConvert(e$,"FROMDL4",rfpickqh.,sql_rfpickqh.)
+		e = rfpickqh_SQLAddUpdate(e$,ch_mysql,sql_rfpickqh.)
+		if e = 0
+			message$ = e$ + "   Error inserting/updating rfpickqh record: "+k_rfpickqh$
+			call FatalError()
+			exit do
+		end if
+	loop
+end function noFatalError
+
+
+
+sub FatalError()
+	noFatalError = 0
+	print message$
+end sub

@@ -1,0 +1,896 @@
+! ! 1.0 12/07/2009 - initial conversion
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp358.dl4 src/serp358.src
+!
+! From the original code:
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: JUN 16, 2004  14:56:19
+Rem /w/papermaster/r2002//usr/acct/txc/work/r2002/mx/mx358.src (univ2) [txc] {05331}
+Rem  Copyright (c) 2004 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+Rem FROM (MX355) TO MX358 - NON RASL LOCATION MAINT(orig FROM MX355RF)
+Rem AUTHOR : DAVE D 01/26/93
+Rem REDONE FOR RF 4/2000 - W. BLAZAK
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+include "src/inc/fileprtdefault.inc" ! port default
+Declare External Sub CreateNetStatus
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+! include "src/inc/file?.inc"
+
+!
+! *declare additional dl4 intrinsic subs & functionsDeclare Intrinsic Sub InpBuf,String
+Declare Intrinsic Sub InpBuf,String
+! Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+!External Lib "ubsfunc.dl4"
+!Declare External Function openfile,pdate$,jdate$,Formatdate2$
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault
+Declare External Function OpenFile,chkdtefrmt$,OpenMySQLMirror
+External Lib "librasl.lib"
+Declare External Sub chkwhrasl
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+include "src/inc/fileprod.inc"
+include "src/inc/fileprodwhse.inc"
+include "src/inc/fileprodloc.inc"
+include "src/inc/filesprodlot.inc"
+include "src/inc/sql_prod.inc" ! SQL defintions
+
+! local subs / functions
+
+Declare sub ReadProduct, ReadProductWhse, GetWHOnHand, CheckForOtherLocations
+Declare sub GetOtherLocations, DeleteLocation, AddUpdateProduct, CreateSprodlot
+Declare sub GetLocationData,ReadLocation
+Declare function YYMMDDToStr$
+!
+try
+dim prod. as prod
+dim pw. as prodwhse
+dim prodl. as prodloc
+dim sprod. as sprodlot
+
+dim 1%,portnum
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%,rec_uac
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[500],tmp2$[1000],b$[200]
+b$=" ",b$
+dim message$[150],webstr$[200]
+dim prt. as prtdefault ! port defaults
+!
+! call dxopen()
+!
+! call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+call GetPortDefault(e$,IntCO,UserID$,portnum,rec_uac,prt.) ! get port default
+Dim 1%,PL1[1],PD1[9],RASL[5],Cnvtu[2],recLock
+Dim 2%,R6,DIR,CHANNEL_,PLDT,otherDIR,SYS_DATE
+Dim 3%,PL2[0],cnvta
+Dim PLOC$[18],K2$[50],F$[16],K3$[50],K33$[50],k_pw$[50]
+Dim K333$[50],KPLOC$[50],qtyUOM$[4],K_OTHER$[50]
+Dim K4$[40],P9$[50],BINM$[6],K6$[40]
+Dim N1$[4],N2$[118]
+DIM K_WHLOC$[60],WL$[30],productID$[12]
+
+dim DEF_LOT$[12],S_KEY$[42]
+
+Mat Read #1,19,50;P9$;
+Read #1,3,172;SYS_DATE;
+! RASL = 0 \ If P9$[41,41] = "Y" Or P9$[41,41] = "W" Let RASL = 9
+! FLAGSS[2] = 23
+
+! get default warehouse based on port defaults - not
+! applicable in ERP
+!
+! Ropen #8,"PRTDFLT"
+! Ropen #7,"USERPORT"
+! Mat Read #7,Spc(6),10;A4; \ If Not(A4) Let A4 = Spc(6)
+! Mat Read #8,A4,0;PD1;
+! Close #8,#7
+! 
+! If P9$[41,41] = "W" And PD1[2] Call "CHKWRASL",PD1[2],RASL[]
+
+! Gosub L_5500 ! draw header for screen
+
+! E = Spc(5) \ COID = Int((E - Int(E / 16384) * 16384) / 64)
+! F$ = COID Using "CNTRL#"
+For I = 2 To 10
+	Read F \ If F = -1 Goto L_945
+	Read #1,88,Abs(F);F$;
+	If INQ Ropen #I,F$ \ Goto L_945
+	If F >= 0 Open #I,F$
+	If F < 0 Ropen #I,F$
+L_945: Next I
+Data "1792","208","-2736","-2768","-2352"," -1"," -1"," -1","2528"
+! #2 - product, #3 - prodloc, #4 - WHLOC, #5 - WHINFO, #6 - ALTITEM, #10 - SPRODLOT
+ch_whi = 5
+ch_prod = 2
+ch_pw=OpenFile(1744,IntCo) \ If ch_pw=-1 Error 42 ! prodwhse file
+ch_cc=OpenFile(-1728,IntCo) \ if ch_cc=-1 Error 42 ! ccodes
+sqlChan = OpenMySQLMirror(e$)
+
+if rtrim$(action1$)="GETDEFAULTS" goto serveitup:
+if rtrim$(action1$) = "GETWHLIST" goto serveitup:
+
+call dxget("WarehouseID", tmp$) \ PL1[0] = tmp$
+If PL1[0] <= 0 Or PL1[0] > 99
+	e$ = "Invalid warehouse entered!" \ error 10000
+end if
+Call ChkWhRasl(e$,intCO,ch_cntrl,ch_whi,PL1[0],RASL[])
+IF P9$[41,41]="N" LET RASL=0 ! SYSTEM-WIDE - NO RASL!!
+if not(RASL)
+	gosub GetBinMask
+else
+	binm$=""
+end if
+if action1$ <> "GETOTHERLOCS"
+	!
+	! add section to indicate RASL Flag
+	!
+	tmp$=bsdel$+"HouseKeeping"+fdel$+rdel$+"RASLFlag"+fdel$+"BinMask"+fdel$+rdel$
+	tmp$=tmp$+str$(RASL)+fdel$+binm$+fdel$+rdel$+esdel$
+	call addToStr(e$, rstr$, tmp$)
+end if
+if action1$ <> "GETLOCLIST"
+	call dxget("LocationID", tmp$) \ tmp$ = ucase$(tmp$)
+	PLOC$[13,18] = tmp$,b$
+	IF RASL gosub VerifyRASLLoc
+end if
+if action1$ = "GETOTHERLOCS" or action1$ = "DELETELOC" or action1$ = "ADDPRODUCT" or action1$ = "GETLOCATIONDATA" or action1$ = "UPDATEPRODUCT"
+	call dxget("PRODUCTID", tmp$)
+	if tmp$ = ""
+		e$ = "NO product ID passed in!"
+		error 10000
+	end if
+	productID$ = ucase$(tmp$),b$
+end if
+
+serveitup: ! 
+!
+! what's being requested?  serve it up!
+!
+select case action1$
+	case "GETWHLIST"
+		gosub BuildWHDroplist
+		! status section
+		Message$=""
+	case "GETLOCLIST"
+		gosub BuildLocDroplist
+		! status section
+		Message$=""
+	case "GETOTHERLOCS"
+		call GetOtherLocations()
+		! status section
+		Message$=""
+	case "GETDATA"
+		gosub LoadData
+		! status section
+		Message$=""
+	case "GETDEFAULTS"
+		gosub getdefaults
+		! status section
+		message$="OK"
+	case "DELETELOC"
+		call DeleteLocation()
+		! status section
+		message$="OK"
+	case "ADDPRODUCT"
+		call AddUpdateProduct()
+		! status section
+		message$="OK"
+	case "GETLOCATIONDATA"
+		call GetLocationData()
+		! status section
+		message$="OK"
+	case "UPDATEPRODUCT"
+		call AddUpdateProduct()
+		! status section
+		message$="OK"
+	case else
+		e$ = "Unknown action1: "+action1$ \ error 10000
+endselect
+! message should be set.  if we got here - we've got a good status
+ReturnStatus=1
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call addToStr(e$,rstr$,webstr$)
+goto OutEnd:
+
+! ***********************************************************************
+! Nobody but us subroutines and exit code down here
+! ***********************************************************************
+
+!----------------------------------------------------------------------------
+! build initial drop list of existing warehouses
+!----------------------------------------------------------------------------
+BuildWHDroplist: !
+	! Add section header and column defs
+	tmp$=bsdel$+"WHDroplist"+fdel$+rdel$
+	tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+	call addToStr(e$,rstr$,tmp$)
+	for i = 1 to 99
+		Mat Read #ch_whi,i-1;N1$
+		Mat Read #ch_whi,i-1,4;N2$
+		If N1$ > "    " ! if there is a WH desginator we have a defined record
+			tmp$=str$(i)+fdel$+str$(i)+" - "+rtrim$(n1$)+": "+rtrim$(n2$[1,30])+fdel$+rdel$
+			call addToStr(e$, rstr$, tmp$)
+		end if
+	next i
+	call addToStr(e$, rstr$, esdel$)
+Return
+
+!----------------------------------------------------------------------------
+! build drop list of locations
+!----------------------------------------------------------------------------
+BuildLocDroplist: !
+	tmp$=bsdel$+"LocDroplist"+fdel$+rdel$
+		tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+		call addToStr(e$,rstr$,tmp$)
+	if RASL
+		! drop list is all defined locations
+		! Add section header and column defs
+		
+		K_WHLOC$ = PL1[0] using "##"
+		do
+			Search #4,3,1;K_WHLOC$,V1,E \ if E>2 Error 11000
+			if E exit do
+			if pl1[0] <> val(K_WHLOC$[1,2]) exit do
+			! skip wh control records
+			If K_WHLOC$[5,5] <> "@" and K_WHLOC$[6,6] <> "@"
+				Read #4,V1,10;WL$; \ wl$ = ltrim$(wl$)
+				tmp$ = k_whloc$[3,8]+fdel$+ltrim$(k_whloc$[3,8])
+				if wl$ <> "" tmp$ = tmp$+" - "+wl$
+				tmp$=tmp$+fdel$+rdel$
+				call addToStr(e$, rstr$, tmp$)
+			end if
+		loop
+	else
+		! non-rasl locations - get any existing defs
+		!e$ = "Lookup valid for RASL only." \ error 10000 ! SEND FROM PRODLOC
+		K_WHLOC$ = PL1[0] using "##"
+		TMP2$=""
+		do
+			Search #3,3,2;K_WHLOC$,V1,E \ if E>2 Error 11000
+			if E exit do
+			if pl1[0] <> val(K_WHLOC$[1,2]) exit do
+			! skip wh control records
+			if tmp2$<>k_whloc$[3,8] ! diff - send it
+				tmp$ = k_whloc$[3,8]+fdel$+ltrim$(k_whloc$[3,8])
+				!if wl$ <> "" tmp$ = tmp$+" - "+wl$
+				tmp$=tmp$+fdel$+rdel$
+				call addToStr(e$, rstr$, tmp$)
+				TMP2$=K_WHLOC$[3,8]
+			Endif
+		Loop
+	end if
+	call addToStr(e$, rstr$, esdel$)
+Return
+
+!----------------------------------------------------------------------------
+! Make sure selected RASL location exists
+!----------------------------------------------------------------------------
+VerifyRASLLoc: !
+	K4$ = " ",K4$;K4$ = PL1[0] Using "##";K4$[3] = PLOC$[13,18]
+	Search #4,2,1;K4$,R4,E \ If E>1 Error 11000
+	If E
+		e$ = "Location not valid!"
+		error 10000
+	end if
+Return
+
+!----------------------------------------------------------------------------
+! Load up the data and send back to web
+!----------------------------------------------------------------------------
+LoadData: !
+	call dxget("EDIT",tmp$) \ doingEdit = tmp$
+	K3$ = " ",K3$
+	K33$ = " ",K33$
+	K3$[1,2] = PL1[0] Using "##"
+	K3$[3,8] = PLOC$[13,18]
+	K3$[9] = ""
+	K33$ = K3$
+	K333$ = " ",K333$
+	LINECOUNTER = 9
+	EDIT_ = 0
+	CHANNEL_ = 3 \ DIR = 2 \ otherDIR = 1 ! product location
+	If RASL Let CHANNEL_ = 10 \ DIR = 3 \ otherDIR = 2! sprodlot for RASL
+	!
+	! Build header section for data
+	!
+	tmp$=bsdel$+"TableData"+fdel$+rdel$
+	tmp$=tmp$+"ProductID"+fdel$+"Perm/Pri?"+fdel$
+	tmp$=tmp$+"ProductDesc"+fdel$+"WhOnHand"+fdel$+"WhOnHandUOM"+fdel$
+	tmp$=tmp$+"Date Created"+fdel$+"OtherLocations"+fdel$
+	call addToStr(e$, rstr$, tmp$+rdel$)
+	do
+		SkipRecord: ! for skipping similar sprodlot recs
+		Search #CHANNEL_,3,DIR;K3$,R3,E \ If E>2 Error 11000
+		If E exit do
+		If K3$[1,8] <> K33$[1,8] exit do
+		If RASL AND K333$[1,20] = K3$[1,20] Goto SkipRecord
+		!If RASL Let K333$ = K3$
+		EDIT_ = 99
+		If RASL
+			Read Record #CHANNEL_,r3,0;sprod.;  
+
+			Let K333$ = K3$
+			KPLOC$ = " ",KPLOC$
+			KPLOC$ = K3$[9,20] + K3$[1,8]
+			Search #3,2,1;KPLOC$,REC3,E \ if e>1 error 11000
+			If Not(E)
+				Mat Read #3,REC3,18;PL1
+				Mat Read #3,REC3,22;PL2
+				Mat Read #3,REC3,48;PLDT
+			
+			Else
+				PL1[1] = 0 \ PL2[0] = 0 \ PLDT = 0
+			End If
+		else
+			Mat Read #3,R3,18;PL1 \ Mat Read #3,R3,22;PL2
+			Mat Read #3,R3,48;PLDT
+		End If
+		ProductID$ = K3$[9,20]
+		call ReadProduct()
+		call ReadProductWhse()
+		if rasl then  pw.QtyOnHand = sprod.QtyRcvd - sprod.QtyUsed  ! trick in prodlot avail
+		call GetWHOnHand()
+		call CheckForOtherLocations()
+		tmp$=k3$[9,20]+fdel$
+		If PL1[1] = 1
+			if RASL
+				! tmp$=tmp$+"(Primary)"
+			else
+				! tmp$=tmp$+"(Permanent)"
+			end if
+			tmp$ = tmp$+"Y"
+		end if
+		tmp$=tmp$+fdel$+prod.Desc1$+fdel$
+		tmp$=tmp$+str$(whOnHand)+fdel$+qtyUOM$+fdel$
+		tmp$=tmp$+YYMMDDToStr$(PLDT)+fdel$
+		tmp$=tmp$+str$(otherLocs)+fdel$
+		call addToStr(e$, rstr$, tmp$+rdel$)
+	loop
+	call addToStr(e$, rstr$, esdel$)
+	if not(EDIT_) and not(doingEdit)
+		e$ = "No products found for location in warehouse."
+		error 10000
+	end if
+return
+
+sub GetLocationData()
+try
+	call ReadProduct()
+	call ReadProductWhse()
+	call ReadLocation()
+	if rec3<= 0
+		e$ = "Location not on file!"
+		error 10000
+	end if
+	!
+	! load header portion
+	!
+	tmp$=bsdel$+"TableData"+fdel$+rdel$
+	tmp$=tmp$+"ProductID"+fdel$+"WarehouseID"+fdel$+"LocationID"+fdel$
+	tmp$=tmp$+"ProductDesc"+fdel$+"ProductDesc2"+fdel$
+	tmp$=tmp$+"PermanentFlag"+fdel$+"ProdTI"+fdel$+"ProdHI"+fdel$
+	tmp$=tmp$+"MaxPallets"+fdel$+"ReplenPoint"+fdel$+"ReplenCapacity"+fdel$
+	tmp$=tmp$+"ProdHeight"+fdel$+"ProdWidth"+fdel$+"ProdLength"+fdel$
+	tmp$=tmp$+"StockUM"+fdel$+"LocDate"+fdel$
+	call addToStr(e$,rstr$,tmp$+rdel$)
+	!
+	! load data portion
+	!
+	tmp$=prodl.ProdCode$+fdel$+str$(prodl.Whse)+fdel$+prodl.Loc$+fdel$
+	tmp$=tmp$+prod.Desc1$+fdel$+prod.Desc2$+fdel$+str$(prodl.permprim)+fdel$
+	tmp$=tmp$+str$(pw.UnitsSkidTier)+fdel$+str$(pw.TiersPerSkid)+fdel$
+	tmp$=tmp$+str$(prodl.MaxPal)+fdel$+str$(prodl.ReplPt)+fdel$+str$(prodl.ReplCap)+fdel$
+	tmp$=tmp$+str$(prod.HeightOfStkUM)+fdel$+str$(prod.WidthOfStkUM)+fdel$+str$(prod.LengthOfStkUM)+fdel$
+	tmp$=tmp$+XUnit$(prod.UMStkDefault, ch_cc)+fdel$
+	tmp$=tmp$+YYMMDDToStr$(prodl.PLDATE)+fdel$
+	call addToStr(e$,rstr$,tmp$+rdel$+esdel$)
+else ! main try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub ReadLocation()
+try
+	KPLOC$ = " ",KPLOC$
+	KPLOC$[1,12] = productID$
+	KPLOC$[13,14] = PL1[0] using "##"
+	KPLOC$[15,20] = PLOC$[13,18]
+	rec3 = filegetprodloc(e$,3,"=",1,KPLOC$,prodl.,1)
+else ! main try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+!----------------------------------------------------------------------------
+! Read the product record
+!----------------------------------------------------------------------------
+sub ReadProduct()
+try
+	clear prod.
+	prod.Desc1$ = "Product Not On File!"
+	
+	K2$ = " ",K2$
+	K2$ = ProductID$
+	r_prod = filegetprod(e$,ch_prod,"=",1,k2$,prod.,recLock)
+else ! main try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+!----------------------------------------------------------------------------
+! Read the product record
+!----------------------------------------------------------------------------
+sub ReadProductWhse()
+try
+	clear pw.
+
+	k_pw$ = " ",k_pw$
+	k_pw$[1,12] = productID$[1,12]
+	k_pw$[13,14] = pl1[0] using "##" 
+	r_pw = filegetprodwhse(e$,ch_pw,"=",1,k_pw$,pw.,recLock)
+else ! main try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetWHOnHand() 
+try
+	whOnHand = 0
+	qtyUOM$ = ""
+	if not(r_prod) return
+	qtyUOM$ = XUnit$(prod.UMStkDefault, ch_cc)
+	if not(r_pw) return
+	cnvtu[0]=0;cnvtu[1]=prod.UMStkDefault;cnvtu[2]=1
+	Cnvta=pw.QtyOnHand
+	whOnHand=ConvProdAmount(e$,CNVTU[],CNVTA,1,FLAG,prod.)
+else ! main try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub CheckForOtherLocations()
+try
+	otherLocs = 0
+	K_OTHER$ = " ",K_OTHER$
+	K_OTHER$[1,12] = k3$[9,20]
+	K_OTHER$[13,14] = PL1[0] Using "##"
+	do
+		search #CHANNEL_,3,otherDIR;K_OTHER$,R_OTHER,E \ if E>2 error 11000
+		if E exit do
+		if val(K_OTHER$[13,14]) <> PL1[0] or K_OTHER$[1,12] <> k3$[9,20] exit do
+		if K_OTHER$[15,20] <> K3$[3,8]
+			otherLocs = 1
+			exit do
+		end if
+	loop
+else ! main try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetOtherLocations()
+try
+	K3$ = " ",K3$
+	K33$ = " ",K33$
+	K3$[1,12] = productID$
+	K3$[13,14] = PL1[0] Using "##"
+	K3$[15] = ""
+	K33$ = K3$
+	K333$ = " ",K333$
+	CHANNEL_ = 3 \ DIR = 1 ! product location
+	If RASL Let CHANNEL_ = 10 \ DIR = 2 ! sprodlot for RASL
+	!
+	! Build header section for data
+	!
+	tmp$=bsdel$+"TableData"+fdel$+rdel$
+	tmp$=tmp$+"Location"+fdel$+"Perm/Pri?"+fdel$
+	tmp$=tmp$+"Date Created"+fdel$
+	call addToStr(e$, rstr$, tmp$+rdel$)
+	do
+		SkipRecord2: ! for skipping similar sprodlot recs
+		Search #CHANNEL_,3,DIR;K3$,R3,E \ If E>2 Error 11000
+		If E exit do
+		If K3$[1,14] <> K33$[1,14] exit do
+		If RASL AND K333$[1,20] = K3$[1,20] Goto SkipRecord2
+		if k3$[15,20] = PLOC$[13,18] goto SkipRecord2 ! original location
+		If RASL Let K333$ = K3$
+		If RASL
+			KPLOC$ = " ",KPLOC$
+			KPLOC$ = K3$[1,20]
+			Search #3,2,1;KPLOC$,REC3,E \ if e>1 error 11000
+			If Not(E)
+				Mat Read #3,REC3,18;PL1
+				Mat Read #3,REC3,22;PL2
+				Mat Read #3,REC3,48;PLDT
+			
+			Else
+				PL1[1] = 0 \ PL2[0] = 0 \ PLDT = 0
+			End If
+		else
+			Mat Read #3,R3,18;PL1 \ Mat Read #3,R3,22;PL2
+			Mat Read #3,R3,48;PLDT
+		End If
+		tmp$=rtrim$(k3$[15,20])+fdel$
+		If PL1[1] = 1
+			if RASL
+				! tmp$=tmp$+"(Primary)"
+			else
+				! tmp$=tmp$+"(Permanent)"
+			end if
+			tmp$ = tmp$+"Y"
+		end if
+		tmp$=tmp$+fdel$+YYMMDDToStr$(PLDT)+fdel$
+		call addToStr(e$, rstr$, tmp$+rdel$)
+	loop
+	call addToStr(e$, rstr$, esdel$)
+else ! main try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub DeleteLocation()
+try
+	call ReadLocation()
+	if rec3<=0
+		if RASL
+			e$ = "Product location not on file or not primary!"
+			error 10000
+		else
+			error 11000
+		end if
+	end if
+	if RASL
+		if not(prodl.PermPrim)
+			e$ = "RASL: Not a primary location, can't delete."
+			error 10000
+		end if
+	end if
+	e = fileupdateprodloc(e$,3,"d",rec3,prodl.,0,0,-1,"serp 358: Bin/location edit")
+	if e<0 error 11000
+else ! main try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub AddUpdateProduct()
+try
+	call ReadLocation()
+	if action1$ = "ADDPRODUCT"
+		if rec3>0
+			e$ = "Product already on file for this location!"
+			error 10000
+		end if
+		clear prodl.
+		prodl.ProdCode$ = productID$
+		prodl.Loc$ = PLOC$[13,18]
+		prodl.Whse = pl1[0]
+		prodl.PermPrim = 1
+		prodl.Loc8Char$ = " ",prodl.Loc8Char$
+	else ! "UPDATEPRODUCT"
+		if rec3<=0
+			e$ = "Product not on file for this location!"
+			error 10000
+		end if
+	endif
+	if not(RASL)
+		call dxget("PermanentFlag", tmp$) \ prodl.PermPrim = tmp$
+	else
+		call dxget("MaxPallets",tmp$) \ prodl.MaxPal = tmp$
+		call dxget("ReplenPoint",tmp$) \ prodl.ReplPt = tmp$
+		call dxget("ReplenCapacity",tmp$) \ prodl.ReplCap = tmp$
+	end if
+	call dxget("LocDate",tmp$)
+	tmp2$=chkdtefrmt$(e$,tmp$) ! make sure MM/DD/YYYY
+	let prodl.PLDATE=tmp2$[9,10]+tmp2$[1,2]+tmp2$[4,5] ! to YYMMDD
+	if prodl.pldate<101 or prodl.pldate>991231 or fra(prodl.pldate) let prodl.pldate=0
+	if action1$ = "ADDPRODUCT"
+		rec3 = fileupdateprodloc(e$,3,"a",rec3,prodl.,0,0,-1,"serp 358: Bin/location edit")
+		if rec3<=0 e=rec3 \ error 11000
+	else
+		e = fileupdateprodloc(e$,3,"C",rec3,prodl.,0,0,-1,"serp 358: Bin/location edit")
+		if e error 11000
+	end if
+	recLock = 1
+	call ReadProduct()
+	if r_prod > 0
+		! these fields are located in the
+		! product file
+		call dxget("ProdHeight",tmp$) \ prod.HeightOfStkUM = tmp$
+		call dxget("ProdWidth",tmp$) \ prod.WidthOfStkUM = tmp$
+		call dxget("ProdLength",tmp$) \ prod.LengthOfStkUM = tmp$
+		e = fileupdateprod(e$,ch_prod,"c",r_prod,prod.,0,0,-1,"serp 358: Bin/location edit")
+		if e<0 error 11000
+	end if
+	call ReadProductWhse()
+	if r_pw > 0
+		call dxget("ProdTI",tmp$) \ pw.UnitsSkidTier = tmp$
+		call dxget("ProdHI",tmp$) \ pw.TiersPerSkid = tmp$
+		e = fileupdateprodwhse(e$,ch_pw,"c",r_pw,pw.,0,0,-1,"serp 358: Bin/location edit")
+		if e<0 error 11000
+	end if
+	! inserting SQL update here
+	if sqlChan >= 0 ! MySQL enabled and channel opened
+		e = prod_UpdateSQLFromDL4(e$, intCo, productID$, sqlChan, chprod)
+		if e <> 1 ! returns the number of records add/updated/deleted
+			error 11000 ! search error
+		end if
+	end if
+	if action1$ = "ADDPRODUCT" call CreateSprodlot()
+else ! main try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+!----------------------------------------------------------------------------
+! RASL - Create new sprodlot record for RASL primary (for new records only)
+!----------------------------------------------------------------------------
+sub CreateSprodlot()
+try
+	If Not(RASL) exit sub
+	DEF_LOT$ = " ",DEF_LOT$
+	DEF_LOT$[1,7] = "STOCK",prodl.Whse Using "&&"
+	S_KEY$ = prodl.Whse Using "##",prodl.Loc$,prodl.ProdCode$,DEF_LOT$,"          "
+	Search #10,2,3;S_KEY$,S_REC,E \ If E>1 Error 11000
+	If Not(E) exit sub
+	clear sprod.
+	sprod.ProdCode$ = prodl.ProdCode$
+	sprod.LotNum$ = DEF_LOT$,b$
+	sprod.Stock$ = " ",sprod.Stock$
+	sprod.Comment$ = "PRIMARY ASSIGN - SERP358",b$
+	sprod.Whse = prodl.Whse
+	sprod.SrcType = 3
+	sprod.DateRcvd = SYS_DATE
+	sprod.PhysUpdt = 1
+	sprod.Loc$ = prodl.Loc$
+	e = fileupdatesprodlot(e$,10,"a",s_rec,sprod.,0,0,-1,"serp 358: Bin/location edit")
+	if e<=0 error 11000
+else ! main try
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+Function YYMMDDToStr$(dateVal)
+try
+	dim retval$[8]
+	retval$ = ""
+	if not(dateVal) exit function retval$
+	tmp2$ = dateVal using "&&&&&&"
+	retval$ = tmp2$[3,4]+"/"+tmp2$[5,6]+"/"+tmp2$[1,2]
+else
+	include "src/callsuberr.inc"
+end try
+end Function retval$
+
+
+!----------------------------------------------------------------------------
+! Get bin mask from whinfo
+!----------------------------------------------------------------------------
+GetBinMask: !
+	R5 = PL1[0] - 1
+	If R5 < 0
+		BINM$ = "AAAAAA"
+	else
+		Mat Read #5,R5,862;BINM$;
+		For I = 1 To 6
+			If BINM$[I,I] = "" Or BINM$[I,I] = " " Let BINM$[I,I] = "A"
+		Next I
+	end if
+Return
+!----------------------------------------------------------------------------
+! get defaults - like warehouse
+!----------------------------------------------------------------------------
+!----------------------------------------------------------------------------
+GetDefaults: !
+	! Add section header and column defs
+	tmp$=bsdel$+"Defaults"+fdel$+rdel$
+	tmp$=tmp$+"WHSE"+fdel$+rdel$
+	call addToStr(e$,rstr$,tmp$)
+	If prt.wh<=0 let prt.wh=1
+	if prt.wh>99 let prt.wh=1
+	let tmp$=str$(prt.wh)+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	call addToStr(e$, rstr$, esdel$)
+Return
+
+
+! L_2000: Rem
+! PLOC$ = " ",PLOC$ \ PL1[0] = PD1[2] \ PL1[1] = 0
+! ALTCODE$ = " ",ALTCODE$
+! ALTCODE1$ = " ",ALTCODE1$
+! Gosub L_3060 ! get the warehouse
+! L_2010: PL1[1] = 0;PL2[0] = 0 \ Gosub L_3200 ! get the location
+! If RASL Gosub L_4200 \ Goto L_2010 ! verify valid RASL location
+! 
+! L_2040: K3$ = " ",K3$
+! K33$ = " ",K33$
+! K3$[1,2] = PL1[0] Using "##"
+! K3$[3,8] = PLOC$[13,18]
+! If RASL Let K3$ = " ",K3$
+! If RASL Let K3$[1,2] = PL1[0] Using "##"
+! If RASL Let K3$[3,8] = PLOC$[13,18]
+! K3$[9] = ""
+! K33$ = K3$
+! K333$ = " ",K333$
+! LINECOUNTER = 9
+! EDIT_ = 0
+! CHANNEL_ = 3 \ DIR = 2 ! product location
+! If RASL Let CHANNEL_ = 10 \ DIR = 3 ! sprodlot for RASL
+! 
+! Print @0,LINECOUNTER - 1;'CL';"PRODUCT CD";
+! If RASL = 0 Print Tab 12;"PERM"; Else Print Tab 12;"PRIM";
+! Print @18,LINECOUNTER - 1;"PRODUCT DESCRIPTION"; Tab 50;"VENDOR ITEM NUMBER";
+! Print @0,LINECOUNTER;'CE';
+! Print @0,LINECOUNTER;
+! 
+! L_2080: Search #CHANNEL_,3,DIR;K3$,R3,E
+! 	If E > 2 Gosub ERR_SEARCH
+! 	If E = 2 Goto L_2500
+! 	If K3$[1,8] <> K33$[1,8] Goto L_2500
+! 	If RASL If K333$[1,20] = K3$[1,20] Goto L_2080
+! 	If RASL Let K333$ = K3$
+! 	If Not(E) Let EDIT_ = 99
+! 	If RASL And CHANNEL_ = 10
+! 		KPLOC$ = " ",KPLOC$
+! 		KPLOC$ = K3$[9,20] + K3$[1,8]
+! 		Search #3,2,1;KPLOC$,REC3,E
+! 		If Not(E)
+! 			Mat Read #3,REC3,18;PL1
+! 			Mat Read #3,REC3,22;PL2
+! 		Else
+! 			PL1[1] = 0 \ PL2[0] = 0
+! 		End If
+! 	End If
+! 	If Not(E) If Not(RASL) Mat Read #3,R3,18;PL1 \ Mat Read #3,R3,22;PL2
+! 	Gosub L_6000 ! read the product
+! 	Print Tab 0;K3$[9,20];"  ";
+! 	If PL1[1] = 1 Print "P"; Else Print " ";
+! 	Print Tab 18;A$[9,38];
+! 	Print Tab 50;A$[93,112];
+! 	Print " " \ LINECOUNTER = LINECOUNTER + 1
+! 	If LINECOUNTER < FLAGSS[2] - 2 Goto L_2080
+! 	Print @0,FLAGSS[2] - 1;"  <CR>:More  R:Relist  E:Exit  ";'CL';
+! 	Input ""U5$
+! 	Call String(1,U5$)
+! 	If U5$ = "E" Goto OUTEND
+! 	If U5$ = "EXIT" Goto OUTEND
+! 	If U5$ = "R" Or U5$ = "RELIST" Goto L_2040
+! 	LINECOUNTER = 9
+! 	Print @0,LINECOUNTER - 1;'CL';"PRODUCT CD";
+! 	If RASL = 0 Print Tab 12;"PERM"; Else Print Tab 12;"PRIM";
+! 	Print @18,LINECOUNTER - 1;"PRODUCT DESCRIPTION"; Tab 50;"VENDOR ITEM NUMBER";
+! 	Print @0,LINECOUNTER;'CE';
+! 	Print @0,LINECOUNTER;
+! Goto L_2080
+! 
+! L_2400: Rem RASL BRING UP ITEM/WHSE
+! 	K3$ = " ",K3$;K3$[1,12] = PLOC$[1,12];K3$[13] = PL1[0] Using "##"
+! 	Search #3,2,1;K3$,R3,E \ If E > 1 Gosub ERR_SEARCH
+! 	If E = 1 Return 1
+! 	PLOC$[1,12] = K3$[1,12];PLOC$[13,18] = K3$[15,20]
+! 	PL1[0] = K3$[13,14];PL1[1] = 0
+! 	Mat Read #3,R3,22;PL2
+! 	EDIT_ = 99
+! 	Print @17,9;"Y";
+! 	PROD$[1,12] = PLOC$[1,12];WHSE = PL1[0];WH = WHSE
+! 	Print @17,9;PLOC$[13,18];
+! Return
+! 
+! L_2500: Rem EDIT
+! 	If EDIT_ = 0 Print @0,FLAGSS[2] - 3;"NO PRODUCTS FOUND";
+! 	Print @0,FLAGSS[2] - 1;"  E:Exit  R:Relist  <CR>:End  ";'CL';
+! 	Input ""U5$
+! 	Call String(1,U5$)
+! 	If U5$ = "" Let PLOC$[13,18] = "      " \ Goto L_2010
+! 	If U5$ = "E" Goto OUTEND
+! 	If U5$ = "EXIT" Goto OUTEND
+! 	If U5$ = "R" Or U5$ = "RELIST" Goto L_2040
+! 	J7$ = "Invalid Selection!" \ Gosub L_7600 \ Goto L_2500
+! Goto L_2040
+! 
+! L_3060: Rem ENTER WAREHOUSE
+! 	J0$ = "3000021203"
+! 	J5$ = "Enter Warehouse #"
+! 	J1 = PL1[0]
+! 	Gosub L_7000
+! 	If J1 <= 0 Or J1 > 99 Let J7$ = "Invalid Warehouse" \ Gosub L_7600 \ Goto L_3060
+! 	PL1[0] = J1
+! 	If P9$[41,41] = "W" Call "CHKWRASL",PL1[0],RASL[]
+! 	If Not(RASL) Gosub L_6200
+! 	WH = PL1[0]
+! 	WHSE = PL1[0]
+! Return
+! 
+! L_3200: Rem ENTER LOCATION
+! 	Print @13,5;'CL';@0,8;'CE';
+! 	L_3210: J0$ = "2 000615 5" \ J1$ = ""
+! 	If Not(RASL) Let J5$ = "Enter Location, <CR>:Exit "
+! 	If RASL Let J5$ = "Enter Location, -:Location selection <CR>:Exit"
+! 	J1$ = PLOC$[13,18]
+! 	Gosub L_7000
+! 	J5$ = ""
+! 	If J4$ = "" Or J4$[1,1] = " " Goto OUTEND
+! 	If J4$ = "EXIT" Goto OUTEND
+! 	If J$[1,6] = "      " Goto L_3200
+! 	If J$[1,1] = "-" If RASL Gosub L_6800 \ Goto L_3210
+! 	If F9 Goto L_3290
+! 	PLOC$[13,18] = J$
+! L_3290: Return
+! 
+! L_4200: Rem RASL CHECK FOR VALID LOCATION
+! 	K4$ = " ",K4$;K4$ = PL1[0] Using "##";K4$[3] = PLOC$[13,18]
+! 	Search #4,2,1;K4$,R4,E \ If E > 1 Gosub ERR_SEARCH
+! 	If E = 1 Goto L_4260
+! 	Return 1
+! 	L_4260: Rem NOT A LOCATION!
+! 	J7$ = "Location Not Valid!"
+! 	Gosub L_7600
+! Return
+! 
+! L_5500: Rem DRAW SCREEN ---------------------------------------------------
+! 	Print 'CS'
+! 	Print @3,0;"-358-";
+! 	If RASL Print @10,0;"RASL PRIMARY"; Else Print @10,0;"NON RASL";
+! 	Print @23,0;"STOCK LOCATION - INQUIRY. ";
+! 	Print @15,1;"PRODUCTS IN A LOCATION";
+! 	Print @1,5;"LOCATION.:";
+! 	Print @1,3;"WAREHOUSE:";
+! Return
+! 
+! L_6000: Rem read prod file
+! 	A$ = " ",A$
+! 	K2$ = " ",K2$
+! 	K2$[1,12] = K3$[9,20]
+! 	Search #2,2,1;K2$,R2,E
+! 	If E
+! 		A$[9,28] = "Product Not On File!"
+! 		Return
+! 	End If
+! 	L_6050: Mat Read #2,R2,0;A$;
+! Return
+! 
+! L_6200: Rem GET MASK FROM WHINFO
+! 	R5 = PL1[0] - 1 \ If R5 < 0 Goto L_6260
+! 	Mat Read #5,R5,862;BINM$;
+! 	For X = 1 To 6
+! 		If BINM$[X,X] = "" Or BINM$[X,X] = " " Let BINM$[X,X] = "A"
+! 	Next X
+! 	Goto L_6280
+! 	L_6260: Rem NG
+! 	BINM$ = "AAAAAA"
+! 	L_6280: Print @30,6;'CL';"MASK: ";BINM$;
+! Return
+! 
+! L_6800: Rem LIST LOC
+! 	Swap 1,"SW352"
+! Return
+
+! OUTEND: Rem EXIT
+! Close 
+! Chain "MX000"
+! Stop 
+
+OUTEND: Rem EXIT ROUTINE
+call setoutput(e$,rstr$)
+Close
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end

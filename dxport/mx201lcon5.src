@@ -1,0 +1,765 @@
+! mx201lcon5
+!
+! supporting library of rasl routines
+!
+! loadsave -w -n 100,10 -o prog/dxport/mx201lcon5.dl4 src/mx201lcon5.src
+!
+! 1.0 03/07/08
+! 1.5 05/06/2008 revised prod & prodwhse structs
+!	08/2011 - find a dl4 bug with structs - if ANYTHING is in the last string variable
+!		it will put a null in to the 1st char of next record.
+!		even though sizes are correct for the var & record (even a " " at pos 1)
+!
+include "src/copyright.inc"
+!
+! sub & functions for list library
+!
+!	S   MX201LCON5			cons whse rasl
+! Note: copied routines from mxrasl5
+! as this can't be combined with mxrasl5 due to program mx266 calling
+! this program specifically.
+
+include "src/inc/filewhloc.inc" ! whse locations
+include "src/inc/fileordhead.inc" ! Order header, ROS, ROT (NOT fileroh, dl4 thing)
+include "src/inc/filerolz.inc" ! Order Line
+include "src/inc/filesordlotz.inc" ! Sordlot (fix dir's)
+include "src/inc/filesprodlot.inc" ! Sprodlot
+include "src/inc/filewhinfoz.inc" ! wh info (modified & corrected vers)
+include "src/inc/filewohfle.inc" ! work order header
+include "src/inc/filewolfle.inc" ! work ord lines
+include "src/inc/fileprodloc.inc" ! prod locations
+include "src/inc/fileccodes.inc" ! um codes
+include "src/inc/filesordlkitl.inc" ! kit lines
+include "src/inc/fileprodwhse.inc" ! prod whse
+include "src/inc/fileinvtrans.inc" ! inv trans
+include "src/inc/fileprod.inc" ! prod file
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,buildsort,JDate$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "invttrans.dl4"
+Declare External Sub maketrans
+
+! Declare External Sub Allocordlot,ChkWHRasl
+
+! internal subs/functions (mxrasl5)
+Declare sub getwhlinfo,DFLTSTOCK,getlotcntrl
+Declare sub clr_ordlot,del_sordlot,upd_sprodlot
+Declare sub upd_sordlot,create_sordlot
+Declare sub get_primloc,check_wla
+Declare sub create_sprodlot,LotCnt_Sordlot
+! to get mxrasl5 to pass vars - dim them here
+	Dim 1%,Cnvtu[2],WH,mfg,mfgrts,allord,FOpen[20]
+	Dim 2%,Type,Sel
+	Dim 3%,CNVTA,Amount
+	Dim Spaces$[128],mode$[2],olmode$[2],fmode$[2],tmode$[2]
+	DIM 1%,CH_PRODLOC,CH_WHLOC,CH_PROD,CH_ROH,CH_ROL,CH_CCODES,CH_KIT
+	DIM 1%,CH_PRODWH,CH_INVTR,CH_USERPORT
+	DIM 1%,CH_PRODLOT,CH_ORDLOT,CH_CUST,CH_WOH,CH_WOL
+	DIM 1%,PASS,RASL[5],BPick[5],FromWh
+	DIM F$[17],V$[60],V1$[31],V6$[60],K1$[60],K2$[60],M1$[4],I$[80]
+	DIM F1$[24],F2$[30],K$[60],LK$[60]
+	DIM 2%,R[50],X,X2,TS9[3]
+	DIM 1%,WHSE,FOUND,ConsUpd,2%,D9[20]
+	DIM 1%,D1,J0,J2,J3,J4,J5,J6,J8,J9[5],3%,J1,R0[100],E,T7[5]
+	DIM 1%,whoAmI,L3[3],WLA[7]
+	! Dim 1%,W0,W1[2],w5[4],2%,W2[7],W6[3],3%,W3[24],W7[4] ! "mfg vars
+	DIM J$[40],J0$[12],J1$[40],J2$[40],J5$[75],J7$[75],J9$[40],LOT$[12]
+	! DIM 2%,H0[12],L4[3],P2[2],ol2[3],H5[11]
+	Dim 2%,AXCESS,BPKQty,N0
+	DIM 2%,sysDate,prodRecvDate,julDate[1]
+	DIM TIER$[1],TIEB$[2],SKEY$[55],SRT$[60],1%,SRT[2],3%,LOCSRT
+	DIM C2$[20],P0$[66],P1$[156],S0$[36],LOC$[6],TEMP$[12]
+	DIM B1$[200],B2$[200],A$[156],KLOT$[60],PRIM$[6],K20$[40],K21$[20]
+	DIM OL2$[16],SP1$[6],P9$[50],P60$[50],P61$[256],X$[20],PN$[16]
+	DIM ROL$[40],K16$[50],KL$[58] ! ,1%,KL1[5],3%,KL3[1],2%,KL2[1]
+	! DIM 3%,P3[4],L5[3],T7[5],ol3[5],l7[12],B3[17]
+	Dim K17$[60],K18$[60],SK17$[60]
+	DIM 3%,QSHP,QORD,QBO,TORD,TSHP,TBO,RELQTY,qta,qta1,qtb,orig_l7_4
+	DIM 3%,unallocAmount,locUnalloc,LT2[5]
+	DIM 3%,Rec[99],L4,E ! is used as rec # only
+	DIM SCRATCH$[80],k3$[50],RASLUNALLOCLOC$[6],dfltRcvLoc$[6],DFLTCMLOC$[6]
+	dim tmpKey$[60],tmpKey2$[60],tmp$[100],userid$[10]
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+! SET UP Program wide dims
+	Dim ROH. as roh
+	Dim ROL. as rolnew
+	Dim Ordl. as sordlot
+	Dim Prlt. as sprodlot
+	Dim WHI. as whinfo
+	Dim WHLC. as whloc
+	Dim crol. as rolnew ! copy of
+	Dim Prod. as prod
+	Dim kitl. as sordlkitl
+	Dim WOH. as wohfle
+	Dim WOL. as wolfle
+	Dim ploc. as prodloc
+	Dim itr. as invtrans
+	Dim pwh. as prodwhse
+Enter intco,Ctlc,S9[],OPEN_CHAN[]
+!--------------------------------------------------------------------
+Sub GETWHLINFO() 
+!  REM GET WHSE Location INFO
+Try
+dim whlc. as whloc
+
+LET K21$=WHSE USING "##";K21$[3]="  @    "
+FMode$="=";Dir=1;e=0
+R[21]=filegetwhloc(e$,CH_WHLoc,fmode$,dir,K21$,WHLC.)
+clear e$
+If R[21]<0 
+  Clear WHLC.
+  Let WHLC.AllocOk=1
+Endif
+Let Srt[1]=WHLC.BinKLoc
+Let Srt[2]=WHLC.TierKLoc
+Let LocSrt=WHLC.MaxWgt ! is diff for @ key
+Let WLA=WHLC.AllocOk
+
+ else
+    include "src/callsuberr.inc"
+  end try
+  !
+End Sub ! getwhlinfo
+!
+!--------------------------------------------------------------------
+Sub DFLTSTOCK(whse) 
+REM "=================================== SET UP DEFAULT STOCK LOT
+try
+
+LET LOT$=" ",LOT$
+LET LOT$[1,7]=WHSE USING "STOCK&&"
+LET LOC$[1,6]="STOCK "
+IF ROH.OrdType=7 LET LOC$[1,6]="STOCK "
+else
+    include "src/callsuberr.inc"
+  end try
+  !
+End Sub ! DFLTStock
+!
+!--------------------------------------------------------------------
+Sub GETLOTCNTRL(p9$,whse)
+REM "======================== CHECK LOT CNTRL FOR A SPECIFIC PRODUCT
+Try
+LET LOTCNTRL=0
+IF P9$[1,1]="N" Exit sub
+IF P9$[1,1]="B" AND prod.LotCtrl$="N" ! "by product, this product is "N"
+	LET LOT$[1,7]=WHSE USING "STOCK&&"
+	Exit sub
+
+ENDIF
+if p9$[1,1]="Y" or (p9$[1,1]="B" and prod.lotctrl$="Y")
+	LET LOTCNTRL=1
+endif
+else
+    include "src/callsuberr.inc"
+end try
+  !
+End Sub ! GETLOTCNTRL
+!
+!--------------------------------------------------------------------
+
+Sub CLr_ORDLOT()
+REM "===================== CHECK FOR LOTS WHICH SHOULDN'T BE THERE
+try
+!declare sub del_sordlot
+LET V$=" ",V$
+LET V$[1,6]=ROH.OrdNum USING "######"
+IF MFG OR MFGRTS LET V$[1,6]=WOL.WONum$
+LET V$[7,9]=rol.LineNum USING "###" 
+! LET V$[10,11]=WHSE USING "##" ! "do ALL for Order/Line
+! If OWHS Let V$[10,11]=OWHS Using "##" ! "clear Original Whse Alloc.
+LET I$=V$ \ LET V1=0 \ LET E=0
+! Do ! can't do a do..loop
+	CO_LOOP: REM Clean Order Lot Loop
+	fmode$=">";dir=3
+	V1=filegetsordlotz(e$,ch_ordlot,fmode$,dir,v$,ordl.)
+	clear e$
+	clear ordl.sOpen$
+IF V1>0 AND V$[1,9]=I$[1,9] ! " [1,11]=I$[1,11]
+	IF NOT(KIT) AND V$[30,32]="KIT" GOTO CO_LOOP:
+	IF KIT AND V$[30,32]<>"KIT" GOTO CO_LOOP:
+	LET LN=V$[33,35]
+	IF KIT AND LN<>Kitl.KitLineNum GOTO CO_LOOP:
+	IF V$[40,40]="4" GOTO CO_LOOP:
+	LET R[7]=V1
+	LET I$=V$
+	IF ordl.whse=fromwh goto CO_Loop: ! keep from whse
+	IF roh.OrdType=4
+		LET ordl.QtyBHRel=0
+		WRITE #CH_ORDLOT,V1,90;ordl.QtyBHRel;
+	ENDIF 
+	!IF rol.NStkItem<>0 OR rol.UpdtStk=0 GOTO CO_DEL:
+	!If rol.OrgWhse Goto Co_Del: ! "Delete all from Original Whse
+	!IF RASL
+	!	IF ordl.Loc$="NONE  " OR ordl.Loc$="STOCK " GOTO CO_DEL:
+	!ELSE 
+	!	IF ordl.Loc$<>"STOCK " GOTO CO_DEL:
+	!ENDIF 
+	!IF LOTCNTRL
+	!	IF ordl.LotNum$[1,5]="STOCK" GOTO CO_DEL:
+	!ELSE 
+	!	IF ordl.LotNum$[1,5]<>"STOCK" GOTO CO_DEL:
+	!ENDIF 
+	!IF ordl.ProdCode$<>rol.ProdCode$ GOTO CO_DEL:
+	!IF ordl.Whse<>WHSE GOTO CO_DEL:
+	!IF ordl.LotNum$[1,5]="STOCK"
+	!	LET X2=ordl.LotNum$[6,7]
+	!	IF X2<>ordl.Whse GOTO CO_DEL:
+	!ENDIF 
+	!GOTO CO_LOOP:
+	GOTO CO_DEL ! ALWAYS DELETE FROM CONS WHSE!
+ENDIF 
+Exit sub
+
+CO_DEL: REM FOUND A SORDLOT
+LET QSHP=ordl.QtyAlloc;QORD=ordl.QtyAlloc;QBO=ordl.QtyOnBO
+TEMP$=rol.ProdCode$;rol.ProdCode$=ordl.ProdCode$
+call DEL_SORDLOT()
+LET rol.ProdCode$=TEMP$;V$=I$
+GOTO CO_LOOP:
+else
+    include "src/callsuberr.inc"
+end try
+  !
+End Sub ! clr_ordlot
+!
+!--------------------------------------------------------------------
+Sub DEL_SORDLOT()
+REM "======================================== DELETE SORDLOT
+try
+!declare sub upd_sprodlot
+LET K1$=" ",K1$;K2$=" ",K2$
+LET K1$[1,12]=ordl.ProdCode$
+LET K1$[13,18]=ordl.OrdNum USING "######"
+If mfg or MFgrts let k1$[13,18]=ordl.ProdWo$
+LET K1$[19,21]=ordl.WoSoLine USING "###"
+LET K1$[22,23]=ordl.Whse USING "##"
+LET K1$[24,29]=ordl.Loc$
+LET K1$[30,41]=ordl.LotNum$
+LET K1$[42,51]=ordl.Stock$
+Let K1$[53]="" ! CUT TO LENGTH
+LET T7=ordl.QtyReq \ LET e=v1 
+fmode$="d" ! delete - rec# in e
+V1=fileupdatesordlotz(e$,ch_ordlot,fmode$,e,ordl.)
+If V1<0 ! an error on delete - what happens? (send error 19000+)
+  X2=ABS(v1)
+  Let e$="SEARCH ERROR "+Str$(x2)+" DELETE ORDLOT - MX201LCON5"
+  system "echo ''" + msc$(0)+" "+ e$ + "'' >> files/1/erp.errlog"
+	dim msc4$[100] \ msc4$=msc$(4)
+	if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+	call env(2,"PROGNAME",msc4$)
+	call programdump()
+  Error 19000+x2
+  
+Endif
+! IF V1<>R[7] PRINT "RECORDS DO NOT AGREE" \ LET E=0 \ GOSUB ERR_SEARCH:
+LET M1=-1 \ call UPD_SPRODLOT()
+LET QSHP=0;QBO=0
+else
+    include "src/callsuberr.inc"
+  end try
+  !
+End Sub ! del_sordlot
+!
+!--------------------------------------------------------------------
+Sub UPD_SPRODLOT()
+REM "================================== UPDATE SPRODLOT
+try
+!declare sub create_sprodlot
+IF ordl.Loc$[1,1]="" OR ordl.Loc$[1,6]="      " LET ordl.Loc$=LOC$[1,6]
+LET K2$=" ",K2$
+LET K2$[1,12]=ordl.LotNum$
+! k2$[13,22]=stock$ ! always blank?
+LET K2$[23,24]=WHSE USING "##"
+LET K2$[25,30]=ordl.Loc$
+LET K2$[31]=rol.ProdCode$
+fmode$="=";dir=1;e=1 ! e=lockflag=yes
+V1=filegetsprodlot(e$,ch_prodlot,fmode$,dir,k2$,prlt.,e)
+clear e$
+If V1<0 ! not found
+	If M1=-1 Exit Sub ! "not found on delete of sordlot/unalloc DO NOT CREATE NEW
+	IF K2$[1,4]="    " OR K2$[25,28]="    " Exit sub
+	IF K2$[1,5]="STOCK"
+		IF K2$[25,28]="NONE" OR K2$[25,29]="STOCK" call CREATE_SPRODLOT()
+	ELSE 
+		If LOTCNT and consupd call CREATE_SPRODLOT() ! mx201lcon
+		! GOSUB ERR_SEARCH:
+	ENDIF 
+ENDIF 
+
+IF TYPE<>3
+  If consupd=0 or (consupd<>0 and roh.OrdType<>8 AND roh.OrdType<>16) ! 
+	IF QSHP>0 LET prlt.QtyAlloc=prlt.QtyAlloc+(QSHP*M1)
+	LET prlt.QtyBO=prlt.QtyBO+(QBO*M1)
+  Endif ! mx201lcon5 uses fromwh and ordtype check
+	IF prlt.QtyBO<0 LET prlt.QtyBO=0
+ENDIF 
+clear prlt.sopen$
+WRITE Record #CH_PRODLOT,V1,0;prlt.; ! org only update qty's?
+! write #ch_prodlot,v1,100;prlt.QtyAlloc;
+! write #ch_prodlot,v1,106;prlt.QtyBO;
+else
+    include "src/callsuberr.inc"
+  end try
+  !
+End Sub ! upd_sprodlot
+!
+!--------------------------------------------------------------------
+Sub CREATE_SPRODLOT()
+REM create a sprodlot - should only be for adding alloc
+try
+
+IF ordl.Loc$[1,1]="" OR ordl.Loc$[1,4]="    " exit sub
+IF ordl.LotNum$[1,1]="" OR ordl.LotNum$[1,4]="    " exit sub 
+LET K1$=" ",K1$
+LET K1$[1,12]=rol.ProdCode$
+LET K1$[13,18]=rol.ordnum USING "######"
+IF MFG OR MFGRTS LET K1$[13,18]=wol.WONum$
+LET K1$[19,21]=rol.LineNum USING "###"
+LET K1$[22,23]=WHSE USING "##"
+LET K1$[24,29]=ordl.Loc$
+LET K1$[30,41]=ordl.LotNum$
+Let k1$[53]="" ! CUT TO LENGTH!
+LET V6$=" ",V6$
+LET V6$[1,22]=K1$[30,51];V6$[23,30]=K1$[22,29];V6$[31,42]=K1$[1,12]
+LET fmode$="=";dir=1;e=0
+V1=filegetsprodlot(e$,ch_prodlot,fmode$,dir,v6$,prlt.,e)
+clear e$
+If V1>0 exit sub ! "already on file
+clear prlt.
+! setup strings with spaces
+prlt.Comment$=spaces$
+prlt.Stock$=spaces$
+prlt.NotUsed$=spaces$
+clear prlt.sOpen$ ! prlt.sOpen$[1,1]=spaces$
+
+LET prlt.ProdCode$=rol.ProdCode$
+LET prlt.LotNum$=V6$[1,12]
+LET prlt.Loc$=V6$[25,30]
+LET prlt.Whse=WHSE;prlt.SrcType=3
+LET prlt.DateRcvd=roh.OrdDate;prlt.AvgCost=prod.CostAvg
+
+fmode$="a";e=0 ! adds keys & writes
+V1=fileupdatesprodlot(e$,ch_prodlot,fmode$,e,prlt.)
+If V1<0 ! an error on delete - what happens? (send error 19000+)
+  X2=ABS(v1)
+  if x2<>9
+	Let e$="SEARCH ERROR "+Str$(x2)+" CREATE SPRODLOT - MX201LCON5"
+	system "echo ''" + msc$(0)+" "+ e$ + "'' >> files/1/erp.errlog"
+	dim msc4$[100] \ msc4$=msc$(4)
+	if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+	call env(2,"PROGNAME",msc4$)
+	call programdump()
+	Error 19000+x2
+  Endif
+Endif
+LET R[6]=V1
+
+LET M1=1 ! switch to add? why switch?(does come here on de-allocates!)
+else
+    include "src/callsuberr.inc"
+  end try
+  !
+End Sub ! create_sprodlot
+!
+!--------------------------------------------------------------------
+
+Sub Clr_sort()
+try
+L_12320: REM CLEAR SORT
+LET SRT$=" ",SRT$
+L_12340: SEARCH #ch_sort,3,1;SRT$,R[9],E ! \ IF E>2 GOSUB ERR_SEARCH:
+IF E GOTO L_12390:
+SEARCH #ch_sort,5,1;SRT$,R[9],E ! \ IF E GOSUB ERR_SEARCH:
+if e
+	e$="Search Error "+Str$(E)+" clear sort in mx201lcon5"
+	system "echo ''" + msc$(0)+" "+ e$ + "'' >> files/1/erp.errlog"
+	dim msc4$[100] \ msc4$=msc$(4)
+	if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+	call env(2,"PROGNAME",msc4$)
+	call programdump()
+Endif
+GOTO L_12340:
+
+L_12390: 
+else
+    include "src/callsuberr.inc"
+  end try
+  !
+End Sub ! Clr_sort
+!
+!--------------------------------------------------------------------
+Sub UPD_SORDLOT()
+REM "======================================= sordlot maint
+try
+!Declare sub CREATE_SORDLOT,UPD_SPRODLOT
+LET PASS=1
+LET K1$=" ",K1$
+LET K1$=" ",K1$;K1$[1,6]=roh.Ordnum USING "######"
+IF MFG OR MFGRTS LET K1$[1,6]=wol.WONum$
+LET K1$[7,9]=rol.LineNum USING "###"
+LET K1$[10,11]=WHSE USING "##"
+IF PRIM$[1,6]<>"      " LET LOC$[1,6]=PRIM$ ELSE  LET LOC$[1,6]="STOCK "
+LET K1$[12,17]=LOC$[1,6]
+LET K1$[18,29]=LOT$[1,12]
+IF KIT LET K1$[30,32]="KIT";K1$[33,35]=kitl.KitLineNum USING "&&&"
+k1$[41]=""
+LET K2$=K1$
+LET K6=0
+LET X=9
+Tmode$="=";dir=3;e=0
+v1=filegetsordlotz(e$,ch_ordlot,tmode$,dir,k1$,ordl.,E)
+clear e$
+IF V1<0
+	IF (QSHP AND ((QTA1 OR RASL[1]=1) OR LOC$[1,6]="STOCK ")) OR (LOC$[1,6]="STOCK " AND (RELQTY OR QBO))
+		call CREATE_SORDLOT()
+	ELSE 
+		LET PASS=0
+		LET OL2$=" ",OL2$
+	ENDIF 
+	exit sub
+
+ENDIF 
+IF K1$[1,11]=K2$[1,11]
+	LET R[7]=V1
+	
+	LET TORD=QORD \ LET TSHP=QSHP \ LET TBO=QBO \ LET M1=-1
+	LET QSHP=ordl.QtyAlloc;QBO=ordl.QtyOnBO \ call UPD_SPRODLOT()
+	LET QORD=TORD \ LET QSHP=TSHP \ LET QBO=TBO
+	IF roh.OrdType<>4 LET ordl.QtyReq=ordl.QtyReq+QORD;ordl.QtyAlloc=ordl.QtyAlloc+QSHP;ordl.UnitCost=prlt.AvgCost
+	If Consupd<>0 Let ordl.QtyCons=QSHP;ordl.QtyAlloc=0 ! for mx201lcon
+	IF roh.OrdType=4 OR roh.OrdType=15
+		IF roh.OrdType=4 LET SCR=ordl.QtyReq ELSE  LET SCR=ordl.QtyReq-ordl.QtyAlloc+QSHP
+		IF RELQTY>SCR
+			LET ordl.QtyBHRel=SCR;RELQTY=RELQTY-SCR
+		ELSE 
+			LET ordl.QtyBHRel=RELQTY;RELQTY=0
+		ENDIF 
+	ENDIF 
+	IF (roh.OrdType<>8 AND roh.OrdType<>16) LET ordl.QtyCons=0
+	LET ordl.QtyOnBO=ordl.QtyOnBO+QBO
+	LET ordl.CustNum=roh.CustNum
+	clear ordl.sopen$
+	WRITE Record #CH_ORDLOT,R[7],0;ordl.;
+	
+ELSE 
+	LET PASS=0
+ENDIF 
+else
+    include "src/callsuberr.inc"
+  end try
+  !
+End Sub ! upd_sordlot
+!
+!--------------------------------------------------------------------
+Sub CREATE_SORDLOT()
+REM "========================================= CREATE SORDLOT
+try
+
+LET K1$=" ",K1$
+LET K1$[1,12]=rol.prodcode$
+LET K1$[13,18]=roh.ordnum USING "######"
+IF MFG OR MFGRTS LET K1$[13,18]=wol.WONum$
+LET K1$[19,21]=rol.LineNum USING "###"
+LET K1$[22,23]=WHSE USING "##"
+LET K1$[24,29]=LOC$[1,6]
+LET K1$[30,41]=LOT$[1,12]
+IF KIT LET K1$[42,44]="KIT";K1$[45,47]=kitl.KitLineNum USING "&&&"
+Let k1$[53]=""
+tmode$="=";dir=1;e=0
+V1=filegetsordlotz(e$,ch_ordlot,tmode$,dir,k1$,ordl.,E)
+clear e$
+IF V1<0
+	! setup sordlot
+	clear ordl.
+	ordl.ProdWo$=Spaces$
+	ordl.NU$=spaces$
+	clear ordl.sOpen$ ! ordl.sOpen$[1,10]=spaces$
+	ordl.Stock$=spaces$
+	LET ordl.ProdCode$=rol.ProdCode$
+	LET ordl.LotNum$=LOT$[1,12]
+	LET ordl.Loc$=LOC$[1,6]
+	IF KIT LET ordl.Stock$[1,3]="KIT";ordl.Stock$[4,6]=kitl.KitLineNum USING "&&&"
+	LET ordl.WoSoLine=rol.LineNum;ordl.OrdType=TYPE;ordl.whse=WHSE
+	IF S9[3]=4 LET ordl.OrdType=3
+	IF roh.OrdType=12 LET ordl.OrdType=5
+	LET ordl.OrdNum=roh.OrdNum;ordl.DateUsed=roh.OrdDate;ordl.CustNum=roh.CustNum
+
+	IF MFG OR MFGRTS LET ordl.ProdWo$=wol.WONum$
+	LET ordl.QtyReq=QORD;ordl.QtyAlloc=QSHP;ordl.UnitCost=prlt.AvgCost
+	If Consupd<>0 Let ordl.QtyCons=QSHP;ordl.QtyAlloc=0 ! for mx201lcon
+	IF roh.OrdType=4 OR roh.OrdType=15
+		IF ordl.QtyAlloc<0 LET ordl.QtyAlloc=0
+		LET SCR=ordl.QtyReq-ordl.QtyAlloc+QSHP
+		IF RELQTY>SCR
+			LET ordl.QtyBHRel=SCR;RELQTY=RELQTY-SCR
+		ELSE 
+			LET ordl.QtyBHRel=RELQTY;RELQTY=0
+		ENDIF 
+	ENDIF 
+	IF (roh.OrdType<>8 AND roh.OrdType<>16) LET ordl.QtyCons=0
+	LET ordl.QtyOnBO=QBO
+	LET ordl.DateShip=0
+	IF MFG OR MFGRTS LET ordl.ProdWo$=wol.WONum$ ! "alpha order#
+	Let tmode$="a";E=0 ! add keys, write data
+	V1=fileupdatesordlotz(e$,ch_ordlot,tmode$,E,ordl.)
+	If V1<0 ! an error on delete - what happens? (send error 19000+)
+		X2=ABS(v1)
+		if x2<>9
+			Let e$="SEARCH ERROR "+Str$(x2)+" CREATE ORDLOT - MX201LCON5"
+			system "echo ''" + msc$(0)+" "+ e$ + "'' >> files/1/erp.errlog"
+			dim msc4$[100] \ msc4$=msc$(4)
+			if Pos(msc4$, = "/",-1) let msc4$=msc4$[pos(msc4$,="/",-1)+1]
+			call env(2,"PROGNAME",msc4$)
+			call programdump()
+			Error 19000+x2
+		Endif
+	Endif
+ENDIF 
+else
+    include "src/callsuberr.inc"
+  end try
+  !
+End Sub ! create_sordlot
+!
+!--------------------------------------------------------------------
+Sub GET_PRIMLOC()
+REM GET PRIMARY LOCATION
+try
+!declare sub create_sprodlot
+LET PRIM$=" ",PRIM$;K20$=" ",K20$
+LET K20$=rol.ProdCode$;K20$[13]=WHSE USING "##"
+fmode$="=";dir=1;e=0
+R[20]=filegetprodloc(e$,ch_prodloc,fmode$,dir,k20$,ploc.,e)
+clear e$
+IF R[20]<0 LET K20$[15,20]="      "
+LET PRIM$=K20$[15,20]
+If Not(RASL) Let Prim$="STOCK "
+REM CHECK FOR PRIMARY SPRODLOT
+LET V6$=" ",V6$;V6$[1,12]=rol.ProdCode$;V6$[13,14]=WHSE USING "##"
+LET V6$[15,20]=PRIM$[1,6];V6$[21]=""
+fmode$="=";dir=2;e=0
+V1=filegetsprodlot(e$,ch_prodlot,fmode$,dir,v6$,prlt.,e)
+clear e$
+IF v1>0 exit sub 
+IF RASL[1]<>1 OR NOT(RASL)
+	LET PRIM$=" ",PRIM$
+	LET PRIM$="STOCK "
+ELSE
+	! OL2$=" ",OL2$
+	ordl.loc$=prim$[1,6]
+	ordl.LotNum$=lot$[1,12]
+	call create_sprodlot()
+! build primary if pulling from primary only
+ENDIF
+
+else
+    include "src/callsuberr.inc"
+  end try
+  !
+End Sub ! GET_PRIMLOC
+!
+!--------------------------------------------------------------------
+
+Sub CHECK_WLA()
+REM --------------------------- ok to allocate from this loc?
+! using the PM wla[] variables instead of sql
+try
+Let WLA=1;WLA[1]=0 ! "allocatable - holds any
+If Not(RASL) exit sub ! "no rasl - only STOCK
+LET K21$=K16$[13,20]
+tmode$="=";dir=1;e=0
+R[21]=filegetwhloc(e$,ch_whloc,tmode$,dir,k21$,WHLC.,e)
+clear e$
+IF R[21]<0
+	clear whlc.
+	LET WLA=0 ! "not found / set up is not allocatable?
+	LET WLA[1]=0
+ELSE 
+	let wla[0]=whlc.AllocOk
+	let wla[1]=whlc.AllocWhlOly
+ENDIF 
+else
+    include "src/callsuberr.inc"
+  end try
+  !
+End Sub ! CHECK_WLA
+!
+!--------------------------------------------------------------------
+
+Sub LotCnt_Sordlot()
+rem  keep same lot as FROM warehouse (used by mx201lcon5)
+try
+!declare sub upd_sordlot,create_sordlot,upd_sprodlot
+LK$ = " ",LK$
+LK$[1,6] = ROH.OrdNum Using "######"
+LK$[7,9] = rol.LineNum Using "###"
+LK$[10,11] = FromWh Using "##"
+LK$[12]="" ! cut to search length
+NextLotSordlot: ! Search #ch_sordlot,3,3;LK$,R[7],E \ If E>2 Gosub Err_Search:
+tmode$=">";dir=3;e=0
+R[7]=filegetsordlotz(e$,ch_ordlot,tmode$,dir,LK$,ordl.,e)
+clear e$
+If R[7]<0 Exit sub 
+Let X2 = LK$[1,6] \ If X2<>ROH.OrdNum Exit sub
+Let X2 = LK$[7,9] \ If X2<>rol.LineNum Exit sub
+Let X2 = LK$[10,11] \ If X2<>FromWh Exit sub
+! whse = TO WHSE - just searching fromwh for sordlots to xfer 
+Let QORD=ordl.QtyReq;QSHP=ordl.QtyAlloc;QBO=ordl.QtyCons
+Let LOT$=ordl.LotNum$
+If LOT$[1,5]="STOCK" Let LOT$[1,7]=Whse using "STOCK&&"
+call upd_sordlot() ! Gosub L_2210:  ! update or create new sordlot for consign whse
+If not(Pass) call create_sordlot() ! did not create in the upd_ (not stock)
+m1=1   !  add it in
+Call Upd_sprodlot() ! Gosub L_3610:  ! create/update sprodlot
+Label10: Rem  leave this line here, return +1 used
+Goto NextLotSordlot:
+else
+    include "src/callsuberr.inc"
+  end try
+  !
+End Sub ! LotCnt_Sordlot
+!
+!-------------------------------------------------------------------------------------
+
+!--------------------------------------------------------------------
+! mx201lcon5(intco,Ctlc,S9[],OPEN_CHAN[])
+!warehouse consignments  - callable
+!  ORDER LOT MAINTENANCE
+! OPEN_CHAN[0] = PROD
+!          [1] = ROH
+!          [2] = ROLNEW
+!          [3] = SORDLOT
+!          [4] = SPRODLOT
+try
+	!declare sub DFLTSTOCK,clr_ordlot,GETLOTCNTRL,LotCnt_Sordlot
+	!declare sub UPD_SORDLOT,UPD_SPRODLOT
+	option string redim is legal
+	DIM F$[17],V$[60],V1$[31],V6$[60],K1$[60],K2$[60],M$[11],M1$[4],I$[80]
+	DIM 2%,R[7],X,X2,L7[6],d9[20],type
+	DIM 1%,L3[3],H1[1],P1[1],S1[3],UN[2],pfu1[20],cnvtu[2],fromwh
+	DIM 1%,D1,J0,J2,J3,J4,J5,J6,J8,J9[5],X1[9],whse,OWhs,H4[2]
+	dim 3%,J1,R0[100],pfu2[6],cvnta,a[33],z9[9],E
+	DIM J$[40],J0$[12],J1$[40],J2$[40],J5$[75],J7$[75],J9$[40]
+	dim a$[156],mode$[2],fmode$[2],tmode$[2]
+	! DIM 2%,H0[12],L4[3],P2[2],S2[3],H5[11]
+	DIM C1$[30],C2$[12],P0$[66],P1$[156],S0$[36],LOC$[6],lot$[12],v9$[60]
+	DIM B1$[200],B2$[200],CL$[77],A$[156],LK$[60]
+	DIM OL2$[16],SP1$[6],P9$[50],L6$[60],X$[20]
+	DIM PN$[16],Spaces$[128],Prim$[6]
+	DIM 3%,P3[4],L5[3],T7[5],S3[5],S7[9],B3[17]
+	dim K17$[60],K18$[60],SK17$[60]
+	dim rstr$[500] !need for error handling variables
+	DIM 3%,QSHP,QORD,QBO,AVAL,TORD,TSHP,TBO
+	DIM 4%,AMOUNT
+	dim 1%,ch_roh,ch_rol,ch_prod,ch_sordlot,ch_sprodlot
+	DIM 1%,consupd,WLA[7]
+	dim V2$[30],B1[24],K15$[60]
+	dim 3%,roh_rec,pltr,V1
+	Dim ROH. as roh
+	Dim ROL. as rolnew
+	Dim Ordl. as sordlot
+	Dim Prlt. as sprodlot
+	Dim WHI. as whinfo
+	Dim WHLC. as whloc
+	Dim crol. as rolnew ! copy of
+	Dim Prod. as prod
+	Dim kitl. as sordlkitl
+	Dim WOH. as wohfle
+	Dim WOL. as wolfle
+	Dim ploc. as prodloc
+	Dim itr. as invtrans
+	Dim pwh. as prodwhse
+	If ctlc<=0 ! no control file
+	  Let ctlc=OpenFile(9999,intco) \ if ctlc=-1 Error 42
+	Endif
+	try
+	  Mat READ #ctlc,19,50;P9$;
+	Else
+	  Let ctlc=OpenFile(9999,intco) \ if ctlc=-1 Error 42
+	End try
+	Mat READ #ctlc,19,50;P9$;
+	MAT  READ #1,115;D9;
+	Spaces$=" ",Spaces$
+	ch_roh=open_chan[1]
+	ch_rol=open_chan[2]     
+	ch_prod=open_chan[0]     
+	ch_ordlot=open_chan[3] 
+	ch_prodlot=open_chan[4]
+	Prim$=Spaces$ ! not using primary here
+	kit=0;mfg=0;mfgrts=0;allord=1 ! not used here
+	! and we're off - i guess if file chan not passed error out?
+	Read record #CH_ROH,s9[2],0;ROH.;
+	LET Consupd=1 ! for routines to know its a mx201lcon
+	LET TYPE=2
+	IF S9[3]=4 OR S9[3]=44 LET TYPE=3  ! c/m related
+	rec_roh=s9[2]
+	IF roh.Wh<=0 LET roh.wh=1
+	IF roh.Wh>D9[5] LET roh.Wh=1 !# WHSES
+	Let FromWh = roh.Wh
+	LET Whse=roh.Wh
+	IF (roh.OrdType=8 OR roh.OrdType=16) LET Whse=roh.ConsWh
+	LET V$=" ",V$ 
+	call DFLTSTOCK(whse) ! GOSUB L_2150:  ! set up loc$ and lot$
+	! GET 1ST LINE NUMBER
+	LET V1$=" ",V1$
+	LET V1$[1,6]=roh.OrdNum USING "######"
+	Let V1$[7]="" ! cut to search length
+
+	L_1700: ! SEARCH #ch_rol,3,1;V1$,V1,E
+	Mode$=">";dir=1;E=0
+	V1=filegetrolz(e$,ch_rol,mode$,dir,V1$,rol.,e)
+	clear e$
+	IF V1<0 GOTO con5Done:
+	
+	LET X2=V1$[1,6]
+	IF X2<>roh.OrdNum GOTO Con5Done:
+	LET R[4]=V1 
+	IF rol.LineNum>900 GOTO L_1700:
+	IF rol.NStkItem GOTO L_1700: ! NON STOCK LET rol.UpdtStk=0
+	let rec_prod=rol.PDRecNum
+	Read Record #CH_prod,rec_prod,0;Prod.;
+	IF rol.ProdCode$<>prod.ProdCode$ LET rol.ProdCode$=prod.ProdCode$
+	If rol.OrgWhse<=0 Or rol.OrgWhse>D9[5] Or Fra(rol.OrgWhse) Let rol.OrgWhse=0
+	If rol.Whse<=0 Or rol.Whse>D9[5] Or Fra(rol.Whse) Let rol.Whse=roh.wh
+	Let Whse=rol.Whse;FromWh=rol.Whse
+	IF (roh.OrdType=8 OR roh.OrdType=16) LET Whse=roh.ConsWh
+	wh=whse ! retain wh
+	call clr_ordlot() ! GOSUB L_2950:   !  remove sordlot info
+	Let rol.OrgWhse=0
+	IF NOT(rol.UpdtStk) GOTO L_2125: ! NO STOCK UPDATE
+	whse=wh
+	call GETLOTCNTRL(p9$,whse) ! GOSUB L_3710:   ! get lotcnt flag set
+	LET QORD=rol.QtyShip+rol.QtyBO \ LET QSHP=rol.QtyShip \ LET QBO=rol.QtyBO
+	call DFLTSTOCK(whse) ! GOSUB L_2150:    ! set up loc$ and lot$
+	if LOTCNT 
+		call LotCnt_Sordlot()
+	else
+		call UPD_SORDLOT() ! GOSUB L_2660:
+		LET K1$=" ",K1$
+		LET K1$[1,12]=rol.ProdCode$
+		LET K1$[13,18]=roh.OrdNum USING "######"
+		LET K1$[19,21]=rol.LineNum USING "###"
+		LET K1$[22,23]=Whse USING "##"
+		LET K1$[24,29]=LOC$[1,6]
+		LET K1$[30,41]=LOT$[1,12]
+		LET M1=1
+		if pass ! updated sordlot
+		call UPD_SPRODLOT() ! GOSUB L_3610:
+		Endif
+	endif
+L_2125: GOTO L_1700:
+	
+	Con5Done: ! finito
+else
+    include "src/callmainerrnet_call.inc"
+  end try
+  !
+End ! mx201lcon5
+!
+!--------------------------------------------------------------------

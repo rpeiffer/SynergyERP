@@ -1,0 +1,1291 @@
+!>>> Program im472
+!
+! description  image index  
+!
+! loadsave -w -n 100,10 -o prog/dxport/im472.dl4 src/im472.src
+!
+include "src/copyright.inc" ! dx
+!
+!
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile
+Declare Intrinsic Sub DateToJulian,JulianToDate
+!
+External Lib "libgeneral.lib"
+Declare Intrinsic Sub programdump,findf,fileinfo
+Declare Intrinsic Function findchannel
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Sub suberr,mainerr,searcherr
+Declare External Function expandarray,AddToMYReports
+Declare Intrinsic Function Trim$
+Declare Intrinsic Sub dxopen,dxget,dxset,dxclose,dxsave,programdump,env
+Declare Intrinsic Sub InpBuf,String
+!
+External Lib "libedittrack.lib"    
+Declare External Sub MakeEdittrack 
+!
+Declare Sub settype,pndimage,chkimages,StoreOrderImage,imagesave,fnd_order,update_imidx
+Declare Sub createedittrack,chk_manual_input,chk_date,loadinvoicebatch,find_data
+Declare Sub build_log_report,bar_cntrl,imuser
+!
+Include "src/inc/fileordhead.inc"
+!
+Include "src/inc/fileedittrack.inc"
+!
+Def Struct imtype
+ Member 3%,SAVE_SEQ_NUM			: item 0	! ImSeq[0]  Stored docs     
+ Member 3%,LOAD_SEQ_NUM			: item 6	! ImSeq[1]  Scanned docs    
+ Member 3%,SCAN_BATCH_COUNT		: item 12	! ImSeq[2]  WAITING INDEXING
+ Member 1%,ROTATION				: item 18	! ImRot     0,90,180,270    
+ Member 2%,BARCODE_TYPES		: item 20	! ImBCode[0]       
+ Member 2%,BARCODE_DIRECTION	: item 24	! ImBCode[1]       
+ Member 2%,BC_AREA_TOP			: item 28	! ImBCode[2]                  
+ Member 2%,BC_AREA_LEFT			: item 32	! ImBCode[3]                  
+ Member 2%,BC_AREA_BOTTOM		: item 36	! ImBCode[4]                  
+ Member 2%,BC_AREA_RIGHT		: item 40	! ImBCode[5]                  
+ Member 1%,INIT_LOCATION		: item 44	! Iminit                  
+end def
+!
+Def Struct imstore
+ Member Description$[20] : Item 0	! IMSTO$[1,20]              
+ Member Path$[20] : Item 20			! IMSTO$[21,40]    
+ Member DeviceType$[1,4] : Item 40	! IMSTO$[41,44]   
+ Member 3%,NumPlatters : Item 44	! IMSTO[0]              
+ Member 3%,MaxBlocks : Item 50		! IMSTO[1]              
+ Member 3%,NumDocuments : Item 56	! IMSTO[2]              
+ Member 3%,NumPages : Item 62		! IMSTO[3]              
+ Member 3%,NumBlocks : Item 68		! IMSTO[4]  
+end def
+!
+Def Struct imindex
+ Member PREFIX$[2] : Item 0			!IMI$[1,2]                
+ Member IKEY$[28] :   Item 2			!IMI$[3,30]  TYPE-SPECIFIC 
+ Member COMMENT$[30] : Item 30		!IMI$[31,60]                
+ Member PLATTER$[6]  : Item 60		!IMI$[61,66]                
+ Member 3%,SEQNUMBER :	Item 66			!IMI1                 
+ Member 1%,LOCATION : Item 72			!IMI2[0]  Ctrl rec 177  
+ Member 1%,PAGES : Item 74				!IMI2[1]                
+ Member 1%,ROTATION : Item 76			!IMI2[2]                
+ Member 1%,EXTRA1   : Item 78			!IMI2[3]                
+ Member 2%,STOREDATE : Item 80			!IMI3[0]                 
+ Member 2%,LASTACCESS : Item 84			!IMI3[1]                
+ Member 2%,EXTRA2 : Item 88				!IMI3[2]                
+end def
+!
+Def Struct imuser
+ Member KeyIP$[10]		: Item 0              
+ Member Load_Path$[30]	: Item 10    
+ Member 1%,Scan_Station	: Item 40
+ Member IMFiller$[82]	: Item 42
+end def
+!
+try
+	dim imt. as imtype
+	Dim ims. As imstore
+	dim imdx. as imindex
+	dim imuser. as imuser
+	Dim roh. As roh ! order header 
+	DIM etr. as edittrack
+	dim 1%,ctlc,ch_imstore,ch_imtype,ch_imidx,ch_imLIdx,ch_log,ch_imuser
+	Dim 2%
+	Dim 3%
+	DIM DTDESCRIPTION$[12,20],DTINDEX1$[12,20],DTINDEX2$[12,20],DTIMODE$[12,6]
+	DIM DTLOOKUP$[12,16],DTREFFILE$[12,4],prefix$[12,2],f$[16],ext$[4]
+	Dim Key1_ROHH$[20],Key1_ROH$[20]  
+!
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+	Dim tmp$[1000],tmp1$[1000],blank$[1000],ymd_date$[10],rstr$[1000]
+	Dim action$[30],options$[30],userid$[8],b$[200],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+	dim ACTION1$[20],Key_ImIdx$[50],key_imlidx$[50],ipadd$[10],tmp_path$[30]
+	dim P176$[256],P60$[50]
+!
+	blank$=" ",blank$
+!
+	!Call dxopen()  
+	Call dxget("S_USER.AppID",tmp$) !company #               
+	Try Let IntCo = Val(tmp$) Else Let IntCo = 1 !company # 
+		ctlc = 1
+	try 
+		ropen #ctlc,(IntCo Using "files/cntrl/cntrl#")
+		cntrlflag=1
+	else
+		cntrlflag=0
+	end try
+
+	call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+	Def FNR(X) = Sgn(X) * (Abs(Int((Abs(X) + .005) * 100) / 100))
+
+!! UNTIL UBSFUNC GETS IMAGING ADDED, NEED TO OPEN THE FILES OLD SCHOOL
+	F$="6/imstore" + Str$(IntCo)
+	ch_imstore = findchannel()
+	open #ch_imstore,f$
+	F$="6/imtype" + Str$(IntCo)
+	ch_imtype = findchannel()
+	open #ch_imtype,f$
+	F$="6/imindex" + Str$(IntCo)
+	ch_imidx = findchannel()
+	open #CH_ImIdx,f$
+	f$="6/imloadidx" + str$(IntCo)  !! default file
+	ch_imLIdx = findchannel()
+	open #CH_ImLIdx,f$
+	MAT  READ #CTLC,60,50;P60$;
+	MAT  READ #CTLC,176,0;P176$;
+	IF P176$[2,2]="Y" LET EXT$=".imd"
+	IF P176$[3,3]="Y" LET EXT$=".tif"
+	IF P176$[1,1]="Y" LET LOADINVWRK=1 ELSE  LET LOADINVWRK=0
+
+	Call dxget("ACTION1",ACTION1$)
+	action1$=RTrim$(UCase$(action1$))
+
+	select case Action1$
+	case "INITIAL"
+		!! send up allowed image types
+		dim k_imlidx$[100]
+		dim 3%
+		!! check imuser table using ipaddress
+		call imuser()
+		call chkimages()
+		call settype()
+		call addtostr(e$,rstr$,bsdel$+"Doc Types"+fdel$,rdel$)  ! table name
+		call addtostr(e$,rstr$,"Doc Types"+fdel$,rdel$)  ! header 
+		for i=0 to 12
+			if DTDescription$[i]
+				k_imlidx$=prefix$[i]
+				search #ch_imlidx,3,1;k_imlidx$,rec_imlidx,e \ If e>2 Error 11000
+				! include doc type where there is pending load
+				if not(e) and k_imlidx$[1,2]=prefix$[i]
+					call AddToStr(e$,rstr$,UCASE$(DTDescription$[i])+fdel$+rdel$)
+				endif
+			endif
+		next i
+		call addtostr(e$,rstr$,esdel$)
+	case "PENDING"
+		dim imtype$[50]
+		call dxget("IMTYPE",tmp$)
+		imtype$=ucase$(rtrim$(tmp$))
+		select case imtype$
+		case "DELIVERY RECEIPT"
+			IMTYPE$="dr"
+			call pndimage()
+		case "MSDS SHEET"
+			imtype$="md"
+			call pndimage()
+		case "PRODUCT LITERATURE"
+			imtype$="pl"
+			call pndimage()
+		case "CUSTOMER DOCUMENT"
+			imtype$="cd"
+			call pndimage()
+		case "VENDOR INVOICE"
+			imtype$="vi"
+			call pndimage()
+		case "VENDOR STATEMENT"
+			imtype$="vs"
+			call pndimage()
+		case "VENDOR DOCUMENT"
+			imtype$="vd"
+			call pndimage()
+		case "PICKING DOCUMENT"
+			imtype$="pd"
+			call pndimage()
+		case "MISC. DOCUMENT"
+			imtype$="mi"
+			call pndimage()
+		case "CONCRETE TICKET"
+			imtype$="ct"
+			call pndimage()
+		case "ORDER SOURCE"
+			imtype$="os"
+			call pndimage()
+		case "PURCHASE ORDER"
+			imtype$="po"
+			call pndimage()
+		case else
+		end select
+	case "BARCODEINFO"
+	dim imtype$[50]
+		call dxget("IMTYPE",tmp$)
+		imtype$=ucase$(rtrim$(tmp$))
+		call bar_cntrl()
+	case "INDEX"
+		dim tmp2$[100],loadimg$[10],webstr$[2000],message$[200],IMKEY2$[10],IMKEY3$[10],Comment$[30]
+		dim 1%,bcflag,bad_count
+		dim 3%,barcode
+		call imuser()
+		call build_log_report()
+		IMKEY3$="INDEX"
+		ch_roh = OpenFile(-1840,IntCo)
+		call imuser()  !! get right load image file open
+		img_count=0
+img_count_loop:	tmp$="IMAGE"+str$(img_count)
+		call dxget(tmp$,loadimg$)
+		if loadimg$
+			tmp$="BARCODE"+str$(img_count)
+			call dxget(tmp$,tmp2$)
+			print #ch_log;dateusing$(Tim#(0),"HH:NN:SS");" Image ";loadimg$;" Barcode ";tmp2$
+			tmp$="MESSAGE"+str$(img_count)
+			call dxget(tmp$,message$)
+			print #ch_log;message$
+			if len(tmp2$)
+				for i=1 to len(tmp2$)
+					if tmp2$[i,i]<"0" or tmp2$[i,i]>"9" bcflag=1  !! not a number
+				next i
+				if not(bcflag)
+					MANFLG=0  !! AUTO INDEX
+					barcode=tmp2$
+					key_imlidx$=loadimg$
+					search #ch_imLIdx,2,1;key_imlidx$,rec_imlidx,e \ if e>2 error 11000
+					if not(e) call StoreOrderImage(loadimg$,barcode,IMKEY2$,IMKEY3$,comment$,MANFLG)
+				endif
+			endif
+		else
+			bad_count=bad_count+1
+		endif
+		if bad_count<20  !! try a bunch to handle a few bad barcodes
+			img_count=img_count+1
+			goto img_count_loop:
+		endif
+		!print #ch_log;"Image Indexing Complete"
+		! status section                                        
+		Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)  
+		Call AddToStr(e$,rstr$,WebStr$)                         
+	case "FIND_DATA"
+		dim fkey$[20],ftype$[2],webstr$[2000],message$[200]
+		dim 3%
+		message$=""
+		returnstatus=0
+		call dxget("KEY",fkey$)
+		CALL dxget("TYPE",ftype$)
+		call Find_data(fkey$,ftype$,message$)
+		if message$   ! did not find the order
+			roh.custnum=0
+			roh.orddate=0
+			returnstatus=1
+		endif
+		call addtostr(e$,rstr$,bsdel$+"FOUND DATA"+fdel$,rdel$)  ! table name
+		call addtostr(e$,rstr$,"KEY",fdel$)
+		call addtostr(e$,rstr$,"CUSTOMER",fdel$)
+		call addtostr(e$,rstr$,"DATE",fdel$,rdel$)
+		call addtostr(e$,rstr$,fkey$,fdel$)
+		tmp$=roh.custnum
+		call addtostr(e$,rstr$,tmp$,fdel$)
+		if roh.orddate
+			tmp1$=roh.orddate using "&&&&&&"
+			tmp$=tmp1$[3,4]+"/"+tmp1$[5,6]+"/"+tmp1$[1,2]
+		else
+			tmp$=""
+		endif
+		call addtostr(e$,rstr$,tmp$,fdel$,rdel$)
+		call addtostr(e$,rstr$,esdel$)
+		Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)  
+		Call AddToStr(e$,rstr$,WebStr$)                      
+	case "MANUAL"
+		DIM webstr$[2000],message$[200]
+		dim loadimg$[10],Comment$[30]
+		dim IMKEY1$[50],IMKEY2$[50],IMKEY3$[50]
+		DIM 3%
+		call dxget("IMAGE",loadimg$)
+		call dxget("IMKEY1",IMKEY1$)
+		call dxget("IMKEY2",IMKEY2$)
+		call dxget("IMKEY3",IMKEY3$)
+		call dxget("COMMENT",Comment$)
+		call imuser()
+		returnstatus=0
+		call chk_manual_input(loadimg$,IMKEY1$,IMKEY2$,IMKEY3$,message$)
+		if not(message$)
+			key_imlidx$=loadimg$
+			search #ch_imLIdx,2,1;key_imlidx$,rec_imlidx,e \ if e>2 error 11000
+			if not(e)
+				select case loadimg$[1,2]
+				case "dr"
+					barcode=IMKEY1$
+					MANFLG=1  !! manual index
+					type=0
+					call StoreOrderImage(loadimg$,barcode,IMKEY2$,IMKEY3$,comment$,MANFLG)
+				case "md"
+					! check incoming values done in chk_manual_input, above
+					! store image
+					key_imidx$=" ",key_imidx$
+					key_imidx$="MD"+IMKEY1$+blank$
+					type=6
+					call update_imidx(key_imidx$)
+				case "pl"
+					key_imidx$=" ",key_imidx$
+					imkey1$=imkey1$+blank$
+					key_imidx$="PL"+IMKEY1$[1,12]+imkey2$+blank$
+					type=1
+					call update_imidx(key_imidx$)
+				case "cd"
+					key_imidx$=" ",key_imidx$
+					tmp=imkey1$
+					key_imidx$="CD"+(tmp using "######")+imkey2$+blank$
+					type=2
+					call update_imidx(key_imidx$)
+				case "vi"
+					key_imidx$=" ",key_imidx$
+					tmp=imkey1$
+					key_imidx$="VI"+(tmp using "######")+imkey2$+blank$
+					! VENDOR CODE, INVOICE CODE
+					type=3
+					call update_imidx(key_imidx$)
+				case "vs"
+					key_imidx$=" ",key_imidx$
+					tmp=imkey1$
+					key_imidx$="VS"+(tmp using "######")+ymd_date$+blank$
+					! VENDOR CODE, date
+					type=4
+					call update_imidx(key_imidx$)
+				case "vd"
+					key_imidx$=" ",key_imidx$
+					tmp=imkey1$
+					key_imidx$="VD"+(tmp using "######")+imkey2$+blank$
+					! "Vendor code"    
+					! "Reference code" 
+					type=5
+					call update_imidx(key_imidx$)
+				case "pd"
+					barcode=IMKEY1$
+					MANFLG=1  !! manual index
+					type=7
+					call StoreOrderImage(loadimg$,barcode,IMKEY2$,IMKEY3$,comment$,MANFLG)
+				case "mi"
+					key_imidx$=" ",key_imidx$
+					key_imidx$="MI"+imkey1$+imkey2$+blank$
+					type=8
+					! "subtype"  4 long
+					! "Key"      
+					call update_imidx(key_imidx$)
+				case "ct"
+					key_imidx$=" ",key_imidx$
+					key_imidx$=imkey1$+imkey2$+blank$
+					type=10
+					!"Date (yymmdd)"   
+					!"Concrete ticket#"
+					call update_imidx(key_imidx$)
+				case "os"
+					key_imidx$=" ",key_imidx$
+					tmp=imkey1$
+					key_imidx$="OS"+(tmp using "######")+blank$
+					type=11
+					! "Order Number"
+					call update_imidx(key_imidx$)
+				case "po"
+					key_imidx$=" ",key_imidx$
+					tmp=imkey1$
+					key_imidx$="PO"+(tmp using "######")+blank$
+					type=12
+					! PO number"
+					call update_imidx(key_imidx$)
+				case else
+				end select
+			endif
+		else
+			returnstatus=1
+		endif
+		Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)  
+		Call AddToStr(e$,rstr$,WebStr$)   
+	case "DELETE"
+		dim loadimg$[10],Key_ImIdx$[50]
+		dim 3%
+		call dxget("IMAGE",loadimg$)
+		key_imidx$=" ",key_imidx$	
+		key_imidx$=loadimg$+blank$
+		search #ch_imlidx,5,1;key_imidx$,rec_imlidx,e \ if e>2 error 11000
+		e=3
+		search #ch_imlidx,1,0;key_imidx$,rec_imlidx,e 
+	case else
+	end select
+	OUTEND: Rem EXIT PROGRAM
+	Call setoutput(e$,rstr$,1) !1 flag puts 0 status seciton in, puts </page> in
+	!call dxclose()
+Else
+!
+include "src/callmainerrnet.inc"
+end try
+End ! the whole program
+
+sub SETTYPE()
+try
+	dim 1%,type,x1
+	dim 3%
+	FOR TYPE=0 TO 12
+	  	READ #ctlc,177,TYPE*2;X1;
+		if x1	
+			!SetType: ! Hard-coded paramaters for recognized form types
+			DTDescription$[type] = ""
+			! DTDescription$ =Description of type
+			! Prefix$ =Type prefix
+			! DTIndex1$ =Index element 1 description
+			! DTIndex2$ =Index element 2 description
+			! DTIMode$ = Indexing mode; M:manual  B:barcode
+			! DTLookup$ =Lookup field description
+			! DTReffile$=Reference file
+			If Type = 0
+				DTDescription$[type] = "Delivery receipt"
+				Prefix$[type] = "dr"
+				DTIndex1$[type] = "Order number"
+				DTIndex2$[type] = ""
+				DTIMode$[type] = "B"! default to barcode indexing - Bxx - xx=rotation
+				DTLookup$[type] = ""! No lookup field
+				DTReffile$[type]= ""
+			End if
+			If Type = 1
+				DTDescription$[type] = "Product literature"
+				Prefix$[type] = "pl"
+				DTIndex1$[type] = "Item code"
+				DTIndex2$[type] = "Reference code"
+				DTIMode$[type] = "M"! default to manual indexing
+				DTLookup$[type] = "Product description"
+				DTReffile$[type]= "PROD"
+			End if
+			If Type = 2
+				DTDescription$[type] = "Customer document"
+				Prefix$[type] = "cd"
+				DTIndex1$[type] = "Customer#"
+				DTIndex2$[type] = "Reference code"
+				DTIMode$[type] = "M"! default to manual indexing
+				DTLookup$[type] = "Customer name"
+				DTReffile$[type]= "CUST"
+			End if
+			If Type = 3
+				DTDescription$[type] = "Vendor invoice"
+				Prefix$[type] = "vi"
+				DTIndex1$[type] = "Vendor code"
+				DTIndex2$[type] = "Vendor invoice no."
+				DTIMode$[type] = "M"! default to manual indexing
+				DTLookup$[type] = "Vendor name"
+				DTReffile$[type]= "VEND"
+			End if
+			If Type = 4
+				DTDescription$[type] = "Vendor statement"
+				Prefix$[type] = "vs"
+				DTIndex1$[type] = "Vendor code"
+				DTIndex2$[type] = "Date (yymmdd)"
+				DTIMode$[type] = "M"! default to manual indexing
+				DTLookup$[type] = "Vendor name"
+				DTReffile$[type] = "VEND"
+			End if
+			If Type = 5
+				DTDescription$[type] = "Vendor document"
+				Prefix$[type] = "vd"
+				DTIndex1$[type] = "Vendor code"
+				DTIndex2$[type] = "Reference code"
+				DTIMode$[type] = "M"! default to manual indexing
+				DTLookup$[type] = "Vendor name"
+				DTReffile$[type]= "VEND"
+			End if
+
+			If Type = 6
+				DTDescription$[type] = "MSDS Sheet"
+				Prefix$[type] = "md"
+				DTIndex1$[type] = "MSDS Number"
+				DTIndex2$[type] = ""
+				DTIMode$[type] = "M"! default to manual indexing
+				DTLookup$[type] = ""
+				DTReffile$[type]= ""
+			End if
+
+			If Type = 7
+				DTDescription$[type] = "Picking document"
+				Prefix$[type] = "pd"
+				DTIndex1$[type] = "Order number"
+				DTIndex2$[type] = ""
+				DTIMode$[type] = "B"! default to barcode indexing - Bxx - xx=rotation
+				DTLookup$[type] = ""! No lookup field
+				DTReffile$[type]= ""
+			End if
+
+			If Type = 8
+				DTDescription$[type] = "Misc. document"
+				Prefix$[type] = "mi"
+				DTIndex1$[type] = "+subtype"
+				DTIndex2$[type] = "Key"
+				DTIMode$[type] = "M"! default to manual indexing
+				DTLookup$[type] = ""
+				DTReffile$[type]= ""
+			End if
+
+! If Type = 9
+! DTDescription$ = "Credit memo"
+! Prefix$ = "cm"
+! DTIndex1$ = "Order number"
+! DTIndex2$ = ""
+! DTIMode$ = "B"! default to barcode indexing - Bxx - xx=rotation
+! DTLookup$ = ""! No lookup field
+! DTReffile$= ""
+! End if
+
+			If Type = 10
+				DTDescription$[type] = "Concrete ticket"
+				Prefix$[type] = "ct"
+				DTIndex1$[type] = "Date (yymmdd)"
+				DTIndex2$[type] = "Concrete ticket#"
+				DTIMode$[type] = "B"! default to barcode indexing - Bxx - xx=rotation
+				DTLookup$[type] = ""! No lookup field
+				DTReffile$[type]= ""
+			End if
+
+			If Type = 11
+				DTDescription$[type] = "Order source"
+				Prefix$[type] = "os"
+				DTIndex1$[type] = "Order number"
+				DTIndex2$[type] = ""
+				DTIMode$[type] = "M"! default to manual indexing
+				DTLookup$[type] = ""! No lookup field
+				DTReffile$[type]= ""
+			End if
+			If Type = 12
+				DTDescription$[type] = "Purchase Order"
+				Prefix$[type] = "po"
+				DTIndex1$[type] = "PO number"
+				DTIndex2$[type] = ""
+				DTIMode$[type] = "M"! default to manual indexing
+				DTLookup$[type] = ""! No lookup field
+				DTReffile$[type]= ""
+			End if
+		end if
+	next type
+else
+	include "src/callsuberr.inc"
+end try
+end sub  ! settype
+
+sub pndimage()
+try
+	dim k_imlidx$[100],dskloc$[100]
+	dim 3%
+	!
+	call imuser()
+	call chkimages()
+	call addtostr(e$,rstr$,bsdel$+"Load Path"+fdel$,rdel$)  ! table name
+	call addtostr(e$,rstr$,"Path"+fdel$,rdel$)  ! header 
+	loaddirflg=0
+	if ipadd$ and imuser.load_path$
+		dskloc$=rtrim$(imuser.load_path$)
+		call findf(dskloc$,loaddirflg)
+	endif
+	if not(loaddirflg) and ipadd$ and imuser.Scan_Station
+		read record #ch_imstore,0;ims.
+		dskloc$=rtrim$(ims.path$)+"/"+STR$(imuser.Scan_Station)
+		call findf(dskloc$,loaddirflg)
+	endif		
+	if not(loaddirflg)
+		read record #ch_imstore,0;ims.
+		dskloc$=rtrim$(ims.path$)	!! load path
+	endif
+	call AddToStr(e$,rstr$,dskloc$+fdel$+rdel$)
+	! ext
+	call AddToStr(e$,rstr$,ext$+fdel$+rdel$)
+	call addtostr(e$,rstr$,esdel$)
+	!
+	call addtostr(e$,rstr$,bsdel$+"Pending Images"+fdel$,rdel$)  ! table name
+	call addtostr(e$,rstr$,"Images"+fdel$,rdel$)  ! header 
+	k_imlidx$=imtype$+blank$
+pndimage_loop: search #ch_imlidx,3,1;k_imlidx$,rec_imlidx,e \ If e>2 Error 11000
+	if not(e) and k_imlidx$[1,2]=IMTYPE$
+		call AddToStr(e$,rstr$,k_imlidx$+fdel$+rdel$)
+		goto pndimage_loop:
+	endif
+	call addtostr(e$,rstr$,esdel$)
+else
+	include "src/callsuberr.inc"
+end try
+end sub  ! pndimage
+
+sub chkimages()   !! compare loadidx vs files in load dir. adjust loadidx if needed
+try
+	dim k_imlidx$[100],dskloc$[100]
+	dim 3%
+	loaddirflg=0
+	if ipadd$ and imuser.load_path$
+		dskloc$=rtrim$(imuser.load_path$)
+		call findf(dskloc$,loaddirflg)
+	endif
+	if not(loaddirflg) and ipadd$ and imuser.Scan_Station
+		read record #ch_imstore,0;ims.
+		dskloc$=rtrim$(ims.path$)+"/"+STR$(imuser.Scan_Station)
+		call findf(dskloc$,loaddirflg)
+	endif		
+	if not(loaddirflg)
+		read record #ch_imstore,0;ims.
+		dskloc$=rtrim$(ims.path$)	!! load path
+	endif
+	k_imlidx$=blank$
+chkimages_loop: search #ch_imlidx,3,1;k_imlidx$,rec_imlidx,e \ If e>2 Error 11000
+	if not(e) 
+		call findf(dskloc$+"/"+rtrim$(k_imlidx$)+ext$,e)
+		if not(e)
+			search #ch_imlidx,5,1;k_imlidx$,rec_imlidx,e \ If e>2 Error 11000
+			e=4
+			search #ch_imlidx,1,0;k_imlidx$,rec_imlidx,e
+		endif
+		GOTO chkimages_loop:
+	endif
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! chkimages
+
+sub StoreOrderImage(loadimg$,barcode,IMKEY2$,IMKEY3$,comment$,MANFLG)
+TRY 
+	dim jdate$[10],key1_invwrk$[20]
+	dim 1%,rec_roh
+	dim 3%
+	if barcode<1 or barcode>999999 
+		if ch_log print #ch_log;"barcode ";barcode;" to large to be an order"
+		exit sub  !! too big for order number
+	endif
+	foundflag=0
+	prefix$=loadimg$[1,2]
+	Key_ImIdx$[1,2]=prefix$
+	If (prefix$ = "dr" or prefix$ = "pd") 
+		if not(manflg) 
+			CALL Fnd_Order(barcode)
+		else
+			roh.CUSTNUM=IMKEY2$
+			tmp=IMKEY3$
+			jdate$=tmp using "&&&&&"
+			Call JulianToDate(1,jdate$,jdate$,e)
+			if not(e)
+				roh.orddate=(jdate$[7,8]+jdate$[1,2]+jdate$[4,5])
+			else
+				roh.orddate=0
+			endif
+			ROH.ORDNUM=barcode                                
+			ROH.STATUS=91                                 
+			ROH.INVNUM=0                  
+			LET roh.SlsmNum=0                                               
+			foundflag=1
+		endif
+		if  Not(FoundFlag)
+			Let Key_ImIdx$[3] = barcode Using "######" 
+			Let Key_ImIdx$[9] = blank$                    
+			Let Key_ImIdx$[31] = ""
+		else
+			Let JDate$=" ",JDate$;JDate$=roh.orddate Using "&&&&&&" 
+			Call DateToJulian(1,JDATE$,JDATE$,E)
+			if e then jdate$="0"
+			Let JDate=JDate$  
+			Key_ImIdx$[3] = barcode Using "######"  
+			Key_ImIdx$[9] = roh.CUSTNUM Using "######"        
+			Key_ImIdx$[15] = JDate Using "######"       
+			Key_ImIdx$[21] = blank$
+			Key_ImIdx$[31] = ""
+		endif
+		If prefix$ = "dr" type=0
+		if prefix$ = "pd" type=7
+	Endif
+	if Key_ImIdx$[1,2] = "os"
+		Let Key_ImIdx$[3] = barcode Using "######" 
+		Let Key_ImIdx$[9] = blank$                    
+		Let Key_ImIdx$[31] = ""
+		type=11
+	endif
+	if ch_log print #ch_log;"build image key ";key_imidx$
+
+	If Prefix$ = "dr" and not(manflg)
+		If LoadInvWrk = 1
+			call loadinvoicebatch(barcode,ch_roh)
+		endif
+	endif
+	!* if it's out there, mark it as scanned              
+	if not(manflg) 	
+		Call Fnd_Order(BARCODE)
+	endif
+	If P60$[44,44] = "Y" and foundflag                                 
+		Call createedittrack()                              
+		!if debug PRINT #ch_debug;"create edittrack record" 
+	End If                                                
+	call update_imidx(key_imidx$)
+else
+	include "src/callsuberr.inc"
+end try
+END SUB !storeorderimage
+
+
+sub update_imidx(key_imidx$)
+try
+	dim 3%,REC_IMIDX
+	KEY_IMIDX$ = UCASE$(KEY_IMIDX$)                                            
+	SEARCH #CH_IMIDX,2,1;KEY_IMIDX$,REC_IMIDX,E 
+	IF E=1 LET EXIST=0 ELSE  LET EXIST=1                            
+	If Not(Exist)
+		! Add new entry to index
+		E=2 \ Search #CH_ImIdx,1,0;Key_ImIdx$,Rec_ImIdx,E 
+		!If E Gosub Client_SE:
+
+		! get document sequence #
+		Read record #CH_ImType,Type,0; imt.
+		IMT.SAVE_SEQ_NUM = IMT.SAVE_SEQ_NUM + 1
+		Write record #CH_ImType,Type,0; imt.;
+
+		! Set-up record
+		IMDX.PREFIX$ = KEY_IMIDX$[1,2]
+		IMDX.IKEY$ = Key_ImIdx$[3] + blank$
+		IMDX.COMMENT$ = comment$ + blank$
+		IMDX.SEQNUMBER = IMT.SAVE_SEQ_NUM
+		IMDX.LOCATION = imt.init_location	! initial location
+		IMDX.PAGES = 0			! pages
+
+		write record #ch_imidx,rec_imidx,0;imdx.;
+		! insert image key
+		Search #CH_ImIdx,4,1;Key_ImIdx$,Rec_ImIdx,E \ If e>2 Error 11000
+		if e exit sub  !! don't move or delete image if key exists
+		!if debug PRINT #ch_debug;"create imidex record ";key_imidx$
+	Else
+		read record #ch_imidx,rec_imidx,0;imdx.;
+		!if debug PRINT #ch_debug;"read imidex record ";key_imidx$
+	Endif
+	call imagesave(loadimg$)
+	if len(comment$)
+		read record #ch_imidx,rec_imidx,0;imdx.;
+		IMDX.COMMENT$ = comment$ + blank$
+		write record #ch_imidx,rec_imidx,0;imdx.;
+	endif
+	!! REMOVE from imload file
+	key_imlidx$=loadimg$
+	search #ch_imLIdx,2,1;key_imlidx$,rec_imlidx,e \ if e>2 error 11000
+	if not(e)
+		search #ch_imLIdx,5,1;key_imlidx$,rec_imlidx,e \ if e error 11000
+		e=3
+		search #ch_imlidx,1,0;key_imlidx$,rec_imlidx,e
+	endif
+else
+	include "src/callsuberr.inc"
+end try
+END SUB !update_imidx
+
+
+sub ImageSave(loadimg$)  !
+try
+	dim SaveDir$[100],saveimage$[150],page$[4],work$[50],loaddir$[100]
+	dim 3%,farray[50]
+	Read Record #ch_imstore,0,0;ims.;	! read load location info
+	!! load for load folder
+	loaddirflg=0
+	if ipadd$ and imuser.load_path$
+		loaddir$=rtrim$(imuser.load_path$)
+		call findf(loaddir$,loaddirflg)
+	endif
+	if not(loaddirflg) and ipadd$ and imuser.Scan_Station
+		read record #ch_imstore,0;ims.
+		loaddir$=rtrim$(ims.path$)+"/"+STR$(imuser.Scan_Station)
+		call findf(loaddir$,loaddirflg)
+	endif		
+	if not(loaddirflg)
+		read record #ch_imstore,0;ims.
+		loaddir$=rtrim$(ims.path$)	!! load path
+	endif
+	Call findf(loaddir$ + "/" + loadimg$ + ext$,e)
+	if not(e) exit sub
+	imdx.pages = imdx.pages + 1	! pages
+	imdx.storedate = Tim(6)		! scan date
+	imdx.lastaccess = Tim(6)	! last access date
+
+	write record #ch_imidx,rec_imidx,0;imdx.;
+	Last_ImIdx = Rec_ImIdx
+
+	! -----Get storage location-----------
+	Rec_ImSto = imdx.location
+	read record #ch_imstore,rec_imsto,0;ims. 
+	Work$ = ims.path$
+	SaveDir$ = TRIM$(Work$)
+
+	! set-up save file name
+	If P176$[6,6]="Y"
+		Page$ = imdx.pages Using "&&&&"
+	Else
+		Page$ = Imdx.pages Using "&&"
+	Endif
+	SaveImage$ = SaveDir$ + "/" + loadimg$[1,2] + "/" + Str$(Imdx.seqnumber) + Page$ + Ext$
+
+	! Make sure there's not already one 
+	Call findf(SAVEIMAGE$,e)
+	If E
+		! It's already there... kill the existing one!
+		Kill SaveImage$
+	Endif
+
+	! move document to storage location
+	Modify loaddir$ + "/" + loadimg$ + ext$ + " " + SaveImage$
+	if ch_log print #ch_log;"Moved ";loaddir$;"/";loadimg$;ext$;" to ";SaveDir$;"/";loadimg$[1,2];"/";Str$(Imdx.seqnumber);Page$;Ext$
+
+	! ---- update location totals ------------
+
+	! Update document count if first page
+	If IMDX.PAGES=1 Let IMS.NUMDOCUMENTS=IMS.NUMDOCUMENTS+1
+
+	IMS.NUMPAGES=IMS.NUMPAGES+1	! page count
+
+	! update disk space used
+	!Call 127,Work$,FArray,SaveImage$,1
+	Call fileinfo(work$,farray[],saveimage$,1)
+	ims.numblocks=Ims.numblocks+FArray[6]
+	write record #ch_imstore,rec_imsto,0;ims.;
+	
+	! Update waiting to index count
+	read record #ch_imType,type,0;imt.
+	Imt.scan_batch_count = Imt.scan_batch_count - 1
+	If Imt.scan_batch_count<0 Let Imt.scan_batch_count=0	! just in case
+	write record #CH_ImType,Type,0;Imt.;
+else
+	include "src/callsuberr.inc"
+end try
+END SUB !imagesave
+
+
+SUB Fnd_Order(ordnum)  !==================================================
+try
+dim 3%
+FoundFlag=0
+!If Prefix$ <> "dr" and Prefix$ <> "pd" and prefix$<>"os" Return
+
+! make sure order exists                                            
+roh.status=0;FoundFlag=0
+!IF CUSTOM_CUSTOMER$="MAYFIELD" 
+!  LET IAGE=30*18               
+!ELSE                           
+   LET IAGE=180                 
+!ENDIF                          
+! first check active order file  
+Key1_ROH$ = ordnum Using "  ######"
+For X1=1 to 99                                                      
+	If X1=30 Let X1=90  ! skip unused statuses                      
+	Key1_ROH$[1,2]=X1 Using "##"                                    
+	Search #CH_ROH,2,1;Key1_ROH$,Rec_ROH,E 
+	If Not(E)                                                        
+		! found it                                                  
+		read record #ch_roh,rec_roh,0;roh.;                                        
+		Unlock #CH_ROH                                              
+  	    FoundFlag=1;X1 = 100 ! break-out of loop    
+		if ch_log print #ch_log;"Order ";ordnum;" found in open order file"
+	Endif                                                           
+Next X1                                                             
+
+If Not(FoundFlag)
+	ch_rohH = OpenFile(-1136,IntCo)
+   ! try invoice history file - extra index
+   ! dir 3 - order number / Inv #
+   Key1_ROHH$ = ordnum Using "######"
+   Next_ROHH: Search #CH_ROHH,3,3;Key1_ROHH$,Rec_ROHH,E  \ If e>2 Error 11000
+   If Not(E) and Val(Key1_ROHH$[1,6])=ordnum 
+	   read record #ch_rohh,rec_rohh,0;roh.;
+	   Let JDate$=" ",JDate$;JDate$=ROH.OrdDate USING "&&&&&&"    
+	   Call DateToJulian(1,JDATE$,JDATE$,E)                    
+	   If E jdate$="0"
+	   Let JDate=JDate$;Today=TIM(6)                 
+	   If Abs(Today - JDate) <= iage 
+	      Let FoundFlag=1 
+		    CLOSE #CH_ROHH
+			if ch_log print #ch_log;"Order ";ordnum;" found in history file at ";key1_rohh$
+			goto fnd_order_exit:
+	   Else
+			LET JDATE$=" ",JDATE$;JDATE$=roh.InvDate USING "&&&&&&"
+			Call DateToJulian(1,JDATE$,JDATE$,E)
+			!CALL 25,1,JDATE$,JDATE$,E                        
+			IF E=0                            
+				LET JDATE=JDATE$;TODAY=TIM(6)                    
+				IF ABS(TODAY-JDATE)<= iage                        
+					foundflag=1
+					CLOSE #CH_ROHH
+					if ch_log print #ch_log;"Order ";ordnum;" found in history file at ";key1_rohh$
+					goto fnd_order_exit:
+				endif
+			endif
+		endif
+		Goto Next_ROHH:
+   Endif
+   CLOSE #CH_ROHH
+Endif
+fnd_order_exit: 
+else
+	include "src/callsuberr.inc"
+end try
+END SUB	!Fnd_Order
+
+Sub createedittrack()                            
+Try           
+	dim 1%,fchan[10]
+	dim 3%
+	FChan[0] = -1;FChan[1] = -1 ! no files open - etrack/usercntrl 
+	if foundflag
+		LET ETR.PRINTER=0                                    
+		LET ETR.ORDNUM=ROH.ORDNUM                                
+		LET ETR.STATUS=ROH.STATUS                                 
+		LET ETR.INVNUM=ROH.INVNUM                  
+		LET ETR.CUSTNUM=ROH.CUSTNUM                                 
+		LET etr.OrgOrdTot=0                                  
+		LET ETR.ETACTION=7 !* set action to "order scanned"           
+		LET ETR.LINENUM=0                                     
+		LET etr.prodcode$="            " ! no product          
+		LET etr.OrgQtyOrd = 0
+		LET etr.NewQtyOrd = 0              
+		LET etr.OrgQtyShip = 0
+		LET etr.NewQtyShip = 0          
+		LET etr.OrgQtyBO = 0
+		LET etr.NewQtyBO = 0                  
+        LET etr.AccessCode$ = Userid$ + blank$                                   
+		LET etr.UMSell = 0                                             
+		LET etr.NstkFlag = 0                                         
+		LET etr.Slsm = roh.SlsmNum                                               
+		LET etr.OrgUnitPrice = 0    
+		LET etr.NewUnitPrice = 0 ! UnitPrice                         
+		LET etr.umprice = 0                                           
+		LET etr.umcost = 0                                             
+		LET etr.OrgLoadCost = 0                                      
+		LET etr.NewLoadCost = 0                                      
+		LET etr.UnitNetWgt = 0                                        
+		LET etr.NetWgtFact = 0                                      
+		LET etr.SpareNu$ = blank$                                     
+		LET etr.NewUnitPrice = 0                                
+		LET etr.NewLoadCost = 0                             
+                                                              
+		Call MakeEdittrack(e$,IntCo,FChan[],etr.)                            
+	ENDIF                        
+Else                           
+	Include "src/callsuberr.inc"  
+End Try             
+End Sub ! createedittrack
+
+
+sub chk_manual_input(loadimg$,IMKEY1$,IMKEY2$,IMKEY3$,message$)
+try
+	dim 3%
+	if len(loadimg$)<>8 MESSAGE$="Image bad length" \ exit sub
+	message$=""
+	select case loadimg$[1,2]
+	case "dr","pd"
+		!call find_data(IMKEY1$,message$)
+		if IMKEY2$
+			ch_cust = OpenFile(-1808,IntCo)
+			tmp=IMKEY2$ \ IMKEY2$=tmp using "######"
+			search #ch_cust,2,1;IMKEY2$,cust_rec,e \ if e>2 error 11000
+			CLOSE #CH_CUST
+			if e message$="Customer Not Found. " !\ exit sub
+		endif
+		if IMKEY3$
+			call chk_date(IMKEY3$)
+			if not(IMKEY3$) message$=message$+"Date should be entered as MM/DD/YY or MM/DD/YYYY" \ exit sub
+		endif
+	case "md"
+		if not(len(IMKEY1$)) message$=message$+"Enter a MSDS number" \ exit sub
+		for i=1 to len(IMKEY1$)
+			if IMKEY1$[i,i]<"0" or IMKEY1$[i,i]>"9" message$=message$+"MSDS must be a number" \ exit sub
+		next i
+		! these 2 fields not used
+		IMKEY2$=blank$  
+		IMKEY3$=blank$
+	case "pl"
+		! NO SPECIAL CHECKING
+	case "cd"
+		! no special checking
+	case "vi"
+		! check for AP invoice
+		ch_apinv=openfile(-9801,IntCo)		! 2/A220OI
+		! VVVVVVIIIIIIIIIIIITT
+		tmp=IMKEY1$ \ IMKEY1$=tmp using "######"
+		tmp$=imkey2$+blank$
+		imkey2$=tmp$[1,12]
+		tmp$=" ",tmp$
+		tmp$=imkey1$+imkey2$+blank$
+		search #ch_apinv,3,1;tmp$,ap_rec,e \ if e>2 e=11000
+		if tmp$[1,18]<>imkey1$[1,6]+imkey2$[1,12]
+			message$="Transaction not found. " 
+		endif
+		close #ch_apinv
+	case "vs"
+		if IMKEY2$
+			call chk_date(IMKEY2$)
+			if not(IMKEY2$) message$=message$+"Date should be entered as MM/DD/YY or MM/DD/YYYY" \ exit sub
+		endif
+	case else
+	end select
+Else                           
+	Include "src/callsuberr.inc"  
+End Try             
+End Sub ! chk_manual input
+
+sub chk_date(IMKEY3$)
+try
+	DIM jdate$[10]
+	dim 3%
+	search IMKEY3$,"/",e
+	if not(e) or e=1 let IMKEY3$="" \ exit sub
+	search IMKEY3$[e+1],"/",e1
+	if not(e1) let IMKEY3$="" \ exit sub
+	if e+e1+1<>len(IMKEY3$)
+		tmp=IMKEY3$[e+e1+1]
+		tmp=fra(tmp/100)*100  !! last 2 parts of year
+		jdate$=tmp using "&&"
+	else
+		exit sub
+	endif
+	if e>1
+		tmp=IMKEY3$[1,e-1]
+		jdate$=jdate$+(tmp using "&&")   ! month
+	endif
+	if e1>1
+		tmp=IMKEY3$[e+1,e+e1-1]
+		ymd_date$=jdate$+(tmp using "&&")  !! day of month
+	endif
+	Call DateToJulian(1,ymd_date$,JDATE$,E)
+	if e
+		let IMKEY3$=""
+	else
+		tmp=jdate$
+		let IMKEY3$=tmp using "######"  !! set for key
+	endif
+Else                           
+	Include "src/callsuberr.inc"  
+End Try             
+End Sub ! chk_date
+
+sub loadinvoicebatch(barcode,ch_roh)
+try
+	dim 3%
+			! --- invoice work file ----------
+			! make sure order is at status 1 - 4
+			Let FoundFlag=0
+			For Stat = 1 to 4
+				Let Key1_ROH$[1,2]=Stat Using "##"
+				Let Key1_ROH$[3,8]=barcode Using "######"
+				Search #CH_ROH,2,1;Key1_ROH$,Rec_ROH,E \ If e>2 Error 11000
+				If Not(E) 
+				   Let FoundFlag=1
+				   Goto FoundIt:
+			    Endif
+			Next Stat
+
+			! see if at edit statuses
+			FoundFlag=0 
+			Key1_ROH$ = barcode Using "  ######"
+			For X1=1 to 90                                                      
+				Key1_ROH$[1,2]=X1 Using "##"                                    
+				Search #CH_ROH,2,1;Key1_ROH$,Rec_ROH,E \ If e>2 Error 11000
+				If Not(E)                                                        
+					! found it                                                  
+					read record #ch_roh,rec_roh,0;roh.; 
+					IF roh.orgstatus>=1 AND roh.orgstatus<=4 LET FOUNDFLAG=1
+  					X1 = 100 ! break-out of loop                 
+				Endif                                                           
+			Next X1    
+			
+			FoundIt: !
+			If FoundFlag
+				read record #ch_roh,rec_roh,0;roh.;    
+				Unlock #CH_ROH          
+				ch_INVWRK = OpenFile(3056,IntCo)
+				! ====== insert key into invoice work file =========
+				Key1_InvWrk$[1,2]=ROH.DIV Using "&#"
+				Key1_InvWrk$[3,4]=ROH.WH Using "&#"
+				Key1_InvWrk$[5,10]=BARCODE Using "######"
+				!if debug PRINT #ch_debug;"load invwork ";key1_InvWrk$
+				Search #CH_InvWrk,4,1;Key1_InvWrk$,Rec_InvWrk,E \ If e>2 Error 11000
+				!IF E>1 Gosub Client_SE:	! if already there, don't worry
+				if ch_log 
+					if e
+						print #ch_log;"Order ";barcode;" NOT inserted in invoice batch"
+					else
+						print #ch_log;"Order ";barcode;" inserted in invoice batch"
+					endif
+				endif
+				close #ch_invwrk
+			else
+				if ch_log print #ch_log;"Order ";barcode;" NOT inserted in invoice batch, bad status"
+			Endif
+Else                           
+	Include "src/callsuberr.inc"  
+End Try             
+End Sub  ! load invoicebatch
+
+sub find_data(fkey$,ftype$,message$)
+try
+	dim 3%
+	select case ftype$[1,2]
+	case "dr","pd","os"
+		tmp=fkey$
+		CH_ROH = OpenFile(-1840,IntCo) 
+		CALL Fnd_Order(tmp)
+		CLOSE #CH_ROH
+		if  Not(FoundFlag) message$="A current Order Number "+str$(tmp)+" not found " 
+	case "pl"
+		ch_prod = openfile(-1792,IntCo)
+		tmp$=fkey$ + blank$
+		search #ch_prod,2,1;tmp$,prod_rec,e \ if e>2 error 11000
+		close #ch_prod
+		if e message$="Product Not Found. " 
+	case "cd"
+		ch_CUST = openfile(-1808,IntCo)
+		tmp=fkey$
+		tmp$=tmp using "######"
+		search #ch_cust,2,1;tmp$,cust_rec,e \ if e>2 error 11000
+		close #ch_cust
+		if e message$="Customer Not Found. " 
+	case "vi", "vs", "vd"
+		ch_vend = openfile(-2400,IntCo)
+		tmp=fkey$
+		tmp$=tmp using "######"
+		search #ch_vend,2,1;tmp$,vend_rec,e \ if e>2 error 11000
+		close #ch_vend
+		if e message$="Vendor Not Found. "
+	case "po"
+		message$="PO Not Found. "
+		ch_po = openfile(-2416,IntCo)
+		tmp=fkey$
+		tmp$="  "+tmp using "######"
+		for x=1 to 99
+			tmp$[1,2]=x using "##"
+			search #ch_po,2,1;tmp$,po_rec,e \ if e>2 error 11000
+			if not(e) message$="" \ x=100
+		next x
+	case else
+	end select
+Else                           
+	Include "src/callsuberr.inc"  
+End Try             
+End Sub ! find_data
+
+sub build_log_report()
+try
+	dim ReportDir$[100],BaseName1$[50],StatusFile$[160],lne$[1000]
+	ReportDir$ = "REPORTDIR" \ System 28,ReportDir$
+	if ipadd$=""
+		BaseName1$ = "image_index_"
+	else
+		BaseName1$ = "image_index_"+(imuser.Scan_Station using "&&&")+"_"
+	endif
+	BaseName1$ = basename1$+dateusing$(Tim#(0),"YYMMDD")
+	StatusFile$ = ReportDir$ + "/"+BaseName1$
+	Ch_log = findchannel()
+
+	Call FindF(StatusFile$,tmp)
+	if not(tmp)
+		Try
+			Build #Ch_log,StatusFile$ As "TEXT"
+			Print #Ch_log;"Imdexing Started..." +dateusing$(Tim#(0),"HH:NN:SS")
+			Try Close #Ch_log Else Rem
+			e = AddToMYReports(BaseName1$) 
+			if e<0
+				e$="Error adding to my reports!" 
+				returnstatus=1
+				error 10000
+			endif
+		Else
+			returnstatus=1
+			let e$="Error in Building Status File "
+			error 10000
+		end TRY
+	endif
+	Try Close #Ch_log Else Rem
+	Try
+		Open #Ch_log,StatusFile$
+	else
+		returnstatus=1
+		let e$="Error in Opening Status File "
+		error 10000
+	end TRY
+	lne$=" ",lne$
+	linecnt=0
+bl_loop: read #ch_log;lne$
+	if lne$
+		linecnt=linecnt+1
+		if lne$[1,1]="\14\" then linecnt=0 	
+		goto bl_loop:
+	endif
+	!PRINT #CH_LOG;linecnt
+	if linecnt>55 print #ch_log;"\14\"
+	returnstatus=0 ! or is it 1?
+	message$="Please check under My Reports "+basename1$+" for status and completion"
+	Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)     
+	Call AddToStr(e$,rstr$,WebStr$)                            
+	Call SetOutPut(e$,rstr$)
+Else                           
+	Include "src/callsuberr.inc"  
+End Try             
+End Sub ! build_log_report
+
+sub bar_cntrl()
+  try
+	select case imtype$
+	case "DELIVERY RECEIPT"
+		read record #ch_imtype,0;imt.
+	case "PICKING DOCUMENT"
+		read record #ch_imtype,7;imt.
+	case "CONCRETE TICKET"
+		read record #ch_imtype,10;imt.
+	case else
+		imt.SAVE_SEQ_NUM=0
+		imt.LOAD_SEQ_NUM=0    
+		imt.SCAN_BATCH_COUNT=0	
+		imt.ROTATION=0		
+		imt.BARCODE_TYPES=0	     
+		imt.BARCODE_DIRECTION=0	 
+		imt.BC_AREA_TOP=0	              
+		imt.BC_AREA_LEFT=0		           
+		imt.BC_AREA_BOTTOM=0                  
+		imt.BC_AREA_RIGHT=0                  
+		imt.INIT_LOCATION=0 
+	end select
+	call addtostr(e$,rstr$,bsdel$+"Barcode Settings"+fdel$,rdel$)  ! table name
+	call addtostr(e$,rstr$,"Rotation"+fdel$)  ! header 
+	call addtostr(e$,rstr$,"Types"+fdel$) 
+	call addtostr(e$,rstr$,"Direction"+fdel$)
+	call addtostr(e$,rstr$,"Area Top"+fdel$)
+	call addtostr(e$,rstr$,"Area Left"+fdel$)
+	call addtostr(e$,rstr$,"Area Bottom"+fdel$)
+	call addtostr(e$,rstr$,"Area Right"+fdel$,rdel$)
+
+	call addtostr(e$,rstr$,str$(imt.ROTATION)+fdel$)
+	call addtostr(e$,rstr$,str$(imt.BARCODE_TYPES)+fdel$) 
+	call addtostr(e$,rstr$,str$(imt.BARCODE_DIRECTION)+fdel$)
+	call addtostr(e$,rstr$,str$(imt.BC_AREA_TOP)+fdel$)
+	call addtostr(e$,rstr$,str$(imt.BC_AREA_LEFT)+fdel$)
+	call addtostr(e$,rstr$,str$(imt.BC_AREA_BOTTOM)+fdel$)
+	call addtostr(e$,rstr$,str$(imt.BC_AREA_RIGHT)+fdel$,rdel$)
+	call addtostr(e$,rstr$,esdel$)
+ Else                           
+	Include "src/callsuberr.inc"  
+ End Try 
+end sub ! bar_cntrl
+
+sub imuser()
+  try
+	imuser.Load_Path$=""
+	imuser.Scan_Station=0
+	Call dxget("IPADDRESS",tmp$)
+	if tmp$
+		F$="6/imuser" + Str$(IntCo)
+		call findf(f$,e)
+		if e
+			ch_imuser = findchannel()
+			open #ch_imuser,f$
+			tmp$=rtrim$(ucase$(tmp$))+BLANK$
+			search #ch_imuser,2,1;tmp$,rec_imuser,e \ If e>2 Error 11000
+			if e
+				!! make an entry that this ipaddress may need setting up
+				!! can use ssu for now undil maint program gets done
+				e=2
+				search #ch_imuser,1,0;tmp$,rec_imuser,e \ If e Error 11000
+				imuser.KeyIP$=tmp$              
+				imuser.Load_Path$=blank$    
+				imuser.Scan_Station=100
+				write record #ch_imuser,rec_imuser;imuser.;
+				search #ch_imuser,4,1;tmp$,rec_imuser,e \ If e Error 11000
+			endif
+			read record #ch_imuser,rec_imuser;imuser.	
+			if imuser.Scan_Station>=100
+				ipadd$=""  !! set as if not found, since not fully set up
+			else
+				close #CH_ImLIdx
+				f$="6/imloadidx" + str$(imuser.Scan_Station)    !! open imloadidx for user
+				open #CH_ImLIdx,f$
+				ipadd$=tmp$   !! looks like a address that is set up
+			endif
+		endif  ! find imuser
+	else
+		ipadd$=""
+	endif  !tmp$
+  Else                           
+	Include "src/callsuberr.inc"  
+  End Try 
+endsub !  imuser

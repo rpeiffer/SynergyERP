@@ -1,0 +1,849 @@
+! --- 444i.dl4
+!
+! 444i - Commission Analysis Report
+!
+!
+! loadsave -w -n 100,10 -o prog/dxport/444i.dl4 src/444i.src
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+include "src/inc/filesslsm.inc"
+
+!
+!Option Default Dialect IRIS1
+!
+Declare Intrinsic Sub Time
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,BuildSort
+Declare External Sub GetCostLevels
+! Internal Subroutines and Functions
+Declare Sub OpenFilesGetControlInfo,GetReportParameters,SortHistory
+Declare Sub AccumulateAndPrint,PrintSalesrep,PrintHeader
+Declare Sub PrintBucketPortion,PrintThisYearLastYear,PrintRolling
+Declare Sub PrintCompany,PrintCompanyLine,GetSalesrepInfo
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200],List$[50,200],3%
+b$=" ",b$
+dim message$[150],webstr$[200]
+
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+! record structures
+dim sr. as sslsm
+! keys
+dim K_sr$[50],K_invh$[50],K_sort$[50]
+! record numbers
+dim 2%,R_sr
+
+! accumulators and constants to make the program more readable
+dim 1%,ytd,qtd,month_,year_,section,begSales,endSales
+dim 1%,period[1,1,1],q[1],checkMonth
+dim 2%,currper,startqtrmonth,startqtryear,startqtrper,endqtrmonth, endqtryear, endqtrper
+dim 2%,range[5,1],h0[12],h5[16]
+dim 3%,repTotals[39,4,2] ! [order type (39=total),ytd/qtd/mtd/lytd/lmtd,sls/cost/comm]
+dim 3%,companyTotals[39,4,2] ! [order type (39=total),ytd/qtd/mtd/lytd/lmtd,sls/cost/comm]
+dim 3%,repRolling[39,11,2] ! [order type(39=total),month,sls/cost/comm]
+dim 3%,invSales,invCost,invCommission,scom[4]
+ytd = 0 \ qtd = 1 \ mtd = 2 \ lytd = 3 \ lmtd = 4 \ rolling = 5
+sls = 0 \ cost = 1 \ comm = 2
+beg = 0 \ end_ = 1
+month_ = 0 \ year_ = 1
+! section of report we are printing
+bucketPrint = 1 \ thisYearLastYear = 2 \ rollingBuckets = 3 \ finalTotals = 4
+
+! everything else
+dim pageHeading$[132],fmth$[12,3],mth$[12,3],doubleDash$[132]
+dim ordDescription$[760],dollarMask$[20],percentMask$[10],largePercentMask$[10]
+dim largePercentMask2$[10]
+dim 1%,toBrowser,Cost_Lev[3],BOYMONTH
+dim 3%
+!
+! M A I N   L O G I C
+!
+call OpenFilesGetControlInfo()
+call GetReportParameters()
+toBrowser = 0
+try
+	i = Chf(0)
+else
+	toBrowser = spc(8)
+end try
+if toBrowser and toBrowser <> 49 error toBrowser
+
+if toBrowser
+	e$ = "Browser option not supported yet.  Please re-select printer."
+	error 10000
+	!<section>
+	tmp$ = bsdel$,"444i",fdel$,rdel$
+	Call addtostr(e$,rstr$,tmp$)
+else
+	call setoutput(e$,rstr$, 2)
+end if
+maxLines = 60
+doubleDash$ = "=",doubleDash$
+dollarMask$ = "---------#.##"
+percentMask$ = "#&.&&"
+largePercentMask$= "##&.&"
+largePercentMask2$= "####&.&"
+Call SortHistory()
+Call AccumulateAndPrint()
+
+
+OutEnd: !
+If toBrowser
+	Call addtostr(e$,rstr$,esdel$) !end section
+	call setoutput(e$,rstr$, 1) ! 1 flag puts 0 status section in puts </page> in
+End If
+try Close else rem
+! 
+! 
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end
+
+
+! ***********************************************************************
+! Nobody but us subroutines down here
+! ***********************************************************************
+
+Sub OpenFilesGetControlInfo()
+Try
+	CH_SR=OpenFile(-1824,IntCo) \ if ch_sr=-1 Error 42 ! salesrep
+	ch_invh =openfile(-1136,IntCo) \ if ch_invh=-1 error 42 ! invh
+	ch_invhk = openfile(-9994,IntCo) \ if ch_invhk=-1 error 42 ! invhkey
+	ch_sort = buildsort(e$,25,1)
+	if ch_sort<0
+		e=ch_sort
+		error 11000
+	end if
+	!
+	! get costlev
+	! 0 = avg, 1 = load, 2 = PO 3 = base
+	!
+	call GetCostLevels(e$, Cost_Lev[],IntCo,UserID$)
+	Mat READ #1,51,74;BOYMONTH; ! fiscal beginning of year month
+	Mat READ #1,62,0;ordDescription$;
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! OpenFilesGetControlInfo
+
+sub GetReportParameters()
+try
+	!
+	! get parameters from block ID and initialize
+	!
+	call dxget("MONTH", tmp$) \ currentMonth = tmp$
+	if currentMonth<1 or currentMonth>12 or fra(currentMonth)
+		e$="Invalid Month was entered" \ error 10000
+	endif
+	call dxget("YEAR", tmp$) \ currentYear = tmp$
+	if currentYear<0 or currentYear>9999
+		e$="Invalid Year was entered" \ error 10000
+	endif
+	call dxget("BEGSALES",tmp$) \ begSales = tmp$
+	if not(begSales) begSales = 1
+	if begSales<1 or begSales>999 or fra(begSales)
+		e$="Invalid beginning Salesperson" \ error 10000
+	endif
+	call dxget("ENDSALES",tmp$) \ endSales = tmp$
+	if not(endSales) endSales = 999
+	if endSales<1 or endSales>999 or fra(endSales)
+		e$="Invalid ending Salesperson" \ error 10000
+	endif
+	if endSales<BegSales
+		e$="Invalid Salesperson Range" \ error 10000
+	endif
+	if currentYear < 100 let currentYear = currentYear + 2000
+	pageHeading$ = "Commission Trend Report - Month: "+str$(currentMonth)
+	pageHeading$ = pageHeading$ +"  Year: "+str$(currentYear)
+	! set month
+	fmth$[1]="Jan"
+	fmth$[2]="Feb"
+	fmth$[3]="Mar"
+	fmth$[4]="Apr"
+	fmth$[5]="May"
+	fmth$[6]="Jun"
+	fmth$[7]="Jul"
+	fmth$[8]="Aug"
+	fmth$[9]="Sep"
+	fmth$[10]="Oct"
+	fmth$[11]="Nov"
+	fmth$[12]="Dec"
+	! calculate beginning and ending ytd and qtd periods
+	! adjusting for fiscal year
+	period[ytd,beg,month_] = BOYMONTH
+	period[ytd,beg,year_] = currentYear
+	if currentMonth < BOYMONTH period[ytd,beg,year_] = currentYear - 1
+	period[ytd,end_,month_] = currentMonth
+	period[ytd,end_,year_] = currentYear
+	! find the quarter with the fiscal year
+	let tmp$[1,4]=currentyear using "&&&&"
+	let tmp$[5,6]=currentmonth using "&&"
+	let currper=tmp$
+	startqtryear=currentyear
+	startqtrmonth=boymonth
+	if boymonth>currentmonth ! need to check what year fiscal year starts 
+		let startqtryear=currentyear-1
+	endif
+	let tmp$[1,4]=startqtryear using "&&&&"
+	let tmp$[5,6]=startqtrmonth using "&&"
+	let startqtrper=tmp$
+	let endqtryear=startqtryear
+	let endqtrmonth=startqtrmonth+2
+	if endqtrmonth>12
+		let endqtrmonth=endqtrmonth-12
+		let endqtryear=endqtryear+1
+	endif
+	let tmp$[1,4]=endqtryear using "&&&&"
+	let tmp$[5,6]=endqtrmonth using "&&"
+	let endqtrper=tmp$
+	For x= 1 to 4
+		if currper>=startqtrper and currper<=endqtrper goto foundquarter:
+		let startqtryear=endqtryear
+		let startqtrmonth=endqtrmonth+1
+		if startqtrmonth>12
+			let startqtrmonth=1
+			let startqtryear=startqtryear+1
+		endif
+		let tmp$[1,4]=startqtryear using "&&&&"
+		let tmp$[5,6]=startqtrmonth using "&&"
+		let startqtrper=tmp$
+		let endqtryear=endqtryear
+		let endqtrmonth=endqtrmonth+3
+		if endqtrmonth>12
+			let endqtrmonth=endqtrmonth-12
+			let endqtryear=endqtryear+1
+		endif
+		let tmp$[1,4]=endqtryear using "&&&&"
+		let tmp$[5,6]=endqtrmonth using "&&"
+		let endqtrper=tmp$
+	next x
+	foundquarter: ! 
+	period[qtd,beg,month_] = startqtrmonth
+	period[qtd,beg,year_] = startqtryear
+	if currper<endqtrper
+		let tmp$[1,6]=currper using "&&&&&&"
+		let endqtrmonth=tmp$[5,6]
+		let endqtryear=tmp$[1,4]
+	endif
+	period[qtd,end_,month_] = endqtrmonth
+	period[qtd,end_,year_] = endqtryear
+    ! remove - was calcuting strange periods when fye was not calendar
+	!for i = 0 to 3
+	!	q[month_] = BOYMONTH + (i*3)
+	!	q[year_] = period[ytd,beg,year_]
+	!	if q[month_] > 12
+	!		q[month_] = q[month_] - 12
+	!		q[year_] = q[year_] + 1
+	!	end if
+	!	for j = 0 to 2
+	!		! need to check match for each month - no simplier way
+	!		! as fiscal quarter could break across a calendar year
+	!		checkMonth = q[month_] + J
+	!		if checkMonth > 12 checkMonth = checkMonth - 12
+	!		if currentMonth = checkMonth
+	!			period[qtd,beg,month_] = q[month_]
+	!			period[qtd,beg,year_] = q[year_]
+	!			period[qtd,end_,month_] = q[month_] + 2
+	!			period[qtd,end_,year_] = q[year_]
+	!			if period[qtd,end_,month_] > 12
+	!				period[qtr,end_,month_] = abs(period[qtr,end_,month_] - 12)
+	!				period[qtr,end_,year_] = period[qtr,end_,year_] + 1
+	!			end if
+	!			j = 3 \ i = 4 ! found - quit searching
+	!		end if
+	!	next j
+	!next i
+	! Find fiscal quarter
+	
+	range[ytd,beg] = (period[ytd,beg,year_] * 100) + period[ytd,beg,month_]
+	range[ytd,end_] = (period[ytd,end_,year_] * 100) + period[ytd,end_,month_]
+	range[qtd,beg] = (period[qtd,beg,year_] * 100) + period[qtd,beg,month_]
+	range[qtd,end_] = (period[qtd,end_,year_] * 100) + period[qtd,end_,month_]
+	range[mtd,beg] = (currentYear * 100) + currentMonth
+	range[mtd,end_] = (currentYear * 100) + currentMonth
+	range[lytd,beg] = ((period[ytd,beg,year_] - 1) * 100) + period[ytd,beg,month_]
+	range[lytd,end_] = ((period[ytd,end_,year_] - 1) * 100) + period[ytd,end_,month_]
+	range[lmtd,beg] = ((currentYear -1) * 100) + currentMonth
+	range[lmtd,end_] = ((currentYear -1) * 100) + currentMonth
+	if currentMonth = 1
+		range[rolling,beg] = ((currentYear - 1) * 100) + 1
+		range[rolling,end_] = ((currentYear - 1) * 100) + 12
+	else
+		range[rolling,beg] = ((currentYear - 1) * 100) + currentMonth
+		range[rolling,end_] = (currentYear * 100) + currentMonth - 1
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! GetReportParameters
+
+sub SortHistory()
+try
+	! the earliest history we need is for the portion of the
+	! report that covers ytd from the prior year - so lets start
+	! there
+	K_invh$ = " ",K_invh$
+	K_INVH$[1,4] = period[ytd,beg,year_] - 1 using "&&&&"
+	K_invh$[5,6] = period[ytd,beg,month_] using "&&"
+	do
+		search #ch_invhk,3,1;K_INVH$,R_invh,e
+		if e>2 error 11000
+		if E exit do
+		if val(K_invh$[1,4]) > period[ytd,end_,year_] exit do
+		if val(K_invh$[1,4]) = period[ytd,end_,year_] and val(K_invh$[5,6]) > period[ytd,end_,month_] exit do
+		mat read #ch_invh,R_invh,0;h0;
+		mat read #ch_invh,R_invh,104;h5;
+		if h0[11] >= begSales and h0[11] <= endSales
+			K_sort$ = " ",K_sort$
+			K_sort$[1,3] = h0[11] using "###"
+			K_sort$[4,5] = h5[7] using "##"
+			K_sort$[6] = K_invh$
+			SEARCH #CH_sort,4,1;K_sort$,R_invh,E \ IF E error 11000
+		end if
+	loop
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! SortHistory
+
+sub AccumulateAndPrint()
+try
+	currRep = 0
+	K_sort$ = " ",K_sort$
+	do
+		search #ch_sort,3,1;K_sort$,R_invh,e
+		if e>2 error 11000
+		if e exit do
+		! check for salesrep change
+		if currRep <> val(K_sort$[1,3])
+			if currRep call PrintSalesrep()
+			currRep = K_sort$[1,3]
+			call GetSalesrepInfo()
+		end if
+		arYYYYMM = val(K_sort$[6,11])
+		ordType = val(K_sort$[4,5])
+		mathSign = 1 \ if val(K_sort$[12,13]) = 31 mathSign = -1
+		mat read #ch_invh,R_invh,104;h5;
+		mat read #ch_invh,R_invh,318;scom;
+		invSales = h5[13] * mathSign
+		invCost = h5[14] * mathSign
+		invCommission = scom[0] * mathSign
+		! figure out which buckets to accumulate this invoice
+		for i = ytd to lmtd
+			if arYYYYMM >= range[i,beg] and arYYYYMM <= range[i,end_]
+				repTotals[ordType,i,sls] = repTotals[ordType,i,sls] + invSales
+				repTotals[ordType,i,cost]= repTotals[ordType,i,cost] + invCost
+				repTotals[ordType,i,comm] = repTotals[ordType,i,comm] + invCommission
+				repTotals[39,i,sls] = repTotals[39,i,sls] + invSales
+				repTotals[39,i,cost]= repTotals[39,i,cost] + invCost
+				repTotals[39,i,comm] = repTotals[39,i,comm] + invCommission
+			end if
+		next i
+		if arYYYYMM >= range[rolling,beg] and arYYYYMM <= range[rolling,end_]
+			! figure out which rolling bucket - gaak!
+			for i = 0 to 11
+				checkDate = range[rolling,beg] + i
+				checkMonth = checkDate MOD 100
+				if checkMonth > 12
+					checkDate = CheckDate + 100 ! next year
+					checkDate = (int(checkDate/100)*100) + checkMonth - 12 
+				end if
+				if arYYYYMM = checkDate ! this is the bucket
+					repRolling[ordType,i,sls] = repRolling[ordType,i,sls] + invSales
+					repRolling[ordType,i,cost] = repRolling[ordType,i,cost] + invCost
+					repRolling[ordType,i,comm] = repRolling[ordType,i,comm] + invCommission
+					repRolling[39,i,sls] = repRolling[39,i,sls] + invSales
+					repRolling[39,i,cost] = repRolling[39,i,cost] + invCost
+					repRolling[39,i,comm] = repRolling[39,i,comm] + invCommission
+					i = 12
+				end if
+			next i
+		end if
+	loop
+	if currRep
+		call PrintSalesrep()
+		call PrintCompany()
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! SortHistory
+
+sub GetSalesrepInfo()
+try
+	tmp$ = " ",tmp$
+	tmp$[1,3] = currRep using "###"
+	R_sr = filegetsslsm(e$,CH_SR,"=",1,tmp$,sr.)
+	if R_sr <= 0
+		clear sr.
+		sr.Name$ = "NOT ON FILE!"
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! GetSalesrepInfo
+
+
+sub PrintSalesrep()
+try
+	section = bucketPrint
+	lineNo = 999 \ call PrintHeader(0,0)
+	for ordType = 1 to 38 ! for all order types
+		printThis = 0
+		! if anything in YTD for this order type, print
+		for i = 0 to 2
+			if repTotals[ordType,ytd,i] <> 0
+				printThis = 1
+				i = 3
+			end if
+		next i
+		if printThis
+			Call PrintBucketPortion(ordType)
+			for i = ytd to lmtd
+			companyTotals[ordType,i,sls] = companyTotals[ordType,i,sls] + repTotals[ordType,i,sls]
+			companyTotals[ordType,i,cost] = companyTotals[ordType,i,cost] + repTotals[ordType,i,cost]
+			companyTotals[ordType,i,comm] = companyTotals[ordType,i,comm] + repTotals[ordType,i,comm]
+			companyTotals[39,i,sls] = companyTotals[39,i,sls] + repTotals[ordType,i,sls]
+			companyTotals[39,i,cost] = companyTotals[39,i,cost] + repTotals[ordType,i,cost]
+			companyTotals[39,i,comm] = companyTotals[39,i,comm] + repTotals[ordType,i,comm]
+			next i
+		end if
+	next ordType
+	Call PrintBucketPortion(39)
+	section = thisYearLastYear
+	subSection = month_
+	bucketCurrent = mtd
+	bucketPrior = lmtd
+	call PrintHeader(7,1) ! force subheader print
+	for ordType = 1 to 38 ! for all order types
+		! print monthly comparisons
+		printThis = 0
+		if repTotals[ordType,bucketCurrent,sls] <> 0 or repTotals[ordType,bucketCurrent,cost] printThis = 1
+		if repTotals[ordType,bucketPrior,sls] <> 0 or repTotals[ordType,bucketPrior,cost] printThis = 1
+		if printThis call PrintThisYearLastYear(ordType)
+	next ordType
+	call PrintThisYearLastYear(39)
+	print #0; "" \ lineNo = lineNo + 1
+	call PrintHeader(0,0)
+	if not(headerPrinted)
+		print #0;"** FIGURES FOR YEAR TO DATE **"
+		lineNo = lineNo + 1
+	end if		
+	subSection = year_
+	bucketCurrent = ytd
+	bucketPrior = lytd
+	for ordType = 1 to 38 ! for all order types
+		! print ytd comparisons
+		printThis = 0
+		if repTotals[ordType,bucketCurrent,sls] <> 0 or repTotals[ordType,bucketCurrent,cost] printThis = 1
+		if repTotals[ordType,bucketPrior,sls] <> 0 or repTotals[ordType,bucketPrior,cost] printThis = 1
+		if printThis call PrintThisYearLastYear(ordType)
+	next ordType
+	call PrintThisYearLastYear(39)
+	call PrintHeader(0,0)
+	print #0;fmth$[period[ytd,beg,month_]];" - ";fmth$[period[ytd,end_,month_]]
+	print #0;" "
+	lineNo = lineNo + 2
+	section = rollingBuckets
+	call PrintHeader(10,1) ! force subheader print
+	for ordType = 1 to 38 ! for all order types
+		! print last 12 months
+		printThis = 0
+		! make sure we got something somewhere
+		for i = 0 to 11
+			for j = 0 to 1
+				if repRolling[ordType,i,j] <> 0
+					printThis = 1
+					j = 2
+				end if
+			next j
+			if printThis let i = 12
+		next i
+		if printThis call PrintRolling(ordType)
+	next ordType
+	call PrintRolling(39)
+	! CLEAR ACCUMULATORS FOR REP
+	clear repTotals[]
+	clear repRolling[]
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintSalesrep
+
+sub PrintCompany()
+! print report totals - 1st mtd then ytd
+try
+	section = finalTotals
+	lineNo = 999 \ call PrintHeader(0,0)
+	for ordType = 1 to 38 ! for all order types
+		printThis = 0
+		! if anything in MTD for this order type, print
+		for i = 0 to 2
+			if companyTotals[ordType,mtd,i] <> 0
+				printThis = 1
+				i = 3
+			end if
+		next i
+		if printThis call PrintCompanyLine(ordType,mtd)
+	next ordType
+	Call PrintCompanyLine(39,mtd) ! mtd totals
+	Print #0;""
+	print #0;"" 
+	lineno=lineno+2
+! quarter to date section
+	for ordType = 1 to 38 ! for all order types
+		printThis = 0
+		! if anything in qTD for this order type, print
+		for i = 0 to 2
+			if companyTotals[ordType,qtd,i] <> 0
+				printThis = 1
+				i = 3
+			end if
+		next i
+		if printThis call PrintCompanyLine(ordType,qtd)
+	next ordType
+	Call PrintCompanyLine(39,qtd) ! mtd totals
+	Print #0;""
+	print #0;"" 
+	lineno=lineno+2
+! end quarter to date section
+
+
+
+
+	for ordType = 1 to 38 ! for all order types
+		printThis = 0
+		! if anything in YTD for this order type, print
+		for i = 0 to 2
+			if companyTotals[ordType,ytd,i] <> 0
+				printThis = 1
+				i = 3
+			end if
+		next i
+		if printThis call PrintCompanyLine(ordType,ytd)
+	next ordType
+	Call PrintCompanyLine(39,ytd) ! ytd totals & report finished
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintCompany
+
+sub PrintCompanyLine(ord,typ)
+try
+	call PrintHeader(0,0) ! checks header
+	! Month To Date Or Year to Date
+	i=typ ! mtd/qtd/ytd
+	margin = 0
+	profit = companyTotals[ord,i,sls] - companyTotals[ord,i,cost]
+	if ord < 39
+		print #0;ordDescription$[((ord-1) * 20)+1,(ord * 20)];
+	else
+		print #0;"** ";
+		if i=mtd print #0;"MTD ";
+		if i=qtd print #0;"QTD ";
+		if i=ytd print #0;"YTD ";
+		Print #0;"TOTAL";
+	end if
+	print #0;tab 21;companyTotals[ord,i,sls] using dollarMask$;
+	print #0;tab 34;companyTotals[ord,i,cost] using dollarMask$;
+	print #0;tab 47;profit using dollarMask$[1];
+	if companyTotals[ord,i,sls] <> 0
+		margin = profit / companyTotals[ord,i,sls] * 100
+	end if
+	if margin >= 100
+		print #0;tab 63;margin using largePercentMask$;
+	else
+		print #0;tab 63;margin using percentMask$;
+	end if
+	margin = 0
+	if profit <> 0
+		margin = companyTotals[ord,i,comm] / profit * 100
+	end if
+	if margin >= 100
+		print #0;tab 68;margin using largePercentMask2$;
+	else
+		print #0;tab 70;margin using percentMask$;
+	end if
+	print #0;tab 81;companyTotals[ord,i,comm] using dollarMask$[1]
+	lineNo = lineNo + 1
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintBucketPortion
+
+sub PrintBucketPortion(ord)
+try
+	call PrintHeader(0,0)
+	! Month To Date
+	margin = 0
+	profit = repTotals[ord,mtd,sls] - repTotals[ord,mtd,cost]
+	if ord < 39
+		print #0;ordDescription$[((ord-1) * 20)+1,(ord * 20) - 11];
+	else
+		print #0;"** TOTAL";
+	end if
+	print #0;tab 10;repTotals[ord,mtd,sls] using dollarMask$;
+	print #0;tab 23;repTotals[ord,mtd,cost] using dollarMask$;
+	print #0;tab 36;profit using dollarMask$[3];
+	if repTotals[ord,mtd,sls] <> 0
+		margin = profit / repTotals[ord,mtd,sls] * 100
+	end if
+	if margin >= 100
+		print #0;tab 48;margin using largePercentMask$;
+	else
+		print #0;tab 48;margin using percentMask$;
+	end if
+	margin = 0
+	if profit <> 0
+		margin = repTotals[ord,mtd,comm] / profit * 100
+	end if
+	if margin >= 100
+		print #0;tab 54;margin using largePercentMask$;
+	else
+		print #0;tab 54;margin using percentMask$;
+	end if
+	print #0;tab 60;repTotals[ord,mtd,comm] using dollarMask$[3];
+	! Quarter to Date
+	margin = 0
+	profit = repTotals[ord,qtd,sls] - repTotals[ord,qtd,cost]
+	print #0;tab 71;repTotals[ord,qtd,sls] using dollarMask$[3];
+	print #0;tab 84;profit using dollarMask$[3];
+	if repTotals[ord,qtd,sls] <> 0
+		margin = profit / repTotals[ord,qtd,sls] * 100
+	end if
+	if margin >= 100
+		print #0;tab 96; margin using largePercentMask$;
+	else
+		print #0;tab 96; margin using percentMask$;
+	end if
+	! Year to Date
+	margin = 0
+	profit = repTotals[ord,ytd,sls] - repTotals[ord,ytd,cost]
+	print #0;tab 102;repTotals[ord,ytd,sls] using dollarMask$[3];
+	print #0;tab 115;profit using dollarMask$[3];
+	if repTotals[ord,ytd,sls] <> 0
+		margin = profit / repTotals[ord,ytd,sls] * 100
+	end if
+	if margin >= 100
+		print #0;tab 127; margin using largePercentMask$
+	else
+		print #0;tab 127; margin using percentMask$
+	end if
+	lineNo = lineNo + 1
+	if ord = 39 print #0;"" \ lineNo = lineNo + 1
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintBucketPortion
+
+sub PrintThisYearLastYear(ord)
+try
+	call PrintHeader(0,0)
+	if ord < 39
+		print #0;ordDescription$[((ord-1) * 20)+1,(ord * 20)];
+	else
+		print #0;"** TOTAL";
+	end if
+	margin = 0
+	profit = repTotals[ord,bucketCurrent,sls] - repTotals[ord,bucketCurrent,cost]
+	print #0;tab 21;repTotals[ord,bucketCurrent,sls] using dollarMask$;
+	print #0;tab 34;profit using dollarMask$;
+	if repTotals[ord,bucketCurrent,sls] <> 0
+		margin = profit / repTotals[ord,bucketCurrent,sls] * 100
+	end if
+	if margin >= 100
+		print #0;tab 49;margin using largePercentMask$;
+	else
+		print #0;tab 49;margin using percentMask$;
+	end if
+	margin = 0
+	profit2 = repTotals[ord,bucketPrior,sls] - repTotals[ord,bucketPrior,cost]
+	print #0;tab 60;repTotals[ord,bucketPrior,sls] using dollarMask$;
+	print #0;tab 73;profit2 using dollarMask$;
+	if repTotals[ord,bucketPrior,sls] <> 0
+		margin = profit2 / repTotals[ord,bucketPrior,sls] * 100
+	end if
+	if margin >= 100
+		print #0;tab 88;margin using largePercentMask$;
+	else
+		print #0;tab 88;margin using percentMask$;
+	end if
+	margin = 100
+	if repTotals[ord,bucketPrior,sls] <> 0
+		margin = repTotals[ord,bucketCurrent,sls] / repTotals[ord,bucketPrior,sls] * 100
+	end if
+	print #0;tab 99;margin using "##&.&&";
+	margin = 100
+	if profit2 <> 0
+		margin = profit / profit2 * 100
+	end if
+	print #0;tab 109;margin using "##&.&&"
+	lineNo = lineNo + 1
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintThisYearLastYear
+
+sub PrintRolling(ord)
+try
+	call PrintHeader(7,0) ! multiple lines per item needed
+	if ord < 39
+		print #0;ordDescription$[((ord-1) * 20)+1,ord * 20]
+	else
+		print #0;"** TOTAL"
+	end if
+	lineNo = lineNo + 1
+	! rolling buckets are arranged OLDEST to NEWEST for easy
+	! accumulation, but we need to print NEWEST to OLDEST
+	avgSales = 0
+	avgCost = 0
+	for bucket = 0 to 2
+		if bucket = 0 print #0;"  SALES";
+		if bucket = 1 print #0;"   COST";
+		if bucket = 2 print #0;"   GP %";
+		col = 0
+		for i = 11 to 0 step -1
+			if bucket < 2
+				print #0;tab 11+(col*9);repRolling[ord, i, bucket] using "-------&";
+			 else ! margin
+				margin = 0
+				if repRolling[ord,i,sls] <> 0
+					margin = ((repRolling[ord,i,sls] - repRolling[ord,i,cost]) / repRolling[ord,i,sls]) * 100
+				end if
+				print #0;tab 11+(col*9);margin using " ##&.&&%";
+			end if
+			if bucket = 0
+				avgSales = avgSales + repRolling[ord, i, bucket]
+				avgCost = avgCost + repRolling[ord, i, bucket + 1]
+			end if
+			col = col + 1
+		next i
+		print #0;" "
+		lineNo = lineNo + 1
+		if bucket = 0
+			avgSales = avgSales / 12
+			print #0;tab 5;"AVG SALES: ";avgSales using "-------&"
+		end if
+		if bucket = 1
+			avgCost = avgCost / 12
+			print #0;tab 5;"AVG COST: ";avgCost using "-------&"
+		end if
+		if bucket = 2
+			margin = 0
+			if avgSales <> 0
+				margin = (avgSales - avgCost) / avgSales * 100
+			end if
+			print #0;tab 5;"AVG MARG: ";margin using " ##&.&&%"
+		end if
+		lineNo = lineNo + 1 
+	next bucket
+	print #0;" "
+	lineNo = lineNo + 1
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintRolling
+
+
+sub PrintHeader(extraLines,forceSubheader)
+try
+	headerPrinted = 0
+	if lineNo + extraLines <= maxLines
+		if not(forceSubheader) exit sub ! no need to print a header
+	else
+		! need to print one from scratch
+		if pageNo > 0 print #0;"\14\" ! form feed
+		pageNo = pageNo + 1
+		Print #0;" - 444i -"; Tab (Int(66 - (Len(pageHeading$) / 2)));pageHeading$
+		tmp$ = "" \ Call Time(tmp$)
+		Print #0; Tab 1;"DATE ";tmp$;
+		if section <> finalTotals
+			tmp$ = "SALESREP: "+str$(currRep)+" - "+rtrim$(sr.Name$)
+		else
+			tmp$ = "******** COMPANY TOTALS ********"
+		end if
+		Print #0;Tab (Int(66 - (Len(tmp$) / 2)));tmp$;
+		Print #0; Using "PAGE ###"; Tab 119;pageNo
+		Print #0;" "
+		lineNo = 4
+	end if
+	headerPrinted = 1
+	if section = bucketPrint
+		print #0;"Ord Type";Tab 10;"      Sales";
+		print #0;Tab 23;"       Cost";
+		print #0;Tab 36;"     Profit";
+		print #0;Tab 48;" GP %";
+		print #0;Tab 54;" Rate";
+		print #0;Tab 60;"  Commissn";
+		print #0;Tab 71;"  QTD Sales";
+		print #0;Tab 84;" QTD Profit";
+		print #0;Tab 96;" GP %";
+		print #0;Tab 102;"  YTD Sales";
+		print #0;Tab 115;"   YTD Prof";
+		print #0;Tab 127;" GP %"
+		print #0;doubleDash$
+		lineNo = lineNo + 2
+	else if section = thisYearLastYear
+		print #0;"PERFORMANCE COMPARISON";Tab 99;"   Performance"
+		print #0;Tab 21;"------- Current Figures -------";
+		print #0;Tab 60;"---------- Last Year ----------";
+		print #0;Tab 99;"Based On Last Year"
+		print #0;Tab 21;"      Sales";
+		print #0;Tab 34;"     Profit";
+		print #0;Tab 47;" GP %";
+		print #0;Tab 59;"       Sales";
+		print #0;Tab 72;"      Profit";
+		print #0;Tab 86;" GP %";
+		print #0;Tab 99;" Sales";
+		print #0;Tab 109;"Profit"
+		print #0;doubleDash$
+		if subSection = month_
+			print #0;"** FIGURES FOR MONTH **"
+		else
+			print #0;"** FIGURES FOR YEAR TO DATE **"
+		end if
+		lineNo = lineNo + 5
+	else if section = rollingBuckets
+		print #0;"PREVIOUS 12 MONTHS"
+		print #0;"MONTH";
+		lastMonth =  currentMonth - 1
+		if lastMonth < 1 lastMonth = 12
+		for i = 0 to 11
+			j = lastMonth - i
+			if j < 1 j = j + 12
+			print #0;tab 11+(i*9);"     ";fmth$[j];
+		next i
+		print #0;" "
+		print #0;doubleDash$
+		lineNo = lineNo + 3
+	else if section = finalTotals
+		print #0;"Ord Type";Tab 21;"      Sales";
+		print #0;Tab 34;"       Cost";
+		print #0;Tab 47;"     Profit";
+		print #0;Tab 63;" GP %";
+		print #0;Tab 70;" Rate";
+		print #0;Tab 81;" Commission"
+		print #0;doubleDash$
+		lineNo = lineNo + 2
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub ! PrintSalesrep
+
+end

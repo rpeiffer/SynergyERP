@@ -1,0 +1,704 @@
+! --- mx233
+! description Batch Order Invoicing Entry
+!
+! 1.0 mm/dd/yyyy change??
+!
+! loadsave -w -n 100,10 -o prog/dxport/mx233.dl4 src/mx233.src
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+Include "src/inc/filecust.inc" ! custome
+include "src/inc/fileordhead.inc" ! combined ros,rot,roh
+include "src/inc/fileprod.inc" ! product file
+include "src/inc/filerolz.inc" ! order lines
+include "src/inc/fileprtdefault.inc" ! port default
+include "src/inc/filewhinfo.inc" ! warehouse
+include "src/inc/filedivifle.inc" ! division file
+!
+!
+! *declare additional dl4 intrinsic subs & functions
+!
+Declare Intrinsic sub programdump,env
+!
+! *declare additional external libs & subs & functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,JDate$,PDate$
+Declare External Sub getportdefault
+!
+
+!
+!
+! **main procedure
+Declare Sub OpenFiles,OrderList,ChkOrder,chksn
+!
+!
+! dim variables used by program
+!
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+	Option String Redim is legal ! in case subs dim/use same names
+
+ dim action$[30],options$[30],userid$[8],b$[200],3%
+ dim action1$[30],action2$[30],action3$[30] ! actions for programs
+ dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1000] ! .net delimiters
+ Dim WebStr$[1000],Message$[200],dblog$[50],tmp$[200],blank$[100]
+	Dim Cust$[60],p9$[50],p60$[50],p61$[256],K$[60]
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2],UCA5[10]
+	Dim 2%,Q0[1],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size
+	dim 1%,X1[9],Chans[20]
+	Dim 2%,CustNo,x2[9],sysdate
+	Dim 1%,ttlords,schn[2]
+	Dim 2%,ORDNo,s9[9]
+	Dim 3%,CFin[8]
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR,SHR,SDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99]
+ blank$=" ",blank$
+ Dim cust. as cust ! customer
+ dim roh. as roh ! order header
+ dim ros. as ros ! order ship to file
+ dim rot. as rot ! order total file
+ DIM PR. as prod ! prodfile
+ dim rol. as rolnew ! order lines
+ dim prt. as prtdefault ! port defaults
+ dim whi. as whinfo ! whse info
+ dim bcust. as cust ! billto cust
+ !
+ ! call dxopen()  - DONE IN OEMENU!
+ !
+ call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+ !
+ ! open files - may add a check to see if user can run an action/program
+ !
+ Action1$=UCase$(action1$)
+ action1$=RTrim$(action1$) ! UPPERCASE & TRIMMED
+ Action2$=UCase$(action2$)
+ action2$=RTrim$(action2$) ! UPPERCASE & TRIMMED
+ !etc for all files needed
+ close #1 ! getsession opens it as READONLY!
+ !
+ Call OpenFiles() ! open any/all files (include ctlc
+ mat read #ctlc,19,50;p9$;
+ mat read #ctlc,60,50;p60$;
+ mat read #ctlc,61,0;p61$;
+ SCHN[0]=OHC;SCHN[1]=OSC;SCHN[2]=OTC
+  call GetPortDefault(e$,IntCO,UserID$,portnum,rec_uac,prt.) ! get port default
+ Div=prt.Div;Whse=prt.Wh
+ ReturnStatus=0
+ debugdetail=0
+ Message$="ACTION1 NOT FOUND"  ! action is used for menu routing
+ select case action1$ ! go to various programs based on action
+   case "GETUDFLTS" ! get the user defaults					doc=BIE-GetDefaults.doc
+	ReturnStatus=1
+	Message$="OK"
+	Clear List$[]
+	List$[0]=bsdel$,"USERDEFAULT",fdel$
+	List$[1]="DIV",fdel$,"WHSE",fdel$
+	WebStr$=Str$(DIV),fdel$,Str$(Whse),fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	! now send div droplist
+	tmpcnt=maxcnt
+	Clear List$[]
+	Call filedroplistdivifle(e$,list$[],tmpcnt,DVC)
+	call AddToStr(e$,rstr$,List$[])
+	! and now the whse droplist
+	tmpcnt=maxcnt
+	Clear List$[]
+	! Call filedroplistwhinfo(e$,list$[],tmpcnt,WHC) ! NOTE WHSE ID IS WRONG!!! whse is minus 1
+	List$[0]=bsdel$,"droplistwhinfo",fdel$
+	List$[1]="ID",fdel$,"WhName",fdel$
+	row=2
+	maxwhse=CHF(WHC)-1 \ if maxwhse>98 let maxwhse=98
+	For I=0 to maxwhse ! CHF(WHC)-1 (99 is the ALLWHSE record)
+		read record #WHC,I,0;whi.;
+		if rtrim$(whi.WhName$)<>"" !indicates active record in non-indexed file
+			WebStr$=Str$(I+1),fdel$,rtrim$(whi.WhName$),fdel$
+			List$[row]=webstr$
+			row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next I
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	! end getudflts
+   case "DIVLIST" ! division droplist						doc=BIE-DivDroplist.doc
+	ReturnStatus=1
+	Message$="OK"
+	Clear List$[]
+	tmpcnt=maxcnt
+	Call filedroplistdivifle(e$,list$[],tmpcnt,DVC)
+	call AddToStr(e$,rstr$,List$[])
+    ! end divlist
+   case "WHSELIST" ! warehouse droplist						doc=BIE-WhseDropList.doc
+	ReturnStatus=1
+	Message$="OK"
+	Clear List$[]
+	tmpcnt=maxcnt
+	! Call filedroplistwhinfo(e$,list$[],tmpcnt,WHC) ! NOTE WHSE ID IS WRONG!!! whse is minus 1
+	List$[0]=bsdel$,"droplistwhinfo",fdel$
+	List$[1]="ID",fdel$,"WhName",fdel$
+	row=2
+	maxwhse=CHF(WHC)-1 \ if maxwhse>98 let maxwhse=98
+	For I=0 to maxwhse ! CHF(WHC)-1 (99 is the ALLWHSE record)
+		read record #WHC,I,0;whi.;
+		if rtrim$(whi.WhName$)<>"" !indicates active record in non-indexed file
+			WebStr$=Str$(I+1),fdel$,rtrim$(whi.WhName$),fdel$
+			List$[row]=webstr$
+			row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next I
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+    ! end whselist
+   case "LISTORDS" ! list existing							doc=BIE-GetListOrds.doc
+	ReturnStatus=1
+	Message$="OK"
+	Call Dxget("WHSE",tmp$)
+	X2=tmp$
+	if x2<0 or x2>99 or fra(X2)
+		Let returnstatus=0
+		Message$="INVALID WAREHOUSE"
+		Goto ELOrd
+	Endif
+	Whse=X2
+	Call dxget("DIV",tmp$)
+	X2=tmp$
+	if x2<0 or x2>99 or fra(X2)
+		Let returnstatus=0
+		Message$="INVALID DIVISION"
+		Goto ELOrd
+	Endif
+	Div=X2
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"ENTRYLIST",fdel$
+	List$[1]="ORDID",fdel$,"DIV",fdel$,"WHSE",fdel$,"ORDSTATUS",fdel$,"CUSTID",fdel$,"CUSTNAME",fdel$,"SHIPTONAME",fdel$
+	Row=2
+	Call OrderList()
+	call AddToStr(e$,rstr$,List$[])
+	ELOrd: ! end
+    ! end listords
+   case "DELORDERS" ! delete entries						doc=BIE-DeleteListOrds.doc
+	ReturnStatus=1
+	Message$="OK"
+	Call Dxget("WHSE",tmp$)
+	X2=tmp$
+	if x2<0 or x2>99 or fra(X2)
+		Let returnstatus=0
+		Message$="INVALID WAREHOUSE"
+		Goto EDOrd
+	Endif
+	Whse=X2
+	Call dxget("DIV",tmp$)
+	X2=tmp$
+	if x2<0 or x2>99 or fra(X2)
+		Let returnstatus=0
+		Message$="INVALID DIVISION"
+		Goto EDOrd
+	Endif
+	Div=X2
+	K$=" ",K$;NumOrd=0
+	K$[1,2]=Div Using "&&"
+	K$[3,4]=Whse Using "&&"
+	AODLoop: ! all in range - delete from Batch file
+	Search #BTC,3,1;K$,R[1],E 
+	If E goto EDAOrd
+	let x2=K$[1,2] \ if Div if x2<>div goto AODLoop
+	let x2=K$[3,4] \ if whse if x2<>whse goto AODLoop
+	Search #BTC,5,1;K$,R,E
+	if E
+		ReturnStatus=0
+		If E=5 let X3=Err(8)
+		Message$="Search Error ",(E + (X3 * .001))
+		Message$ = Message$,"/ DELETING BATCH IN PROGRAM ",MSC$(4)
+		call programdump("tmp/b233dose!","")
+		Goto EDAORD
+	Endif
+	NumOrd=NumOrd+1
+	Goto AODLoop
+	EDAOrd: ! end loop
+	If ReturnStatus=1
+		message$="OK - DELETED "+Str$(NUMORD)+" ENTRIES"
+	Endif
+	EDOrd: ! end delete
+    ! end delords
+   case "SUBORD" ! submit a batch of orders					doc=BIE-SubmitOrder.doc
+	ReturnStatus=1
+	Message$="OK"
+	Call Dxget("WHSE",tmp$)
+	X2=tmp$
+	if x2<0 or x2>99 or fra(X2)
+		Let returnstatus=0
+		Message$="INVALID WAREHOUSE"
+		Goto ESOrd
+	Endif
+	Whse=X2
+	Call dxget("DIV",tmp$)
+	X2=tmp$
+	if x2<0 or x2>99 or fra(X2)
+		Let returnstatus=0
+		Message$="INVALID DIVISION"
+		Goto ESOrd
+	Endif
+	Div=X2
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"ORDCHK",fdel$
+	List$[1]="ORDID",fdel$,"STATUS",fdel$,"RESULT",fdel$
+	Row=2
+	! is now a batch of orders to check
+	Call dxget("TTLORDS",tmp$)
+	x2=tmp$
+	if x2<=0 or x2>7000 or fra(X2)
+		Let returnstatus=0
+		Message$="INVALID NUMBER OF ORDERS"
+		goto ESORD
+	Endif
+	ttlords=x2
+	For X1=1 to ttlords
+		Call dxget("ORDID"+Str$(X1),tmp$)
+		let X2=tmp$
+		If X2<1 or X2>999999 or fra(X2)
+			Let returnstatus=0
+			Message$="INVALID ORDER NUMBER"
+			Goto ESDOrd
+		Endif
+		OrdNo=tmp$;returnstatus=1
+		! okay now the checks
+		Call ChkOrder()
+		If returnstatus=1 ! so far ok - add to batch
+			k$=" ",K$
+			k$[1,2]=ROH.DIV Using "&&"
+			K$[3,4]=roh.wh Using "&&"
+			K$[5,10]=roh.ordnum using "######"
+			! finally - is it already in batch?
+			
+			Search #BTC,2,1;k$,R,E
+			if not(E) ! the dreaded already exists
+				returnstatus=0
+				Message$="ORDER ALREADY ENTERED"
+				goto ESDORD
+			Endif
+			
+			LET R=ohr ! on PM it's zero?
+			Search #BTC,4,1;K$,R,E
+			If E>1
+				ReturnStatus=0
+				If E=5 let X3=Err(8)
+				Message$="Search Error ",(E + (X3 * .001))
+				Message$ = Message$,"/ INSERTING BATCH ORDER IN PROGRAM ",MSC$(4)
+				call programdump("tmp/b233sose!","")
+				goto ESDORD
+			Endif
+			
+			Message$="OK - ADDED TO BATCH"
+			ReturnStatus=1
+		Endif
+		ESDORD: ! end detail
+		WebStr$=Str$(OrdNo),fdel$,Str$(ReturnStatus),fdel$,Message$,fdel$
+		List$[row]=WebStr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Next X1
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	ReturnStatus=1 ! batch submitted ok
+	Message$="OK"
+	ESOrd: ! end submit order
+    ! end subord
+   case "DELORD" ! submit an order to delete				doc=BIE-DeleteOrder.doc
+	ReturnStatus=1
+	Message$="OK"
+	Call Dxget("WHSE",tmp$)
+	X2=tmp$
+	if x2<0 or x2>99 or fra(X2)
+		Let returnstatus=0
+		Message$="INVALID WAREHOUSE"
+		Goto EDSOrd
+	Endif
+	Whse=X2
+	Call dxget("DIV",tmp$)
+	X2=tmp$
+	if x2<0 or x2>99 or fra(X2)
+		Let returnstatus=0
+		Message$="INVALID DIVISION"
+		Goto EDSOrd
+	Endif
+	Div=X2
+	Call dxget("ORDID",tmp$)
+	let X2=tmp$
+	If X2<1 or X2>999999 or fra(X2)
+		Let returnstatus=0
+		Message$="INVALID ORDER NUMBER"
+		Goto EDSOrd
+	Endif
+	OrdNo=tmp$
+	K$=" ",K$;NumOrd=0
+	K$[1,2]=Div Using "&&"
+	K$[3,4]=Whse Using "&&" ! hopefully div & whse sent the same!!!
+	If Whse<>0 and Div<>0 ! only if known
+		K$[5]=OrdNo Using "######"
+		Search #BTC,2,1;K$,R[1],E 
+		If E goto EDSOrd
+		if Not(E) goto DLSORD
+	Endif
+	SODLoop: ! single order - delete from Batch file
+	Search #BTC,3,1;K$,R[1],E ! this here in case all div/whse
+	If E goto EDSOrd
+	let x2=K$[1,2] \ if Div if x2<>div goto SODLoop
+	let x2=K$[3,4] \ if whse if x2<>whse goto SODLoop
+	Let X2=K$[5,10] \ if x2<>OrdNo goto SODLoop ! MUST BE NONZERO!
+	DLSORD: ! delete it
+	Search #BTC,5,1;K$,R,E
+	if E
+		ReturnStatus=0
+		If E=5 let X3=Err(8)
+		Message$="Search Error ",(E + (X3 * .001))
+		Message$ = Message$,"/ DELETING BATCH ORDER IN PROGRAM ",MSC$(4)
+		call programdump("tmp/b233dose!","")
+		Goto EDSORD
+	Endif
+	NumOrd=1
+	EDSORD: ! end delete single order
+	If NumOrd=0 and returnstatus=1
+		ReturnStatus=0
+		Message$="ORDER NOT IN BATCH"
+	Endif
+    ! end delord
+   case "SUBMITBATCH" ! submit here instead of 234			doc=BIE-SubmitBatch.doc
+	ReturnStatus=1
+	Message$="OK"
+	Call Dxget("WHSE",tmp$)
+	X2=tmp$
+	if x2<0 or x2>99 or fra(X2)
+		Let returnstatus=0
+		Message$="INVALID WAREHOUSE"
+		Goto ESBOrd
+	Endif
+	Whse=X2
+	Call dxget("DIV",tmp$)
+	X2=tmp$
+	if x2<0 or x2>99 or fra(X2)
+		Let returnstatus=0
+		Message$="INVALID DIVISION"
+		Goto ESBOrd
+	Endif
+	Div=X2
+	Clear List$[]
+	tmpcnt=maxcnt
+	List$[0]=bsdel$,"SUBMITBATCH",fdel$
+	WebStr$="ORDERID",fdel$,"INVNUM",fdel$,"STATUS",fdel$
+	List$[1]=webStr$
+	Row=2
+	k$=" ",K$
+	k$[1,2]=DIV Using "&&"
+	K$[3,4]=whse Using "&&"
+	SBMLoop: ! loop thru
+	Search #BTC,3,1;K$,R,E
+	if e goto EBSbm
+	let x2=K$[1,2] \ if Div if x2<>div goto SBMLoop
+	let x2=K$[3,4] \ if whse if x2<>whse goto SBMLoop
+	OrdNo=K$[5,10]
+	if p61$[101,101]<>"Y" ! new flag - retain failed til next time
+		Search #BTC,5,1;k$,R,E
+		if e goto SBMLoop ! if doesn't delete - skip it
+	Endif 
+	! okay now the checks
+	returnstatus=1;DANW=0
+	Call ChkOrder()
+	If returnstatus=1 ! so far ok 
+		! do call to invoice it
+		! THAT'S ALL - CALL MX234A
+		s9[2]=ohr;h1=ohr;s9[4]=234;cfin[8]=cust.SlsComServiceChar
+		Call "mx234a.dl4",S9[],cur,h1,v1,cfin[],Chans[],IntCo
+		read record #OHC,ohr,0;roh.; ! re-read after call
+		let x2=5
+		If roh.ordtype = 16 And P61$[55,55] = "N" let x2=6 ! bypass inv print
+		If roh.status=x2
+			WebStr$=Str$(roh.ordnum),fdel$
+			WebStr$=WebStr$,Str$(roh.InvNum),fdel$
+			WebStr$=WebStr$,"OK - INVOICE CREATED",fdel$
+			if p61$[101,101]="Y" ! ok - delete it
+				Search #BTC,5,1;k$,R,E
+				If E>1
+					If E=5 let X3=Err(8)
+					Message$="Search Error ",(E + (X3 * .001))
+					Message$ = Message$,"/ DELETING ORDER IN PROGRAM ",MSC$(4)
+					call programdump("tmp/b233dose!","")
+				Endif
+			Endif ! move delete to success only - not all
+		Else  ! not invoiced
+			WebStr$=Str$(roh.ordnum),fdel$
+			WebStr$=WebStr$,"0",fdel$
+			WebStr$=WebStr$,"INVOICE NOT CREATED",fdel$
+		Endif
+		List$[row]=WebStr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Else ! failed
+		WebStr$=Str$(roh.ordnum),fdel$
+		WebStr$=WebStr$,"0",fdel$
+		WebStr$=WebStr$,Message$,fdel$
+		List$[row]=WebStr$
+		row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	if p61$[101,101]="Y" and danw=1 ! ok - delete it
+		Search #BTC,5,1;k$,R,E
+		If E>1
+			If E=5 let X3=Err(8)
+			Message$="Search Error ",(E + (X3 * .001))
+			Message$ = Message$,"/ DELETING ORDER IN PROGRAM ",MSC$(4)
+			call programdump("tmp/b233dose!","")
+		Endif
+	Endif ! move delete to success only - not all
+	Goto SBMLoop
+	EBSBM: ! end batch loop
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	ReturnStatus=1 ! successful send
+	Message$="OK"
+	ESBOrd: ! end batch
+    ! end submitbatch
+ end select  !action options
+ 
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+ 
+ !call dxclose()
+else
+ include "src/callmainerrnet.inc"
+end try
+end ! of main program
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC=OpenFile(9999,IntCo) \ if ctlc=-1 Error 42 ! control file read/write
+	CUC=OpenFile(1808,IntCo) \ If CUC=-1 Error 42 ! customer
+	PRC=OpenFile(1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	OHC=OpenFile(1840,IntCo) \ if OHC=-1 Error 42 ! order header
+	OSC=OpenFile(1856,IntCo) \ if OSC=-1 Error 42 ! order shipto
+	OTC=OpenFile(1872,IntCo) \ if OTC=-1 Error 42 ! order Totals
+	OLC=OpenFile(1888,IntCo) \ if OLC=-1 Error 42 ! order lines
+	DVC=OpenFile(-688,intCo) \ If dvc = -1 Error 42 !DIVISION 
+	Whc = OpenFile(-2768,intCo) \ If Whc = -1 Error 42  !" warehouse file
+	BTC=OpenFile(3056,IntCo) \ if BTC=-1 Error 42 ! Batch file
+	BOC=OpenFile(-2576,IntCo) \ if BOC=-1 Error 42 ! bo work file
+	SNC=OpenFile(2944,IntCo) \ if SNC=-1 Error 42 ! serial numbers
+	CHANS[1]=CTLC;CHANS[2]=OHC;CHANS[3]=OSC;CHANS[4]=OTC;CHANS[5]=OLC
+	CHANS[6]=CUC;CHANS[7]=0;CHANS[8]=PRC;CHANS[9]=PWC
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub OrderList()
+! list orders in batch file for div/whse
+ Try
+	Dim KOHC$[60]
+	Dim 1%,Maxstat
+	Dim 3%
+	maxstat=7
+	K$=" ",K$
+	K$=Div Using "&&"
+	K$[3]=Whse Using "&&"
+	Do
+		Search #BTC,3,1;K$,R,E
+		if e exit do
+		x2=k$[1,2];x2[1]=k$[3,4]
+		If div=0 or x2=div
+			if whse=0 or x2[1]=whse
+				OrdNo=K$[5,10]
+				For X=1 to maxstat
+					kohc$=" ",Kohc$
+					KOHC$=X Using "##"
+					KOHC$[3]=OrdNo Using "######"
+					OHR=filegetrohz(e$,SCHN[],"=",1,kohc$,roh.,ros., rot.)
+					If OHR>0
+						Goto FLOrd
+					Endif
+				Next X
+				WebStr$=Str$(OrdNo),fdel$,Str$(X2),fdel$,Str$(X2[1]),fdel$,"0",fdel$,"NOT FOUND!",fdel$
+				Webstr$=WebStr$,"NOT FOUND!",fdel$,"NOT FOUND!",fdel$
+				List$[row]=WebStr$
+				row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+				Goto LODone
+
+				FLOrd: ! found order
+				Cust$=roh.CustNum using "######"
+				CUR=filegetcust(e$,CUC,"=",1,Cust$,cust.)
+				If CUR<0
+					clear cust.
+					Cust.name$="NOT FOUND!"
+				Endif
+				WebStr$=Str$(OrdNo),fdel$,Str$(X2),fdel$,Str$(X2[1]),fdel$,Str$(roh.status),fdel$
+				WebStr$=WebStr$,Cust$,fdel$,RTrim$(cust.Name$),fdel$,RTrim$(ros.Name$),fdel$
+				List$[row]=WebStr$
+				row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+				LODone: ! done
+			Endif ! whse same
+		Endif ! div same
+	    
+	Loop
+	List$[row]=esdel$ 
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! OrderList
+! 
+!--------------------------------------------------------------------
+Sub ChkOrder()
+! check the entered order
+ Try
+	Dim KOHC$[60],KBOW$[60],CKey$[60]
+	Dim 1%,Maxstat
+	Dim 3%
+	danw=0
+	Let maxstat=7 ! search from 1 to 7
+	For X=1 to maxstat
+		kohc$=" ",Kohc$
+		KOHC$=X Using "##"
+		KOHC$[3]=OrdNo Using "######"
+		OHR=filegetrohz(e$,SCHN[],"=",1,kohc$,roh.,ros., rot.)
+		If OHR>0
+			Goto HCOrd
+		Endif
+	Next X
+	Let Returnstatus=0 ! ;DANW=1 (can't - may be in edit!!
+	Message$="ORDER NOT ON FILE OR NOT AVAILABLE TO INVOICE"
+	Exit Sub
+	HCOrd: ! have a order - continue check
+	If roh.status<>4
+		if roh.status>4 let danw=1 ! delete - already invoice
+		returnstatus=0
+		message$="ORDER IS STATUS "+Str$(roh.status)+" CANNOT INVOICE"
+		Exit sub
+	Endif
+	if roh.OrdType=16 and not(roh.XferAuth)
+		returnStatus=0
+		message$="TRANSFER NOT YET AUTHORIZED"
+		Exit sub
+	Endif
+	If div and roh.Div<>div
+		returnstatus=0
+		message$="ORDER IS A DIFFERENT DIVISION"
+		exit sub
+	Endif
+	If whse and roh.Wh<>whse
+		returnstatus=0
+		message$="ORDER IS A DIFFERENT WAREHOUSE"
+		exit sub
+	Endif
+	IF roh.OrdType=5 OR roh.OrdType=11 OR roh.OrdType=9 ! type not allow
+		returnstatus=0
+		Message$="CANNOT INVOICE ORDER TYPE "+Str$(roh.ordtype)
+		exit sub
+	Endif
+	If rot.HoldCode ! on hold
+		returnstatus=0
+		Message$="ORDER IS ON HOLD"
+		exit sub
+	Endif
+	IF P9$[47,47]="Y" ! SERIAL NUMBERS - based on flag valid sn in inv?
+		Serial_Flag=0
+		call chksn()
+		If serial_flag<>0
+			returnstatus=0
+			Message$="SERIAL NUMBERS REQUIRED"
+			Exit sub
+		Endif
+	Endif
+	! check bowork
+		KBOW$=" ",KBOW$;BOFLag=99
+		KBOW$=roh.CustNum using "######" ! KOHC$ ! same - cust/order
+		KBOW$[7]=roh.OrdNum using "######"
+		BOFLoop: ! loop by customer
+		Search #BOC,3,2;KBOW$,R,E
+		If E let BOFlag=0
+		If Not(E)
+			x2=kbow$[1,6] \ if x2<>CustNo Let BOFlag=0
+			If BOFlag ! still ok
+				x2=kbow$[7,12] \ if x2<>OrdNo goto BOFLoop
+			Endif
+		Endif
+		If BOFlag ! no invoice
+			returnstatus=0
+			Message$="ORDER is in BACKORDER PROCESS"
+			exit sub
+		Endif
+		ckey$=" ",cKey$
+		cKey$=roh.CustNum using "######"
+	
+		CUR=filegetcust(e$,CUC,"=",1,CKey$,cust.)
+		If CUR<0
+			ReturnStatus=0
+			Message$="CUSTOMER NOT FOUND"
+			Exit sub
+		Endif
+		Cust$=Cust.CustomerBillTo using "######"
+		BTR=filegetcust(e$,CUC,"=",1,Cust$,bcust.)
+		If BTR<0
+			ReturnStatus=0
+			Message$="BILL TO CUSTOMER NOT FOUND"
+			Exit sub
+		Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! ChkOrder
+! 
+!--------------------------------------------------------------------
+Sub chksn()
+! in papermaster it does this in 234 - so added 
+  Try
+	Dim KRol$[60],KSN$[60]
+	Dim 3%
+	Krol$=" ",krol$
+	KRol$=roh.OrdNum Using "######"
+	SNROLLoop: ! loop order
+	Search #OLC,3,1;KRol$,r[11],E
+	If E Exit sub
+	X2=krol$[1,6] \ if x2<>roh.ordnum exit sub
+	Read record #olc,r[11];rol.;
+	if rol.NStkItem=0 and rol.UpdtStk=1 and rol.QtyShip
+		PRR=rol.PDRecNum
+		Read record #PRC,PRR,0;pr.;
+		If pr.SerNoTrack$<>"Y" 
+			let Serial_Count=rol.qtyship ! ALL accounted for
+		Else ! need to count sn rec's
+			KSN$=KROL$
+			serial_count=0 ! zero 1st!
+			SNL2: ! loop
+			Search #SNC,3,1;KSN$,R[31],E
+			If E goto SNL3
+			If Not(E)
+				if ksn$[1,9]=KRol$[1,9]
+					let serial_count=serial_count+1
+					goto SNL2 ! next
+				Endif
+			Endif
+			SNL3: ! loop done
+			If serial_count<>rol.qtyship let serial_flag=1
+		Endif
+	Endif
+	goto SNRolLoop ! next line
+			
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! chksn
+! 
+!--------------------------------------------------------------------

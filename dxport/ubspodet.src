@@ -1,0 +1,483 @@
+!Program Name: ubspodet                                    
+!                                                  
+!Last Updated:                                     
+!
+! loadsave -w -s -n 100,10 -o prog/dxport/ubspodet.dl4 src/ubspodet.src
+!
+
+Declare External Sub PODet
+ 
+Declare Sub updatelog,errTrap
+
+Include "src/povars.inc"
+Dim po1. as poInfo
+Dim pol.[25] as poItem
+Call POdet(1,999,"218112",po1., pol.[],i,s)
+Print i,s
+Stop
+
+External Sub PODet(intCo, intSalesMan, debug, dlog$, po$, pohrec$, po1. as poInfo,pol.[] as poItem,ii,msg$,ss,iLimit,cost_lev[])
+
+Try
+
+Declare Intrinsic Function FindChannel,Trim$
+Declare Intrinsic Sub FormatDate,DXSet
+Declare Intrinsic Sub Logic
+Declare External Function FDate$,PDate$,BaseName$,XAmount,xunit$,OpenFile
+Declare External Function WareHouse, ReplaceChar$
+
+External Lib "ubsfunc.dl4","ubsprconv.dl4"
+
+Include "src/ubsvendor.inc"
+Include "src/ubsprod.inc"
+Include "src/ubspo.inc"
+
+!DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01)
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)                       
+Def FNN(H) = Int(Abs(H) * 10 ^ Q0[1] + .5) * 10 ^ - Q0[1] * Sgn(H)       
+Def FNT(H) = Int(Abs(H) * 10 ^ Q0[1]) * 10 ^ - Q0[1] * Sgn(H)            
+Def FNV(H) = Int(Abs(H) * 10 ^ Q0[1] + .9999999) * 10 ^ - Q0[1] * Sgn(H) 
+Def FNU(H) = Int(Abs(H) + Sgn(Fra(Abs(H)))) * Sgn(H)                     
+
+Dim POHK$[20],PODK$[20],POMK$[20],pohkey2$[30]
+
+Dim VEND. As VENDOR
+Dim POH.  As POHDR
+Dim POD.  As PODET
+Dim POM.  As POMSG
+Dim NS.   As NSTKDESC
+Dim PR.   As Prod
+
+Dim 1%,debugDetail,Zline,NonStock
+! Variables for Channel#'s
+Dim 2%,CTLC,VENDC,POHC,PODC,POMC,NSC,BUYC,PRC,CCC
+! Variables for Search Record#
+Dim 3%,CTLR,VENDR,POHR,PODR,POMR,BUYR,PRR
+! Variables for Search Error
+Dim 2%,CTLE,VENDE,POHE,PODE,POME,BUYE,PRE
+Dim 2%,vendid,ponum
+! Line Buffer for Output XML
+Dim Output$[1024]
+
+Dim Msg$[256],pgmName$[20]
+Dim EN$[10], ST$[40], Status$[10], Sales$[35], Temp$[100],Space$[100]
+Dim SLS$[3],CO$[2]
+Dim OrgL1$[16], CCD$[14], POSTR$[30],PODate$[30]
+Dim PUNIT1$[10],PUNIT2$[10],P9$[50],P60$[50],SPOInfo$[300],HLD$[100],U5$[50],P61$[256]
+Dim QMASK$[20],PMASK$[20],EMASK$[20],dec$[5]
+Dim WHSE$[2],TYPE$[10],BUYER$[30],MESSAGE$[20]
+Dim SHIPADDR3$[30],SHIPADDR4$[30]
+Dim SOLDADDR3$[30],SOLDADDR4$[30]
+dim 1%,cnvcu[10],3%,cnvca[10]
+Dim 1%, ii,pp,phcurrid,plcurrid
+Dim 2%, Q0[1]
+Dim 3%, specs[10],3%,PHCURRFACT,PLCURRFACT
+dim 1%,cnvcu[10],3%,cnvca[10],rstr$[1000],e$[100]
+
+debugDetail=0
+pgmName$="ubspodet"
+msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+
+Dim 1%,t9[11],2%, t2, N2[5], ErrStat, X1, X2, 3%,tDRM
+
+N2[2]=3 ! 1=Stock, 2=NonStock, 3=Both (order)
+N2[3]=3 ! UM Conv 1=stock, 2=selling, 3=as Entered
+
+Space$=" ",Space$
+ErrStat = 10000;ii = 0
+SLS$=intSalesMan Using "###"         ! passed Salesman
+CO$=Str$(intCo) ! Company
+PO$=Val(Trim$(PO$))
+POHREC$=Val(Trim$(POHREC$))
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+If debugDetail  
+   msg$="doing...PO-"+PO$+" pohrec-"+POHREC$ \ Call updatelog(debug)
+Endif
+
+
+CTLC = OpenFile(-9999,intCo) \ If CTLC=-1   Error 42    ! Control
+VENDC= OpenFile(-2400,intCo)  \ If VENDC=-1 Error 42    ! Vendor 
+POHC = OpenFile(-2416,intCo)  \ If POHC=-1  Error 42    ! PO Head 
+PODC = OpenFile(-2432,intCo)  \ If PODC=-1  Error 42    ! PO Line
+POMC = OpenFile(-2464,intCo)  \ If POMC=-1  Error 42    ! PO Message 
+NSC  = OpenFile(-2448,intCo)  \ If NSC=-1   Error 42    ! NonStock
+BUYC = OpenFile(-9991,intCo)  \ If BUYC=-1  Error 42    ! Buyer
+PRC  = OpenFile(-1792,intCo)  \ If PRC=-1   Error 42    ! Product
+CCC  = OpenFile(-1728,intCo)  \ If CCC=-1   Error 42    ! CCodes
+
+
+Mat Read #CTLC,19,50;P9$;
+Mat Read #CTLC,60,50;P60$;
+Mat Read #CTLC,115,40;Q0; 
+Mat Read #ctlc,61,0;p61$;
+
+
+If not(Q0[1]) let Q0[1]=2                                                       
+Let Dec$="#",Dec$;Qmask$="---,---,--#"                                         
+If Q0[0] Let Qmask$="---,---,--#.",Dec$[1,Q0[0]]         !qty mask      
+If Q0[1] Let Pmask$="---,---,---,---.",Dec$[1,Q0[1]]     !price mask        
+Let Emask$="$---,---,---,---.##"                         !ext. price mask    
+
+
+WHSE$=WareHouse(intSalesMan,intCo) Using "##"    !get warehouse
+
+
+Let POHR=0
+let vendid=0;ponum=po$
+try
+	POHR=Val(POHREC$)
+	let vendid=val(po1.vend$)
+	let ponum=val(po$)
+else
+	let pohkey2$=" ",pohkey2$
+end try
+if pohr<>0 goto main:
+if not(vendid) goto outend:
+if not (ponum) goto outend:
+let pohkey2$[1,6]=vendid using "######"
+let pohkey2$[7,12]=ponum using "######"
+search #pohc,2,2;pohkey2$,pohr,e
+if e
+	let pohr=0
+	goto outend:
+endif
+Main: !=================================================================
+If not(POHR) Then goto Outend:
+
+Read Record #POHC,POHR; POH.;
+If POH.H0[2]<>Val(PO$)  Let POHE=22 
+If POHE goto Outend:
+ErrStat=0 
+
+If debugDetail                                                               
+   msg$="doing...Reading #POHC: POHR="+POHR \ Call updatelog(debug)
+Endif     
+let phcurrid=0
+let phcurrfact=0
+IF P61$[136,136]="Y"
+	mat read #pohc,pohr,612;phcurrid;
+	mat read #pohc,pohr,614;phcurrfact;
+endif
+specs[0]=CTLC ! CNTRL
+specs[1]=PODC ! POLINE
+specs[2]=PRC  ! PROD
+specs[3]=NSC  ! NONSTOCK
+specs[5]=POH.H0[0] ! PO STATUS
+specs[6]=poh.H0[2] ! PO NUMBER
+specs[7]=0  ! old status - for possible later use
+specs[10]=0 ! currency rate
+if p61$[136,136]="Y" and phcurrid<>0 and phcurrfact<>0
+	let specs[10]=phcurrfact
+endif
+call "ubscalcpototals.dl4",370,specs[]  ! get better total info
+
+If POH.H0[0]=1  Let ST$="PO ENTERED           " 
+If POH.H0[0]=2  Let ST$="PO PRINTED           " 
+If POH.H0[0]=3  Let ST$="PO REGISTERED        " 
+If POH.H0[0]=4  Let ST$="PO OPEN              " 
+If POH.H0[0]=5  Let ST$="PO RECEIPT IN PROCESS" 
+If POH.H0[0]=6  Let ST$="PO RECEIPT REGISTERED" 
+If POH.H0[0]=7  Let ST$="PO CLOSED            " 
+If POH.H0[0]=11 Let ST$="DM ENTERED           " 
+If POH.H0[0]=12 Let ST$="DM PRINTED           " 
+If POH.H0[0]=13 Let ST$="DM REGISTERED        " 
+If POH.H0[0]=14 Let ST$="DM CLOSED            " 
+If POH.H0[0]=90 Let ST$="IN PROCESS           " 
+
+If POH.H4[0]=0  Let type$="WAREHOUSE"
+If POH.H4[0]=1  Let type$="DIRECT"
+If POH.H4[0]=2  Let type$="INDIRECT"
+
+Let shipAddr3$=""
+If len(POH.H1$[61,90])>1 and POH.H1$[61,65]<>"     " Then
+    Let shipAddr3$=Trim$(POH.H1$[61,90])
+Endif
+Let shipAddr4$=""
+Let shipAddr4$=Trim$(POH.H1$[91,105])+", "+POH.H1$[106,107]+"  "
+Let shipAddr4$=shipAddr4$+Trim$(POH.H1$[108,112])
+If len(POH.H1$[113,116])>1 and POH.H1$[113,116]<>"    " Then 
+   Let shipAddr4$=shipAddr4$+"-"+Trim$(POH.H1$[113,116])    
+Endif
+If shipAddr3$="" then let shipAddr3$=shipAddr4$;shipAddr4$="" 
+
+
+VEND: !=============================================== 
+Let VENDR=POH.H0[1]
+If VENDR Then
+   Read Record #VENDC,VENDR; VEND.;
+Else
+   Let VEND.A$[1,30]="-NOF-"
+Endif
+
+Let soldAddr3$=""                                                   
+If len(VEND.A$[61,90])>1 and VEND.A$[61,65]<>"     " Then                       
+	Let soldAddr3$=Trim$(VEND.A$[61,90])                                        
+Endif                                                                           
+Let soldAddr4$=""                                    
+Let soldAddr4$=Trim$(VEND.A$[91,105])+", "+VEND.A$[106,107]+"  " 
+Let soldAddr4$=soldAddr4$+Trim$(VEND.A$[108,112])                
+If len(VEND.A$[113,116])>1 and VEND.A$[113,116]<>"    " Then     
+   Let soldAddr4$=soldAddr4$+"-"+Trim$(VEND.A$[113,116])         
+Endif
+If soldAddr3$="" then let soldAddr3$=soldAddr4$;soldAddr4$=""
+
+
+BUYER: !==============================================
+Let BUYR=POH.PO1[6]
+If BUYR Then
+   Mat read #BUYC,BUYR,0;BUYER$; 
+Else
+   Let BUYER$="-NOF-"       
+Endif
+
+
+LoadHeader: !=========================================
+po1.po$=POH.H0[2] using "######"
+po1.status$=ST$
+po1.orderdate$=PDate$(POH.H0[3])
+po1.duedate$=PDate$(POH.H0[4])
+po1.confdate$=PDate$(POH.H0[5])
+po1.term$=POH.H$[35,48]
+po1.buyer$=buyer$
+po1.shipvia$=POH.H$[15,24]
+po1.type$=type$
+po1.whse$=POH.H4[1] using "##"
+if cost_lev[2]  ! >0 means show cost
+	if not(specs[5])
+		po1.totamt$=POH.H8[0] using Emask$
+	else
+		po1.totamt$=specs[5] using Emask$
+	endif
+else
+	po1.totamt$=" " 
+endif
+if not(specs[8])   !! qty check
+	po1.totwt$=POH.H8[1] using Pmask$
+	po1.totcube$=POH.PO3[9] using Qmask$
+	po1.totpc$=POH.PO3[10] using Qmask$
+else
+	let po1.totwt$=specs[6] using Pmask$
+	let po1.totcube$=specs[7] using Qmask$
+	let po1.totpc$=specs[8] using Qmask$
+endif
+po1.vend$=VEND.D1[1] using "######"
+po1.vendname$=VEND.A$[1,30]
+po1.soldAddr1$=VEND.A$[1,30]
+po1.soldAddr2$=VEND.A$[31,60]
+po1.soldAddr3$=soldAddr3$
+po1.soldAddr4$=soldAddr4$
+po1.shipAddr1$=POH.H1$[1,30]
+po1.shipAddr2$=POH.H1$[31,60]                                      
+po1.shipAddr3$=shipAddr3$                                                
+po1.shipAddr4$=shipAddr4$
+
+
+
+Let PODK$=" ",PODK$;PODK$[1,6]=Val(PO$) using "######"
+POD: !================================================
+Search #PODC,3,1;PODK$,PODR,PODE                                        
+If Trim$(PODK$[1,6])<>Trim$(PO$)  Let PODE=22                          
+If PODE Goto POM:                                                    
+
+If debugDetail                                                                  
+   msg$="doing...Search #PODC: PODK$="+PODK$+" PODR="+PODR\Call updatelog(debug)
+   If PODE msg$="error...Search error "+PODE \ Call updatelog(debug)            
+Endif 
+Read Record #PODC,PODR; POD.;
+
+
+If POD.L1[2]>900 Goto POD:
+Call Logic(1,2 ^ 2,POD.L1[3],ZLINE)
+Call Logic(1,2 ^ 0,POD.L1[3],NONSTOCK)   
+If Zline goto LoadDetail:
+let plcurrid=0
+let plcurrfact=0
+if p61$[136,136]="Y"
+	mat read #podc,podr,548;plcurrid;	! 1%,CURRID		DSP:548
+	mat read #podc,podr,550;plcurrfact; ! 3%,CURRFACT	DSP:550
+endif
+
+! Validate UM Selections??
+If N2[2]=3 Goto PODOK:
+If N2[2]=2 If NonStock Goto PODOK:
+If N2[2]=1 If not(NonStock) Goto PODOK:
+Goto POD:
+
+
+PODOK: Rem Ok to continue here
+If NonStock Then
+  Clear PR.
+  Read Record #NSC,POD.L3[1];NS.;
+  For X1=0 TO 20                                                    
+	If X1<21 Let PR.PFU1[X1]=0                                         
+    If X1<5  Let PR.PFU1[X1]=NS.NSD1[X1+2]                                 
+	If X1<7  Let PR.PFU2[X1]=0                                          
+    If X1<5  Let PR.PFU2[X1]=NS.NSD3[X1+3]                                 
+  Next X1        
+  Let PR.A[5]=NS.NSD3[7];PR.A[6]=NS.NSD3[6];PR.B[23]=NS.NSD3[2]    
+  Let PR.PFU1[0]=NS.NSD1[2]   
+  Let PR.PFU1[8]=NS.NSD1[5];PR.PFU1[10]=NS.NSD1[4];PR.PFU1[11]=NS.NSD1[3] 
+  Let PR.A$[9,38]=NS.NSD$[13,42];PR.A$[63,92]=NS.NSD$[43,72]              
+  Let PR.A$[140,151]=NS.NSD$[1,12]                                        
+Else
+  Read Record #PRC,POD.L3[1];PR.;
+End If
+
+
+CONVERT: !===========================================================
+!qty ordered
+Let CNVTA=POD.L3[2]                   !cost/price/qty                         
+Let CNVTU[0]=0                        !current unit                           
+Let CNVTU[1]=POD.L1[4]                !desired unit - as entered
+Let CNVTU[2]=1                        !mode 1=qty 2=cost/price                
+LET POD.L3[2]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+!qty to ship                                                             
+Let CNVTA=POD.PL4[5]                   !cost/price/qty                    
+Let CNVTU[0]=0                        !current unit                      
+Let CNVTU[1]=POD.L1[4]                !desired unit - as entered         
+Let CNVTU[2]=1                        !mode 1=qty 2=cost/price           
+LET POD.PL4[5]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+!qty received                                                             
+Let CNVTA=POD.L3[3]                   !cost/price/qty                    
+Let CNVTU[0]=0                        !current unit                      
+Let CNVTU[1]=POD.L1[4]                !desired unit - as entered         
+Let CNVTU[2]=1                        !mode 1=qty 2=cost/price           
+LET POD.L3[3]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+!unit cost                                                             
+Let CNVTA=POD.PL4[0]                  !cost/price/qty                    
+Let CNVTU[0]=0                        !current unit                      
+Let CNVTU[1]=POD.L1[5]                !desired unit - as entered         
+Let CNVTU[2]=2                        !mode 1=qty 2=cost/price           
+LET POD.PL4[0]=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+if p61$[136,136]="Y" and plcurrid<>0 and plcurrfact<>0
+	let cnvcu[0]=1
+	let cnvca[0]=pod.pl4[0]
+	let cnvca[1]=plcurrfact
+	call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$
+	let pod.pl4[0]=cnvca[0]
+	let cnvcu[0]=1
+	let cnvca[0]=pod.pl4[7]
+	let cnvca[1]=plcurrfact
+	call "mxcurrconv.dl4",cnvcu[],cnvca[],e$,rstr$
+	let pod.pl4[7]=cnvca[0]
+endif
+
+LoadDetail: !=============================================
+If ii < iLimit Then
+  pol.[ii].li$=Str$(POD.L1[2])
+  pol.[ii].item$=POD.L1$[81,92]
+  pol.[ii].desc1$=ReplaceChar$(POD.L1$[1,30])
+  pol.[ii].desc2$=ReplaceChar$(POD.L1$[31,60])
+  pol.[ii].qtyord$=POD.L3[2] using Qmask$
+  pol.[ii].qtyshp$=POD.PL4[5] using Qmask$
+  pol.[ii].qtyrcv$=POD.L3[3] using Qmask$
+  pol.[ii].uom$=XUNIT$(POD.L1[4],CCC)
+  if cost_lev[2]  ! >0 means show cost
+  	pol.[ii].unitcost$=POD.PL4[0] using Pmask$
+	pol.[ii].cunit$=XUNIT$(POD.L1[5],CCC)
+	pol.[ii].extcost$=POD.PL4[7] using Emask$
+  else  ! no cost
+  	pol.[ii].unitcost$ = " "
+  	pol.[ii].cunit$ = " " 
+  	pol.[ii].extcost$ = " "
+  endif
+  If Zline Then pol.[ii].zline$="Y" Else pol.[ii].zline$="N"
+
+  Let ii=ii+1
+  ss=22
+  Goto POD:
+Endif
+
+
+POM: !===============================================
+Let POMK$=" ",POMK$;COUNT=0
+Let POMK$[1,1]="1";POMK$[2,7]=Val(PO$) using "&&&&&&"
+POMLoop: !===========================================                        
+Search #POMC,3,1;POMK$,POMR,POME  
+If Val(POMK$[2,7])<>Val(PO$) and POMK$[1,1]="2"  Let POME=22
+If POME Goto OutEnd:
+
+If Val(POMK$[2,7])<>Val(PO$)
+   Let POMK$=" ",POMK$;COUNT=0
+   Let POMK$[1,1]="2";POMK$[2,7]=Val(PO$) using "&&&&&&" 
+   Goto POMLoop:
+Endif
+
+If debugDetail                                                                  
+   msg$="doing...Search #POMC: POMK$="+POMK$+" POMR="+POMR\Call updatelog(debug)
+   If POME msg$="error...Search error "+POME \ Call updatelog(debug)            
+Endif 
+Read Record #POMC,POMR; POM.; 
+Let COUNT=COUNT+1
+Let Message$=" ",Message$
+If POMK$[1,1]="1" Then Message$="Notes: "
+If POMK$[1,1]="2" Then Message$="Special Messages: "
+
+LoadMessage: !=============================================    
+If ii < iLimit and COUNT=1 Then
+  pol.[ii].li$=""        
+  pol.[ii].item$=""                                   
+  pol.[ii].desc1$=Message$
+  pol.[ii].desc2$=""                                
+  pol.[ii].qtyord$=""                                        
+  pol.[ii].qtyshp$=""                                         
+  pol.[ii].qtyrcv$=""                                    
+  pol.[ii].uom$=""                                    
+  pol.[ii].unitcost$=""                                
+  pol.[ii].cunit$=""                               
+  pol.[ii].extcost$=""                                 
+  pol.[ii].zline$="M"    
+  Let ii=ii+1 
+  ss=22
+Endif
+If ii < iLimit Then 
+  pol.[ii].li$=""                                 
+  pol.[ii].item$=""                              
+  pol.[ii].desc1$=Trim$(POM.M$[1,50])
+  pol.[ii].desc2$=""
+  pol.[ii].qtyord$=""                                            
+  pol.[ii].qtyshp$=""                                            
+  pol.[ii].qtyrcv$=""                                           
+  pol.[ii].uom$=""                                         
+  pol.[ii].unitcost$=""                                          
+  pol.[ii].cunit$=""
+  pol.[ii].extcost$=""                                           
+  pol.[ii].zline$="M"   
+
+  Let ii=ii+1  
+  ss=22        
+  Goto POMLoop:    
+Endif                                                          
+
+
+OutEnd: !=========================================================
+Close #CTLC,#VENDC,#POHC,#PODC,#POMC,#NSC,#BUYC,#PRC,#CCC
+msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+ss=ErrStat
+Exit Sub
+
+Else
+  ss=Spc(10)
+  Call errTrap(pgmName$)
+  Exit Sub
+End Try
+
+Sub updatelog(debug)                                        
+	If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub     
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+
+ss=ErrStat
+
+End Sub
+

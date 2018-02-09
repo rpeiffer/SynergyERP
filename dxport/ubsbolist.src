@@ -1,0 +1,482 @@
+!Program Name: ubsbolist 
+!
+! loadsave -w -n 100,10 -o prog/dxport/ubsbolist.dl4 src/ubsbolist.src
+!                                                
+!Last Updated:                                   
+!zyc 09/01/04 cct182085 modified path for include
+!zyc 09/07/04 cct182085 rem "OD.L7[2]-OD.L7[4]-OD.L7[0]" logic
+!zyc 09/03/04 cct182085 add log file
+!rce 10/10/05  salesgroup
+!
+
+Declare External sub bolist
+Declare Sub updatelog,errTrap
+
+Include "src/bovars.inc"
+
+Dim bo.[100] as boInfo
+Dim 1%,arrSales[999]
+Dim 3%
+
+Call BOList(1,999,bo.[], ii, ss, 100, arrSales[])
+
+!If X$<>"" Then
+!	Print "Good!"
+!Else
+!	Print "Booo!"
+!End If
+Print ss
+Stop
+
+!Chain ""
+
+External Sub BOList(intCo, intSalesMan, debug, dlog$, bo.[] as boInfo, ii, ss, iLimit, arrSales[], ...)
+
+Try 
+	Enter custid, ...
+	Try Dim custid$[6] Else REM
+	custid$ = custid using "######"
+else
+	Dim custid$[6]
+	rem
+end try
+Try
+	Enter Shipid
+Else
+	Shipid=-1
+End try
+
+If Custid let custid$=Custid Using "######"
+Try
+
+External Lib "ubsfunc.dl4","ubsprconv.dl4"
+Declare Intrinsic Function FindChannel,Trim$
+Declare External Function PDate$,XAmount,Xunit$,OpenFile
+Declare Intrinsic Sub DXGet,DXPut
+
+
+Include "src/ubsorder.inc"
+Include "src/ubscustomer.inc"
+Include "src/ubsprod.inc"
+Include "src/ubspo.inc"
+
+Dim ODK$[12],OHK$[12],CUK$[12],SMK$[20],PRK$[40],VNK$[40],P9$[50],P61$[256]
+
+Dim OH. As OrdH
+Dim OD. As OrdD
+Dim CU. As Customer
+Dim PR. As Prod
+Dim OS. as OrdS2
+Dim Poh. as POHdr
+Dim POL. as podet
+
+Dim 1%,debugDetail
+! Variables for Channel#'s
+Dim 2%,OHC,ODC,CUC,CTLC,SMC,PRC,VNC,CCC,ETC
+! Variables for Search Record#
+Dim 3%,OHR,ODR,CUR,CTLR,SMR,PRR,VNR,ETR
+! Variables for Search Error
+Dim 2%,OHE,ODE,CUE,CTLE,SME,PRE,VNE,ETE
+
+Dim ST$[40], Status$[10], Sales$[35], Temp$[100], Temp1$[100]
+Dim SLS$[3],CO$[2],Hold$[30], POK$[50], BName$[30], tmp$[100]
+Dim Msg$[256],pgmName$[20]
+Dim Space$[100],OrgL1$[16], CCD$[14], Vend$[50],EnteredBy$[10]
+
+Dim 2%, t2, 3%, R[99]
+
+debugDetail=0
+pgmName$="ubsbolist"
+msg$[1,50]="-",msg$ \ Call updatelog(debug)               
+msg$="start...program "+pgmName$ \ Call updatelog(debug)     
+
+ii=0
+
+SLS$=intSalesMan Using "###" ! Passed Salesman
+CO$=Str$(intCo) ! Company
+msg$="doing...company-"+CO$+" salesman-"+SLS$ \ Call updatelog(debug)
+
+ST$="OR ENOR PTOR RGOR ACIN ENIN PTIN RGIN AC"
+
+OHC = OpenFile(-1840,intCo) \ If OHC=-1 Error 42
+ODC= OpenFile(-1888,intCo)  \ If ODC=-1 Error 42
+CUC= OpenFile(-1808,intCo)  \ If CUC=-1 Error 42
+CTLC= OpenFile(-9999,intCo) \ If CTLC=-1 Error 42
+SMC= OpenFile(-1824,intCo)  \ If SMC=-1 Error 42
+PRC= OpenFile(-1792,intCo)  \ If PRC=-1 Error 42
+VNC= OpenFile(-2400,intCo)  \ If VNC=-1 Error 42
+CCC= OpenFile(-1728,intCo)  \ If CCC=-1 Error 42     !CCodes
+ETC= OpenFile(-1664,intCo)  \ If ETC=-1  Error 42    !entdby
+OSC=OpenFile(-1856,intco) \ if osc=-1 Error 42 ! shipto
+PHC=OpenFile(-2416,INTCO) \ if phc=-1 Error 42 ! po head
+POC= OpenFile(-2432,intCo)  \ If POC=-1 Error 42    ! PO Line
+ch_buy=OpenFile(-9991,intCo) \ If Ch_buy = -1 Error 42 ! buyer
+
+If SLS$<> "999" Then
+	Let OHK$=SLS$
+Else
+	Let OHK$=custid$
+
+End If
+
+arrayloop: !
+if arrSales
+	ohk$=arrsales[counter] using "###"
+Endif
+
+
+BOTOP: Rem Loop Through Ord Header on Salesman directory (default sort)
+! IF SLS$<>"999" If OHK$[1,3]<>SLS$ Let OHE=22
+IF SLS$<>"999"
+	Search #OHC,3,3;OHK$,OHR,OHE
+	if arrsales  ! using salesgroup
+		If val(ohk$[1,3]) <> arrSales[counter]
+			Let OHE=22
+			counter=counter+1
+			if arrSales[counter] and counter<1000 goto arrayloop  ! if more loop
+		endif
+	else
+		If OHK$[1,3]<>SLS$ Let OHE=22
+	endif
+else  ! sls$ = "999"
+	Search #OHC,3,2;OHK$,OHR,OHE
+	If OHK$[1,6]<> custid$ Let OHE=22
+
+endif
+
+If OHE Goto BOEND:
+
+If debugDetail
+   msg$="doing...Search #OHC: OHK$="+OHK$+" OHR="+OHR \ Call updatelog(debug)
+   If OHE msg$="error...Search error "+OHE  \ Call updatelog(debug)
+Endif
+Read Record #OHC,OHR; OH.;
+
+! Determine Status
+t2 = OH.H0[0]
+Status$=""
+
+IF t2>7 Goto BOTop: ! Status' to skip per MX446A
+If t2<1 Goto BOTop:
+If Shipid>0 ! wants for a shiplist
+	OSR=oh.h0[2]
+	Read record #OSC,OSR,0;OS.;
+	IF OS.SRN[3]=1 or OS.SRN[3]=2 ! used 0 or shiplist#
+		if OS.SRN[2]=custid and os.SRN[1]=shipid Goto OKShip
+	Endif
+	Goto BOTop ! other types ng or diff cust/ship
+	OKShip: ! ok
+Endif
+
+
+! There are too many custom price types not to show all for now
+! rce 9/15/05  came up with type 38 at burke
+! IF OH.H5[7]>2 goto BOTop: ! Only types 1 or 2 Per MX446A
+! IF OH.H5[7]<1 goto BOTop:
+
+If t2<=11 Let Status$=ST$[t2*5-4,t2*5]
+
+! Scan orddet to see if order has a Backordered item on it.
+ODK$=OH.H0[7] Using "######"
+Temp1$=ODK$
+
+ODLoop: Search #ODC,3,1;ODK$,ODR,ODE
+If ODK$[1,6]<>Temp1$ Let ODE=22
+
+If ODE Goto BOTop: ! End of items and no Backorder item found.
+
+If debugDetail
+   msg$="doing...Search #ODC: ODK$="+ODK$+" ODR="+ODR \ Call updatelog(debug)
+   If ODE msg$="error...Search error "+ODE  \ Call updatelog(debug)
+Endif
+Read Record #ODC,ODR;OD.;
+
+!If OD.L7[2]-OD.L7[4]-OD.L7[0]<=0 Goto ODLoop:  ! No Open Quantity Skip item
+
+If OD.L7[3]=0 Goto ODLoop:
+
+FoundBO: Rem here we have found an order with a Backorder amount.
+
+
+!=====================Get Customer Info.
+CUK$=OH.H0[4] USING "######"
+Temp$=CUK$
+
+Search #CUC,2,1;CUK$,CUR,CUE
+If CUK$[1,6]<>Temp$ Let CUE=22
+
+IF CUE Goto BOTOP:   ! No Customer On File ??
+
+If debugDetail
+   msg$="doing...Search #CUC: CUK$="+CUK$+" CUR="+CUR \ Call updatelog(debug)
+   If CUE msg$="error...Search error "+CUE  \ Call updatelog(debug)
+Endif
+Read Record #CUC,CUR;CU.;
+
+
+!=====================entered by       
+ETR=OH.H5[0];EnteredBy$=" ",EnteredBy$ 
+
+If ETR=0 Then                      
+   EnteredBy$="-NOF-"              
+Else                               
+   Mat Read #ETC,ETR,0;EnteredBy$; 
+End If                             
+
+
+!===================Get SalesMan
+SMK$=OH.H0[11] Using "### "
+Temp$=SMK$
+
+Search #SMC,2,1;SMK$,SMR,SME
+If SMK$[1,4] <> Temp$ Let SME=22
+
+If debugDetail
+   msg$="doing...Search #SMC: SMK$="+SMK$+" SMR="+SMR \ Call updatelog(debug)
+   If SME msg$="error...Search error "+SME  \ Call updatelog(debug)
+Endif
+If SME=0 Then
+	Mat Read #SMC,SMR;Sales$[1,30];
+Else
+	Sales$="-NF-"
+End If
+
+Temp$=Sales$
+Sales$=""
+For X1=1 to Len(Temp$)
+	If Temp$[X1,X1]="'" Then
+           Sales$=Sales$,"\\"
+        End If
+	Sales$=Sales$,Temp$[X1,X1]
+Next X1
+
+! Get Product Record.
+If OD.L3[0] Then  ! non-stock
+  Clear PR.
+  rem The old Gosub L_30000:
+  REM ===== set units for conversions (stock/nonstock version)
+
+   LET PR.A[6]=OD.L6[4]
+   LET PR.A[5]=OD.UNF[5]
+   IF NOT(PR.A[5]) THEN
+     LET PR.A[5]=1
+     LET OD.UNF[5]=1
+   END IF
+
+   LET PR.PFU1[0]=OD.EUN[0]
+   LET PR.PFU1[1]=OD.UN[0]
+   LET PR.PFU1[2]=OD.UN[1]
+   LET PR.PFU1[3]=OD.UN[2]
+   LET PR.PFU1[4]=OD.EUN[1]
+   LET PR.PFU1[5]=0
+   LET PR.PFU1[6]=0
+   LET PR.PFU1[7]=0
+   LET PR.PFU1[8]=OD.UN[0]
+   LET PR.PFU1[9]=OD.UN[0]
+   LET PR.PFU1[10]=OD.EUN[1]
+   LET PR.PFU1[11]=OD.UN[2]
+   LET PR.PFU1[12]=OD.UN[1]
+   IF OD.L3[0]=0
+     LET PR.PFU1[13]=OD.UN[0]
+     LET PR.PFU1[16]=OD.EUN[0]
+     LET PR.PFU1[17]=OD.EUN[0]
+     LET PR.PFU1[15]=OD.CTWT
+     LET PR.PFU1[18]=OD.UN[0]
+     LET PR.PFU1[19]=OD.UN[0]
+   END IF
+
+   LET PR.PFU2[0]=OD.UNF[0]
+   LET PR.PFU2[1]=OD.UNF[1]
+   LET PR.PFU2[2]=OD.UNF[2]
+   LET PR.PFU2[3]=OD.UNF[3]
+   LET PR.PFU2[4]=0
+   LET PR.PFU2[5]=0
+   LET PR.PFU2[6]=0
+
+   FOR X1=1 TO 4
+     FOR X2=0 TO X1-1
+       IF PR.PFU1[X1]=PR.PFU1[X2] THEN
+         LET PR.PFU1[X1]=0
+         PR.PFU2[X1-1]=0
+       END IF
+     NEXT X2
+   NEXT X1
+
+  Let OrgL1$[1,16]=OD.L1$[1,16]
+  If OD.S3$[1,16]=Space$[1,16] Let OD.L1$[1,16]=OD.S3$[1,16]
+Else  ! not non-stock
+  Read Record #PRC,OD.L4[0];PR.;
+End If
+
+LET CNVTA=OD.L7[2]
+LET CNVTU[0]=0;CNVTU[1]=OD.UN[0]
+IF OD.S2[1] LET CNVTA=CNVTA*OD.S2[1]
+! IF N2[3]=1 LET CNVTU[1]=PR.PFU1[8]  ! not sure where n2[3] comes from always0
+! IF N2[3]=2 LET CNVTU[1]=PR.PFU1[9]
+! IF N2[3]=3 LET CNVTU[1]=OD.UN[0]
+LET CNVTU[2]=1
+LET QORD=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+LET CNVTA=OD.L7[3]
+IF OD.S2[1] LET CNVTA=CNVTA*OD.S2[1]
+LET QBOR=XAMOUNT(CNVTU[],CNVTA,PR.PFU1[],PR.PFU2[],PR.A[],CTLC,FLAG)
+
+IF OD.UN[0]>0 MAT  READ #CCC,OD.UN[0],0;CCD$;
+IF OD.UN[0]=-1 LET CCD$[11,14]="CWT "
+IF OD.UN[0]=-2 LET CCD$[11,14]="LOT "
+IF OD.UN[0]=-3 LET CCD$[11,14]="LB  "
+
+! Get Vendor
+VNK$=PR.B[24] Using "######"
+Temp$=VNK$
+
+Search #VNC,2,1;VNK$,VNR,VNE
+If VNK$[1,6]<>Temp$[1,6] Let VNE=22
+
+If debugDetail
+   msg$="doing...Search #VNC: VNK$="+VNK$+" VNR="+VNR \ Call updatelog(debug)
+   If VNE msg$="error...Search error "+VNE  \ Call updatelog(debug)
+Endif
+If VNE=0 Then
+   Mat Read #VNC,VNR;Vend$[1,30];
+Else
+   Vend$="-NOF-"
+End If
+! finally - PO data (if any)
+clear poh. ! clear it
+BName$=""
+PONUM=OD.L4[2]
+! if PONUM=0 AND OH.H5[2]>0 LET PONUM=OH.H5[2]
+If ponum>0 ! or is it OH.H5[2]?
+	POk$=" ",POK$
+	For X=1 to 9 ! exclude DM's? YES lets
+		pok$[1,2]=X using "##"
+		POK$[3]=ponum using "######"
+		search #PHC,2,1;pok$,R[PHC],E
+		if not(E) goto GOTAPO
+	Next X
+	PONUM=0-ponum
+	goto PODone
+	GOTAPO: ! found - do your thing
+	read record #PHC,R[PHC],0;poh.;
+	if poh.po1[6] ! has buyer
+		read #ch_buy,poh.po1[6],0;BName$;
+	Endif
+PODone: ! finished
+Else ! no po 0 check stk items
+	if od.l3[0]=0
+		pohr=0
+		POK$=OD.L4[0] USING "######"
+		Temp$=POK$
+		Search #POC,3,2;POK$,POR,POE
+		IF POK$[1,6]<>Temp$[1,6] Let POE=22
+		IF POE Then
+		   PONUM=0
+		   Goto POSDone:
+		End If
+		Read Record #POC,POR;POL.;
+		pp=0
+		If POL.L1[0] > 2 Then
+		   LOWDD=0
+		Else
+		   LOWDD=POL.L2[2]
+		   POHR=pol.l3[0]
+		   pp=1
+		End If
+		POLoop: Search #POC,3,2;POK$,POR,POE
+		If POK$[1,6]<>Temp$[1,6] Let POE=22
+		If POE Goto POSDone:
+		Read Record #POC,POR;POL.;
+		IF POL.L1[0] < 3 Then
+		  If POL.L2[2]<>0 IF POL.L2[2]<LOWDD LET LOWDD=POL.L2[2];pohr=pol.l3[0]
+		  If LOWDD=0 LET LOWDD=POL.L2[2];pohr=pol.l3[0]
+		  If pp < 11 Then
+			! SPOInfo$=SPOInfo$+Str$(Val(POK$[7,12]))+";"+Str$(PO.L3[2]-PO.L3[3])+";"+PDate$(PO.L2[2])+";"+Str$(PO.L3[0])+"~"
+			pp=pp+1
+		  End If
+		  !POStr$=LOWDD Using "&&&&&&"
+		  !Call FormatDate(POStr$,POStr$,T2,4)
+		  !PODate$="STK PO: ",Str$(Val(POK$[7,12]))," DUE: ",POStr$
+		  !If T2 Let PODate$="STK PO: ",Str$(Val(POK$[7,12]))," DUE: ERR"
+		End If
+		
+		Goto POLoop:
+	POSDone: ! lines
+		if pohr>0
+			R[PHC]=POHR
+			read record #PHC,R[PHC],0;poh.;
+			ponum=poh.h0[2]
+			if poh.po1[6] ! has buyer
+				read #ch_buy,poh.po1[6],0;BName$;
+			Endif
+			if poh.h0[0]>9 and poh.h0[0]<90 ! DM
+				ponum=0
+				bname$=""
+				clear poh.
+			Endif
+		Endif
+	Endif ! stk item look for po
+Endif ! of has po num on line - or is it Header?
+
+If ii<iLimit Then
+  bo.[ii].SalesMan$=Str$(OH.H0[11])+" "+Sales$
+  bo.[ii].CustID$=Str$(OH.H0[4])
+  bo.[ii].CustName$=Trim$(CU.A1$[31,60])
+  bo.[ii].OrderNo$=Str$(OH.H0[7])
+  bo.[ii].OrderIT$=Str$(OD.L3[2])
+  bo.[ii].Vendor$=Vend$
+  bo.[ii].PO$=Trim$(OH.PO$)
+  bo.[ii].Ordered$=PDate$(OH.H0[9])
+  bo.[ii].Item$=OD.L1$[1,16]
+  bo.[ii].Desc1$=OD.L6$[1,30] 
+  bo.[ii].Desc2$=OD.L6$[31,60]
+  bo.[ii].QtyOrd$=QORD Using "###,###"
+  bo.[ii].QtyOrdWT$=QORD*(PR.A[6]/PR.A[5]) Using "###,###/lbs"
+  bo.[ii].OrdUM$=CCD$[11,14]
+  bo.[ii].QtyBOrd$=QBOR Using "###,###"
+  bo.[ii].QtyBOrdWT$=QBOR*(PR.A[6]/PR.A[5]) Using "###,###/lbs"
+  bo.[ii].ShipDT$=PDate$(OH.H0[10])
+  bo.[ii].EnteredBy$=EnteredBy$
+  tmp$="" \ if PONUM>0 let tmp$=Str$(PONUM)
+  bo.[ii].BOPO$=tmp$ ! po
+  tmp$="" \ if POH.H0[4] let tmp$=PDate$(POH.H0[4])
+  ! if ponum<0 let tmp$="NOT FOUND"
+  if poh.h0[0]>5 and poh.h0[0]<10 tmp$="CLOSED"
+  bo.[ii].PODue$=tmp$
+  bo.[ii].POBuyer$=Str$(POH.po1[6])+" "+RTrim$(BName$)
+  ii=ii+1
+Else
+  Goto BOEnd:
+End If
+
+
+Goto ODLoop:
+
+BOEnd: Rem End it all !
+if ii>0 let ii=ii-1 ! starts at 0 only adds if found 1
+
+Close #OHC,#ODC,#CUC,#CTLC,#SMC,#PRC,#VNC,#CCC,#ETC
+msg$="doing...end of "+pgmName$ \ Call updatelog(debug)
+ss=0
+Exit Sub
+Else
+  Temp$=""
+  Call errTrap(pgmName$)
+End Try
+
+
+Sub updatelog(debug)                                        
+	If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " " + msg$ + "'' >> " + dlog$
+End Sub       
+
+
+Sub errTrap(pgmName$)
+  msg$="error...",Spc(8)," ",Msc$(2)," at ",Str$(Spc(10))," ",pgmName$
+  Call updatelog(1)
+End Sub
+
+
+ss=0 !ss=Spc(10)
+End Sub
+

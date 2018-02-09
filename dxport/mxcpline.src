@@ -1,0 +1,599 @@
+! >>> Program mxcpline
+!
+! description Copy inv lines to credit memo
+!
+! loadsave -w -n 100,10 -o prog/dxport/mxcpline.dl4 src/mxcpline.src
+!
+! 1.0 mm/dd/yyyy change??
+!
+include "src/copyright.inc" ! dx
+Rem MXCPLINE - copy line from an invoice line to credit memo line
+Rem AUTHOR: - mtg 09/2003
+Rem "uses 3% invoice number
+! channel variables
+!	fleptr[0,0-1]		sortfile ,1]=intco (Coid)
+!	FLEPTR[1,0-1]		(prod) product file	!
+!	FLEPTR[2,0-1]		(prodwhse) prod warehouse file	&
+!	FLEPTR[3,0-1]		(commcode) commodity code file	!
+!	FLEPTR[4,0-1] 		sordlot
+!	FLEPTR[5,0-1]		sprodlot
+!	FLEPTR[6,0-1]		(contracth) contract header file *
+!	FLEPTR[7,0-1]		(ccodes) unit of measure file
+!	FLEPTR[8,0-1]		(brktbl) break table file *
+!	FLEPTR[11,0-1]		(rol) invoice line
+!	FLEPTR[12,0-1]		(proddesc) product description file
+!	FLEPTR[13,0-1]		(invh) invoice history header
+!	FLEPTR[14,0-1]		(invl) invoice history line 
+!	FLEPTR[15,0-1]		(roh) order header
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: MAY 11, 2005  09:45:39
+Rem /w2/papermaster/r2005//usr/acct/dek/work/r2005/mx2/mxcpline.src (univ2) [dek] {46111}
+Rem  Copyright (c) 2005 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+Declare Intrinsic Sub DateToJulian,InpBuf,String
+Declare Intrinsic sub programdump,env
+Declare Intrinsic function findchannel
+! Option Default Dialect IRIS1
+External Lib "libgeneral.lib" !general routines
+  Declare External Sub suberr,mainerr,getsession,setoutput,addtostr,CreateNetStatus,GetDelimiters
+  Declare External Function getmsg$,expandarray
+External Lib "ubsfunc.dl4"
+Declare External Function openfile
+External Lib "librasl.lib"
+Declare External Sub Allocordlot,chkwhrasl
+Try
+Enter INVNUM,INVLN,CMNUM,CMLN,CMTYPE,CMWHSE,CMORDTYPE,FLEPTR[],ERRFLAG,CUSTNUM,CQty,Warn$
+Rem {begin src/inc/dim.getchan.i}
+Dim 1%,CHNL
+Dim 3%,CHNLSCR,CHNLFREE
+Rem {end dim.getchan.i}
+Dim 1%,H3[1],FChan[99]
+Dim 2%,COID,ch[20],H5[16],RASL[2]
+Dim 2%,X1,LCO[1],KITCOPY,H0[8]
+Dim 3%,E,J1,X2,R[99],OREF[5],rec[20]
+Dim 3%,CST,REC_INVH,REC_INVL,REC_ROL,REC_ROH
+Dim 4%,X3
+Dim P61$[256]
+Dim J1$[50],J4$[50],J5$[80]
+Dim J$[50],X$[10],N$[30],P9$[15],KEYSORT$[50]
+Dim P60$[50],UNIT$[4],custom_customer$[30]
+Dim KEYROH$[30] ! Warn$[100] - pass in / out
+Dim K1$[50],K2$[50],K3$[50]
+Dim 1%,L3[3],S2[1],PL[1],UN[2],EUN[2],CTWT,LPRINTED,OWHS
+Dim 2%,L2[1],L4[3],L6[5],L9[1],LTAX2,LP_DATE,LP_TIME
+Dim 3%,L5[3],L7[12],S3[17],OLM[6],UNF[6],ROL0,LTAX1,QPB
+Dim L6$[60],L1$[20],S3$[33],MT$[2],POFLAG$[1]
+Dim 1%,SNH1
+Dim 2%,SNH[1]
+Dim SNH$[54]
+Dim 1%,SN1[2]
+Dim 2%,SN2[9]
+Dim 2%,RS1[2],RS3[2]
+Dim 3%,RS2[4],nsfrt[2],nsinvno
+Dim RS1$[30],RS2$[30],RS3$[18],RS4$[50],b4k$[2],nsuda$[120]
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],e$[500]
+Dim WebStr$[400],rstr$[500],tmp$[100],msg$[100],Message$[100]
+! COID = Int((Spc(5) - Int(Spc(5) / 16384) * 16384) / 64)
+Mat Read #1,19,50;P9$;
+Mat Read #1,60,50;P60$; \ Mat Read #1,61,0;P61$;
+mat read #1,115,60;custom_customer$; ! ALT
+custom_customer$=RTrim$(UCase$(custom_customer$))
+CH_SORT = 0 ! FLEPTR[0,0] (CANNOT USE AS NO WAY TO KEEP OPEN!)
+intco=fleptr[0,1];COID=IntCo
+ch_ctrl=1 ! as it's used as #1 above
+Warn$="OK - LINE COPIED" ! default= ok
+ErrFlag=0 ! default=ok
+OPENFILES: Rem open files needed
+CHNL = 99
+If Not(FLEPTR[13,0]) ! invoice history
+  ! Gosub GETCHAN
+  CH_INVH = findchannel() ! CHNL
+  Read #1,88,1136;J5$[1,16]; \ Ropen #CH_INVH,J5$
+Else 
+  CH_INVH = FLEPTR[13,0]
+End If 
+If Not(FLEPTR[14,0])
+  ! Gosub GETCHAN
+  CH_INVL = findchannel() ! CHNL
+  Read #1,88,1184;J5$[1,16]; \ Ropen #CH_INVL,J5$
+Else 
+  CH_INVL = FLEPTR[14,0]
+End If 
+CH_INVNS=findchannel()
+J5$="4/SPRDDESCH"+Str$(COID) \ ROpen #ch_invns,J5$ ! #34
+CH_HIST_SN = findchannel() ! CHNL
+Read #1,88,2960;J5$[1,16]; \ Ropen #CH_HIST_SN,J5$
+CH_SN = findchannel() ! CHNL
+Read #1,88,416;J5$[1,16]; \ Open #CH_SN,J5$
+CH_ORD_SN = findchannel() ! CHNL
+Read #1,88,2944;J5$[1,16]; \ Open #CH_ORD_SN,J5$
+If Not(FLEPTR[11,0])
+  CH_ROL = findchannel() ! CHNL
+  Read #1,88,1888;J5$[1,16]; \ Open #CH_ROL,J5$
+Else 
+  CH_ROL = FLEPTR[11,0]
+End If 
+If Not(FLEPTR[12,0])
+  CH_PRODDESC = findchannel() ! CHNL
+  Read #1,88,2128;J5$[1,16]; \ Open #CH_PRODDESC,J5$
+Else 
+  CH_PRODDESC = FLEPTR[12,0]
+End If 
+If Not(FLEPTR[7,0])
+  CH_CCODE = findchannel() ! CHNL
+  Read #1,88,1728;J5$[1,16]; \ Ropen #CH_CCODE,J5$
+Else 
+  CH_CCODE = FLEPTR[7,0]
+End If 
+If Not(FLEPTR[15,0])
+  CH_ROH = findchannel() ! CHNL
+  Read #1,88,1840;J5$[1,16] \ Open #CH_ROH,J5$
+Else 
+  CH_ROH = FLEPTR[15,0]
+End If 
+Rem "check history for it
+K1$ = INVNUM Using "30##########"
+Search #CH_INVH,2,1;K1$,REC_INVH,E \ If E > 1 Gosub ERR_SEARCH
+If E
+  WARN$ = "INVOICE NOT FOUND IN HISTORY" \ Goto WARN
+End If 
+Mat read #ch_invh,rec_invh,104;H5; ! need for later
+CMQTY = 0
+!If CH_SORT ! this is passed to serpordl (qty left to credit!)
+!  Mat Read #CH_INVH,REC_INVH,0;H0;
+!  X2 = H0[8] \ Gosub YMD2JUL \ X2 = 0
+!  JODATE = X2
+!  KEYSORT$ = " ",KEYSORT$
+!  KEYSORT$[1,6] = JODATE Using "######"
+!  KEYSORT$[7,16] = INVNUM Using "##########"
+!  KEYSORT$[18,18] = "I"
+!  KEYSORT$[19,21] = INVLN Using "###"
+!  KEYSORT$[22,33] = REC_INVH Using "############"
+!SRCHSORT: Rem find cmqty
+!  Search #CH_SORT,6,1;KEYSORT$,REC_INVL,E \ If E = 2 Goto ENDCMQTY
+!  If E > 1 Gosub ERR_SEARCH
+!  X = KEYSORT$[7,16] \ If X <> INVNUM Goto ENDCMQTY
+!  If KEYSORT$[18,18] = "I" Goto SRCHSORT
+!  R1 = KEYSORT$[22,33]
+!  Mat Read #CH_INVH,R1,52;H3; \ If H3[1] = 3 Goto SRCHSORT
+!  Mat Read #CH_INVH,R1,0;H0; \ If H0 <> 31 Goto SRCHSORT
+!  Mat Read #CH_INVL,REC_INVL,168;L7;
+!  CMQTY = CMQTY + L7[4]
+!  Goto SRCHSORT
+!ENDCMQTY: Rem end of getting credit memo qty
+!End If 
+K1$ = " ",K1$;K1$ = INVNUM Using "##########"
+K1$[11,13] = INVLN Using "###"
+Search #CH_INVL,2,1;K1$,REC_INVL,E \ If E > 1 Gosub ERR_SEARCH
+If E
+  WARN$ = "LINE DOESN'T EXIST ON INVOICE" \ Goto WARN
+End If 
+Mat Read #CH_INVL,REC_INVL,0;L2;
+Mat Read #CH_INVL,REC_INVL,8;L3;
+Mat Read #CH_INVL,REC_INVL,16;L4;
+Mat Read #CH_INVL,REC_INVL,32;L5;
+Mat Read #CH_INVL,REC_INVL,56;L6;
+Mat Read #CH_INVL,REC_INVL,80;L6$;
+Mat Read #CH_INVL,REC_INVL,140;L1$;
+Mat Read #CH_INVL,REC_INVL,160;L9;
+Mat Read #CH_INVL,REC_INVL,168;L7;
+Mat Read #CH_INVL,REC_INVL,246;PL;
+Mat Read #CH_INVL,REC_INVL,250;UN;
+Mat Read #CH_INVL,REC_INVL,256;S2;
+Mat Read #CH_INVL,REC_INVL,260;S3;
+Mat Read #CH_INVL,REC_INVL,368;MT$;
+Mat Read #CH_INVL,REC_INVL,370;S3$;
+Mat Read #CH_INVL,REC_INVL,403;POFLAG$;
+Mat Read #CH_INVL,REC_INVL,404;OLM;
+Mat Read #CH_INVL,REC_INVL,446;EUN;
+Mat Read #CH_INVL,REC_INVL,452;UNF;
+Mat Read #CH_INVL,REC_INVL,494;LCO;
+Mat Read #CH_INVL,REC_INVL,502;CST;
+Mat Read #CH_INVL,REC_INVL,508;LTAX1;
+Mat Read #CH_INVL,REC_INVL,514;CTWT;
+Mat Read #CH_INVL,REC_INVL,538;LTAX2;
+Mat Read #CH_INVL,REC_INVL,542;QPB;
+Mat Read #CH_INVL,REC_INVL,548;LPRINTED;
+Mat Read #CH_INVL,REC_INVL,550;OWHS;
+Mat Read #CH_INVL,REC_INVL,552;LP_DATE;
+Mat Read #CH_INVL,REC_INVL,556;LP_TIME;
+Mat Read #CH_INVL,REC_INVL,564;ROL0;
+If L3[0] And S2[0] = 3 Goto CREATELN
+If L7[4] = 0 And J1 > 0
+  WARN$ = "LINE IS BACKORDERED..COULD NOT COPY"
+  Goto WARN
+End If 
+If L7[4] = 0 And S2[0] <> 3
+  WARN$ = "No Quantity was shipped on this line"
+  Goto WARN
+End If 
+!If CMQTY ! always zero
+  If CQty<=0 ! (L7[4] - CMQTY) <= 0
+    WARN$ = "Credit has already been applied"
+    Goto WARN
+  End If 
+!End If 
+If P60$[24,24] = "Y" Let OLM[4] = OLM[5]
+CREATELN: K3$ = " ",K3$ \ K3$[1,6] = CMNUM Using "######"
+K3$[7,9] = CMLN Using "###"
+Search #CH_ROL,2,1;K3$,REC_ROL,E \ If E > 1 Gosub ERR_SEARCH
+If Not(E)
+  WARN$ = "LINE ALREADY EXISTS ON CREDIT MEMO"
+  Goto WARN
+End If 
+L7[4] = CQty ! L7[4] - CMQTY
+If Fra(L7[4]) Goto BROKENBASE
+E = 2 \ Search #CH_ROL,1,0;K3$,REC_ROL,E \ If E Gosub ERR_SEARCH
+L2[0] = 12;L2[1] = CMNUM
+L3[2] = CMLN
+L7[0] = 0 \ L7[1] = 0 \ L7[3] = 0
+L7[2] = L7[4]
+L4[3] = CMWHSE
+If P61$[46,46] = "Y" If CMTYPE = 3 !"cct156742
+  L5[1] = 0;S3[1] = 0;LCO[0] = 0;LCO[1] = 0;CST = 0
+  S3[12] = 0;S3[13] = 0;ROL0 = 0
+End If 
+If CMTYPE = 3 Let L3[1] = 0
+POFLAG$ = " ",POFLAG$
+QPB = 0;LPRINTED = 0;OWHS = 0;LP_DATE = 0;LP_TIME = 0
+If L1$[14,16] = "KIT" Let KITCOPY = KITCOPY + 1
+L1$[14,16]="   " ! always rem out kit flag
+Mat Write #CH_ROL,REC_ROL,0;L2
+Mat Write #CH_ROL,REC_ROL,8;L3
+Mat Write #CH_ROL,REC_ROL,16;L4
+Mat Write #CH_ROL,REC_ROL,32;L5
+Mat Write #CH_ROL,REC_ROL,56;L6
+Mat Write #CH_ROL,REC_ROL,80;L6$
+Mat Write #CH_ROL,REC_ROL,140;L1$
+Mat Write #CH_ROL,REC_ROL,160;L9
+Mat Write #CH_ROL,REC_ROL,168;L7
+Mat Write #CH_ROL,REC_ROL,246;PL
+Mat Write #CH_ROL,REC_ROL,250;UN
+Mat Write #CH_ROL,REC_ROL,256;S2
+Mat Write #CH_ROL,REC_ROL,260;S3
+Mat Write #CH_ROL,REC_ROL,368;MT$
+Mat Write #CH_ROL,REC_ROL,370;S3$
+Mat Write #CH_ROL,REC_ROL,403;POFLAG$
+Mat Write #CH_ROL,REC_ROL,404;OLM
+Mat Write #CH_ROL,REC_ROL,446;EUN
+Mat Write #CH_ROL,REC_ROL,452;UNF
+Mat Write #CH_ROL,REC_ROL,494;LCO
+Mat Write #CH_ROL,REC_ROL,502;CST
+Mat Write #CH_ROL,REC_ROL,508;LTAX1
+Mat Write #CH_ROL,REC_ROL,514;CTWT
+Mat Write #CH_ROL,REC_ROL,538;LTAX2
+Mat Write #CH_ROL,REC_ROL,542;QPB
+Mat Write #CH_ROL,REC_ROL,548;LPRINTED
+Mat Write #CH_ROL,REC_ROL,550;OWHS
+Mat Write #CH_ROL,REC_ROL,552;LP_DATE
+Mat Write #CH_ROL,REC_ROL,556;LP_TIME
+Mat Write #CH_ROL,REC_ROL,564;ROL0;
+
+Search #CH_ROL,4,1;K3$,REC_ROL,E \ If E Gosub ERR_SEARCH
+If Not(L3[0]) ! SKIP DIR 2 ON NON STOCK AND MESG LINE
+  K3$ = " ",K3$;K3$[1,6] = L4[0] Using "######"
+  K3$[7,12] = CMNUM Using "######"
+  K3$[13,15] = CMLN Using "###"
+  Search #CH_ROL,4,2;K3$,REC_ROL,E \ If E Gosub ERR_SEARCH
+End If 
+If Not(L3[0]) Goto ENDCOPY
+If S2[0] = 3 Goto ENDCOPY
+If (CMORDTYPE = 21 Or CMORDTYPE = 22) And L3[2] <= 0 Goto ENDCOPY
+!now got non-stock in history!!
+		k3$=" ",k3$;k3$=k1$ ! same key as inv line
+		Search #ch_invns,2,1;k3$,r[34],e \ if e>1 Gosub ERR_SEARCH
+		if e ! not found - pre-upgrade?
+			LET RS3[0]=0;RS3[1]=0;RS3[2]=0;RS4$=" ",RS4$ ! BUYER AND HAZ - USE INV HIST
+			LET NSINVNO=0;NSFRT[2]=0
+			LET NSUDA$=" ",NSUDA$;B4K$="  " ! NEW UDA - USE INV HIST
+		Else 
+			! redo order vars - only need the nonstk file only data
+			MAT READ #ch_invns,r[34],120;RS3;
+			MAT READ #ch_invns,r[34],132;RS4$;
+			MAT READ #ch_invns,r[34],190;NSFRT;
+			MAT READ #ch_invns,r[34],208;NSUDA$;
+		Endif
+RS1[0] = CMNUM
+RS1[1] = L3[2]
+RS1[2] = REC_ROL
+RS1$ = L6$[1,30]
+RS2$ = L6$[31,60]
+RS2[0] = L3[3]
+RS2[1] = L7[4]
+RS2[2] = L5[1]
+RS2[3] = L5[2]
+RS2[4] = L5[3]
+!RS3[0] = 0;RS3[1] = 0;RS3[2] = 0;RS4$ = " ",RS4$
+!nsinvno=0;nsfrt[0]=0;nsfrt[1]=0;nsfrt[2]=0
+!b4k$="  ";nsuda$=" ",nsuda$
+nsinvno=0;b4k$="  " ! always clear
+K2$ = " ",K2$ \ K2$[1,6] = CMNUM Using "######"
+K2$[7,9] = CMLN Using "###"
+E = 2 \ Search #CH_PRODDESC,1,0;K2$,REC_PRODDESC,E \ If E Gosub ERR_SEARCH
+CNVTU[0] = 0;CNVTU[1] = UN[0];CNVTU[2] = 5;CNVTA = RS2[1] \ Gosub L_20000 \ RS2[1] = AMOUNT
+CNVTU[2] = 2;CNVTA = RS2[2] \ Gosub L_20000 \ RS2[2] = AMOUNT
+CNVTA = RS2[3] \ Gosub L_20000 \ RS2[3] = AMOUNT
+Mat Write #CH_PRODDESC,REC_PRODDESC,0;RS1;
+Mat Write #CH_PRODDESC,REC_PRODDESC,12;RS1$;
+Mat Write #CH_PRODDESC,REC_PRODDESC,42;RS2$;
+RS2[1] = - RS2[1];RS2[2] = - RS2[2];RS2[3] = - RS2[3];RS2[4] = - RS2[4]
+Mat Write #CH_PRODDESC,REC_PRODDESC,72;RS2;
+RS3$[1,12] = L1$[1,12]
+RS3$[13,16] = L1$[17,20]
+Write #CH_PRODDESC,REC_PRODDESC,102;RS3$;
+Mat Write #CH_PRODDESC,REC_PRODDESC,120;RS3;
+Mat Write #CH_PRODDESC,REC_PRODDESC,132;RS4$;
+MAT WRITE #CH_PRODDESC,REC_PRODDESC,182;NSINVNO;
+MAT WRITE #CH_PRODDESC,REC_PRODDESC,188;B4K$;
+MAT WRITE #CH_PRODDESC,REC_PRODDESC,190;NSFRT;
+MAT WRITE #CH_PRODDESC,REC_PRODDESC,208;NSUDA$;
+!x$=" ",x$
+!mat write #ch_proddesc,rec_proddesc,188;x$; ! spaces needed
+Search #CH_PRODDESC,4,1;K2$,REC_PRODDESC,E \ If E Gosub ERR_SEARCH
+L4[0] = REC_PRODDESC
+Write #CH_ROL,REC_ROL,16;L4[0];
+ENDCOPY: Rem "
+! done - rest of line files
+Gosub COPY_SN
+gosub copy_Tagfile
+If KITCOPY > 0
+  Warn$="WARNING!! THE INVOICE COPIED HAS "
+  ! Print @9,6;
+  If KITCOPY = 1 Warn$=Warn$+"A SINGLE KIT LINE"
+  If KITCOPY > 1 Warn$=Warn$+Str$(KITCOPY)+" KIT LINES"
+  !Print ".  IF INVENTORY IS TO BE RETURNED,"
+  !Print @9,7;"PLEASE BE AWARE THE KIT BILL OF MATERIAL SEQUENCE"
+  Warn$=Warn$+" KIT BOM LINES ARE NOT COPIED." !   THERE ARE SEVERAL REASONS FOR"
+  !Print @9,9;"THIS.  FOR EXAMPLE, UNLESS YOU DISASSEMBLE THE KIT,"
+  !Print @9,10;"(WHICH WOULD NOT BE POSSIBLE FOR CHEMICALS) IT"
+  !Print @9,11;"WOULD NOT BE CORRECT TO HAVE THE SEQUENCE LINES."
+  !Print @9,12;"PLEASE SEE THE PERSON THAT DOES KITS FOR GUIDANCE"
+  !Print @9,13;"ON HOW TO PROCEED."
+  !Print @9,14;"PRESS <CR> TO CONTINUE";
+  !Input ""J1$
+End If 
+KEYROH$[1,6] = CUSTNUM Using "######"
+KEYROH$[7,12] = CMNUM Using "######"
+Search #CH_ROH,2,2;KEYROH$,REC_ROH,E \ If E Gosub ERR_SEARCH
+Mat Read #CH_ROH,REC_ROH,0;H0
+Mat Read #CH_ROH,REC_ROH,512;OREF;
+If OREF[1] = H0[7] ! set if still = order #
+  OREF[1] = INVNUM
+End If 
+If custom_customer$<>"SOUTHJERSEY" ! do not change ref #
+	Mat Write #CH_ROH,REC_ROH,512;OREF;
+Endif
+If L3[0]=0 and L3[1]=1 ! it's a product - credits need allocations
+	whi=0
+	Call ChkWhRasl(e$,intco,ch_ctrl,WHI,L4[3],RASL[])
+	if rasl[0]=0 ! not rasl
+		CH[0]=CH_ROH;Rec[0]=REC_ROH
+		CH[1]=CH_ROL;Rec[1]=REC_ROL
+		CH[2]=0;rasl=0     ! no sordlot/rasl            
+		CH[3]=0;atype=1 ! no sprodlot/type = credit
+		if fleptr[4,0]>0 let ch[2]=fleptr[4,0]
+		if fleptr[5,0]>0 let ch[3]=fleptr[5,0]
+		Call Allocordlot(e$,intCo,AType,Ch[],Rec[],Rasl,Status)
+		!call programdump("tmp/cmcpinv2!","")
+		E$=""
+		if H5[7]=8 or H5[7]=16 ! needs the "to" whse set (just in case)
+			Clear CH[] ! files MUST BE OPEN!!
+			if fleptr[1,0]>0
+				let ch_prod=fleptr[1,0]
+			else
+				ch_prod=Openfile(1792,intco) \ if ch_prod=-1 Error 42 ! prodfile
+			endif
+			if fleptr[4,0]>0
+				let sltc=fleptr[4,0]
+			Else
+				SLTC=OpenFile(2320,intCo) \ If SLTC = -1 Error 42 !ordlot
+			endif
+			if fleptr[5,0]>0
+				let pltc=fleptr[5,0]
+			Else
+				PLTC=OpenFile(2528,intCo) \ If PLTC = -1 Error 42 !sprodlot
+			endif
+			CH[0]=Ch_prod;CH[1]=ch_roh;CH[2]=ch_rol
+			CH[3]=SLTC;CH[4]=PLTC
+			clear REC[] ! used like s9[]
+			REC[2]=Rec_roh \ if credit let REC[3]=4
+			call "mx201lcon5.dl4",intco,Ch_ctrl,REC[],CH[] ! do to whse
+			if fleptr[1,0]<=0 try close #ch_prod Else Rem
+			if fleptr[4,0]<=0 try close #SLTC Else Rem
+			if fleptr[5,0]<=0 try close #Pltc Else Rem
+		Endif
+	Else ! is rasl!
+		clear rec[] ! used like s9[]
+		Rec[2]=Rec_roh;Rec[3]=4;Rec[4]=243 ! determine program #?
+		Rec[12]=REC_ROL ! PASS THE LINE JUST UPDATED (new single line mxrasl5)?
+		if fleptr[1,0]>0
+			let ch_prod=fleptr[1,0]
+		else
+			ch_prod=Openfile(1792,intco) \ if ch_prod=-1 Error 42 ! prodfile
+		endif
+		if fleptr[4,0]>0
+			let sltc=fleptr[4,0]
+		Else
+			SLTC=OpenFile(2320,intCo) \ If SLTC = -1 Error 42 !ordlot
+		endif
+		if fleptr[5,0]>0
+			let pltc=fleptr[5,0]
+		Else
+			PLTC=OpenFile(2528,intCo) \ If PLTC = -1 Error 42 !sprodlot
+		endif
+		FChan[0]=1;FChan[1]=Ch_prod;FCHan[2]=ch_roh;FChan[3]=ch_rol
+		FChan[4]=0;FChan[5]=CH_CCODE;FChan[6]=PLTC;FChan[7]=0
+		FChan[8]=SLTC;FChan[9]=0
+		! Call dxsave(0,"/tmp/jcs.txt!")
+		Call "MXRASL5.DL4",intco,Ch_ctrl,Rec[],FChan[]
+		if fleptr[4,0]<=0 try close #SLTC Else Rem
+		if fleptr[5,0]<=0 try close #PLTC Else Rem
+		if fleptr[1,0]<=0 try close #ch_prod Else Rem
+	Endif ! rasl 0 / 1
+Endif
+Goto OutEnd
+WARN: Rem
+!Window Open @5,8; Size 44,5; Using "WARNING !!!"
+WARNTHEM: Rem
+!Print 'CS';
+!Print @1,0;WARN$;
+!Print @1,1;"Cannot Copy this Line";
+Warn$=Warn$+" Cannot Copy this Line"
+!Print @1,2;"    <CR>: continue    ";
+!Input ""J4$
+!Call String(1,J4$)
+ERRFLAG = 99
+! Window Close 
+Goto OUTEND
+BROKENBASE: Rem "Display message that this line contains broken base units.
+UNIT$ = "Err "
+If UN[0] = -1 Let UNIT$ = "CWT "
+If UN[0] = -2 Let UNIT$ = "LOT "
+If UN[0] = -3 Let UNIT$ = "LB  "
+If UN[0] > 0
+  Mat Read #CH_CCODE,UN[0],10;UNIT$;
+End If 
+!Window Open @1,10; Size 78,10; Using "BROKEN BASE UNIT"
+Warn$="This line contains a reference to a broken base unit"
+!Print @1,3;"Line #";L3[2]; \ J$ = L1$ To " " \ J5$ = L6$[1,24] To " "
+!Print Using "----#.#";L7[4];" ";UNIT$;" ";J$;" ";J5$;
+!Print Using " $$$#.##"; Tab (58);L5[2]; \ Print Using " $$$$$#.##";L5[3];
+!Print @1,5;"This line will NOT be copied. It must be entered manually.";
+!Input @27,7;"Press <CR> to continue ";J$
+!Window Close 
+ERRFLAG = 99
+Goto Warn ! OUTEND
+COPY_SN: Rem copy the lines serial number info (if any)
+K2$ = K1$
+SN_HIST_LOOP: Search #CH_HIST_SN,3,1;K2$,REC_HIST_SN,E
+If E = 2 Goto COPY_SN_OUT
+If E Gosub ERR_SEARCH
+If K2$[1,13] = K1$[1,13] !  found something
+  Mat Read #CH_HIST_SN,REC_HIST_SN,0;SNH$
+  Mat Read #CH_HIST_SN,REC_HIST_SN,54;SNH
+  Mat Read #CH_HIST_SN,REC_HIST_SN,62;SNH1;
+  RS4$ = " ",RS4$ ! reusing NS variable!?
+  RS4$ = SNH$[25,54]
+  Search #CH_SN,3,1;RS4$,REC_SN,E
+  If E > 2 Gosub ERR_SEARCH
+  If Not(E) And RS4$[1,30] = SNH$[25,54] ! serial number looking good so far
+    Mat Read #CH_SN,REC_SN,0;RS2$[1,24]
+    Mat Read #CH_SN,REC_SN,290;SN1
+    Mat Read #CH_SN,REC_SN,298;SN2
+    If RS2$[1,12] = SNH$[1,12] And SN1[2] = 1 And SN2[3] = CMNUM
+      RS4$ = " ",RS4$
+      E = 2 \ Search #CH_ORD_SN,1,0;RS4$,REC_ORD_SN,E
+      If E Gosub ERR_SEARCH
+      SNH[0] = CMNUM \ SNH[1] = REC_SN \ SNH1 = 1
+      Mat Write #CH_ORD_SN,REC_ORD_SN,0;SNH$
+      Mat Write #CH_ORD_SN,REC_ORD_SN,54;SNH
+      Mat Write #CH_ORD_SN,REC_ORD_SN,62;SNH1;
+      RS4$ = " ",RS4$
+      RS4$[1,6] = CMNUM Using "######"
+      RS4$[7,9] = L3[2] Using "###"
+      RS4$[10,39] = SNH$[25,54]
+      Search #CH_ORD_SN,4,1;RS4$,REC_ORD_SN,E
+      If E Gosub ERR_SEARCH
+      RS4$ = " ",RS4$
+      RS4$[1,30] = SNH$[25,54]
+      RS4$[31,36] = L4[0] Using "######"
+      Search #CH_ORD_SN,4,2;RS4$,REC_ORD_SN,E
+      If E Gosub ERR_SEARCH
+      SN1[2] = 5
+      Mat Write #CH_SN,REC_SN,290;SN1;
+    End If 
+    Unlock #CH_SN
+  End If 
+  Goto SN_HIST_LOOP
+End If 
+COPY_SN_OUT: Return
+copy_tagfile: ! copy zline tag file
+call dxget("S_ORG.APPID",tmp$) \ intco=tmp$
+ITc = openfile(-9939,intco) \ if ITC=-1 Return ! no file - no copy
+RTC= OpenFile(9950,IntCo)
+if RTC=-1 ! no file
+	Try Close #ITC Else Rem ! close ordtag before exit
+	RETURN ! no file - no copy
+Endif
+chanfrom=0-ITC;chanto=RTC;ordfrom=INVNum;linefrom=InvLn
+ordto=CMNum;lineto=l3[2]
+Call "mxordtagcp.dl4",chanfrom,chanto,ordfrom,linefrom,ordto,lineto,L2[0],IntCo
+Try Close #RTC Else Rem
+Try Close #ITC Else Rem
+Return
+YMD2JUL: Rem  REM  CONVERT YYMMDD TO JULIAN (RETURN=NOGOOD, +1=OKAY)
+X$ = X2 Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Return 
+X2 = X$[1,5]
+Return 1
+L_20000: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)
+If CNVTU[2] = 3 Goto L_20050
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[2] = 0 Goto L_20050
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+L_20050: !
+L_20120: Rem "====== unibasic 5+ logic
+Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+If CNVTU[2] = 0 Goto L_20160
+If FLAG Let E = FLAG \ Gosub ERR_SEARCH
+AMOUNT = CNVTA
+L_20160: Return 
+A[6] = L6[4];A[5] = UNF[5] \ If Not(A[5]) Let A[5] = 1;UNF[5] = 1
+PFU1[0] = EUN[0];PFU1[1] = UN[0]
+PFU1[2] = UN[1];PFU1[3] = UN[2]
+PFU1[4] = EUN[1]
+PFU1[5] = 0;PFU1[6] = 0;PFU1[7] = 0
+PFU1[8] = UN[0];PFU1[9] = UN[0];PFU1[10] = EUN[1]
+PFU1[11] = UN[2];PFU1[12] = UN[1]
+If Not(L3[0]) Goto L_30060
+PFU1[13] = UN[0];PFU1[16] = EUN[0];PFU1[17] = EUN[0]
+PFU1[18] = UN[0];PFU1[19] = UN[0]
+L_30060: PFU2[0] = UNF[0];PFU2[1] = UNF[1]
+PFU2[2] = UNF[2];PFU2[3] = UNF[3]
+PFU2[4] = 0;PFU2[5] = 0;PFU2[6] = 0
+For X1 = 1 To 4
+  For X2 = 0 To X1 - 1
+    If PFU1[X1] = PFU1[X2] Let PFU1[X1] = 0;PFU2[X1 - 1] = 0
+  Next X2
+Next X1
+Return 
+ERR_SEARCH: Rem
+ENUM = E ;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+Msc$(4)
+E$=msg$
+Call programdump("tmp/mxcplinese!","")
+system "echo ''" + msc$(0)+" "+ Msg$ + "'' >> files/1/erp.errlog"
+goto err_msg ! Error 10000
+Return ! End
+ERR_MSG: ! send message
+ReturnStatus=0 ! no good
+Message$=E$
+	  call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  call SetOutPut(e$,rstr$)
+End
+OUTEND: Rem end of program
+!If Err 0 Rem
+If Not(FLEPTR[13,0]) try Close #CH_INVH Else rem
+If Not(FLEPTR[14,0]) try Close #CH_INVL Else rem
+try Close #ch_InvNS else Rem
+try Close #CH_HIST_SN Else rem
+try Close #CH_SN Else rem
+try Close #CH_ORD_SN Else rem
+If Not(FLEPTR[11,0]) try Close #CH_ROL Else rem
+If Not(FLEPTR[12,0]) try Close #CH_PRODDESC Else rem
+If Not(FLEPTR[7,0]) try Close #CH_CCODE Else rem
+!If Err 0 Gosub ERR_TRAP
+!End 
+!Stop 
+Rem {begin rtn.error.s}
+Else
+ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+!
+include "src/callsuberr.inc"
+end try
+End ! the whole program
+Rem {end rtn.error.s}

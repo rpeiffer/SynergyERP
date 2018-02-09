@@ -1,0 +1,985 @@
+!
+!  Program 692_cc
+!
+! description  Physical Book -- Tag Assign for Cycle Count (Inventory Class Assignment)
+!    Based on 692t2 - Tag assign by location
+!
+! loadsave -w -n 100,10 -o prog/dxport/692_cc.dl4 src/692_cc.src
+!
+include "src/copyright.inc"
+
+
+Declare Intrinsic Sub FindF,InpBuf,String,Time,MiscStr
+Declare Intrinsic Sub dxopen,dxget,dxset,dxclose,dxsave,getglobals
+!Option Default Dialect IRIS1
+Declare Intrinsic Sub DateToJulian
+Declare Intrinsic sub programdump,env
+Declare Intrinsic function findchannel
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Function getmsg$,expandarray
+Declare External Sub ERPCronSuccess
+Declare External Function GetParameter$
+
+External Lib "ubsfunc.dl4"
+Declare External Function getuidrec,getuidinfo$,buildsort,openfile
+
+! local subroutines
+Declare Sub OpenFilesReadControl,GetParameters,GetProdWhInfo
+Declare Sub ProcessOrPrintLocations,GetSprodlotNonRASL,GetSprodlotRASL
+Declare Sub AddPhysLotTag,SortByLocation,PrintLine,PrintBarcode
+Declare Sub PrintHeadings,GetVendor,ChangeSortKey,ProcessAllWarehouses
+Declare Sub ProcessWarehouse,GetLotCode,DetermineProductsToPrint
+Declare Sub OpenPrinter
+
+include "src/inc/filewhinfo.inc"
+
+Try
+Dim fname$[50],groupid$[1],filename$[50]
+Dim DEV$[20],HM$[30],nextblockid$[8],Message$[600],WebStr$[600]
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp$[2000],tmp1$[200],blockid$[100],rstr$[2000]
+Dim action$[30],options$[30],userid$[8],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+dim j$[40],K98$[50]
+dim blank$[100]
+
+Dim P$[156],P0$[66],LOT$[12],LOCMASK$[6],custom_customer$[30]
+dim 1%,countWeek,prodCountWeek,invClass2,sw[20],msgPri
+dim countDays$[7],msgMsg$[60]
+Dim 1%,EVEN[1],RASL[5],w0[3],erpCron
+dim 2%,A3,B[24],WH
+Dim 3%,A[33],A2[7],R8,R[99],PWGT,w3[24]
+Dim K10$[20],TIER$[2],PR$[1],1%,PRIM,WL1[2],WLA[7],2%,BIN
+Dim SUNIT$[4],V$[30],U5$[50],W2$[20],BUNIT$[4],K8$[50],CK8$[50],K7$[50]
+Dim I$[30],P1$[26],P2$[28],PL$[30],F$[60],FILE$[60],K11$[40],L11$[5],P61$[256]
+Dim J$[40],CNAME$[30],J2$[20],J3$[40],J4$[40],ARDATE$[8],P9$[50],WH$[30]
+Dim 1%,PFU1[10],F,X1,2%,X2,3%,J,X3,T9[20]
+Dim 3%,PFU2[6],P1[2]
+Dim 3%,REC_PRODGRP,PRODGRP$[3],WHMISC2[7]
+Dim c$[20],prid$[2],BARCODE$[20],LBARCODE$[20]
+
+Rem {begin src/inc/dim.prodgrp.i}
+Dim PGDESC$[30]
+Dim 1%,PGOT[38],PGPO[6],PG1[3]
+Rem {end dim.prodgrp.i}
+Dim K1$[50],K2$[20],K3$[20],K4$[5],X$[10],T9$[26],A1$[50],A2$[50],V4$[50]
+Dim 2%,W2[9],LOC$[30],PLOC$[30],LINE_$[131],K5$[50],PA2$[30],VUNIT$[4]
+Dim 2%,W7[14],3%
+
+Dim msg$[250],pdffilename$[100]
+DIM 1%,DCSPRTRTYPE,DCSP1[4],DCS,goodStatus                                         
+DIM DCSP1$[10],DCSSCR$[300],DCSX$[20]                                   
+DIM DCSFNAME$[50],DCSLINEIN$[100],DCSPRNTNAME$[100]
+dim DCSScript$[100],DCSPrinter$[50],DCSPDFPrinter$[50]
+dim DCSEmailPrinter$[50],DCSFaxPrinter$[50],DefaultEmailFrom$[48]
+dim DefaultFaxCompany$[50],DefaultFaxTime$[5]
+
+dim whinfo. as whinfo
+
+DIM 3% 
+
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+let blank$=" ",blank$
+LINE_$ = "_",LINE_$
+
+DCSScript$="$/usr/ub/sys/fax"		! script to process DCS output
+					! be sure to include beginning "$"
+DCSPrinter$="std_erp692"		! regular po printer
+DCSPDFPrinter$="std_erp692pdf"		! pdf printer
+
+call OpenFilesReadControl()
+call GetParameters()
+if eflag goto OutEnd:
+if not(printingToday) 
+	! normal if run from cron, not normal otherwise
+	! run as a dialy job - might be normal.
+	if not(erpCron) eflag = eflag + 1
+	message$ = "Nothing scheduled to print for selected day"
+	goto OutEnd
+end if
+j8 = 0
+try
+	N = Chf(0)
+else
+	Let J8 = Spc(8)
+end try
+if j8 and J8 <> 49 error j8
+If J8 = 0 !if pdf or print, new method, after edits,setouput,dxclose
+	If prid$ = "P" and dcsflag      !"pdf for dcs format  
+		Call env(2,"PDF",pdffilename$)            
+	End If                                                   
+	Call setoutput(e$,rstr$,2) !2 flag puts 0 status section in w/print in process msg, puts </page> in
+End If
+
+call DetermineProductsToPrint()
+call ProcessAllWarehouses()
+
+OUTEND: Rem "done
+let returnstatus=0
+If Eflag>0
+	ReturnStatus=1 ! ALWAYS - OTHERWISE NO DISPLAY 1=issues
+	tmp$=""
+else
+	if printingToday
+		mat read #1,70,186;countDays$
+		countDays$[dayToPrint,dayToPrint] = "X"
+		mat write #1,70,186;countDays$;
+		let message$="Process Complete"
+		msgPri = 1
+		msgMsg$ = "WARNING! Cycle Count in Process!"+blank$
+		mat write #1,115,162;msgPri;
+		mat write #1,115,164;msgMsg$;
+	end if
+endif
+if j8 or EFlag
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+end if
+if Eflag<1 call ERPCronSuccess()
+	
+ELSE ! main try
+	include "src/callmainerrnet.inc"
+end try
+End ! the whole program
+
+!-----------------------------------------------------------------
+! S U B R O U T I N E   S E C T I O N
+!-----------------------------------------------------------------
+sub OpenFilesReadControl()
+try
+	! need to re-open control file in RW mode
+	try close #1 else rem
+	C$ = "CNTRL/cntrl" + Str$(intCO)              
+	Open #1,C$                                   
+	For J = 2 To 11
+		Read J1 \ If J1 = -1 Goto L_830
+		Read #1,88,Abs(J1);J$;
+		If J1 <= 0 Ropen #J,J$ Else Open #J,J$
+	L_830: Next J
+	Data "-1792","-1728","-2400","-1744","-208","704","-2528","-1","-2736","-2288"
+	Mat Read #1,0,100;ARDATE$;
+	F$ = intCO Using "2/prodgrp#"
+	CH_PRODGRP = 13
+	Ropen #CH_PRODGRP,F$
+	if erpCron ! no sort file automatically built
+		ch_sort = buildsort(e$,25,0,9) \ if ch_sort <> 9 error 42
+	else
+		ch_sort = 9
+	end if
+	ch_commexc = buildsort(e$,25,0) \ if ch_sort < 0 error 42
+	ch_whinfo = OpenFile(-2768) \ if ch_whinfo<0 error 42
+
+	Read #1,3;CNAME$;
+	Mat Read #1,19,50;P9$;
+	Mat Read #1,61,0;P61$;
+
+	mat read #1,70,184;countWeek
+	mat read #1,70,186;countDays$
+	! make sure everthing is in proper shape
+	countDays$ = ucase$(countDays$)
+	for i = 1 to 7
+		if countDays$[i,i] <> "Y" and countDays$[i,i] <> "X" countDays$[i,i] = "N"
+	next i
+	mat write #1,70,186;countDays$;
+	if countWeek = 0 !un-initialized
+		countWeek = 1
+		mat write #1,70,184;countWeek
+	end if
+	mat read #1,115,60;custom_customer$;
+	custom_customer$=UCASE$(TRIM$(custom_customer$))
+	LET dcsflag=0
+	! If custom_customer$ = "MAYFIELD" let dcsflag=1
+	sw[0] = 0 ! print overflow locations non-rasl
+	! taking out of development as we may need to run to disk
+	! If custom_customer$ = "UBS" let dcsflag=1
+	if prid$ = "D" let dcsflag = 0
+	pdffilename$ = RTrim$(userid$),Tim(5) Using "phinv&&&&&&.pdf"  
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetParameters()
+try
+	message$ = ""
+	eflag = 0
+	prid$ = ucase$(GetParameter$("PRINTER")) \ defaultPrinter=prid$
+	blockid$ = rtrim$(GetParameter$("BLOCKID"))
+	let barflag = 0
+	tmp$ = ucase$(GetParameter$("BARCODE"))
+	if erpCron
+		if tmp$ = "Y" barflag = 1
+	else
+		BARFLAG = tmp$     ! 0=no, 1=yes
+	end if
+	IF NOT(dcsflag) and barflag
+		eflag = eflag + 1
+		message$ = message$ + " This Barcode function is not available,please call Universal for assistance! "
+	endif
+	RASL = 0 \ If P9$[41,41] = "Y" Or P9$[41,41] = "W" Let RASL = 9
+	! p61$[45,45] = ALLOCATED QTY INTO ON HAND QTY AT PHYSICAL INV. UPDATE?
+	If RASL If P61$[45,45] = "Y"
+		tmp$ = ucase$(rtrim$(GetParameter$("STKCHK")))
+		If tmp$ <> "Y" 
+			eflag = eflag + 1
+			let message$=message$ + " Please Verify That Allocated Orders has been Removed from Stock "
+		endif
+	ENDIF
+	! commodity codes to exclude - add a few used
+	! for mfg
+	LET K11$="MACH"
+	search #11,2,1;k11$,r[11],e
+	if not(e)
+		k11$ = " ",k11$
+		k11$[1,4] = "MACH"
+		search #ch_commexc,4,1;k11$,r[11],e
+		if e error 11000
+	endif
+	LET K11$="LABR"
+	search #11,2,1;k11$,r[11],e
+	if not(e)
+		k11$ = " ",k11$
+		k11$[1,4] = "LABR"
+		search #ch_commexc,4,1;k11$,r[11],e
+		if e error 11000
+	endif
+	LET K11$="TIME"
+	search #11,2,1;k11$,r[11],e
+	if not(e)
+		k11$ = " ",k11$
+		k11$[1,4] = "TIME"
+		search #ch_commexc,4,1;k11$,r[11],e
+		if e error 11000
+	endif
+	tmp$ = rtrim$(GetParameter$("COMMCODE"))
+	iF TMP$<>""                                                                                           
+		X = 1 
+		NextType: !  
+		x$=""
+		X2 = 0 \ Let X$ = tmp$ To "," : X2 
+		if rtrim$(x$)="" goto exittype:
+		If x2<>0 and x2>len(tmp$) let x2=0
+		IF LEN(X$)>0 AND LEN(X$)<5
+			LET K11$=" ",K11$
+			LET K11$[1,LEN(X$)] = X$
+			SEARCH #11,2,1;K11$,R[11],E
+			IF NOT(E)
+				! search above will truncate key value spaces if found
+				! so rebuild it
+				LET K11$=" ",K11$
+				LET K11$[1,LEN(X$)] = X$
+				search #ch_commexc,4,1;k11$,r[11],e
+				if e>1 error 11000  !user gets droplist & can duplicate TIME, etc
+				cflg=1
+			endif
+		endif                                           
+		If X2 Let tmp$ = tmp$[X2 + 1]
+		if x2 Goto NextType                
+		ExitType: !                                                    
+	endif                                    
+	LOCSORT = 0
+	if rasl
+		locsort = GetParameter$("SRTAISLE")
+		LET LOCSORT=TMP$
+		If locsort<0 or locsort>2
+			let eflag=eflag+1
+			let message$=message$="Invalid RASL Sort Aisles Option "
+		endif
+	endif
+	J1=90;j9=60
+	tmp$ = GetParameter$("PRTOPT")
+	if barflag 
+		let tmp$="D"    !"detail report print barcode
+		LET J9=38   
+	endif
+	select case tmp$
+		case "D"
+			let detl=1
+		case "S"
+			let detl=0
+		case else
+			let eflag=eflag+1
+			let message$=message$+"Invalid Print Option Selected "
+	end select
+	dayToPrint = GetParameter$("DAYTOPRINT")
+	printingToday=0
+	if dayToPrint>0
+		if countDays$[dayToPrint,dayToPrint] <> "Y" and countDays$[dayToPrint,dayToPrint] <> "X"
+			let eflag=eflag+1
+			let message$=message$+" Not scheduled to print for the day requested. "
+		else
+			printingToday = 1
+		end if
+	else
+		if dayToPrint = -1 ! tomorrow
+			dayToPrint = tim(7) + 1 \ if dayToPrint > 6 dayToPrint = 0
+		else !0
+			dayToPrint = tim(7)
+		end if
+		! tim(7) = 0-6 = Sun-Sat.  We need 1-7 = Mon-Sun
+		if dayToPrint = 0 dayToPrint = 7
+		! check to see if we should be printing something
+		if countDays$[dayToPrint,dayToPrint] = "Y" printingToday = 1
+	end if
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub DetermineProductsToPrint()
+try
+	! formula - take the number of products we need to print for
+	! the entire week / the number of days we are printing
+	! and this is the number of products to count per "count day"
+	!
+	! Then figure out which day we are at to determine the first
+	! and the last product to assign tags / print books
+	!
+	daysToCount = 0
+	for i = 1 to 7
+		! X means already generated tags for this day
+		if countDays$[i,i] = "Y" or countDays$[i,i] = "X"
+			daysToCount = daysToCount + 1
+		end if
+	next i
+	whichDayAreWe = 0
+	for i = 1 to 7
+		if countDays$[i,i] = "X" or countDays$[i,i] = "Y"
+			whichDayAreWe = whichDayAreWe + 1
+		end if
+		! if this is our stop - bail out
+		if i = dayToPrint i = 7
+	next i
+	! count the number of products we are doing this week
+	A1$ = " ",A1$
+	prodsToCount = 0
+	do
+		! loop through product file
+		Search #2,3,1;A1$,R9,E \ If E > 2 error 11000
+		If E exit do
+		Mat Read #2,R9,0;P$;
+		mat read #2,R9,1268;prodCountWeek
+		if prodCountWeek <> countWeek goto SkipCount ! not being counted this week
+		If A1$[1,12] = "Z ZZZZZZZZZZ" Goto SkipCount ! skip non-stock record
+		K11$ = " ",K11$ \ K11$[1,4] = P$[152,155]
+		Search #ch_commexc,2,1;K11$,R[11],E \ If NOT(E) Goto SkipCount
+		prodsToCount = prodsToCount + 1
+		SkipCount: !
+	loop
+	if prodsToCount = 0
+		e$ = "No products to count for count week "+str$(countWeek)
+		error 10000
+	end if
+	prodsPerDay = int(prodsToCount / daysToCount)
+	firstProd = 1 + (prodsPerDay * (whichDayAreWe - 1))
+	lastProd = firstProd + prodsPerDay - 1
+	! make sure to catch any rounding issues
+	! on the last day
+	if whichDayAreWe = daysToCount
+		lastProd = prodsToCount
+	end if
+	
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub ProcessAllWarehouses()
+try
+	! HARD CODE FOR TESTING
+	for wh = 1 to 99
+	! for wh = 1 to 1
+		! determine whether this warehouse
+		! is RASL or not
+		If P9$[41,41] = "W" Call "CHKWRASL",WH,RASL[]
+		clear wl1[]
+		clear wla[]
+		If RASL
+			K10$ = " ",K10$;K10$[1,2] = WH Using "##";K10$[5,5] = "@"
+			Search #10,2,1;K10$,R10,E \ If E > 1 error 11000
+			If not(E)
+				Mat Read #10,R10,40;WL1;
+				Mat Read #10,R10,76;WLA;
+			end if
+			! RASL SORT OPTION
+			If WL1[1] < 2 Or WL1[1] > 3 Let WL1[1] = 2
+			If WL1[2] < 2 Or WL1[2] > 3 Or WL1[2] = WL1[1] Let WL1[1] = 2;WL1[2] = 3
+			If WLA[3] + WLA[4] + WLA[5] <> 6 Or Not(WLA[3]) Or Not(WLA[4]) Or Not(WLA[5]) Let WLA[3] = 2;WLA[4] = 3;WLA[4] = 1
+		end if
+		! clear sort file
+		k1$ = " ",k1$
+		do
+			search #ch_sort,3,1;k1$,r,e
+			if e exit do
+			search #ch_sort,5,1;k1$,r,e \ if e error 11000
+		loop
+		! clear portion of commodity exclusion sort
+		! that deals with location prints
+		k11$=" ",k11$;k11$[1,1]="}"
+		do
+			search #ch_commexc,3,1;k11$,r,e
+			if e exit do
+			if k11$[1,1] <> "}" exit do
+			search #ch_commexc,5,1;k11$,r,e \ if e error 11000
+		loop
+		call ProcessWarehouse()
+		If printedSomething Print #0;"\14\";
+	next wh
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub ProcessWarehouse()
+try
+	call OpenPrinter()
+	Call SortByLocation()
+	If RASL AND LOCSORT call ChangeSortKey()
+
+	printedSomething = 0
+	K1$ = " ",K1$
+	K3$ = " ",K3$
+	J1 = 90 \ J2 = 0
+	!Print @0,21;"PRINTING, PLEASE WAIT . . .  ";'CE'; \ Signal 3,0
+	do
+		Search #ch_sort,3,1;K1$,R1,E
+		If E exit do
+		If RASL<>0
+			If LOCSORT<>0
+				If PLOC$ = "" Let PLOC$[1,10] = K1$[21,26],"     "
+			ENDIF
+		endif
+		If PLOC$ = "" Let PLOC$[1,10] = K1$[3,8]
+		IF LOCSORT<>0 Let EVEN[1] = K1$[2 + WLA[3] + WLA[5],2 + WLA[3] + WLA[5]]
+
+		Let LOC$ = " ",LOC$ \ LOC$[1,6] = K1$[3,8]
+		If LOCSORT<>0 And EVEN[0] <> EVEN[1] 
+			Let J1 = 99;EVEN[0] = EVEN[1]
+		endif
+		Mat Read #2,R1,0;P$;
+		Mat Read #2,R1,156;B;
+		Mat Read #2,R1,256;A;
+		Mat Read #2,R1,460;A2;
+		Mat Read #2,R1,508;A3;
+		Mat Read #2,R1,512;PFU1;
+		Mat Read #2,R1,554;PFU2;
+		Mat Read #2,R1,944;PA2$;
+		If PFU1[8] > 0 Mat Read #3,PFU1[8],10;SUNIT$;
+		If PFU1[8] = -1 Let SUNIT$ = "CWT"
+		foundUnit = 0
+		For X9 = 0 To 7
+			If PFU1[X9] = PFU1[8]
+				foundUnit = x9
+				x9 = 7
+			end if
+		Next X9
+
+		If foundUnit Let FACTOR = PFU2[foundUnit - 1] Else Let FACTOR = 1
+		LOTCNTL = 0 \ If P$[113,113] = "Y" Let LOTCNTL = 9
+		If P9$[1,1] = "N" Let LOTCNTL = 0
+		If P9$[1,1] = "Y" Let LOTCNTL = 9
+		If LOTCNTL call GetLotCode()
+		PL$ = " ",PL$ \ PR$ = " "
+		PL$[1,12] = P$[140,151]
+		PL$[13,14] = WH Using "##"
+		PL$[15,20] = LOC$[1,6]
+		Search #6,2,1;PL$,R6,E \ If E > 1 error 11000
+		If not(E)
+			Mat Read #6,R6,20;PRIM;
+			If PRIM Let PR$ = "P"
+		end if
+		call GetProdWhInfo()
+		call GetVendor()
+		call PrintHeadings()
+		call PrintLine()
+		printedSomething = 1
+	loop
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub OpenPrinter() ! will do reopen as well
+try
+	! if dcsflag set, need to reopen
+	! print channel (if going to pdf
+	! only open once as all output
+	! going to a single file
+	if not(initialPrinterDone) and prid$ = "P" and dcsflag
+		try close #0 else rem
+		Open #0,DCSScript$ + " " + DCSPDFPrinter$  
+		initialPrinterDone = 1
+	end if
+	if prid$ <> "P" and prid$ <> "D" ! pdf file just stays open
+		try close #0 else rem
+		! get default printer for warehouse
+		read record #ch_whinfo,wh-1;whinfo.
+		! if not set use printer user selected
+		printerselected = whinfo.DefaultPrinter
+		if not(printerselected) printerselected = DefaultPrinter
+		CHNL = FindChannel()  ! 99 \ Gosub GETCHAN
+		Open #CHNL,"cntrl/CNTRL.LPT"
+		Mat Read #CHNL,printerselected,0;DCSP1$
+		close #CHNL
+		DCSP1$ = lcase$(DCSP1$) To " "
+		open #0,"$/usr/ub/sys/"+dcsp1$[2]
+		if dcsflag
+			GOSUB GETDCSPRTRTYPE:   
+			If PRNTSCREEN Or PRNTDISKFILE 
+				e$ = "The printer is not for DCS Laser Form, please reselect another printer "
+				Error 10000   
+			End If                                
+			If Not(dcsprtrtype)
+				e$ = "The printer is not for DCS Laser Form, please reselect another printer "
+				Error 10000   
+			ENDIF
+			try close #0 else rem
+			OPEN #0,DCSScript$+" "+DCSPrinter$
+		end if
+	end if
+	exit sub
+	include "src/rtn.dcscode_r10.i"
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub SortByLocation()
+try
+	productNumber = 0
+	A1$ = " ",A1$
+	do
+		LOC = 1
+		! loop through product file
+		Search #2,3,1;A1$,R9,E \ If E > 2 error 11000
+		If E exit do
+		If A1$[1,12] = "Z ZZZZZZZZZZ" Goto SkipProduct ! skip non-stock record
+		Mat Read #2,R9,0;P$; \ Mat Read #2,R9,156;B;
+		mat read #2,R9,1268;prodCountWeek
+		mat read #2,R9,1302;invClass2
+		if invClass2<1 or invClass2>12 goto SkipProduct ! not classified or dead
+		if prodCountWeek <> countWeek goto SkipProduct ! not being counted this week
+		! P9$[1,1] = Y/N/B (B = By Product)
+		LOTCNTL = 0 \ If P$[113,113] = "Y" Let LOTCNTL = 9
+		If P9$[1,1] = "N" Let LOTCNTL = 0
+		If P9$[1,1] = "Y" Let LOTCNTL = 9
+		K11$ = " ",K11$ \ K11$[1,4] = P$[152,155]
+		Search #ch_commexc,2,1;K11$,R[11],E \ If NOT(E) Goto SkipProduct
+		! OK this product "counts" even if there is no product
+		! warehouse record
+		productNumber = productNumber + 1
+		if productNumber < firstProd goto SkipProduct
+		if productNumber > lastProd exit do ! done
+		call GetProdWhInfo()
+		If Not(WHSEFOUND) Goto SkipProduct ! no product warehouse, no dice
+		If Not(PG1[1]) Goto SkipProduct ! if product group indicates no update inventory - no dice
+		if w0[0]=1 and w3[0]<=0 Goto SkipProduct ! do not reorder = Y and no on hand skip
+		let prtlc=0 ! sort, not print
+		call ProcessOrPrintLocations()
+		SkipProduct: !
+	loop
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub ChangePrintSort()
+try
+	! BACK THRU CHANGE PRINT SORT
+	K1$ = " ",K1$
+	do
+		Search #ch_sort,3,1;K1$,R9,E \ If E > 2 error 11000
+		If E = 2 exit do
+		If E error 11000
+		If K1$[1,1] = "Z" exit do 
+		LOC$[1,6] = K1$[3,8]
+		call ChangeSortKey()
+		A2$[9] = K1$[9]
+		Search #ch_sort,4,1;A2$,R9,E \ If E error 11000
+		Search #ch_sort,5,1;K1$,R1,E \ If E error 11000
+	loop
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub ChangeSortKey()
+try
+	! LOCATION IS SORTED OTHER THAN KEY - same as on book location sort!
+	BIN = 0;TIER$ = ""
+	If WL1[1] = 2
+		BIN = LOC$[1 + WLA[3],WLA[3] + WLA[4]]
+		TIER$ = LOC$[1 + WLA[3] + WLA[4],6]
+	End If 
+	If WL1[1] = 3
+		TIER$ = LOC$[1 + WLA[3],WLA[3] + WLA[5]]
+		BIN = LOC$[1 + WLA[3] + WLA[5],6]
+	End If 
+	If TIER$ = "" Or TIER$ = " " Goto FinishKey
+	If BIN = 0 Or Fra(BIN) Goto FinishKey
+	A2$ = " ",A2$;A2$[2,1 + WLA[3]] = LOC$[1,WLA[3]]
+	A2$[2 + WLA[3],1 + WLA[3] + WLA[5]] = TIER$
+	LOCMASK$ = ""
+	For I = 1 To WLA[4] \ LOCMASK$ = LOCMASK$,"#" \ Next I
+	A2$[2 + WLA[3] + WLA[5],2 + WLA[3] + WLA[5]] = " "
+	A2$[3 + WLA[3] + WLA[5],2 + WLA[3] + WLA[5] + WLA[4]] = BIN Using LOCMASK$
+	If LOCSORT <= 1 Goto KeyEnd
+	If Not(Fra(BIN / 2)) ! "EVENS=one, ODDS=blank (ODDS 1st)
+		A2$[2 + WLA[3] + WLA[5],2 + WLA[3] + WLA[5]] = "1"
+	End If 
+	FinishKey: A2$ = " ",A2$;A2$[2,2] = "}";A2$[3,8] = LOC$[1,6]
+	KeyEnd: A2$[1,1] = "Z"
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub GetVendor()
+try
+	V$ = " ",V$
+	V4$ = " ",V4$
+	V4$ = B[24] Using "######"
+	Search #4,2,1;V4$,R4,E
+	If E And B[24] Let V$ = "**** VENDOR NOT ON FILE ****" \ exit sub
+	If E And Not(B[24]) Let V$ = "*** VENDOR NOT SPECIFIED ***" \ exit sub
+	Mat Read #4,R4,0;V$;
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetProdWhInfo()
+try
+	WH$ = " ",WH$;WH$ = P$[140,151];WH$[13,14] = WH Using "##"
+	For X = 0 To 9 \ W2[X] = 0 \ Next X
+	for x = 0 to 24
+		let w3[x]=0
+	next x
+	w0[0]=0
+	W7[6] = 0
+	Search #5,2,1;WH$,R8,E \ If E > 1 error 11000
+	If Not(E)
+		Mat Read #5,R8,38;W2;
+		MAT READ #5,R8,78;W3;
+		Mat read #5,r8,420;w0;
+		Mat Read #5,R8,696;W7;
+		If W2[3] Let B[24] = W2[3]
+		WHSEFOUND = 1
+		Mat Read #5,R8,846;WHMISC2;
+		PG1[1] = 1
+		If WHMISC2[0] ! prodgroup
+			PRODGRP$ = WHMISC2[0] Using "###"
+			Search #CH_PRODGRP,2,1;PRODGRP$,REC_PRODGRP,E
+			If Not(E)
+				Mat Read #CH_PRODGRP,REC_PRODGRP,122;PG1;
+			End If 
+		End If 
+	Else 
+		WHSEFOUND = 0
+	End If 
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetLotCode()
+try
+	lot$ = " ",lot$
+	R8 = K1$[27,32] \ If R8 <= 0 exit sub
+	Mat Read #8,R8,0;P0$;
+	If P0$[1,12] <> K1$[9,20] exit sub
+	LOT$ = P0$[13,24]
+	If LOT$[1,5] = "STOCK" lot$ = " ",lot$
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+Sub ProcessOrPrintLocations()
+try
+	lcprt=0
+	if RASL
+		Let K5$ = " ",K5$;K5$[1,12] = A1$[1,12];K5$[13,14] = WH Using "##"
+	else
+		K5$ = " ",K5$
+		K5$[1,12] = A1$[1,12]
+		if prtlc let k5$[1,12]=p$[140,151]
+		K5$[13,14] = WH Using "##"
+	end if
+	do
+		If RASL
+			! search sprodlot for locations
+			raslLoc = 0
+			RASL_LOOP: !
+				Search #8,3,2;K5$,R5,E \ If E > 2 error 11000
+				If E exit do ! no more locations
+				If K5$[1,12] <> A1$[1,12] exit do ! no more locations
+				TWH = K5$[13,14] \ If TWH <> WH exit do ! no more locations
+		else
+			! search prodloc for locations
+			Search #6,3,1;K5$,R5,E
+			If E exit do
+			if prtlc
+				if k5$[1,12]<>p$[140,151] exit do
+			else
+				If K5$[1,12] <> A1$[1,12] exit do
+			endif
+			TWH = K5$[13,14] \ If TWH <> WH exit do
+		end if
+
+		LOC$[1,6] = K5$[15,20]
+		If RASL If LOC$[1,4] = "NONE" Goto SkipLocation
+		if not(rasl) and prtlc ! doesn't apply to RASL
+			k98$=" ",k98$;k98$="}"+p$[140,151]
+			search #ch_commexc,2,1;k98$,R,E
+			if prtlc=2 let e=1 ! we're printing 1st time now!
+			if not(e) ! already printed once - per ERG - print message
+				if lcprt=0
+					if sw[0] ! print non-rasl overflow
+						print #0;Tab 57;"OVERFLOWS PREVIOUSLY PRINTED"
+						j1 = j1 + 1
+					end if
+					lcprt=lcprt+1
+				ENDIF
+				exit do ! done - no loop
+			Else ! first time printing
+				if sw[0] ! print non-rasl overflow
+					if lcprt=0 ! none printed yet - print Header
+						Print #0;tab 57;"OTHER LOCATIONS:"
+						j1=j1+1
+					endif
+					Print #0;Tab 57;loc$[1,6];" _______________"
+					j1 = j1 + 1
+				end if
+				lcprt=lcprt+1;prtlc=2
+				k98$=" ",k98$;k98$="}"+p$[140,151]
+				search #ch_commexc,4,1;k98$,R,E ! add so we know product printed once
+				goto SkipLocation ! next
+			Endif ! 1st or other time
+		Endif 
+		A2$ = " ",A2$;R8 = 0
+		A2$[1,2] = WH Using "##"
+		A2$[3,8] = LOC$[1,6]
+		A2$[9,20] = A1$[1,12]
+		If Not(RASL) Let A2$[21,26] = "STOCK "
+		If Not(LOTCNTL) And Not(RASL) call GetSprodlotNonRASL() Else call GetSprodlotRASL()
+		A2$[27] = ""
+		Search #ch_sort,2,1;A2$,R0,E \ If Not(E) Goto LocationOnFile
+		A2$[27,32] = R8 Using "######"
+		Search #ch_sort,4,1;A2$,R9,E \ If E error 11000
+		call AddPhysLotTag() ! add to physinv
+		LocationOnFile: Rem IF (LOTCNTL OR RASL) AND R8 GOTO L_8542: ! "next lot code (R8=record)
+		SkipLocation: !
+	loop
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetSprodlotRASL()
+try
+	If R8 Goto L_8620
+	R8 = 0;K8$ = " ",K8$
+	K8$[1,12] = P$[140,151];K8$[13,14] = WH Using "##"
+	If RASL Let K8$[15,20] = LOC$[1,6]
+	CK8$ = K8$
+	L_8620: Search #8,3,2;K8$,R8,E
+	If E Let R8 = 0
+	If K8$[1,14] <> CK8$[1,14] Let R8 = 0
+	If RASL If K8$[1,20] <> CK8$[1,20] Let R8 = 0
+	If R8
+		if k8$[15,20]="NONE  " r8=0 \ goto L_8620
+		Let A2$[21,26] = K8$[15,20] 
+	Else 
+		Let A2$[21,26] = "STOCK "
+	endif
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub GetSprodlotNonRASL()
+try
+	K8$ = " ",K8$
+	K8$[1,12] = P$[140,151];K8$[13,14] = WH Using "##"
+	If Not(RASL) Let K8$[15,20] = "STOCK "
+	CK8$ = K8$
+	Search #8,3,2;K8$,R8,E
+	If E Let R8 = 0
+	If K8$[1,20] <> CK8$[1,20] Let R8 = 0
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+Sub AddPhysLotTag()
+try
+	! A2$[1,2] = WH Using "##"
+	! A2$[3,8] = LOC$[1,6]
+	! A2$[9,20] = A1$[1,12]
+	Search #7,2,3;A2$,R7,E \ If Not(E) exit sub
+	K7$ = " ",K7$
+	K7$[1,2] = A2$[1,2];K7$[3,8] = A2$[21,26];K7$[9,14] = A2$[3,8]
+	K7$[15,20] = R9 Using "######";K7$[21,26] = A2$[27,32]
+	Search #7,2,1;K7$,R7,E \ If Not(E) exit sub 
+	E = 2;R7 = 0
+	Search #7,1,0;K7$,R7,E
+	If E error 11000
+	Search #7,4,3;A2$,R7,E \ If E > 1 error 11000
+	If E exit sub 
+	K7$ = " ",K7$
+	K7$[1,2] = A2$[1,2];K7$[3,8] = A2$[21,26];K7$[9,14] = A2$[3,8]
+	K7$[15,20] = R9 Using "######";K7$[21,26] = A2$[27,32]
+	Search #7,4,1;K7$,R7,E
+	If E error 11000
+	K7$ = " ",K7$
+	K7$[1,2] = A2$[1,2];K7$[3,8] = R9 Using "######";K7$[9,14] = A2$[21,26]
+	K7$[15,20] = A2$[27,32];K7$[21,26] = A2$[3,8]
+	Search #7,4,2;K7$,R7,E \ If E error 11000
+	P1$ = " ",P1$;P1$[1,6] = A2$[3,8];P1$[7,18] = A2$[9,20];P1$[25,26] = A2$[1,2]
+	P2$ = " ",P2$;P2$[23,28] = A2$[21,26]
+	P2$[1,7] = WH Using "STOCK&&"
+	If R8 Let P2$[1,12] = K8$[21,32]
+	P1[0] = -99;P1[1] = 0;P1[2] = 0;PWGT = 0
+	Mat Write #7,R7,0;P1$;
+	Mat Write #7,R7,26;P1;
+	Mat Write #7,R7,44;P2$;
+	Mat Write #7,R7,72;PWGT;
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub PrintHeadings()
+try
+	J1 = J1 + 3 \ If J1 < J9 exit sub
+	If J2<>0 Print #0;"\14\";
+	if j2<0 let j2 = 0
+	J2 = J2 + 1 \ J1 = 9
+	Print #0;"\15\";
+	T9$ = "" \ Call Time(T9$)
+	If Not(DETL)
+		Print #0; Tab 0;ARDATE$; Tab 40 - (Len(CNAME$) / 2);CNAME$; Tab 70;"PAGE";J2
+		Print #0; Tab 0;" -692_CC- ";
+		Print #0; Tab 24;"PHYSICAL INVENTORY BOOK";
+		If WH Print #0;" - WHSE";WH Else Print #0;""
+		Print #0;"\15\";
+		Print #0; Tab 0;"LOCATION"; Tab 14;"ITEM CODE";
+		Print #0; Tab 27;"DESCRIPTION"; Tab 59;"STOCKING UNITS"
+		PRINT #0; LINE_$[1,80]
+		Print #0;"\15\"
+		exit sub
+	end if
+	if dcsflag
+		Print #0; Tab 10;ARDATE$; Tab (64 - Len(CNAME$) / 2);CNAME$; Tab 120;"PAGE";J2;
+		PRINT #0; TAB 130;PDFFILENAME$;  
+		print #0;""
+		Print #0;" - 692_CC- ";T9$;
+		Print #0; Tab 43;"PHYSICAL INVENTORY BOOK";
+		PRINT #0; TAB 70;DCSPRNTNAME$[1,100];  
+		print #0;""
+	else
+		Print #0; Tab 10;ARDATE$; Tab (64 - Len(CNAME$) / 2);CNAME$; Tab 120;"PAGE";J2
+		Print #0;" - 692_CC - ";T9$;
+		Print #0; Tab 43;"P H Y S I C A L   I N V E N T O R Y   B O O K"
+	endif
+	If RASL If P61$[45,45] = "Y"
+		Print #0; Tab 1;"WARNING: REMOVE STOCK FOR ALLOCATED ORDERS BEFORE THE COUNT IS STARTED. IT WILL BE ADDED BY THE SYSTEM TO THE COUNT."
+	End If 
+	Print #0; Tab 2;"DESCRIPTION "; Tab 35;"VENDOR ITEM"; Tab 57;"WHSE";
+	Print #0; Tab 62;"LOCATION";
+	Print #0; Tab 75;"ITEM CODE"; Tab 95;"    STOCKING UNITS"
+	pRINT #0; LINE_$
+	Print #0;"\15\"
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub PrintLine()
+try
+	If not(DETL)
+		! summary version only
+		Print #0; Tab 0;LOC$[1,10];
+		Print #0; Tab 11;PR$;
+		Print #0; Tab 13;P$[140,151];
+		Print #0; Tab 26;P$[9,38];
+		Print #0; Tab 57;"______________________"
+		If LOTCNTL Print #0; Tab 13;LOT$;
+		Print #0; Tab 26;P$[63,92];
+		Print #0; Using " = ####### "; Tab 57;SUNIT$;FACTOR;
+		If P$[127,127] = "Y" Print #0;" & LBS" Else Print #0;""
+		if not(rasl) ! only non-rasl
+			prtlc=1 ! print - not sort
+			call ProcessOrPrintLocations()
+			if lcprt print #0;"  " \ let j1=j1+1
+			if j1>j9 call PrintHeadings()
+		Endif
+		Print #0;""
+		exit sub
+	end if
+	Print #0; Tab 1;P$[9,38];
+	Print #0; Tab 35;P$[93,112];
+	If Not(WH) Print #0; Tab 57;"____";
+	If WH Print #0; Using "##"; Tab 57;WH;
+	Print #0; Tab 62;LOC$[1,10];
+	Print #0; Tab 72;PR$;
+	Print #0; Tab 75;P$[140,151];
+	Print #0; Tab 89;"_________________________________________";
+	Print #0;""
+	IF BARFLAG call PrintBarcode()
+	Print #0; Tab 1;P$[63,92];
+	Print #0; Tab 35;V$[1,20];
+	Print #0; Tab 57;PA2$[13,27];
+	BUNIT$ = "ERR."
+	If PFU1[0] > 0 Mat Read #3,PFU1[0],10;BUNIT$;
+	Print #0; Using " = ####### "; Tab 89;SUNIT$; Tab 94;FACTOR;
+	If FACTOR > 1 Print #0;BUNIT$;
+	! PRINT UP TO 3 VAILD UNITS
+	Print #0;" (";
+	For VUM = 0 To 3
+		If PFU1[VUM] = 0 Goto L_5360
+		If PFU1[VUM] > 0 Mat Read #3,PFU1[VUM],10;VUNIT$;
+		Print #0;VUNIT$;" ";
+	L_5360: Next VUM
+	If P$[127,127] = "Y" Print #0;"LBS ";
+	Print #0;")"
+	If LOTCNTL
+		Print #0; Tab 112;"LOT: ";LOT$
+		J1 = J1 + 1
+	End If 
+	if not(rasl) ! only non-rasl
+		prtlc=1 ! print - not sort
+		call ProcessOrPrintLocations()
+		if lcprt print #0;"  " \ let j1=j1+1
+		if j1>j9 call PrintHeadings()
+	Endif
+	Print #0;"  "
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+sub PrintBarcode()
+try
+	! Bar Code print here for dcs   
+	LET LBARCODE$=LOC$[1,10]                           
+	LET BARCODE$=P$[140,151]                          
+	PRINT #0;""                                       
+	PRINT #0; TAB 0;"3RD";                            
+	PRINT #0; TAB 25;LBARCODE$;                       
+	PRINT #0; TAB 45;BARCODE$                         
+	LET J1=J1+2                                       
+else ! sub main try
+include "src/callsuberr.inc"
+end try
+end sub
+
+

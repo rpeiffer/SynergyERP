@@ -1,0 +1,1123 @@
+! libprodwhdisplay.lib
+!
+! supporting library of product: one record, can have multiple pages
+!
+! 1.0 10/10/07 new
+! 1.5 05/07/2008 revised prod & prodwhse struct
+!
+! loadsave -w -n 100,10 -o prog/dxport/libprodwhdisplay.lib src/libprodwhdisplay.src
+!
+include "src/copyright.inc"
+!
+! sub & functions for list library
+!
+!  S   ProdWHDetail        creates product warehouse main detail display
+!  S   ProdWHDemand        creates product warehouse main demand display
+!  S   ProdWHControls      creates product warehouse main controls display
+!  S   ProdWhCategory      creates product warehouse main category display
+!  S   ProdWHPrice			creates prod/whse price & cost display
+!  S   ProdWHSeason			creates prodwhse usage trend & seasonal display
+!  S   ProdWHProftVal		creates prodwhse profitability display
+!
+include "src/inc/fileprod.inc" ! product
+include "src/inc/fileprodwhse.inc" ! product warehouse
+include "src/inc/filea80vm.inc" ! vendor
+include "src/inc/filebuyer.inc" ! buyer
+include "src/inc/fileprodgroup.inc" ! product group
+include "src/inc/filefrcstwgt.inc" ! forecast weight
+include "src/inc/filepwsales.inc" ! product warehouse sales
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters
+!
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+!
+External Lib "libprodwh.lib"
+Declare External Function getwhavail
+!
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+!
+External Lib "ubsfunc.dl4"
+Declare External Function FormatDate$,OpenFile
+Declare External Sub UserCntrl
+!
+Declare Intrinsic Sub Env,DateToJulian,JulianToDate,programdump
+!
+!
+!--------------------------------------------------------------------
+External Sub ProdWHDetail(e$,Intco,WHRec,List$[],maxcnt,WHC,VMC,BYC,PGC,CCC,PR. as prod,WH. as prodwhse)
+  !
+  ! Creates a product warehouse Detail display
+  !
+  ! e$         : error message
+  ! WHRec      : product warehouse record #
+  ! List$[]    : price book display (two screens)
+  ! maxcnt     : maxium # of lines in list
+  ! VMC        : vendor channel
+  ! BYC        : buyer channel
+  ! PGC        : product group channel
+  ! CCC        : u/m codes channel
+  ! PR.        : product record
+  ! WH.        : product warehouse record
+  !
+  try
+    !
+    dim 1%,tmp1
+	dim 2%,tmp2,tmpcnt,cnvtu[2]
+    dim 3%,tmp3,ProdRec,PBRec,GCRec,GFRec,GSRec,GGRec,cnvta
+    !
+	Dim 1%,FndUID,Comm_Lev,UA5[10],Cost_Lev[3] ! vars for call usercntrl
+	Dim UserID$[8],UA2$[50],TUID$[10] ! vars for call usercntrl
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[600],Message$[200]
+	dim ProdKey$[64],SearKey$[64]
+	dim Mode$[3],action2$[30],p9$[50]
+	dim StatusDesc$[10],pum$[4],Unit$[4]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M3$[3] \ M3$="###"
+	dim M32$[6] \ M32$="###.##"
+	dim M4$[4] \ M4$="####"
+    dim M6$[6] \ M6$="######"
+	dim M10$[12] \ M10$="----,---,--#"
+    !
+	dim VM. as a80vm ! vendor
+	dim Buyer. as buyer ! buyer
+	dim PG. as prodgroup ! product group
+	Dim 3%
+    !
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+    !
+	Mat read #1,19,50;p9$; ! assumes cntrl always on 1
+	call dxget("ACTION2",action2$)
+	action2$=UCASE$(RTRIM$(action2$))
+	if action2$<>"" let m10$="---------#"
+	!! get costlev
+	Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	let TUID$=UserID$+"          " ! set up temp var
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max as usercntrl is 10 chars vs 8 for .net
+	If TUID$[1,10]<>"          " !  no blank users!
+	  Call UserCntrl(TUID$,UA2$,UA5[],FndUID,intCo)
+	  If FndUID=0 ! means found it, =1 is not found
+	    Cost_Lev[0]=UA5[0];Cost_Lev[1]=UA5[1] ! avg / load
+		Cost_Lev[2]=UA5[2];Cost_Lev[3]=UA5[3] ! PO / base
+		try comm_lev=UA5[4] Else Comm_lev=1000
+	  Endif ! if not found would be zeroes from dim
+	Endif
+	clear List$[]
+	row=0
+	!
+	! setup page headings
+	WebStr$="ID",fdel$
+	! --- WebStr$=WebStr$,"Product",fdel$
+	WebStr$=WebStr$,"Vendor",fdel$
+	WebStr$=WebStr$,"Vendor Item",fdel$,"Do not reorder",fdel$
+	WebStr$=WebStr$,"Buyer",fdel$,"Product Group",fdel$
+	WebStr$=WebStr$,"Available",fdel$,"Check broken qty",fdel$
+	WebStr$=WebStr$,"Commission %",fdel$,"Terms Discount",fdel$
+	WebStr$=WebStr$,"Pallet",fdel$
+	If action2$="EDIT" or action2$="ADD" or action2$="COPY"
+		webstr$=webstr$,"VENDID",fdel$,"BUYERID",fdel$
+		webstr$=webstr$,"PGRPID",fdel$,"UNTTIER",fdel$
+		webstr$=webstr$,"TIERSKID",fdel$
+	Endif
+	WebsTR$=wEBSTR$,"RESTRITEM",fdel$
+	!
+ 	List$[row]=bsdel$,"ProdWHDetail",fdel$ \ row=row+1
+    List$[row]=WebStr$ \ row=row+1
+	!
+    if WHRec<=0 ! Product warehouse record found
+		if WH.ProdGrp<=0 let WH.ProdGrp=1
+	Endif
+	  !
+	  !SearKey$=PR.PrimVend using M6$ ! PROD?
+	  Searkey$=wh.Vend using M6$
+	  VMRec=filegeta80vm(e$,VMC,"=",1,SearKey$,VM.) ! get vendor
+	  if VMRec<0 clear VM.
+	  !
+	  if WH.Buyer read record #BYC,WH.Buyer;Buyer.; else clear Buyer.
+	  !
+	  if WH.ProdGrp>0
+		Searkey$=" ",searkey$
+		SEARKEY$=WH.ProdGrp using "###"
+		Search #PGC,2,1;Searkey$,PGRec,E
+		if e let pgrec=e*-1
+		if pgrec<0 
+			clear pg.
+			pg.Description$="PROD GROUP "+Str$(pgrec)
+		Else
+			read record #PGC,PGRec,0;PG.;
+		Endif
+	  Endif
+	  !Call programdump("tmp/wdlog1!","")
+	  WebStr$=WH.ProdCode$,WH.Whse using M2$,fdel$ ! id (key)
+      ! --- WebStr$=WebStr$,PR.ProdCode$," ",rtrim$(PR.Desc1$),fdel$ ! product # & desc
+	  !WebStr$=WebStr$,PR.PrimVend using M6$," ",rtrim$(VM.Name$),fdel$ ! PROD? vendor # & name
+	  WebStr$=WebStr$,wh.Vend using M6$," ",rtrim$(VM.Name$),fdel$ ! vendor # & name
+	  !WebStr$=WebStr$,rtrim$(PR.VendItem$),fdel$ ! vendor item - PROD?
+	  webstr$=webstr$,rtrim$(wh.VendPN$),fdel$
+	  if WH.DNReordFlg let tmp$="Y" else tmp$="N"
+	  if wh.DNReordFlg=2 let tmp$="O"
+	  WebStr$=Webstr$,tmp$,fdel$ ! do not reorder
+      WebStr$=WebStr$,WH.Buyer using M3$," ",rtrim$(Buyer.BuyerName$),fdel$ ! buyer # & name
+	  WebStr$=WebStr$,WH.ProdGrp using M3$," ",rtrim$(PG.Description$),fdel$ ! prod group # & desc
+	  !
+	  tmp3=getwhavail(e$,Intco,WHC,WH.ProdCode$,WH.Whse) ! available
+	  cnvtu[0]=0;cnvtu[1]=PR.UMStkDefault;cnvtu[2]=1
+	  Cnvta=tmp3;ctlc=1
+	  tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	  pum$=xunit$(PR.UMStkDefault,ccc) ! u/m
+	  WebStr$=Webstr$,tmp3 using M10$," ",pum$,fdel$ ! w/h available & u/m
+	  !
+	  If WH.ChkBrknQty$="N" let tmp$="N" else tmp$="Y"
+	  WebStr$=WebStr$,tmp$,fdel$ ! check broken quantity
+	  tmp3=WH.CommPct \ if p9$[32,32]<>"Y" let tmp3=pr.CommPct
+	  if comm_lev=1000
+		WebStr$=WebStr$,tmp3 using M32$,fdel$ ! commission
+	  Else ! not
+		webstr$=webstr$," ",fdel$
+	  Endif
+	  WebStr$=WebStr$,WH.TermDisc using M32$,"%",fdel$ ! discount terms
+	  !
+	  ! tier & tier skid
+	  tmp$=WH.UnitsSkidTier using M4$
+	  Unit$=xunit$(PR.UMStkDefault,ccc)
+	  tmp$=tmp$,"/",Unit$
+	  tmp$=tmp$," ",WH.TiersPerSkid using M2$
+	  tmp$=tmp$," Tiers/Skid"
+	  WebStr$=WebStr$,tmp$,fdel$
+	  If action2$="EDIT" or action2$="ADD" or action2$="COPY"
+		WebStr$=WebStr$,Str$(wh.Vend),fdel$
+		WebStr$=WebStr$,Str$(WH.Buyer),fdel$
+		WebStr$=WebStr$,Str$(WH.ProdGrp),fdel$
+		webstr$=webstr$,Str$(WH.UnitsSkidTier),fdel$
+		webstr$=webstr$,Str$(WH.TiersPerSkid),fdel$
+	  Endif
+	  tmp$="N" \ if wh.RestrictedItem=1 let tmp$="Y"
+	  Webstr$=webstr$,tmp$,fdel$
+	  !
+	  List$[row]=WebStr$ \ row=row+1
+	! endif
+	!
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHDetail
+!
+!--------------------------------------------------------------------
+External Sub ProdWHDemand(e$,WHRec,List$[],maxcnt,FWC,CCC,CTLC,PR. as prod,WH. as prodwhse)
+  !
+  ! Creates a product warehouse demand display
+  !
+  ! e$         : error message
+  ! WHRec      : product warehouse record #
+  ! List$[]    : price book display (two screens)
+  ! maxcnt     : maxium # of lines in list
+  ! FWC        : forcast weight channel
+  ! CCC        : u/m codes channel
+  ! CTLC       : control channel
+  ! PR.        : product record
+  ! WH.        : product warehouse record
+  !
+  try
+    !
+    dim 1%,tmp1,MthDays,ARMonth,cnvtu[2]
+	dim 2%,tmp2,tmpcnt,BDays[24]
+    dim 3%,tmp3,ProdRec,cnvta,amount
+   !
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[600],Message$[200]
+	dim ProdKey$[64],SearKey$[64]
+	dim Mode$[3],action2$[30]
+	dim DateIn$[10],DateOut$[10]
+	dim StatusDesc$[10],pum$[4],Unit$[4]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M3$[3] \ M3$="###"
+	dim M5$[6] \ M5$="##,###"
+	dim M9$[11] \ M9$="###,###,###"
+    !
+	dim FW. as frcstwgt ! forecast weight
+	!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+    !
+	call dxget("ACTION2",action2$)
+	action2$=UCASE$(RTRIM$(action2$))
+	if action2$<>""
+		M5$="#####"
+		M9$="#########"
+	Endif
+	clear List$[]
+	row=0
+	!
+	! setup page headings
+	WebStr$="ID",fdel$
+	WebStr$=WebStr$,"Reorder Qty",fdel$
+	WebStr$=WebStr$,"Reorder Type",fdel$,"Forecast Table",fdel$
+	WebStr$=WebStr$,"Demand Rate",fdel$,"Months to Trend",fdel$
+	WebStr$=WebStr$,"Lead Time",fdel$,"Last Receipt",fdel$
+	If action2$="EDIT" or action2$="ADD" or action2$="COPY"
+		Webstr$=Webstr$,"FCWTID",fdel$
+	Endif
+	!
+ 	List$[row]=bsdel$,"ProdWHDemand",fdel$ \ row=row+1
+    List$[row]=WebStr$ \ row=row+1
+	!
+    if action2$="ADD" or WHRec>0 ! Product warehouse record found
+	  !
+	  tmp=WH.FrcstWgtTbl
+      If tmp>0 If tmp<999 read record #FWC,tmp;FW.; else clear FW. ! forcast weight
+	  !
+	  mat read #CTLC,11,0;BDays; ! business days per month
+	  read #CTLC,0,120;ARMonth; 
+	  MthDays=Bdays[ARMonth]
+	  If MthDays<=0 let MthDays=21
+	  !
+	  Unit$=xunit$(PR.UMPurchDefault,ccc) ! u/m
+	  !
+	  WebStr$=WH.ProdCode$,WH.Whse using M2$,fdel$ ! id (key)
+	  cnvtu[0]=0;cnvtu[1]=PR.UMPurchDefault;cnvtu[2]=1
+	  Cnvta=WH.EOQOrdQty
+	  tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	  WebStr$=WebStr$,tmp3 using M9$," ",Unit$,fdel$ ! reorder quantity & u/m
+	  WebStr$=WebStr$,WH.CalcSrc using "###"
+	  if action2$="" ! inquiry - send desc
+		tmp$="Unknown"
+		x2=WH.CalcSrc ! easier to handle
+		if x2=1 let tmp$="Econ Ord Qty"
+		if x2=2 let tmp$="Inv Class"
+		if x2=3 let tmp$="Seasonal"
+		if x2=4 let tmp$="Start up"
+		if x2=5 let tmp$="Arbitrary"
+		if x2=6 let tmp$="Min / Max"
+		webstr$=webstr$," ",tmp$
+	  Endif
+	  webstr$=webstr$,fdel$ ! reorder type
+	  WebStr$=Webstr$,WH.FrcstWgtTbl using M3$," ",rtrim$(FW.TableTitle$),fdel$ ! forcast table & desc
+	  !
+	  tmp$=WH.UsgRate/MthDays using M5$
+      WebStr$=WebStr$,WH.UsgRate using M9$," ",tmp$,"/Days",fdel$
+	  !
+	  WebStr$=WebStr$,WH.MosUsgTrend using M2$,fdel$ ! months to trend
+	  If action2$="EDIT" or action2$="ADD" or action2$="COPY"
+		X3=WH.AvgLeadTime*MthDays
+		webstr$=webstr$,LTrim$(x3 Using "####.##"),fdel$
+	  Else ! detailed lead time
+		!WebStr$=WebStr$,WH.LeadTime1 using M3$," Months " ! lead time months (NO IT ISNT)
+		!WebStr$=WebStr$,WH.LeadTime2 using M3$,"/Days",fdel$ ! lead time days (field cont)
+		X3=WH.AvgLeadTime*MthDays
+		webstr$=webstr$,LTrim$(x3 Using "####.##")," Days",fdel$
+	  Endif
+	  !
+	  DateIn$=WH.LastRecptDate using "&&&&&&" ! last receipt date (yymmdd)
+      call DateToJulian(1,DateIn$,tmp1$,errflag)
+      call JulianToDate(5,tmp1$,DateOut$,errflag) ! returns mm/dd/yyyy
+      WebStr$=WebStr$,DateOut$,fdel$ ! receipt date
+	  If action2$="EDIT" or action2$="ADD" or action2$="COPY"
+		webstr$=webstr$,Str$(WH.FrcstWgtTbl),fdel$
+	  Endif
+	  !
+	  List$[row]=WebStr$ \ row=row+1
+	endif
+	!
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHDemand
+!
+!--------------------------------------------------------------------
+External Sub ProdWHControls(e$,WHRec,List$[],maxcnt,CCC,CTLC,PWSC,PR. as prod,WH. as prodwhse)
+  !
+  ! Creates a product Warehouse Control display
+  !
+  ! e$         : error message
+  ! WHRec      : product warehouse record #
+  ! List$[]    : price book display (two screens)
+  ! maxcnt     : maxium # of lines in list
+  ! CCC        : u/m codes channel
+  ! CTLC       : control channel
+  ! PWSC       : product warehouse sales
+  ! PR.        : product record
+  ! WH.        : product warehouse record
+  !
+  try
+    !
+	Def FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01) 
+	!
+    dim 1%,tmp1,CNVTU[2],MthDays,ARMonth
+	dim 2%,tmp2,tmpcnt,BDays[24]
+    dim 3%,tmp3,CNVTA,MinQty,MaxQty
+    !
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[600],Message$[200]
+	dim ProdKey$[64],SearKey$[64]
+	dim Mode$[3],action2$[30]
+	dim StatusDesc$[10],pum$[4],Unit$[4]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M32$[6] \ M32$="###.##"
+	dim M70$[12] \ M70$="--------,--#"
+    !
+	dim PWS. as pwsales ! prod whse sales
+	!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+    !
+	call dxget("ACTION2",action2$)
+	action2$=UCASE$(RTRIM$(action2$))
+	if action2$<>""
+		M70$="----------#"
+	Endif
+	clear List$[]
+	row=0
+	!
+	! setup page headings
+	WebStr$="ID",fdel$
+	WebStr$=WebStr$,"Min Qty",fdel$
+	WebStr$=WebStr$,"Max Qty",fdel$,"Order Point",fdel$
+	WebStr$=WebStr$,"Line Point",fdel$,"Safety Stock",fdel$
+	WebStr$=WebStr$,"Review Period",fdel$,"Months Exist",fdel$
+	Webstr$=webstr$,"Update Trns Usg",fdel$
+	!
+ 	List$[row]=bsdel$,"ProdWHControls",fdel$ \ row=row+1
+    List$[row]=WebStr$ \ row=row+1
+	!
+    if WHRec>0 ! Product warehouse record found
+	  !
+	  SearKey$=WH.ProdCode$,WH.Whse using M2$
+	  PWSRec=filegetpwsales(e$,PWSC,"=",1,SearKey$,PWS.) ! get prod whse sales
+	  if PWSRec<0 clear PWS.
+	  !
+	  mat read #CTLC,11,0;BDays; ! business days per month
+	  read #CTLC,0,120;ARMonth; 
+	  MthDays=Bdays[ARMonth]
+	  If MthDays<=0 let MthDays=21
+	  !
+	  CNVTU[0]=0 ! convert to rcd #, 0=base
+	  CNVTU[1]=PR.UMStkDefault ! from rcd#,convert um code to record #
+      CNVTU[2]=1 ! 2= convert cost/price, 1=convert qty
+	  Unit$=xunit$(PR.UMStkDefault,ccc) ! u/m
+	  !
+	  WebStr$=WH.ProdCode$,WH.Whse using M2$,fdel$ ! id (key)
+	  !
+	  CNVTA=WH.MinStkLvl ! minimum stock level
+	  MinQty=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	  If WH.MinDaysMths<0 let tmp$="Days" else tmp$="Months"
+	  WebStr$=WebStr$,LTrim$(MinQty using M70$)
+	  If action2$=""
+		webstr$=webstr$," ",Unit$," " ! min qty & u/m
+	    WebStr$=WebStr$,WH.MinDaysMths using M2$,"/",tmp$,fdel$ ! (field cont.)
+	  Else ! edit
+		webstr$=webstr$,fdel$
+	  Endif
+	  !
+	  CNVTA=WH.MaxStkLvl ! maxium stock level
+	  MaxQty=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	  If WH.MaxDaysMths<0 let tmp$="Days" else tmp$="Months"
+	  WebStr$=WebStr$,LTrim$(MaxQty using M70$)
+	  if action2$=""
+		webstr$=webstr$," ",Unit$," " ! max qty & u/m
+	    WebStr$=WebStr$,WH.MaxDaysMths using M2$,"/",tmp$,fdel$ ! (field cont.)
+	  Else
+		webstr$=webstr$,fdel$
+	  Endif
+	  !
+	  Cnvta=WH.OrdPt
+	  tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	  WebStr$=Webstr$,tmp3 using M70$," ",Unit$,fdel$ ! order point & u/m
+	  cnvta=WH.LinePt
+	  tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+      WebStr$=WebStr$,tmp3 using M70$," ",Unit$,fdel$ ! line point & u/m
+	  IF wh.SafetyStkQty=0 if wh.SafetyStk
+		tmp3=FNR((wh.UsgRate*wh.AvgLeadTime)*(wh.SafetyStk/100))
+	  eLSE
+		tmp3=WH.SafetyStkQty
+	  Endif
+	  cnvta=tmp3 ! WH.SafetyStkQty
+	  tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	  webstr$=webstr$,wh.SafetyStk using m32$ ! add qty ?
+	  if action2$="" ! inquiry
+		WebStr$=WebStr$,"% ",tmp3 using M70$," ",uNIT$,fdel$ ! safety stock qty
+	  Else
+		webstr$=webstr$,fdel$ ! need eofld
+	  Endif
+	  !
+	  tmp$=FNR(WH.RvwPer*MthDays) using M32$
+      WebStr$=WebStr$,tmp$,fdel$ ! review period days
+	  !
+      WebStr$=WebStr$,PWS.MonthsProdAround using M2$,fdel$ ! months existing
+	  tmp$="N" \ if WH.LifoPoolCost=1 let tmp$="Y" ! s/b whse xfer updt usage
+	  webstr$=webstr$,tmp$,fdel$
+	  !
+	  List$[row]=WebStr$ \ row=row+1
+	endif
+	!
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHControls
+!
+!--------------------------------------------------------------------
+External Sub ProdWHCategory(e$,WHRec,List$[],maxcnt,CCC,CTLC,PR. as prod,WH. as prodwhse)
+  !
+  ! Creates a product Category display
+  !
+  ! e$         : error message
+  ! WHRec      : product warehouse record #
+  ! List$[]    : price book display (two screens)
+  ! maxcnt     : maxium # of lines in list
+  ! CCC		   : u/m codes channel
+  ! CTLC	   : control file channel
+  ! PR.        : product record
+  ! WH.        : product warehouse record
+  !
+  try
+    !
+    dim 1%,tmp1,CNVTU[2]
+	dim 2%,tmp2,tmpcnt
+    dim 3%,tmp3,ProdRec,PBRec,GCRec,GFRec,GSRec,GGRec
+	dim 3%,AvgIQty,CNVTA,Amount
+    !
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[1200],Message$[200]
+	dim ProdKey$[64],SearKey$[64]
+	dim Mode$[3],qum$[4],action2$[30]
+	dim StatusDesc$[10],pum$[4],Unit$[4],DateIn$[10],DateOut$[10]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M3$[3] \ M3$="###"
+	dim M4$[5] \ M4$="#,###"
+	dim M70$[8] \ M70$="----,--#"
+	dim M72$[13] \ M72$="--,---,--#.##"
+    !
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+    !
+	call dxget("ACTION2",action2$)
+	action2$=UCASE$(RTRIM$(action2$))
+	if action2$<>""
+		M4$="####"
+		M70$="------#"
+		M72$="-------#.##"
+	Endif
+	clear List$[]
+	row=0
+	!
+	! setup page headings
+	WebStr$="ID",fdel$
+	WebStr$=WebStr$,"Inventory Class",fdel$
+	WebStr$=WebStr$,"Last Cycle Count",fdel$,"Last Out of Stock",fdel$
+	WebStr$=WebStr$,"Times Out YTD",fdel$,"Avg. Inventory",fdel$
+	WebStr$=WebStr$,"Avg. Inventory Value",fdel$,"Turns",fdel$
+	WebStr$=WebStr$,"Inventory Class 2",fdel$
+	WebStr$=WebStr$,"Count Week",fdel$
+	!
+ 	List$[row]=bsdel$,"ProdWHCategory",fdel$ \ row=row+1
+    List$[row]=WebStr$ \ row=row+1
+	!
+    if WHRec>0 ! Product warehouse record found
+	  !
+	  WebStr$=WH.ProdCode$,WH.Whse using M2$,fdel$ ! id (key)
+	  WebStr$=WebStr$,WH.InvtClass1 using M2$,fdel$ ! inventory class
+	  !
+	  DateIn$=WH.LastPhysDate using "&&&&&&" ! last receipt date (yymmdd)
+      call DateToJulian(1,DateIn$,tmp1$,errflag)
+      call JulianToDate(5,tmp1$,DateOut$,errflag) ! returns mm/dd/yyyy
+	  WebStr$=WebStr$,DateOut$,fdel$ ! last cycle count (mm/dd/yy)
+	  !
+	  DateIn$=WH.DateOutStk using "&&&&&&" ! last receipt date (yymmdd)
+      call DateToJulian(1,DateIn$,tmp1$,errflag)
+      call JulianToDate(5,tmp1$,DateOut$,errflag) ! returns mm/dd/yyyy
+	  WebStr$=Webstr$,DateOut$,fdel$ ! last out of stock (mm/dd/yy)
+
+	WebStr$=WebStr$,WH.YtdOutOfStk using M4$,fdel$ ! # of times out YTD
+	CNVTU[0]=0 ! convert to rcd #, 0=base
+	CNVTU[1]=PR.UMStkDefault ! from rcd#,convert um code to record #
+	CNVTU[2]=1 ! 2= convert cost/price, 1=convert qty
+	qum$=xunit$(PR.UMStkDefault,ccc) ! u/m
+	CNVTA=Wh.AvgInvtQty ! Avg inventory qty
+	AvgIQty=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	WebStr$=WebStr$,AvgIQty using M72$," ",qum$,fdel$ ! average inventory
+	WebStr$=WebStr$,WH.AvgInvtVal using M72$,fdel$ ! average inventory value
+	WebStr$=WebStr$,WH.InvtTurns using M3$,fdel$ ! # of turns
+	WebStr$=WebStr$,WH.InvtClass2 using M2$,fdel$ ! inventory class2
+	WebStr$=WebStr$,WH.CntWeek using "-##",fdel$ ! count week
+	  !
+	  List$[row]=WebStr$ \ row=row+1
+	endif
+	!
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHCategory
+!
+!--------------------------------------------------------------------
+External Sub ProdWHPrice(e$,WHRec,List$[],maxcnt,CCC,CTLC,intCo,PR. as prod,WH. as prodwhse)
+  !
+  ! Creates a product Warehouse Control display
+  !
+  ! e$         : error message
+  ! WHRec      : product warehouse record #
+  ! List$[]    : price & cost display (two screens)
+  ! maxcnt     : maxium # of lines in list
+  ! CCC        : u/m codes channel
+  ! CTLC       : control channel
+  ! intCo		: company #
+  ! PR.        : product record
+  ! WH.        : product warehouse record
+  !
+  try
+    !
+	Def FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01) 
+	!
+    dim 1%,tmp1,CNVTU[2],WhsePrc
+	dim 2%,tmp2,tmpcnt,PriceUM,CostUM,Q0[1]
+    dim 3%,tmp3,CNVTA
+    !
+	Dim 1%,FndUID,UA5[10],Cost_Lev[3] ! vars for call usercntrl
+	Dim UserID$[8],UA2$[50],TUID$[10] ! vars for call usercntrl
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[600],Message$[200]
+	dim ProdKey$[64],SearKey$[64],action2$[30]
+	dim Mode$[3],P9$[50],P60$[50],P61$[256]
+	Dim QMASK$[20],PMASK$[20],EMASK$[20],DEC$[5]
+	dim StatusDesc$[10],pum$[4],Unit$[4],cum$[4]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M32$[6] \ M32$="###.##"
+	dim M70$[8] \ M70$="----,--#"
+    !
+	Mat Read #CTLC,19,50;P9$; ! system flags
+	Mat Read #CTLC,60,50;P60$; ! add'l flags
+	Mat Read #CTLC,61,0;P61$; ! add'l flags
+	Mat Read #CTLC,115,40;Q0;
+
+	Let Dec$="#",Dec$;Qmask$="--------#"                                         
+	If Q0[0] Let Qmask$="--------#.",Dec$[1,Q0[0]]         !qty mask      
+	If Q0[1] Let Pmask$="------------.",Dec$[1,Q0[1]]     !price mask        
+	Let Emask$="-$$$$$$$$$$$$.##"  !ext. price mask
+	!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	!! get costlev
+	Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	let TUID$=UserID$+"          " ! set up temp var
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max as usercntrl is 10 chars vs 8 for .net
+	If TUID$[1,10]<>"          " !  no blank users!
+	  Call UserCntrl(TUID$,UA2$,UA5[],FndUID,intCo)
+	  If FndUID=0 ! means found it, =1 is not found
+	    Cost_Lev[0]=UA5[0];Cost_Lev[1]=UA5[1] ! avg / load
+		Cost_Lev[2]=UA5[2];Cost_Lev[3]=UA5[3] ! PO / base
+	  Endif ! if not found would be zeroes from dim
+	Endif
+	call dxget("ACTION2",action2$)
+	action2$=UCASE$(RTRIM$(action2$))
+	if action2$<>""
+		M70$="------#"
+	Endif
+    !
+	ADDEDIT=0
+	If action2$="EDIT" or action2$="ADD" or action2$="COPY" let addedit=1
+	clear List$[]
+	row=0
+	tmpcnt=maxcnt
+	!
+	! setup page headings
+	List$[row]=bsdel$,"PriceCost",fdel$
+	row = row + 1
+	WebStr$="ID",fdel$,"WPFlag",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	WebStr$=WH.ProdCode$,WH.Whse using M2$,fdel$ ! id (key)
+	WebStr$=WebStr$,P9$[32,32],fdel$ ! pricing flag
+	List$[row]=WebStr$ \ row=row+1
+	List$[row]=esdel$ ! ------- end of section
+	row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	If action2$="EDIT" or action2$="ADD" or action2$="COPY"
+		Webstr$=bsdel$,"PRICECONTROL",fdel$
+		List$[row]=webstr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Webstr$="PTYPE",fdel$,"BRKTBLID",fdel$,"MUPID",fdel$
+		List$[row]=webstr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		webstr$=Str$(Pr.PriceType),fdel$
+		if p9$[32,32]="Y" ! whse
+			webstr$=webstr$,Str$(wh.BrkTbl),fdel$,Str$(wh.MUpTbl),fdel$
+		Else  ! Prod
+			webstr$=webstr$,Str$(pr.BrkTbl),fdel$,Str$(pr.MUpTbl),fdel$
+		Endif
+		List$[row]=webstr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		List$[row]=esdel$ ! ------- end of section
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+
+	WebStr$=bsdel$,"PRICES",fdel$
+	List$[row]=WebStr$
+	row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="Unit Price",fdel$,"Price",fdel$,"U/M",fdel$
+	List$[row]=WebStr$
+	row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Let PriceUM=PR.UMPriceDefault
+	Let CostUM=PR.UMCostDefault
+	PUM$=xunit$(PriceUM,ccc) ! u/m
+	CUM$=xunit$(CostUM,ccc) ! u/m
+	WhsePrc=0
+	If P9$[32,32]="Y" And WHRec>0 !  WHSE PRICING
+	  WhsePrc=1
+	Endif
+	   tmp1=(15-1)*10 ! get lp1 from cntrl
+	   Read #CTLC,18,tmp1;tmp$[1,10];
+	   if Len(tmp$)<2 or tmp$[1,5]="     " Let tmp$="List 1"
+	   WebStr$=RTrim$(tmp$),fdel$ ! LP 1
+	   Cnvtu[0]=0;Cnvtu[1]=PriceUM;Cnvtu[2]=2
+	   If WhsePrc let Cnvta=WH.Price1 Else Let Cnvta=PR.ListPrice1
+	   tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	   WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! LP 1
+	   WebStr$=WebStr$,RTrim$(PUM$),fdel$ ! price um
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   tmp1=(16-1)*10
+	   Read #CTLC,18,tmp1;tmp$[1,10];
+	   if Len(tmp$)<2 or tmp$[1,5]="     " Let tmp$="List 2"
+	   WebStr$=RTrim$(tmp$),fdel$ ! LP 2
+	   Cnvtu[0]=0;Cnvtu[1]=PriceUM;Cnvtu[2]=2
+	   If WhsePrc let Cnvta=WH.Price2 Else Let Cnvta=PR.ListPrice2
+	   tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	   WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! LP 2
+	   WebStr$=WebStr$,RTrim$(PUM$),fdel$ ! price um
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   tmp1=(17-1)*10
+	   Read #CTLC,18,tmp1;tmp$[1,10];
+	   if Len(tmp$)<2 or tmp$[1,5]="     " Let tmp$="List 3"
+	   WebStr$=RTrim$(tmp$),fdel$ ! LP 3
+	   Cnvtu[0]=0;Cnvtu[1]=PriceUM;Cnvtu[2]=2
+	   If WhsePrc let Cnvta=WH.Price3 Else Let Cnvta=PR.ListPrice3
+	   tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	   WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! LP 3
+	   WebStr$=WebStr$,RTrim$(PUM$),fdel$ ! price um
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   tmp1=(18-1)*10
+	   Read #CTLC,18,tmp1;tmp$[1,10];
+	   if Len(tmp$)<2 or tmp$[1,5]="     " Let tmp$="List 4"
+	   WebStr$=RTrim$(tmp$),fdel$ ! LP 4
+	   Cnvtu[0]=0;Cnvtu[1]=PriceUM;Cnvtu[2]=2
+	   If WhsePrc Let Cnvta=WH.Price4  Else Let Cnvta=PR.ListPrice4
+	   tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	   WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! LP 4
+	   WebStr$=WebStr$,RTrim$(PUM$),fdel$ ! price um
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   tmp1=(19-1)*10
+	   Read #CTLC,18,tmp1;tmp$[1,10];
+	   if Len(tmp$)<2 or tmp$[1,5]="     " Let tmp$="List 5"
+	   WebStr$=RTrim$(tmp$),fdel$ ! LP 5
+	   Cnvtu[0]=0;Cnvtu[1]=PriceUM;Cnvtu[2]=2
+	   If WhsePrc Let Cnvta=WH.Price5 Else Let Cnvta=PR.ListPrice5
+	   tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	   WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! LP 5
+	   WebStr$=WebStr$,RTrim$(PUM$),fdel$ ! price um
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   tmp1=(20-1)*10
+	   Read #CTLC,18,tmp1;tmp$[1,10];
+	   if Len(tmp$)<2 or tmp$[1,5]="     " Let tmp$="List 6"
+	   WebStr$=RTrim$(tmp$),fdel$ ! LP 6
+	   Cnvtu[0]=0;Cnvtu[1]=PriceUM;Cnvtu[2]=2
+	   If WhsePrc Let Cnvta=WH.Price6 Else Let Cnvta=PR.ListPrice6
+	   tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	   WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! LP 6
+	   WebStr$=WebStr$,RTrim$(PUM$),fdel$ ! price um
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   List$[row]=esdel$  ! -------------- end of section
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+
+	   WebStr$=bsdel$,"COSTS",fdel$
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   WebStr$="Costs",fdel$,"Cost",fdel$,"U/M",fdel$,"Table",fdel$
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   
+	   Let tmp$="Base Cost"
+	   WebStr$=RTrim$(tmp$),fdel$ ! Base
+	   Cnvtu[0]=0;Cnvtu[1]=CostUM;Cnvtu[2]=2
+	   if WhsePrc let Cnvta=WH.CostBase Else let Cnvta=PR.CostBase
+	   tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	   If Cost_Lev[3]>0 or addedit ! base cost level
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! base
+		WebStr$=WebStr$,RTrim$(CUM$),fdel$ ! cost um
+	   Else ! no cost
+	    WebStr$=WebStr$," ",fdel$," ",fdel$ ! send blank cost/um
+	   Endif
+	   WebStr$=WebStr$,"  ",fdel$ ! NO Table
+	   
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   tmp1=(13-1)*10
+	   Read #CTLC,18,tmp1;tmp$[1,10];
+	   if Len(tmp$)<2 or tmp$[1,5]="     " Let tmp$="Load Cost"
+	   WebStr$=RTrim$(tmp$),fdel$ ! Load
+	   Cnvtu[0]=0;Cnvtu[1]=CostUM;Cnvtu[2]=2
+	   If WhsePrc Let Cnvta=WH.CostLoad Else Let Cnvta=PR.CostLoad
+	   tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	   If Cost_Lev[1]>0 or addedit ! load cost level
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! load
+		WebStr$=WebStr$,RTrim$(CUM$),fdel$ ! cost um
+		If WhsePrc Let tmp1=WH.Load1MupTbl Else Let tmp1=PR.Load1MupTbl
+		WebStr$=WebStr$,Str$(tmp1),fdel$ ! Table
+	   Else ! no cost
+	    WebStr$=WebStr$," ",fdel$," ",fdel$," ",fdel$ ! blank cost/um/tbl
+	   Endif
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   tmp1=(23-1)*10
+	   Read #CTLC,18,tmp1;tmp$[1,10];
+	   if Len(tmp$)<2 or tmp$[1,5]="     " Let tmp$="REDI Cost"
+	   WebStr$=RTrim$(tmp$),fdel$ ! redi
+	   Cnvtu[0]=0;Cnvtu[1]=CostUM;Cnvtu[2]=2
+	   If WhsePrc Let Cnvta=WH.CostLoad2 Else Let Cnvta=PR.CostLoad2
+	   tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	   If Cost_Lev[1]>0 or addedit ! also load cost level
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! redi
+		WebStr$=WebStr$,RTrim$(CUM$),fdel$ ! cost um
+		If WhsePrc Let tmp1=WH.Load2MupTbl Else Let tmp1=PR.Load2MupTbl
+		WebStr$=WebStr$,Str$(tmp1),fdel$ ! Table
+	   Else ! no cost
+	    WebStr$=WebStr$," ",fdel$," ",fdel$," ",fdel$ ! send blank cost/um/tbl
+	   Endif
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   tmp1=(12-1)*10
+	   Read #CTLC,18,tmp1;tmp$[1,10];
+	   if Len(tmp$)<2 or tmp$[1,5]="     " Let tmp$="Last Cost"
+	   WebStr$=RTrim$(tmp$),fdel$ ! last
+	   Cnvtu[0]=0;Cnvtu[1]=CostUM;Cnvtu[2]=2
+	   If WhsePrc let Cnvta=WH.CostLastPo Else Let Cnvta=PR.CostPO
+	   tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	   If Cost_Lev[2]>0 or addedit ! last/po cost level
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! last
+		WebStr$=WebStr$,RTrim$(CUM$),fdel$ ! cost um
+	   Else ! no cost
+	    WebStr$=WebStr$," ",fdel$," ",fdel$ ! blank cost/um
+	   Endif
+	   WebStr$=WebStr$,"  ",fdel$ ! NO Table
+	   
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   
+	   tmp1=(24-1)*10
+	   Read #CTLC,18,tmp1;tmp$[1,10];
+	   if Len(tmp$)<2 or tmp$[1,5]="     " Let tmp$="Net PO Cost"
+	   WebStr$=RTrim$(tmp$),fdel$ ! net po
+	   Cnvtu[0]=0;Cnvtu[1]=CostUM;Cnvtu[2]=2
+	   If WhsePrc Let Cnvta=WH.CostNetPO Else Let Cnvta=PR.CostNetPO
+	   tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	   If Cost_Lev[2]>0 or addedit ! also po/last cost level
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! net po
+		WebStr$=WebStr$,RTrim$(CUM$),fdel$ ! cost um
+	   Else ! no cost
+	    WebStr$=WebStr$," ",fdel$," ",fdel$ ! blank cost/um
+	   Endif
+	   WebStr$=WebStr$,"  ",fdel$ ! NO Table
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   
+	   tmp1=(14-1)*10
+	   Read #CTLC,18,tmp1;tmp$[1,10];
+	   if Len(tmp$)<2 or tmp$[1,5]="     " Let tmp$="Avg Cost"
+	   WebStr$=RTrim$(tmp$),fdel$ ! Average
+	   Cnvtu[0]=0;Cnvtu[1]=CostUM;Cnvtu[2]=2
+	   If WhsePrc Let Cnvta=WH.CostAvg Else Let Cnvta=PR.CostAvg
+	   tmp3=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	   If Cost_Lev[0]>0 or addedit ! avg cost level
+		WebStr$=WebStr$,LTrim$(tmp3 Using PMask$),fdel$ ! Avg
+		WebStr$=WebStr$,RTrim$(CUM$),fdel$ ! cost um
+	   Else ! no cost
+	    WebStr$=WebStr$," ",fdel$," ",fdel$ ! send blank for cost/um
+	   Endif
+	   WebStr$=WebStr$,"  ",fdel$ ! NO Table
+	   List$[row]=WebStr$
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHPrice
+!
+!--------------------------------------------------------------------
+External Sub ProdWHSeason(e$,WHRec,List$[],maxcnt,CCC,CTLC,PR. as prod,WH. as prodwhse)
+  !
+  ! Creates a product Warehouse Control display
+  !
+  ! e$         : error message
+  ! WHRec      : product warehouse record #
+  ! List$[]    : price & cost display (two screens)
+  ! maxcnt     : maxium # of lines in list
+  ! CCC        : u/m codes channel
+  ! CTLC       : control channel
+  ! PR.        : product record data
+  ! WH.        : product warehouse record data
+  !
+  try
+    !
+	Def FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01) 
+	!
+    dim 1%,tmp1,CNVTU[2],WhsePrc
+	dim 2%,tmp2,tmpcnt,Q0[1]
+    dim 3%,tmp3,CNVTA
+    !
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[600],Message$[200]
+	dim ProdKey$[64],SearKey$[64],M9$[200],action2$[30]
+	dim Mode$[3],P9$[50],P60$[50],P61$[256]
+	Dim QMASK$[20],PMASK$[20],EMASK$[20],DEC$[5]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M32$[6] \ M32$="###.##"
+	dim M70$[8] \ M70$="----,--#"
+    !
+	Mat Read #CTLC,19,50;P9$; ! system flags
+	Mat Read #CTLC,60,50;P60$; ! add'l flags
+	Mat Read #CTLC,61,0;P61$; ! add'l flags
+	Mat Read #CTLC,115,40;Q0;
+
+	Let Dec$="#",Dec$;Qmask$="--------#"                                         
+	If Q0[0] Let Qmask$="--------#.",Dec$[1,Q0[0]]         !qty mask      
+	If Q0[1] Let Pmask$="------------.",Dec$[1,Q0[1]]     !price mask        
+	Let Emask$="-$$$$$$$$$$$$.##"  !ext. price mask
+	LET M9$="January  February March    April    May      June     "    
+	LET M9$=M9$,"July     August   SeptemberOctober  November December "
+	!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+    !
+	call dxget("ACTION2",action2$)
+	action2$=UCASE$(RTRIM$(action2$))
+	if action2$<>""
+		M70$="------#"
+	Endif
+	clear List$[]
+	row=0
+	tmpcnt=maxcnt
+	!
+	! setup page headings
+	WebStr$=bsdel$,"SEASONAL",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="Field",fdel$,"Value",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="ID",fdel$
+	WebStr$=WebStr$,WH.ProdCode$,WH.Whse using M2$,fdel$ ! id (key)
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	If WHRec>0
+		WebStr$="Usage Trend",fdel$
+		WebStr$=WebStr$,FNR(WH.UsgTrendPct) Using "----#.##"," %",fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		WebStr$="Seasonal",fdel$
+		tmp$="N" \ if WH.SeasonalFlag let tmp$="Y"
+		WebStr$=WebStr$,RTrim$(tmp$),fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		tmp1=WH.SeasonalStart
+		tmp$=""
+		if tmp1 let tmp$=M9$[tmp1*9-8,tmp1*9]
+		WebStr$="Start Month",fdel$
+		If WH.SeasonalFlag ! only if seasonal
+		  WebStr$=WebStr$,WH.SeasonalStart Using M2$," ",RTrim$(tmp$),fdel$
+		Else
+		  Let WebStr$=WebStr$," ",fdel$ ! none
+		Endif
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		tmp1=WH.SeasonalEnd
+		tmp$=""
+		if tmp1 let tmp$=M9$[tmp1*9-8,tmp1*9]
+		WebStr$="End Month",fdel$
+		If WH.SeasonalFlag ! only if seasonal
+		  WebStr$=WebStr$,WH.SeasonalEnd Using M2$," ",RTrim$(tmp$),fdel$
+		Else
+		  Let WebStr$=WebStr$," ",fdel$ ! none
+		Endif
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	! done
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHSeason
+!
+!--------------------------------------------------------------------
+External Sub ProdWHProftVal(e$,WHRec,List$[],maxcnt,CTLC,CCC,intCo,PR. as prod,WH. as prodwhse)
+  !
+  ! Creates a product Profitability Values display
+  !
+  ! e$         : error message
+  ! WHRec      : product warehouse record #
+  ! List$[]    : data variable
+  ! maxcnt     : maxium # of lines in list
+  ! CTLC		: control file channel
+  ! CCC			: um file channel
+  ! intCo		: company #
+  ! PR.        : product record data
+  ! WH.        : product warehouse record data
+  !
+  try
+    !
+    dim 1%,tmp1,row,CNVTU[2]
+	dim 2%,tmp2,tmpcnt,flag
+    dim 3%,tmp3,CNVTA,AMOUNT,AvgIQty
+    !
+	Dim 1%,FndUID,UA5[10],Cost_Lev[3] ! vars for call usercntrl
+	Dim UserID$[8],UA2$[50],TUID$[10] ! vars for call usercntrl
+    dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[600]
+    dim tmp$[200],tmp1$[200],WebStr$[600],Message$[200]
+	dim ProdKey$[64],SearKey$[64]
+	dim Mode$[3],P9$[50],P60$[50],P61$[256]
+	dim StatusDesc$[10],qum$[4],Unit$[4]
+	dim blank$[200] \ blank$=" ",blank$
+	dim M2$[2] \ M2$="##"
+	dim M3$[3] \ M3$="###"
+	dim M52$[8] \ M52$="-----.##"
+	dim M70$[7] \ M70$="------#"
+	dim M72$[13] \ M72$="-------#.##"
+    !
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	!! get costlev
+	Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	let TUID$=UserID$+"          " ! set up temp var
+	If Len(TUID$)>10 Let TUID$[11]="" ! Cut it at max as usercntrl is 10 chars vs 8 for .net
+	If TUID$[1,10]<>"          " !  no blank users!
+	  Call UserCntrl(TUID$,UA2$,UA5[],FndUID,intCo)
+	  If FndUID=0 ! means found it, =1 is not found
+	    Cost_Lev[0]=UA5[0];Cost_Lev[1]=UA5[1] ! avg / load
+		Cost_Lev[2]=UA5[2];Cost_Lev[3]=UA5[3] ! PO / base
+	  Endif ! if not found would be zeroes from dim
+	Endif
+	!
+	Def FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01) 
+	!
+	Mat Read #CTLC,19,50;P9$; ! system flags
+	Mat Read #CTLC,60,50;P60$; ! add'l flags
+	Mat Read #CTLC,61,0;P61$; ! add'l flags
+    !
+	clear List$[]
+	row=0
+	tmpcnt=maxcnt
+	!
+	! setup page headings
+	List$[row]=bsdel$,"PROFITABILITY",fdel$
+	row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="Field",fdel$,"Value",fdel$
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="ID",fdel$
+	WebStr$=WebStr$,WH.ProdCode$,WH.Whse using M2$,fdel$ ! id (key)
+	List$[row]=WebStr$ \ row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	If WHRec>0
+	  If Cost_Lev[1]>0 ! use load cost level?
+		tmp3=FNR(WH.GrossMarg*100)
+		tmp$=tmp3 using M52$
+		if tmp$[1,2]="**" let tmp$=Str$(tmp3) ! "mask check
+		WebStr$="Gross Margin",fdel$,tmp$,"%",fdel$ ! gross margin %
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		tmp3=FNR(WH.AdjMarg*100)
+		tmp$=tmp3 using M52$
+		if tmp$[1,2]="**" let tmp$=Str$(tmp3) ! "mask check
+		WebStr$="Adjusted Margin",fdel$,tmp$,"%",fdel$ ! adj margin %
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		tmp3=FNR(WH.RtnOnInvest*100)
+		tmp$=tmp3 using M52$
+		if tmp$[1,2]="**" let tmp$=Str$(tmp3) ! "mask check
+		WebStr$="Return on Investment",fdel$,tmp$,"%",fdel$ ! roi %
+		List$[row]=WebStr$ \ row=row+1
+	  Endif ! cost level 0 - just drop rows
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		CNVTU[0]=0 ! convert to rcd #, 0=base
+		CNVTU[1]=PR.UMStkDefault ! from rcd#,convert um code to record #
+		CNVTU[2]=1 ! 2= convert cost/price, 1=convert qty
+		qum$=xunit$(PR.UMStkDefault,ccc) ! u/m
+	    CNVTA=Wh.AvgInvtQty ! Avg inventory qty
+		AvgIQty=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		tmp$=AvgIQty using M70$
+		if tmp$[1,2]="**" let tmp$=Str$(AvgIQty) ! mask check
+		WebStr$="Avg. Inventory",fdel$,tmp$," ",qum$,fdel$ ! average inventory & u/m
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  If Cost_Level[0]>0 ! use avg cost level?
+		tmp$=WH.AvgInvtVal using M72$
+		if tmp$[1,2]="**" let tmp$=Str$(WH.AvgInvtVal) ! mask check
+        WebStr$="Avg. Inventory Value",fdel$,tmp$,fdel$ ! average inventory value
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Endif ! cost level 0 - just drop rows
+		WebStr$="Inventory Class",fdel$,WH.InvtClass1 Using M3$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		WebStr$="Inventory Class 2",fdel$,WH.InvtClass2 Using M3$,fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		WebStr$="Count Week",fdel$,WH.CntWeek Using "-##",fdel$
+		List$[row]=WebStr$ \ row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Endif
+	! done
+    List$[row]=esdel$ \ row=row+1 ! end of section
+	!
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! ProdWHProftVal
+!
+!--------------------------------------------------------------------

@@ -1,0 +1,252 @@
+! >>> mx283cnv5
+!
+! loadsave -w -n 100,10 -o prog/dxport/mx283cnv5.dl4 src/mx283cnv5.src
+!
+include "src/copyright.inc"
+Rem MX283CNV5 ORDER TYPE CONVERSION (used if order type was changed)
+Rem
+Rem
+! Last Update: nate 9/26/97 - cct#106808: "update stock" flag was
+!                              being erroneously set for products
+!                              with commodity code of "mach"
+!
+! jlp 03/00 cct133501 create callable version for new order entry
+! 12/09 - make a Quote version - (NO AVAILABLE UPDATE)
+!
+! it's easier to read the PM Variables from Order Header in this program
+!  SO THE HEADER IS WRITTEN FIRST IN SERPORDH!
+!
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: JAN  2, 2003  11:56:21
+Rem /w/papermaster/r2002//usr/acct/mary/work/r2002/mx2/mx208cnv5.src (univ2) [mary] {24926}
+Rem  Copyright (c) 2003 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+! channels passed in
+! [1]=Cntrl (#1)
+! [2]=sprod (#3)
+! [3]=prdwh (#30)
+! [4]=customer (#5)
+! [5]=Sordflel (#11)
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,buildsort,JDate$
+
+Declare Intrinsic Sub InpBuf,String
+Declare Intrinsic sub programdump,env
+! Option Default Dialect IRIS1
+
+!Enter R[],H5[],J1,H0[],H4[],Chan[] ! original - read order vars from file instead of passing
+Enter R[],j1,chan[],IntCo
+If Err 0 Gosub ERR_TRAP
+Dim 1%,L3[3],WHSE,BOFLAG,h4[2]
+Dim 2%,L4[3],h5[16],h0[12],h6[8]
+Dim 3%,L7[12],A[33],W3[24],CTWTLB[1],S3[17]
+Dim 1%,Un[2],2%,L6[5],3%,UNF[6],L5[3],OLM[6],ROL0,NetCost[1]
+Dim P9$[50]
+Dim K1$[50],W$[50],L2$[20],P60$[50],3%,AVAIL[5]
+Dim P61$[256],KEYCUST$[6],msg$[100],A$[156]
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+Def FNR(H)=INT(ABS(H)*100+.5)*.01*SGN(H)
+CH_Cntrl=CHAN[1]
+CH_Prod=Chan[2]
+CH_PrdWh=Chan[3]
+CH_Cust=Chan[4]
+CH_ROL=Chan[5]
+CH_ROH=chan[6]
+R8 = R[8]
+mat read #ch_roh,r8,0;h0;
+mat read #ch_roh,r8,78;h4;
+mat read #ch_roh,r8,104;h5;
+mat read #ch_roh,r8,408;h6;
+! H5[7] = J1  ! FILE ALREADY WRITTEN - J1=Original Order type! it was the new ot
+Credit=0 \ if h0[0]>=9 and h0[0]<=12 let credit=1
+if h0[0]>90 ! in process
+	if h6[2]>=9 and h6[2]<=12 let credit=1
+Endif
+Mat Read #ch_cntrl,19,50;P9$;
+Mat Read #ch_cntrl,60,50;P60$;
+Mat Read #ch_cntrl,61,0;P61$;
+If H5[7] = 16 And P61$[49,49] = "Y" ! check if customer allows b/o
+  KEYCUST$ = " ",KEYCUST$;KEYCUST$[1,6] = H0[4] Using "######"
+  Search #CH_Cust,2,1;KEYCUST$,R[5],E \ If E > 1 Gosub ERR_SEARCH
+  If Not(E)
+    Read #CH_Cust,R[5],378;BOFLAG;
+  End If 
+End If 
+K1$ = H0[7] Using "######"
+L_2010: Search #CH_ROL,3,1;K1$,R1,E \ If E > 2 Gosub ERR_SEARCH
+If E Goto OUTEND
+X2 = K1$[1,6] \ If X2 <> H0[7] Goto OUTEND
+If (H5[7] = 21 Or H5[7] = 22) And K1$[7,9] = "   " Goto L_2010
+Mat Read #CH_ROL,R1,8;L3
+Mat Read #CH_ROL,R1,16;L4
+mat read #CH_ROL,r1,56;L6
+Mat Read #CH_ROL,R1,140;L2$
+Mat Read #CH_ROL,R1,168;L7
+Mat read #CH_ROL,r1,260;s3
+Mat read #CH_ROL,r1,452;Unf
+If L3 = 1 Goto L_2010 ! no nonstock
+WHSE = L4[3] \ If WHSE <= 0 Or WHSE > 99 Let WHSE = H4[2]
+! If L3[1] = 1 Let X1 = -1 \ Gosub L_2700 ! back out old alloc
+L3[1] = 1 ! update stock=Y
+If L2$[17,20] = "LABR" Or L2$[17,20] = "TIME" Or L2$[17,20] = "MACH" Let L3[1] = 0
+If P60$[22,22] = "N" If H5[7] = 3 Let L3[1] = 0
+If H5[7] = 2 Or H5[7] = 5 Let L3[1] = 0
+! If H5[7] = 16 And L3[1] = 1 Gosub CHK_AVAIL ! checks avail - MAY ADJUST SHIP QTY!!
+! If L3[1] = 1 Let X1 = 1 \ Gosub L_2700 ! reallocate
+Mat Write #CH_ROL,R1,8;L3;
+Goto L_2010
+
+CHK_AVAIL: Rem "see if it's available in whse
+if credit return 
+For W = 0 To 24 \ W3[W] = 0 \ Next W
+AVAIL[0] = 0;AVAIL[1] = 0
+If P9$[33,33] = "N" ! no whse screen
+  Mat Read #CH_Prod,L4,256;A;
+  AVAIL[0] = A[0] - A[1] - A[3]
+  If P9$[28,28] = "Y" Let AVAIL[0] = AVAIL[0] + A[2]
+Else 
+  W$ = " ",W$;W$[1,12] = L2$[1,12]
+  W$[13,14] = WHSE Using "##"
+  If H5[7] = 7 Let W$[13,14] = H5[11] Using "##"
+  Search #CH_PrdWh,2,1;W$,W9,E \ If E > 1 Gosub ERR_SEARCH
+  If E Return 
+  Mat Read #CH_PrdWh,W9,78;W3;
+  AVAIL[0] = W3[0] - W3[2]
+  If P9$[28,28] = "Y" Let AVAIL[0] = AVAIL[0] + W3[1]
+End If 
+AVAIL[1] = AVAIL[0]
+If H5[7] <> 15 Let AVAIL[0] = AVAIL[0] - L7[4]
+If H5[7] = 15 And H0[5] = 0 Let AVAIL[0] = AVAIL[0] - L7[2]
+If AVAIL[0] < 0 ! "will make negative - reduce shipping to avail
+  If H5[7] <> 15
+    If AVAIL[1] >= 0
+      If H5[7] = 16 And P61$[49,49] = "Y" And BOFLAG <> 0 ! xfer auto bo
+        L7[3] = L7[3] + (L7[4] - AVAIL[1])
+      End If 
+      L7[4] = AVAIL[1]
+    Else ! "nothing's available
+      If H5[7] = 16 And P61$[49,49] = "Y" And BOFLAG <> 0
+        L7[3] = L7[3] + L7[4]
+      End If 
+      L7[4] = 0
+    End If 
+    Mat Write #CH_ROL,R1,168;L7;
+  End If 
+  ! Print @0,22;'CE BD';"ADJUSTED ORDER LINE";L3[2];"DUE TO AVAILABLE";'ED';
+  ! what about resetting extensions, etc?? let's do it! If ot16 was approved/authorized
+  Mat read #ch_rol,r1,32;L5
+  Mat read #ch_rol,r1,250;Un
+  mat read #ch_rol,r1,404;OLM
+  READ #CH_ROL,R1,564;ROL0
+  IF H5[7]=8 OR H5[7]=16 ! "consignment/no price or cost
+	  LET L5[1]=0
+	  LET L5[2]=0;OLM[3]=0
+	  LET S3[0]=0;S3[1]=0                      
+	  LET L6[1]=0
+  ENDIF
+  if unf[5]<=0 let unf[5]=A[5]
+  if unf[5]<=0 let unf[5]=1
+  IF L6[4]<=0 LET L6[4]=a[6]
+  Let S3[4]=FNR(ABS((L6[4]*L7[4])/UNF[5])) ! ext'd weight
+  IF S3[8]=-3 LET S3[9]=S3[0] ELSE  LET S3[9]=FNR(S3[0]*L7[4])   
+  IF S3[11]=-3 LET S3[10]=S3[1] ELSE  LET S3[10]=FNR(S3[1]*L7[4])
+  IF S3[11]=-3 AND L7[2] LET CHBASE=(S3[1]/L7[2]) ELSE  LET CHBASE=S3[1]
+  LET NETCOST[0]=L5[1]+CHBASE                                           
+  IF ROL0                                                               
+    IF ROL0<0                                                           
+      LET NETCOST[0]=NETCOST[0]+ABS(ROL0)                               
+    ELSE                                                                
+      LET NETCOST[0]=NETCOST[0]+(NETCOST[0]*(ROL0/100))                 
+    ENDIF                                                               
+  ENDIF 
+  IF H5[7]=4 OR H5[7]=15 ! "bill and hold                                   
+    LET L5[3]=FNR(S3[7]*OLM[3])                                             
+    LET S3[12]=FNR(S3[7]*NETCOST[0])                                        
+  ELSE                                                                      
+    LET L5[3]=FNR(L7[4]*OLM[3])                                             
+    LET S3[12]=FNR(L7[4]*NETCOST[0])                                        
+  ENDIF                                                                     
+  IF UN[1]=-2 LET L5[0]=FNR(OLM[3])*SGN(L7[2]);L5[3]=FNR(OLM[3])*SGN(L7[4]) 
+  IF UN[2]=-2 LET S3[12]=FNR(NETCOST[0]*SGN(L7[4]));S3[13]=FNR(NETCOST[0]*SGN(L7[2]))                                                              
+  
+  mat write #ch_rol,r1,32;l5
+  mat write #ch_rol,r1,56;l6
+  mat write #ch_rol,r1,260;s3;
+End If ! of avail<0 adjust ship qty
+Return 
+L_2700: Rem "==================== update qty on order in product file
+If L3[0] Return 
+If X1 = 0 Return 
+If L3[1] = 0 Return 
+if credit return ! no on order allocate
+MAT READ #CH_Prod,L4,0;A$
+Mat Read #CH_Prod,L4,256;A
+A[3] = A[3] + ((L7[4]) * X1)
+Mat Write #CH_Prod,L4,256;A;
+IF A$[127,127]="Y" ! "catch wgt - Update LBS ordered
+	if unf[5]<=0 let unf[5]=A[5]
+	if unf[5]<=0 let unf[5]=1
+	IF L6[4]<=0 LET L6[4]=a[6]
+	S3[4]=FNR(ABS((L6[4]*L7[4])/UNF[5])) ! ext'd weight
+	Read #CH_Prod,L4,664;CTWTLB[0]
+  LET X2=X1 \ IF L7[2]<0 LET X2=X2*(-1)             
+  IF H5[7]=15 AND H0[5]<>0 LET X2=0                 
+  LET CTWTLB[0]=CTWTLB[0]+(S3[4]*X2)                
+  ! LET CTWTLB[1]=CTWTLB[1]+(S3[4]*X2) 
+  WRITE #CH_Prod,L4,664;CTWTLB[0];
+ENDIF                                               
+Gosub L_3000
+Return 
+L_3000: Rem "============================== get whse rec for product
+For W = 0 To 24 \ W3[W] = 0 \ Next W
+If P9$[33,33] = "N" Return
+if x1=0 return
+W$ = " ",W$;W$[1,12] = L2$[1,12]
+W$[13,14] = WHSE Using "##"
+If H5[7] = 7 Let W$[13,14] = H5[11] Using "##"
+Search #CH_PrdWh,2,1;W$,W9,E \ If E > 1 Gosub ERR_SEARCH
+If E Goto L_3170
+Mat Read #CH_PrdWh,W9,78;W3
+If H5[7] <> 4 And H5[7] <> 15 Let W3[2] = W3[2] + (L7[4] * X1)
+If H5[7] = 4 Or H5[7] = 15 Let W3[2] = W3[2] + ((L7[2] - L7[0] - L7[3]) * X1)
+Mat Write #CH_PrdWh,W9,78;W3;
+IF A$[127,127]="Y" ! "catch wgt - Update LBS ordered
+	if unf[5]<=0 let unf[5]=A[5]
+	if unf[5]<=0 let unf[5]=1
+	IF L6[4]<=0 LET L6[4]=a[6]
+	S3[4]=FNR(ABS((L6[4]*L7[4])/UNF[5])) ! ext'd weight
+	READ #CH_PrdWh,W9,986;CTWTLB[1]
+  LET X2=X1 \ IF L7[2]<0 LET X2=X2*(-1)             
+  IF H5[7]=15 AND H0[5]<>0 LET X2=0                 
+  ! LET CTWTLB[0]=CTWTLB[0]+(S3[4]*X2)                
+  LET CTWTLB[1]=CTWTLB[1]+(S3[4]*X2) 
+  WRITE #CH_PrdWh,W9,986;CTWTLB[1];
+ENDIF        
+L_3170: Rem was close of chanl 20
+Return 
+OUTEND: Rem EXIT
+Unlock #CH_ROL
+End 
+! Stop 
+Rem {begin rtn.error.s}
+ERR_TRAP: Rem
+If Spc(8) = 123
+  Escdis 
+  Escclr 
+  Return -1
+End If 
+Goto ERR_MAIN
+ERR_SEARCH: Rem
+ENUM = E + 1000;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+Msc$(4)
+Goto ERR_MAIN
+ERR_MAIN: Rem
+! If Err 0 Rem
+e$ = msg$
+If Spc(8) <> 10000 Call suberr(e$,Spc(8),Spc(10),Msc$(2))
+Call mainerr(e$,Spc(8),buttonlist$[],nextlist$[])
+End 
+Rem {end rtn.error.s}

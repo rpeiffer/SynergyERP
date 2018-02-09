@@ -1,0 +1,426 @@
+! ubsvendaptran.src
+!
+! displays an individual transaction for a vendor
+!
+! 
+!
+! loadsave -w -n 100,10 -o prog/dxport/ubsvendaptran.dl4 src/ubsvendaptran.src
+!
+include "src/copyright.inc"
+!
+! sub & functions for list library
+!
+!  S  GetVendApTran		get Vendor AP Trans Detail
+
+include "src/inc/filea80vm.inc" ! "VENDOR file
+include "src/inc/fileapdeth.inc" ! a/p history file 
+include "src/inc/fileapdeta.inc" ! a/p account distribution file
+include "src/inc/fileapdetm.inc" ! ap message file
+include "src/inc/fileappohh.inc" ! ap po history file
+
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,GetDelimiters
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+Declare External Sub Utage5,UserCntrl
+
+External Lib "getglname.lib"
+Declare External Function GetGLName$
+
+Declare Intrinsic Sub Env,FormatDate,JuliantoDate,DatetoJulian
+
+
+! --------------------------------------------------------------------------------------
+External Sub GetVendApTran(e$,List$[],maxcnt,intCo,ReturnStatus,Message$)
+  ! Creates a list of the VENDOR's Transaction Detail
+  !
+  ! e$         : error message
+  ! List$[]    : VENDOR misc list
+  ! maxcnt     : max # of lines for list$[]
+  ! intCo      : company id #
+  ! ReturnStatus	: used for status
+  ! Message$	: used for Status
+try
+!
+	dim 1%,c0[6],spO
+    dim 1%,tmp1,Dir,VENDChan,CTLChan,aphchan,X,apachan
+    dim 1%,tmpCh,FndAR,APHChan,CDir,TARDChan
+	dim 2%,tmp2,tmpcnt,VENDid,reftype,taxcode,terms,aptype
+	dim 2%,TDate[5],Whs,Div,OType
+    dim 3%,tmp3,VENDRec,Refnum,glacct
+	dim 3%,APHRec,ACRec
+	dim keyapph$[50],1%,ch_apph,3%,rec_apph
+	dim keyapm$[50],1%,ch_apm,3%,rec_apm,apmsg$[50],apchkmsg$[50]
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[500]
+    dim tmp$[200],tmp1$[200],WebStr$[400],Message$[200]
+	dim VENDKey$[64],Mode$[2],blank$[100],VEND$[64],refnum$[12]
+	dim taxcoded$[20],artermd$[16],reftype$[3],CMode$[3]
+	dim X$[20],P9$[50],P60$[50],P61$[256],Type$[81]
+	dim aphkey$[64],CPO$[20],TDesc$[30],apakey$[50]
+	dim keyglm$[30],glname$[22]
+!
+	dim VEND. as a80vm
+	dim aph.  as apdeth
+	dim apa.  as apdeta
+	dim apm.  as apdetm
+	dim apph. as appohh
+	
+!
+	call GetDelimiters(e$,bsdel$,esdel$,rdel$,fdel$)
+	Call DXGet("VENDid",VEND$) \ VENDid=VEND$
+	VEND$=VENDid using "######"
+	VEND$ = VEND$+"            "
+	VEND$[7]="" ! "cut after 6 chars
+	! We need the reference number to detail & optionally a ref type
+	Call DXGet("REFNUM",tmp$)
+	Let Refnum$=tmp$+"               "
+	Call DXGet("REFTYPE",tmp$)
+	Let RefType$=RTrim$(tmp$)
+  ! Open any files for this program
+    CTLChan=OpenFile(-9999,intCo) \ If CTLChan = -1 Error 42
+	mat read #CTLChan,19,50;P9$;
+	mat read #CTLChan,60,50;P60$;
+	mat read #CTLChan,61,0;P61$;
+	mat read #ctlchan,51,18;C0;
+	mat read #ctlchan,51,76;spo;
+
+	VENDChan=OpenFile(-2400,intCo) \ If VENDChan = -1 Error 42
+	aphchan=OpenFile(-432,intCo) \ If aphchan = -1 Error 42
+	apaChan=OpenFile(-144,intCo) \ If apaChan = -1 Error 42
+	ch_apm=OpenFile(-9820,intCo) \ If Ch_apm = -1 Error 42 ! ap detail header file
+
+	ReturnStatus = 1
+	Message$="OK"
+	TYPE$ = "INVC/MM/C"
+	!! get the reference type number
+	let reftype=0
+	if refnum$<>""
+	 if len(reftype$)>=3
+		for x=1 to 3
+			if reftype$[1,3]=type$[((x*3)-2),(x*3)]
+				let reftype=x
+			endif
+		next x
+	 endif
+	endif
+        mode$="="
+	dir=1
+       VENDRec = filegeta80vm(e$,VENDChan,mode$,dir,VEND$,VEND.)
+	if VENDRec<=0
+	  Clear VEND.
+	  ReturnStatus = 0
+	  Message$="VENDOR Not Found"
+	endif
+!
+	tmpcnt=maxcnt
+	clear List$[]
+	! this sends 3 sections - ap transaction header, payment info,  account distribution detail
+	List$[0]=bsdel$,"APTRANDETAIL",fdel$ ! ap transaction header
+	WebStr$="ID",fdel$,"Name",fdel$
+	WebStr$=WebStr$,"Transaction Code",fdel$
+	WebStr$=WebStr$,"Trans Date",fdel$
+	WebStr$=WebStr$,"Due Date",fdel$
+	WebStr$=WebStr$,"Disc Date",fdel$
+	WebStr$=WebStr$,"Posting Date",fdel$
+	WebStr$=WebStr$,"PO Number",fdel$
+	WebStr$=WebStr$,"Division",fdel$
+	WebStr$=WebStr$,"Original Amount",fdel$
+	WebStr$=WebStr$,"Discount Amount",fdel$
+	Webstr$=webstr$,"Message",fdel$
+	Webstr$=webstr$,"CheckMessage",fdel$
+	Webstr$=webstr$,"APPOlink",fdel$
+	List$[1]=WebStr$
+
+	If RefNum$="" ! not passed
+	   ReturnStatus=0
+	   Message$="Transaction Code not sent"
+	endif
+	
+	!
+	row=2 ! starting row for data
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Let VENDKey$=VEND$
+	If VENDRec>0 AND RefNum$<>""
+	  Let WebStr$=VENDKey$,fdel$,RTrim$(VEND.Name$),fdel$
+	  APHKEY$ = " ",aphkey$
+	  aphkey$[1,6] = VENDKey$
+	  aphkey$[7,18] = REFNUM$ 
+	  if reftype>0 let aphkey$[19,20]=(reftype-1) using "##"
+	  aphkey$[21]="" ! "need cut after 20
+	  fndap=0
+	  mode$=">"
+	  dir=1
+	  Do
+	    APHRec=filegetapdeth(e$,APHChan,mode$,dir,aphkey$,APH.)
+		If APHRec<0 exit do
+		If aphkey$[1,6]<>VENDKey$ Exit do
+	        if aphkey$[7,18] <>RefNum$ exit do
+		If not (reftype) and REFtype$="DEL" exit do
+	        let tmp1=aphkey$[20,20]
+		If Reftype
+		 If tmp1=reftype
+	     	  let aptype=aphkey$[20,20]
+		  let fndap=99
+		  exit do! done - out		
+		 Endif
+		Else ! no reftype - take any found
+		  let aptype=aphkey$[20,20]
+		  if aptype<>0 and aptype<4 let fndap=99
+		  exit do! done - out	
+		Endif
+	  Loop
+	    If FndAP=0 ! "NOT FOUND!
+	    Let ReturnStatus=0
+	
+		Message$="Reference Number Not Found"
+		if rtrim$(REFtype$)="DEL" let message$="Reference Number Deleted"
+	   List$[row]=esdel$ ! end of section
+	   row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  Endif
+	  If FndAP<>0 ! transaction found
+	    
+
+	  ! build rest of header string
+	  WebStr$=WebStr$,aph.invoicecode$,fdel$ 
+	  if aph.transactionDate<>0 ! it's julian date
+		  tmp$=JDate$(aph.TransactionDate) ! julian date to mm/dd/yyyy
+	  else
+		  tmp$="      "
+	  endif
+	  WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! A/P date
+	  if aph.dueDate<>0 ! it's yymmdd
+	    	  tmp$=Pdate$(aph.dueDate) ! yymmdd to mm/dd/yyyy
+	  else
+		  tmp$="      "
+	  endif
+	  WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! due date
+	  if aph.discountDate<>0 ! it's yymmdd
+	    	  tmp$=Pdate$(aph.discountDate) ! yymmdd to mm/dd/yyyy
+	  else
+		  tmp$="      "
+	  endif
+	  WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! discount date
+	  if aph.postingDate<>0 ! it's yymmdd
+	    	  tmp$=Pdate$(aph.postingDate) ! yymmdd to mm/dd/yyyy
+	  else
+		  tmp$="      "
+	  endif
+	  WebStr$=WebStr$,RTrim$(tmp$),fdel$ ! posting date
+	  if aph.ponumber
+		let tmp$=aph.ponumber using "######"
+	  else
+		let tmp$="      "
+	 endif
+	  Webstr$=WebStr$,tmp$,fdel$ ! purchase order
+	  if aph.division
+		let tmp$=aph.division using "###"
+	  else
+		let tmp$="  "
+	  endif
+          Webstr$=WebStr$,tmp$,fdel$ ! division
+	  let tmp$=aph.originalamount using "----------.##"
+          Webstr$=WebStr$,tmp$,fdel$ ! org amt
+	  let tmp$=aph.discountavail using "----------.##"
+          Webstr$=WebStr$,tmp$,fdel$ ! discount amt
+
+	  let apmsg$=" ",apmsg$
+	  let apchkmsg$=" ",apchkmsg$
+	  let keyapm$[1,6] = aph.VendorCode using "######"
+	  let keyapm$[7,18] = aph.InvoiceCode$[1,12]
+	  let keyapm$[19,20]=aph.TransactionType using "##"
+	  search #ch_apm,3,1;keyapm$,rec_apm,e
+	  if e<>0 goto endgetmsg:
+	  if keyapm$[7,18]<>aph.invoicecode$[1,12] goto endgetmsg:
+	  let tmp3=keyapm$[1,6]\if tmp3<>aph.VendorCode goto endgetmsg:
+	  let tmp3=keyapm$[19,20]\if tmp3<>aph.TransactionType goto endgetmsg:
+	  read record #ch_apm,rec_apm;apm.;
+	  let apmsg$=apm.Message$
+	  let apchkmsg$=apm.ChkMsg$
+	  endgetmsg: ! 
+	  let webstr$=webstr$,rtrim$(apmsg$),fdel$ ! message line
+	  let webstr$=webstr$,rtrim$(apchkmsg$),fdel$ ! message line
+	  ! appolink
+	  let tmp$="N"
+	  if aph.ponumber<>0 and spO<>0 and c0[4]<>0
+		Try
+			ch_apph=OpenFile(-9807,intCo) 
+			if ch_apph>0
+				let keyapph$[1,6] = aph.VendorCode using "######"
+				let keyapph$[7,18] = aph.InvoiceCode$[1,12]
+				let keyapph$[19,20]=aph.TransactionType using "##"
+				Do
+					search #ch_apph,3,1;keyapph$,rec_apph,e
+					if e<>0 exit do
+					if keyapph$[7,18]<>aph.invoicecode$[1,12] exit do
+					let tmp3=keyapph$[1,6]\if tmp3<>aph.VendorCode exit do
+					let tmp3=keyapph$[19,20]\if tmp3<>aph.TransactionType exit do
+					if tmp$="Y"
+						let tmp$="M" ! set for multiple po
+						exit do
+					else
+						let tmp$="Y"
+					endif
+				Loop 
+			endif
+		else
+			let tmp$="N"
+		end Try
+	  endif
+	  let webstr$=webstr$,tmp$,fdel$! appolink
+	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  List$[row]=esdel$ ! end of section
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	endif
+	  !!!! ------------------------- section 2 !!!!! payment section ------------------------
+           List$[row]=bsdel$,"AP PAYMENT INFO",fdel$ ! start of section
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  WebStr$=""
+	  WebStr$="Last Check Date",fdel$
+	  WebStr$=WebStr$,"Last Check No.",fdel$
+	  WebStr$=WebStr$,"Total Amount Paid",fdel$
+	  WebStr$=WebStr$,"Total Disc Taken",fdel$
+	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  If FndAP<>0 ! transaction found
+		Webstr$=""
+		if aph.checkDate<>0 ! it's yymmdd
+	    		tmp$=Pdate$(aph.checkDate) ! yymmdd to mm/dd/yyyy
+		else
+			  tmp$="         "
+		 endif
+		WebStr$=tmp$,fdel$ ! check 2 date
+		if aph.checknumber
+			let tmp$=aph.checknumber using "######"
+		else
+			let tmp$="     "
+		endif
+		Webstr$=WebStr$,tmp$,fdel$ ! Check Number
+		let tmp$=aph.amountpaid using "----------.##"
+		Webstr$=WebStr$,tmp$,fdel$ ! amount paid
+		let tmp$=aph.discounttaken using "----------.##"
+		Webstr$=WebStr$,tmp$,fdel$ ! discount taken amt
+		List$[row]=WebStr$
+		row=row+1
+		if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	   endif
+	   List$[row]=esdel$ ! end of section
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	
+	  Webstr$=""
+
+	
+	  !!!! ------------------------- section 3 !!!!! account dist section ------------------------
+	  ! now the pay detail header
+	  List$[row]=bsdel$,"AP Account Distribution",fdel$ ! start of section
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	 
+	  WebStr$="Account #",fdel$
+	  WebStr$=WebStr$,"Description",fdel$
+	  WebStr$=WebStr$,"Amount",fdel$
+	 
+	  List$[row]=WebStr$
+	  row=row+1
+	  if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	  
+	  Webstr$=""
+	   If FndAP<>0 ! transaction found
+	  apakey$=" ",apakey$
+	  apakey$[1,6]=aphrec using "######"
+	  mode$=">"
+	  dir=1
+	
+	   Do
+	     let aparec=filegetapdeta(e$,apachan,mode$,dir,apakey$,apa.) 
+		If aparec<0 exit do
+		let tmp3=apakey$[1,6]\if tmp3<>aphrec Exit do
+		IF apa.vendor <> aph.vendorcode goto nxtapda:
+		if apa.InvoiceCode$ <> aph.InvoiceCode$ goto nxtapda:
+		 let glacct=0;glname$=" ",glname$
+		 try
+			let glacct=apa.glaccount
+		 else
+			let glacct=0
+			let glname$=" ",glname$
+		 end try
+		 if glacct<>0 
+			let tmpch=-1
+			let keyglm$=glacct using " ########   "
+			let glname$=getglname$(tmpch,keyglm$,intco)
+		 endif
+		 let tmp$=apa.glaccount using "########"
+		WebStr$=tmp$,fdel$
+		WebStr$=WebStr$,glname$,fdel$
+		tmp$=apa.amount using "---------.##"
+		WebStr$=WebStr$,tmp$,fdel$ ! amount
+		
+	    List$[row]=WebStr$
+	    row=row+1
+	    if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	    nxtapda: ! 
+	   Loop
+List$[row]=esdel$ ! end of section
+	   row=row+1
+	   if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	
+	  Webstr$=""
+	   !!! po section
+	  
+	! this sends 4 sections -ap po info
+	List$[ROW]=bsdel$,"APPODETAIL",fdel$ ! ap transaction header
+	let row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	WebStr$="POID",fdel$
+	Webstr$=WEBSTR$,"Amount",fdel$
+	List$[row]=WebStr$
+    let row=row+1
+	if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	if aph.ponumber<>0 and spO<>0 and c0[4]<>0 and returnstatus<>0
+		Try
+			if ch_apph>0
+				LET KEYAPPH$=" ",KEYAPPH$
+				let keyapph$[1,6] = aph.VendorCode using "######"
+				let keyapph$[7,18] = aph.InvoiceCode$[1,12]
+				let keyapph$[19,20]=aph.TransactionType using "##"
+				Do
+					search #ch_apph,3,1;keyapph$,rec_apph,e
+					if e<>0 exit do
+					if keyapph$[7,18]<>aph.invoicecode$[1,12] exit do
+					let tmp3=keyapph$[1,6]\if tmp3<>aph.VendorCode exit do
+					let tmp3=keyapph$[19,20]\if tmp3<>aph.TransactionType exit do
+					read record #ch_apph,rec_apph;apph.;
+					let webstr$=str$(apph.poid),fdel$! appolink
+					let webstr$=webstr$,(apph.totap using "----------.##"),fdel$
+					List$[row]=WebStr$
+					row=row+1
+					if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+				Loop 
+			endif
+		else
+		end Try
+	 endif  
+	
+	 Endif ! of found a reference
+	endif ! valid VEND rec
+	Close #VENDChan
+	If aphchan>0 Close #aphchan
+	If apaChan>0 Close #apaChan
+	if ch_apm>0 Close #ch_apm
+        Close #CTLChan
+	!
+	List$[row]=esdel$ ! end of section
+  else
+    include "src/callsuberr.inc"
+  end try
+  !
+end sub ! GetVendAPTran
+! --------------------------------------------------------------------------------------

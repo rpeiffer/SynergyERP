@@ -1,0 +1,325 @@
+! --- serp914_holiday.dl4
+! Misc. Tables Maintenance program (holidays) converted from holiday
+!
+! 1.0 10/12/2009 - initial conversion
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp914_holiday.dl4 src/serp914_holiday.src
+!
+! From the original code:
+Rem BEDIT Version: 1.7f OBJECT CODE     Created: JUL  9, 1997  11:25:34
+Rem /usr/acct/r97/src/holiday.s (univ) [jcs] {56480}
+Rem  Copyright (c) 1997 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+! include "src/inc/file?.inc"
+Declare Intrinsic Sub DateToJulian
+Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,jdate$,Formatdate2$
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[1000],tmp2$[500],b$[200]
+b$=" ",b$
+dim message$[150],webstr$[200]
+!
+! call dxopen()
+!
+! call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+Dim 1%,CH_CNTRL
+Dim 1%,VDAY[6],ADAY[6],ADJHOLIDAY,ADJCLOZ,HOLIUPDATEBATMAN
+Dim 2%,HOLIDAY[19],CLOZ1[1],CLOZ2[1],CLOZNUM[1]
+Dim 3%,SCR,X,P1,INDX
+Dim SCRATCH$[80],HOLIDAY$[400],CLOZ$[40],CLOZCODE$[2]
+DIM DOW$[7,10]
+
+Gosub OPEN_FILES
+
+!
+! action2 will dictate which table we are dealing with
+!
+If action2$ = "1"
+	! DAY of Week Maintenance
+	gosub READ_DAYS
+	DOW$[1] = "SUNDAY"
+	DOW$[2] = "MONDAY"
+	DOW$[3] = "TUESDAY"
+	DOW$[4] = "WEDNESDAY"
+	DOW$[5] = "THURSDAY"
+	DOW$[6] = "FRIDAY"
+	DOW$[7] = "SATURDAY"
+else If action2$ = "2"
+	gosub READ_HOLIDAYS
+else
+	e$ = "Unknown action2: "+action2$ \ error 10000
+End If
+
+!
+! GETDATA - send data to .NET
+if action1$ = "GETDATA"
+	!
+	! section 1 : table data
+	tmp$=bsdel$+"TableData"+fdel$+rdel$
+	call addToStr(e$, rstr$, tmp$)
+	Gosub BuildTableData
+	call addToStr(e$, rstr$, tmp$+esdel$)
+	if action2$ = "2" ! add'l sections for holiday table
+		! holiday adjustment direction
+		tmp$=bsdel$+"Adjust"+fdel$+rdel$+"Code"+fdel$+rdel$
+		If ADJHOLIDAY
+			tmp$=tmp$+"B"
+		Else
+			tmp$=tmp$+"F"
+		End If
+		tmp$=tmp$+fdel$+rdel$
+		call addToStr(e$, rstr$, tmp$+esdel$)
+		! closures section
+		tmp$=bsdel$+"Closure"+fdel$+rdel$
+		call addToStr(e$, rstr$, tmp$)
+		Gosub BuildClosureTable
+		call addToStr(e$, rstr$, tmp$+esdel$)
+		! closure adjustment direction
+		tmp$=bsdel$+"ClosureAdjust"+fdel$+rdel$+"Code"+fdel$+rdel$
+		If ADJCLOZ
+			tmp$=tmp$+"B"
+		Else
+			tmp$=tmp$+"F"
+		End If
+		tmp$=tmp$+fdel$+rdel$
+		call addToStr(e$, rstr$, tmp$+esdel$)
+		! closure scope dropdown list
+		tmp$=bsdel$+"ScopeDropdownlist"+fdel$+rdel$
+		tmp$=tmp$+"ID"+fdel$+"Desc"+fdel$+rdel$
+		tmp$=tmp$+"C"+fdel$+"Company Wide"+fdel$+rdel$
+		tmp$=tmp$+"D"+fdel$+"Division #"+fdel$+rdel$
+		tmp$=tmp$+"W"+fdel$+"Warehouse #"+fdel$+rdel$
+		call addToStr(e$, rstr$, tmp$+esdel$)
+	end if
+	! status section
+	Message$=""
+	ReturnStatus=1
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call addToStr(e$,rstr$,webstr$)
+	goto OutEnd:
+!
+! SUBMITDATA - get data from .NET
+else if action1$ = "SUBMITDATA"
+	Gosub UnloadTableData
+	Message$="Table Updated"
+	ReturnStatus=1
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call addToStr(e$,rstr$,webstr$)
+	goto OutEnd:
+else
+	e$ = "Unknown action1: "+action1$ \ error 10000
+end if
+
+OPEN_FILES: Rem
+	!
+	! open files
+	!
+	close #1 ! getsession opens the cntrl file as read only, need write access.
+	CH_CNTRL = openfile(9999,intCO)
+Return
+
+!
+! build table data for .net - returned in tmp$
+BuildTableData: !
+	!
+	! table headers
+	!
+	if action2$ = "1" ! days of week
+		tmp$="DAY"+fdel$+"VALID"+fdel$+"ADJUST"+fdel$+rdel$
+	else ! holidays
+		tmp$="DATE"+fdel$+"DESCRIPTION"+fdel$+rdel$
+	end if
+	!
+	! table data
+	if action2$ = "1" ! days of week
+		For I = 0 To 6
+			tmp$=tmp$+DOW$[i + 1]+fdel$
+			If VDAY[I] Let tmp$=tmp$+"Y" Else Let tmp$=tmp$+"N"
+			tmp$=tmp$+fdel$
+			If not(VDAY[i])
+				If ADAY[I]
+					tmp$=tmp$+"B"
+				Else
+					tmp$=tmp$+"F"
+				End If
+			End If
+			tmp$=tmp$+fdel$+rdel$
+		Next I
+	else ! holidays
+		FOR I = 0 TO 19
+			If HOLIDAY[I] tmp$=tmp$+jdate$(HOLIDAY[I])
+			tmp$=tmp$+fdel$
+			tmp$=tmp$+HOLIDAY$[1 + (I*20), 20 + (I*20)]+fdel$+rdel$
+		NEXT I
+	end if
+return
+
+!
+! Holiday information - closures
+BuildClosureTable: !
+	!
+	! table headers
+	!
+	tmp$="FROM"+fdel$+"TO"+fdel$+"DESCRIPTION"+fdel$
+	tmp$=tmp$+"SCOPE"+fdel$+"DivOrWH"+fdel$+rdel$
+	For I = 0 To 1
+		FOR J = 0 TO 1
+			IF I = 0
+				If CLOZ1[J] tmp$=tmp$+jdate$(CLOZ1[J])
+			else
+				If CLOZ2[J] tmp$=tmp$+jdate$(CLOZ2[J])
+			end if
+			tmp$=tmp$+fdel$
+		NEXT J
+		tmp$=tmp$+CLOZ$[1 + (I * 20), 20 + (I * 20)]+fdel$
+		tmp$=tmp$+CLOZCODE$[I+1,I+1]+fdel$
+		tmp$=tmp$+str$(cloznum[I])+fdel$+rdel$
+	Next I
+
+Return
+
+!
+! unload table data from .net and write to the database
+!
+UnloadTableData: !
+	!
+	! table data
+	if action2$ = "1" ! days of week
+		For I = 0 To 6
+			call DxGet("valid"+str$(i+1), tmp$)
+			If tmp$ = "Y" VDAY[I] = 1 Else VDAY[I] = 0
+			call DxGet("adjust"+str$(i+1), tmp$)
+			If NOT(VDAY[I])
+				If tmp$ = "B" ADAY[I] = 1 ELSE ADAY[I] = 0
+			else
+				aday[i] = 0
+			End If
+		Next I
+		gosub write_days
+	else ! holidays
+		FOR I = 0 TO 19
+			call dxget("holidaydate"+str$(i+1), tmp$) \ tmp$ = rtrim$(tmp$)
+			if tmp$ <> ""
+				call DateToJulian(5,Formatdate2$(tmp$), scratch$)
+			else
+				scratch$ = ""
+			end if
+			holiday[i] = scratch$
+			call dxget("holidaydesc"+str$(i+1), tmp$)
+			tmp$=tmp$+b$
+			HOLIDAY$[1 + (I*20), 20 + (I*20)] = tmp$
+		NEXT I
+		call dxget("holidayadjust", tmp$)
+		If tmp$ = "B"
+			ADJHOLIDAY = 1
+		Else
+			ADJHOLIDAY = 0
+		End If
+		! closure information
+		FOR I = 0 TO 1
+			call dxget("closurefrom"+str$(i+1), tmp$) \ tmp$ = rtrim$(tmp$)
+			if tmp$ <> ""
+				call DateToJulian(5,Formatdate2$(tmp$), scratch$)
+			else
+				scratch$  = ""
+			end if
+			IF I = 0
+				CLOZ1[0] = scratch$
+			else
+				CLOZ2[0] = scratch$
+			end if
+			call dxget("closureto"+str$(i+1), tmp$) \ tmp$ = rtrim$(tmp$)
+			if tmp$ <> ""
+				call DateToJulian(5,Formatdate2$(tmp$), scratch$)
+			else
+				scratch$  = ""
+			end if
+			IF I = 0
+				CLOZ1[1] = scratch$
+			else
+				CLOZ2[1] = scratch$
+			end if
+			call dxget("closuredesc"+str$(i+1), tmp$)
+			tmp$ = tmp$+b$
+			CLOZ$[1 + (I * 20), 20 + (I * 20)] = tmp$
+			call dxget("closurescope"+str$(i+1), tmp$)
+			CLOZCODE$[I+1,I+1] = tmp$
+			if tmp$ <> "C"
+				call dxget("closuredivorwh"+str$(i+1), tmp$)
+				cloznum[i] = tmp$
+			else
+				closnum[i] = 0
+			end if
+		NEXT I
+		call dxget("closureadjust", tmp$)
+		if tmp$ = "B"
+			ADJCLOZ = 1
+		else
+			ADJCLOZ = 0
+		end if
+		gosub write_holidays
+	end if
+Return
+
+READ_DAYS: Rem read days of week from control file
+	Mat Read #CH_CNTRL,175,0;VDAY
+	Mat Read #CH_CNTRL,175,14;ADAY
+Return
+WRITE_DAYS: Rem read days of week from control file
+	Mat Write #CH_CNTRL,175,0;VDAY
+	Mat Write #CH_CNTRL,175,14;ADAY
+Return
+
+READ_HOLIDAYS: Rem
+	Mat Read #CH_CNTRL,175,28;CLOZ1
+	Mat Read #CH_CNTRL,175,36;CLOZ2
+	Mat Read #CH_CNTRL,175,44;CLOZ$
+	Mat Read #CH_CNTRL,175,84;CLOZCODE$
+	Mat Read #CH_CNTRL,175,86;CLOZNUM
+	Mat Read #CH_CNTRL,175,94;ADJCLOZ
+	Mat Read #CH_CNTRL,179,0;HOLIDAY
+	Mat Read #CH_CNTRL,179,80;HOLIDAY$
+	Mat Read #CH_CNTRL,179,480;ADJHOLIDAY
+	Mat Read #CH_CNTRL,179,482;HOLIUPDATEBATMAN
+Return
+WRITE_HOLIDAYS: Rem
+	Mat Write #CH_CNTRL,175,28;CLOZ1
+	Mat Write #CH_CNTRL,175,36;CLOZ2
+	Mat Write #CH_CNTRL,175,44;CLOZ$
+	Mat Write #CH_CNTRL,175,84;CLOZCODE$
+	Mat Write #CH_CNTRL,175,86;CLOZNUM
+	Mat Write #CH_CNTRL,175,94;ADJCLOZ
+	Mat Write #CH_CNTRL,179,0;HOLIDAY
+	Mat Write #CH_CNTRL,179,80;HOLIDAY$;
+	Mat Write #CH_CNTRL,179,480;ADJHOLIDAY
+	HOLIUPDATEBATMAN = Spc(6)
+	Mat Write #CH_CNTRL,179,482;HOLIUPDATEBATMAN
+Return
+
+! the end o' da line
+OUTEND: Rem EXIT ROUTINE
+call setoutput(e$,rstr$)
+Close
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end

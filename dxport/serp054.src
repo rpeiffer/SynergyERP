@@ -1,0 +1,288 @@
+! --- serp054.dl4
+! description product group maintenance based on mx054
+!
+! 1.0 09/29/2009 - Initial conversion
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp054.dl4 src/serp054.src
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+! include "src/inc/file?code?.inc"
+!
+!
+! *declare additional dl4 intrinsic subs & functions
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile
+
+!
+Declare Intrinsic Sub InpBuf,String
+! Option Default Dialect IRIS1
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+try
+! vars for DX and communication to .net
+dim 3%,maxcnt,row
+maxcnt = 1000
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],b$[200],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[1000],tmp1$[200],list$[maxcnt,100],scratch$[100],spaces$[100]
+b$=" ",b$
+dim message$[150],webstr$[200]
+!
+! Variables to hold prod group
+Dim PGDESC$[30]
+Dim 1%,PGOT[38],PGPO[6],PG1[3],prod_grp,PGDSC,pgmlit
+Dim PRODGRP_KEY$[50],FILE$[16],P60$[50]
+Dim 3%
+! call dxopen() ! already handled by FMMENU
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+!
+! Open Files
+! make sure #1 has control file open
+I = openfile(-9999,intCO)
+Mat Read #1,60,50;P60$;
+If P60$[46,46] = "Y" Let IMPORT = 1 Else Let IMPORT = 0
+FILE$ = "2/PRODGRP"+Str$(intCO) !  Using "2/PRODGRP#"
+Open #2,FILE$
+CH_PROD_GRP = 2
+! call dxsave(0,"tmp/054in.txt!")
+!
+! check to see if product group exists
+!
+call DXGet("prodgrpid", tmp$)
+if tmp$ = ""
+	prod_group = 0
+else
+	prod_group = tmp$
+end if
+if prod_group<1 or prod_group>999 or fra(prod_group)
+	E = 1
+else
+	prodgrp_key$=prod_group using "###"
+	Search #ch_prod_grp,2,1;prodgrp_key$,rec_prod_grp,E \ If E > 1 gosub err_search
+end if
+!
+! GETLIST - get a list of product groups to be passed back to the web
+!
+returnstatus=1
+message$="OK"
+if action1$ = "GETLIST"
+	gosub CREATE_PRODGROUP_LIST: !* create items for droplistprodgroup
+	Message$="OK"
+	ReturnStatus=1
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call addToStr(e$,rstr$,webstr$)
+	goto OutEnd:
+!
+! GETDATA - read an existing prodgroup record and pass up the data
+!
+else if action1$ = "GETDATA"   !				DOC=R054-GetData.doc
+	!
+	! make sure the product group exists and read the record
+	!
+	if action2$ = "EDIT"
+		if E message$ ="Product group not on file.";returnstatus=0 \ goto outErr
+		gosub read_prodgroup
+	else if action2$ = "ADD"
+		if NOT(E) message$ ="Product group already on file.";returnstatus=0 \ goto outerr
+		! default a new record
+		E = 2
+		Search #CH_PROD_GRP,1,0;PRODGRP_KEY$,REC_PROD_GRP,E
+		If E gosub err_search
+		Search #CH_PROD_GRP,4,1;PRODGRP_KEY$,REC_PROD_GRP,E
+		If E gosub err_search
+		Call dxget("description", tmp$)
+		tmp$=rtrim$(tmp$) \ pgdesc$=tmp$,b$
+		for i = 1 to 38
+			pgot[i] = 1 ! was i-1 - NOT 1 less!
+			if i <= 6 pgpo[i] = 1
+			if i <= 3 pg1[i-1] = 1
+		next i
+		pgdsc=0
+		gosub write_prodgroup
+	else
+		message$ = "Unknown action2: "+action2$;returnstatus=0 \ goto outerr
+	end if
+	!
+	! Section 1 - header
+	!
+	tmp$=bsdel$+"ProductGroup"+fdel$+rdel$
+	tmp$=tmp$+"prodgrpid"+fdel$
+	tmp$=tmp$+"Description"+fdel$
+	for i = 1 to 38
+		tmp$=tmp$+"OrderType"+str$(i)+fdel$
+	next i
+	tmp$=tmp$+"UsePOImport"+fdel$
+	If IMPORT Let MAX_TYPE = 6 Else Let MAX_TYPE = 3
+	For I = 1 To MAX_TYPE
+		tmp$=tmp$+"POType"+str$(i)+fdel$
+	Next i
+	tmp$=tmp$+"PriceList"+fdel$
+	tmp$=tmp$+"UpdateInventory"+fdel$
+	tmp$=tmp$+"InCatalog"+fdel$
+	rem tmp$=tmp$+"Inactive"+fdel$+rdel$
+	tmp$=tmp$+"Discontinued"+fdel$ ! discontinue discontinued?
+	tmp$=tmp$+"MILLITEM"+FDEL$+rdel$
+	Call AddToStr(e$,rstr$,tmp$)  ! put header into rstr$
+	!
+	! Section 1 - main data
+	!
+	tmp$=str$(prod_group)+fdel$
+	tmp$=tmp$+pgdesc$+fdel$
+	For i = 1 To 38
+		if pgot[i]
+			tmp$=tmp$+"Y"+fdel$
+		else
+			tmp$=tmp$+"N"+fdel$
+		end if
+	next i
+	if import
+		tmp$=tmp$+"Y"+fdel$
+	else
+		tmp$=tmp$+"N"+fdel$
+	end if
+	If IMPORT Let MAX_TYPE = 6 Else Let MAX_TYPE = 3
+	For I = 1 To MAX_TYPE
+		if pgpo[i]
+			tmp$=tmp$+"Y"+fdel$
+		else
+			tmp$=tmp$+"N"+fdel$
+		end if
+	Next I
+	for i = 0 to 2
+		if pg1[i]
+			tmp$=tmp$+"Y"+fdel$
+		else
+			tmp$=tmp$+"N"+fdel$
+		end if
+	next i
+	IF pgdsc ! discontinued - still send it!
+		tmp$=tmp$+"Y"+fdel$
+	else
+		tmp$=tmp$+"N"+fdel$
+	end if
+	if pgmlit ! mill item
+		tmp$=tmp$+"Y"+fdel$
+	else
+		tmp$=tmp$+"N"+fdel$
+	end if
+	tmp$=tmp$+rdel$+esdel$	! end section
+	Call AddToStr(e$,rstr$,tmp$)  ! put "data" into rstr$
+	Message$="OK"
+	ReturnStatus=1
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call addToStr(e$,rstr$,webstr$)
+	goto OutEnd:
+!
+! SUBMITDATA - information passed back from web
+!
+else if action1$ = "SUBMITDATA"  !			doc=R054-SubmitData.doc
+	if E message$ ="Product group not on file.";returnstatus=0 \ goto outerr
+	gosub read_prodgroup
+	! call dxsave(0,"tmp/054in.txt!")
+	call dxget("description", tmp$)
+	tmp$ = rtrim$(tmp$) \ pgdesc$ = tmp$,b$
+	If IMPORT Let MAX_TYPE = 6 Else Let MAX_TYPE = 3
+	for i = 1 to 38
+		tmp1$=B$ \ clear tmp1$
+		tmp1$ = "ordertype"+str$(i)
+		call DxGet("ordertype"+str$(i), tmp$)
+		pgot[i] = 1
+		if tmp$ = "N" pgot[i] = 0
+		if i <= MAX_TYPE
+			tmp1$=B$ \ clear tmp1$
+			tmp1$ = "potype"+str$(i)
+			call DxGet("potype"+str$(i), tmp$)
+			pgpo[i] = 1
+			if tmp$ = "N" pgpo[i] = 0
+		end if
+	next i
+	call DxGet("pricelist", tmp$)
+	pg1[0] = 0
+	if tmp$ = "Y" pg1[0] = 1
+	call DxGet("updateinventory", tmp$)
+	pg1[1] = 0
+	if tmp$ = "Y" pg1[1] = 1
+	call DxGet("incatalog", tmp$)
+	pg1[2] = 0
+	if tmp$ = "Y" pg1[2] = 1
+	call DxGet("discontinued", tmp$)
+	pgdsc = 0 ! NO IS DEFAULT!
+	if tmp$ = "Y" pgdsc = 1
+	call dxget("MILLITEM",tmp$)
+	pgmlit=0 \ if UCase$(RTrim$(tmp$))="Y" let pgmlit=1
+	rem remove the following line if discontinued is needed again
+	pgdsc=0
+	gosub write_prodgroup
+	Message$="Record updated."
+	ReturnStatus=1
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call addToStr(e$,rstr$,webstr$)
+	goto OutEnd:
+else ! not sure what action this is
+	message$ = "Unknown action: "+action1$;returnstatus=0 \ goto outerr
+end if
+CREATE_PRODGROUP_LIST: !* create items for droplistprodgroup
+	prodgrp_key$=" ",prodgrp_key$
+	clear list$[]
+	row=0
+	List$[row]=bsdel$,"droplistprodgroup",fdel$
+	row = row + 1
+	list$[1]="ID",fdel$,"Desc",fdel$
+	row = row + 1
+	E=0
+	do while not(e)
+		Search #ch_prod_grp,3,1;prodgrp_key$,rec_prod_grp,E \ If E > 2 gosub err_search
+		if not(e)
+			gosub read_prodgroup
+			list$[row] = prodgrp_key$,fdel$,prodgrp_key$," - ",pgdesc$,fdel$
+			row = row + 1
+		end if
+	loop
+	List$[row]=esdel$ ! end of section
+	call addToStr(e$,rstr$,list$[])
+Return
+READ_PRODGROUP: Rem read in prod group
+	Mat Read #CH_PROD_GRP,REC_PROD_GRP,0;PGDESC$
+	Mat Read #CH_PROD_GRP,REC_PROD_GRP,30;PGOT
+	Mat Read #CH_PROD_GRP,REC_PROD_GRP,108;PGPO
+	Mat Read #CH_PROD_GRP,REC_PROD_GRP,122;PG1
+	mat read #CH_PROD_GRP,REC_PROD_GRP,132;prod_grp
+	mat read #CH_PROD_GRP,REC_PROD_GRP,134;PGDSC
+	mat read #CH_PROD_GRP,REC_PROD_GRP,136;PGMLIT
+Return 
+WRITE_PRODGROUP: Rem WRITE OUT REC
+  PROD_GRP=PROD_GROUP
+  Mat Write #CH_PROD_GRP,REC_PROD_GRP,0;PGDESC$
+  Mat Write #CH_PROD_GRP,REC_PROD_GRP,30;PGOT
+  Mat Write #CH_PROD_GRP,REC_PROD_GRP,108;PGPO
+  Mat Write #CH_PROD_GRP,REC_PROD_GRP,122;PG1
+  mat Write #CH_PROD_GRP,REC_PROD_GRP,132;prod_grp;
+  mat Write #CH_PROD_GRP,REC_PROD_GRP,134;PGDSC;
+  mat Write #CH_PROD_GRP,REC_PROD_GRP,136;PGMLIT;
+ Return
+ERR_SEARCH: Rem
+ENUM = E ;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+message$ = "RETURN STATUS",(E + (CTERR * .001))
+message$ = message$,"/ STATEMENT",ELINE," IN PROGRAM "+Msc$(4)
+returnstatus=0
+Call programdump("tmp/054se!","")
+goto OutErr ! err_msg ! Error 10000
+Outerr: ! out 
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call addToStr(e$,rstr$,webstr$)
+OUTEND: Rem GET OUT!!!!
+call setoutput(e$,rstr$)
+Close
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end

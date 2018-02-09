@@ -1,0 +1,531 @@
+! >>> Program podimport.dl4
+!
+! loadsave -w -n 100,10 -o prog/util/podimport.dl4 src/podimport.src
+!
+! description Process queued up delivery receipts (proof of delivery)
+!             items, convert to tiff images (1 image per page) and
+!             index into ERP
+!
+! 		Needs to be passed a parameters specifying the main
+!               input directory, it should contain sub-directories
+!               for the needed imput and output.  It has the following
+!		structure:
+!			pdf_in: input directory for pdf files
+!			jpg_in: input directory for jpeg files
+!			tif_out: output directory for tiff files
+!
+!		You need at least one input directory and the output directory.
+!		These can be softlinks as needed.
+!
+! default format for pdfs
+!             OOOOOO_YYYMMDDHHSS.pdf where O is order number
+!
+! Designed to be run by ERP Scheduler
+!
+!
+! 1.0 mm/dd/yyyy change??
+!
+include "src/copyright.inc"
+
+Declare External Sub ERPCronSuccess
+
+Declare Intrinsic Sub DateToJulian,FileInfo,FindF,InpBuf,String
+Declare Intrinsic Function FindChannel
+! Option Default Dialect IRIS1
+
+! local subroutines / functions
+Declare Sub OpenFilesReadControlInfo,ProcessInDirectory
+Declare Sub IndexConvertedTifs,IndexImage,ReadIMSTO,WriteIMSTO
+Declare Sub ReadIMIDX,WriteIMIDX,ImageSave,GetParameters
+Declare Function ConvertPdfFile,ConvertJpgFile,FindOrder,GetOrderNumber
+
+try ! main try
+
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100],rstr$[500] ! dx error handling variables
+DIM podMainDir$[100],jpgInDir$[100],inDir$[100]
+DIM pdfInDir$[100],tifOutDir$[100],inEntry$[100],inFilename$[100],tifEntry$[100],tifFilename$[100]
+dim pageMask$[4],page$[4],inBasename$[100],custom_customer$[30]
+
+Rem {begin src/inc/dim.imtype.i}
+Dim 1%,IMROT,IMINIT,3%,IMSEQ[2],2%,IMBCODE[5]
+Rem {end dim.imtype.i}
+
+Rem {begin src/inc/dim.imsettype.i}
+Dim 1%,SEQDISPL
+Dim DTDESCRIPTION$[20],DTINDEX1$[20],DTINDEX2$[20],DTIMODE$[6]
+Dim DTLOOKUP$[16],DTREFFILE$[4],PREFIX$[2]
+Rem {end dim.imsettype.i}
+
+Rem {begin src/inc/dim.ImIdx.i}
+Dim IMI$[66]
+Dim 3%,IMI1,1%,IMI2[3],2%,IMI3[2]
+Rem {end dim.ImIdx.i}
+
+Rem {begin src/inc/dim.ImSto.i}
+Dim IMSTO$[44]
+Dim 3%,IMSTO[4]
+Rem {end dim.ImSto.i}
+
+Dim 2%,H0[12]
+Dim 3%,OREF[5]
+Dim J$[40]
+Dim SAVEIMAGE$[90]
+Dim SAVEDIR$[20],COMMAND$[400],SPACES$[100]
+Dim KEY_IMIDX$[64]
+Dim PART1$[16],WORK$[100],EXT$[4],COMMENT$[30]
+Dim KEY1_ROH$[60]
+Dim KEY1_ROHHIDX$[60]
+Dim 2%,FARRAY[25]
+Dim 2%,JDATE
+Dim 3%,LAST_IMIDX,X2
+Dim P176$[256]
+Dim JDATE$[10]
+dim 3%,ordersIndexed,ordersFailed
+dim 3%
+
+Dim action$[30],options$[30],userid$[8],b$[200],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+
+
+SPACES$ = " ",SPACES$
+
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+ordersFailed = 0
+ordersIndexed = 0
+call GetParameters()
+call OpenFilesReadControlInfo()
+if checkPDF call ProcessInDirectory("pdf")
+if checkJPG call ProcessInDirectory("jpeg")
+
+print "Orders successfully index: "+str$(ordersIndexed)
+print "Orders failing: "+str$(ordersFailed)
+
+if not(ordersFailed)
+	call ERPCronSuccess()
+end if
+else ! main try
+	include "src/callmainerrnet_call.inc"
+End try
+End 
+
+sub GetParameters()
+try
+	podMainDir$ = lcase$(GetParameter$("PODIMPORTDIR"))
+	if podMainDir$ = ""
+		e$ = "POD input directory not specified!"
+		error 10000
+	end if
+	system "test -d ''"+podMaindir$+"''",retval
+	if retval <> 0
+		e$ = "POD input directory "+podMainDir$+" does not exist!"
+		error 10000
+	end if
+	! tif output directory MUST exist
+	tifOutDir$ = podMainDir$+"/tif_out"
+	system "test -d ''"+tifOutDir$+"'' -a -w ''"+tifOutDir$+"''",retval
+	if retval <> 0
+		e$ = "TIF output directory "+tifOutDir$+" either does not exist or is not writable!"
+		error 10000
+	end if
+	! if pdf directory exists we can check for them
+	checkPDF = 0
+	pdfInDir$ = podMainDir$+"/pdf_in"
+	system "test -d ''"+pdfInDir$+"'' -a -w ''"+pdfInDir$+"''",retval
+	if retval = 0 ! exists and is writeable
+		checkPDF = 1
+	end if
+	checkJPG = 0
+	jpgInDir$ = podMainDir$+"/jpg_in"
+	system "test -d ''"+jpgInDir$+"'' -a -w ''"+jpgInDir$+"''",retval
+	if retval = 0 ! exists and is writeable
+		checkJPG = 1
+	end if
+	if not(checkJPG) and not(checkPDF)
+		e$ = "No writable PDF or JPG input directories under "+podMainDir$+ " found!"
+		error 10000
+	end if
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub OpenFilesReadControlInfo()
+try
+	CH_CNTRL = CTLC
+	CH_IMIDX = 2
+	CH_IMSTO = 3
+	CH_ROH = 4
+	CH_ROHH = 5
+	CH_IMTYPE = 6
+	CH_ROHHIDX = 7
+	Open #CH_IMIDX,"6/IMIndex" + Str$(Intco)
+	Open #CH_IMSTO,"6/IMStore" + Str$(Intco)
+	Open #CH_IMTYPE,"6/IMType" + Str$(Intco)
+	Read #CH_CNTRL,88,1840;WORK$[1,16]; \ Ropen #CH_ROH,WORK$[1,16]
+	Read #CH_CNTRL,88,1136;WORK$[1,16]; \ Ropen #CH_ROHH,WORK$[1,16]
+	Open #CH_ROHHIDX,"4/sordflehhkey" + Str$(intco)
+	Mat Read #CH_CNTRL,176,0;P176$;
+	EXT$ = ".tif";IAGE = 180
+	If P176$[2,2] = "Y" Let EXT$ = ".imd"
+	If P176$[3,3] = "Y" Let EXT$ = ".tif"
+	If P176$[6,6] = "Y"
+		pageMask$ = "&&&&"
+	Else 
+		pageMask$ = "&&"
+	End If 
+	mat read #ctlc,115,60;custom_customer$;
+	let custom_customer$=UCase$(trim$(custom_customer$))
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+Sub ProcessInDirectory(ext$)
+try
+	CH_DIR = FindChannel()
+	if ext$ = "pdf" inDir$ = pdfInDir$
+	if ext$ = "jpeg" inDir$ = jpgInDir$
+	WORK$ = "$$/bin/ls -1 " + inDir$ + "/*."+ext$
+	Open #CH_DIR,WORK$ ! directory list in a pipe
+	do
+		Read #CH_DIR;inEntry$;
+		If inEntry$ = "" exit do
+		do ! strip cr/lf
+			if len(inEntry$) < 2 exit do
+			if inEntry$[Len(inEntry$)] >= " " exit do
+			inEntry$[Len(inEntry$)] = "" ! Strip control chars
+		loop
+		print "Processing "+ext$+" file "+inEntry$
+		! strip the file name out
+		idx = pos(inEntry$,= "/", -1)
+		if not(idx)
+			e$ = "Couldn't find file portion for "+inEntry$
+			error 10000
+		end if
+		inFilename$ = inEntry$[idx+1]
+		orderNumber = GetOrderNumber(inFilename$)
+		! inBasename (strip extension off)
+		idx = pos(inFilename$,= ".",-1)
+		if not(idx) or idx = 1 goto SkipInFile
+		inBasename$ = inFilename$[1,idx-1]
+		if orderNumber<1 or orderNumber>999999
+			print ext$+" File "+inFilename$+" couldn't determine order number!"
+			print "Not indexed!"
+			ordersFailed = ordersFailed + 1
+			goto SkipInFile
+		end if
+		! makes sure we have a valid order number...
+		if not(FindOrder())
+			print "  *** Order #"+str$(orderNumber)+" NOT FOUND!"
+			print "  *** "+ext$+" file "+inFilename$+" left intact, not indexed."
+			ordersFailed = ordersFailed + 1
+			goto SkipInFile
+		end if
+		convertStatus = 0
+		if (ext$ = "pdf") convertStatus = ConvertPdfFile()
+		if (ext$ = "jpeg") convertStatus = ConvertJpgFile()
+		if not(convertStatus)
+			print "  *** "+ext$+" File "+inFilename$+" not successfully converted!"
+			print "  *** Not indexed!"
+			ordersFailed = ordersFailed + 1
+			goto SkipInFile
+		end if
+		print "  "+ext$+" File converted to tif - original file deleted."
+		call IndexConvertedTifs()
+		ordersIndexed = ordersIndexed + 1
+	SkipInFile: !
+	loop
+	close #CH_DIR
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+Function GetOrderNumber(inFile$)
+try
+	dim 3%,retval
+	select case custom_customer$
+		case "HTBERRY"
+			! YYYY.MM.DD.OOOOOO.PageX.ext
+			idx = Pos(inFile$, = ".",1,3)
+			if not(idx) or idx = 1 exit function 0
+			idx2 = pos(inFile$, = ".",1,4)
+			if not(idx2) or idx2 < idx+2 exit function 0
+			retval = inFile$[idx+1,idx2-1]
+		case else
+			! default format is
+			! OOOOOO_YYYMMDDHHSS.ext
+			! where O = order number
+			! YYMMDDHHSS = date / time stamp
+			! ext is pdf or jpg, etc
+			idx = pos(inFile$,= "_")
+			if not(idx) or idx = 1 exit function 0
+			retval = inFile$[1,idx-1]
+	end select
+else
+	include "src/callsuberr.inc"
+end try
+end function retval
+
+
+Function FindOrder()
+try
+	FOUNDFLAG = 0
+	KEY1_ROH$ = orderNumber Using "  ######"
+	For X1 = 1 To 99
+		If X1 = 20 Let X1 = 30
+		KEY1_ROH$[1,2] = X1 Using "##"
+		Search #CH_ROH,2,1;KEY1_ROH$,REC_ROH,E \ If E > 1 error 11000
+		If Not(E)
+			Mat Read #CH_ROH,REC_ROH,0;H0;
+			Mat Read #CH_ROH,REC_ROH,512;OREF;
+			FOUNDFLAG = 1;X1 = 100
+		End If 
+	Next X1
+	If Not(FOUNDFLAG)
+		KEY1_ROHHIDX$ = orderNumber Using "######"
+		do
+			Search #CH_ROHHIDX,3,3;KEY1_ROHHIDX$,REC_ROHH,E
+			if e or Val(KEY1_ROHHIDX$[1,6]) <> orderNumber exit do
+			Mat Read #CH_ROHH,REC_ROHH,0;H0
+			Mat Read #CH_ROHH,REC_ROHH,512;OREF;
+			! check order date first
+			JDATE$ = " ",JDATE$;JDATE$ = H0[9] Using "&&&&&&"
+			Call DateToJulian(1,JDATE$,JDATE$,E)
+			If E Let JDATE$ = Str$(Tim(6)) ! error 11000
+			JDATE = JDATE$;TODAY = Tim(6)
+			If Abs(TODAY - JDATE) <= IAGE
+				FOUNDFLAG = 1
+				exit do
+			Else 
+				! check invoice date next
+				JDATE$ = " ",JDATE$;JDATE$ = H0[8] Using "&&&&&&"
+				Call DateToJulian(1,JDATE$,JDATE$,E)
+				If E = 0
+					JDATE = JDATE$;TODAY = Tim(6)
+					If Abs(TODAY - JDATE) <= IAGE
+						FOUNDFLAG = 1
+						exit do
+					End If 
+				End If 
+			End If 
+		Loop
+	end if
+	if not(FOUNDFLAG) exit function 0 ! not found
+else
+	include "src/callsuberr.inc"
+end try
+end function 1
+
+
+Function ConvertPdfFile()
+try
+	system "/usr/ub/bin/pdf2tif.pl ''"+inDir$+"'' "+inBasename$+" ''"+tifOutDir$+"'' >/dev/null 2>&1", retval
+	if retval exit function 0
+else
+	include "src/callsuberr.inc"
+end try
+end Function 1
+
+Function ConvertJpgFile()
+try
+	system "/usr/ub/bin/jpg2tif.pl ''"+inDir$+"'' "+inBasename$+" ''"+tifOutDir$+"'' >/dev/null 2>&1", retval
+	if retval exit function 0
+else
+	include "src/callsuberr.inc"
+end try
+end Function 1
+
+
+Sub IndexConvertedTifs()
+try
+	KEY_IMIDX$[1,2] = "DR"
+	! form type information - coded for DR (delivery receipt)
+	DTDESCRIPTION$ = "Delivery receipt"
+	PREFIX$ = "dr"
+	DTINDEX1$ = "Order number"
+	DTINDEX2$ = ""
+	DTIMODE$ = "B" ! default to barcode indexing - Bxx - xx=rotation
+	DTLOOKUP$ = "" ! No lookup field
+	DTREFFILE$ = ""
+	! manual indexing
+	DTIMODE$ = "M"
+	Read #CH_IMTYPE,TYPE,44;IMINIT; 
+	IMLINE = 0
+	
+	CH_TIFDIR = FindChannel()
+	if ext$ = "pdf" ! this will produce multiple pages
+		WORK$ = "$$/bin/ls -1 " + tifOutDir$ + "/"+inBasename$+"[0-9][0-9][0-9][0-9].tif"
+	else
+		! 1 input file = 1 page
+		WORK$ = "$$/bin/ls -1 " + tifOutDir$ + "/"+inBasename$+".tif"
+	end if
+	Open #CH_TIFDIR,WORK$ ! directory list in a pipe
+	do
+		Read #CH_TIFDIR;tifEntry$;
+		If tifEntry$ = "" exit do
+		do ! strip cr/lf
+			if len(tifEntry$) < 2 exit do
+			if tifEntry$[Len(tifEntry$)] >= " " exit do
+			tifEntry$[Len(tifEntry$)] = "" ! Strip control chars
+		loop
+		print "  Processing tif "+tifEntry$
+		! strip the file name out
+		idx = pos(tifEntry$,= "/", -1)
+		if not(idx)
+			e$ = "Couldn't find file portion for "+tifEntry$
+			error 10000
+		end if
+		tifFilename$ = tifEntry$[idx+1]
+! 		idx = pos(pdfFilename$,= ".")
+! 		if not(idx) or idx = 1 goto SkipTifFile
+! 		tifSequence = tifFilename$[idx-4,idx-1]
+		IMLINE = IMLINE + 1
+		call IndexImage()
+		print "    Tif image "+tifFilename$+" successfully indexed!"
+	SkipTifFile: !
+	loop
+	close #CH_TIFDIR
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+sub IndexImage()
+try
+	If IMLINE > 1 ! add pages
+		REC_IMIDX = LAST_IMIDX
+		Call ReadIMIDX()
+		Call ImageSave()
+		exit SUB
+	End If
+	! new document
+	J$ = orderNumber Using "######"
+	WORK$ = RTrim$(J$) \ PART1$ = WORK$
+	COMMENT$ = "pdfdrimport.dl4",SPACES$
+	IMI2[2] = 0
+	KEY_IMIDX$ = PREFIX$
+	Call String(1,KEY_IMIDX$)
+	JDATE$ = " ",JDATE$;JDATE$ = H0[9] Using "&&&&&&"
+	Call DateToJulian(1,JDATE$,JDATE$,E)
+	If E Let JDATE$ = Str$(Tim(6)) ! error 11000
+	JDATE = JDATE$
+	KEY_IMIDX$[3] = orderNumber Using "######" ! order
+	KEY_IMIDX$[9] = H0[4] Using "######"
+	KEY_IMIDX$[15] = JDATE Using "######"
+	KEY_IMIDX$[21] = SPACES$
+	KEY_IMIDX$[31] = ""
+	Call String(1,KEY_IMIDX$)
+	Search #CH_IMIDX,2,1;KEY_IMIDX$,REC_IMIDX,E \ If E>1 error 11000
+	if not(e) EXISTS = 1 ELSE EXISTS = 0
+	if EXISTS ! already exists
+		call ReadIMIDX()
+		If Tim(6) - IMI3[0] < IAGE ! current - last stored
+			! current - add it
+		Else 
+			! old - overwrite
+			Search #CH_IMIDX,5,1;KEY_IMIDX$,REC_TEMP,E
+			If E error 11000
+			E = 3 \ Search #CH_IMIDX,1,0;KEY_IMIDX$,REC_TEMP,E
+			If E error 11000
+			EXIST = FALSE
+		End If 
+	end if
+	IF NOT(EXISTS)
+		E = 2 \ Search #CH_IMIDX,1,0;KEY_IMIDX$,REC_IMIDX,E \ If E error 11000
+		Read #CH_IMTYPE,TYPE,0;IMI1
+		IMI1 = IMI1 + 1
+		Write #CH_IMTYPE,TYPE,0;IMI1;
+		IMI$[1,30] = KEY_IMIDX$,SPACES$
+		IMI$[31,60] = COMMENT$
+		IMI2[0] = IMINIT
+		IMI2[1] = 0
+		Call WriteIMIDX()
+		Search #CH_IMIDX,4,1;KEY_IMIDX$,REC_IMIDX,E \ If E error 11000
+	End If 
+	call ImageSave()
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+Sub ImageSave()
+try
+	If IMI2[1] >= 9999
+		e$ = "Total number of pages exceeded!!"
+		error 10000
+	end if
+	IMI2[1] = IMI2[1] + 1 ! number documents
+	IMI3[0] = Tim(6)
+	IMI3[1] = Tim(6)
+	call WriteIMIDX()
+	LAST_IMIDX = REC_IMIDX
+	REC_IMSTO = IMI2[0]
+	call ReadIMSTO()
+	SAVEDIR$ = rtrim$(IMSTO$[21,40])
+	PAGE$ = IMI2[1] Using pageMask$
+	SAVEIMAGE$ = SAVEDIR$ + "/" + PREFIX$ + "/" + Str$(IMI1) + PAGE$ + EXT$
+	Call FindF(SAVEIMAGE$,E)
+	If E
+		Kill SAVEIMAGE$
+	End If 
+	COMMAND$ = "mv -f "+tifEntry$+" "+SAVEIMAGE$
+	system COMMAND$,retval
+	if retval <> 0
+		e$ = "Error occurred moving image: "+COMMAND$
+		error 10000
+	end if
+	If IMI2[1] = 1 Let IMSTO[2] = IMSTO[2] + 1
+	IMSTO[3] = IMSTO[3] + 1
+	Call FileInfo(WORK$,FARRAY[],SAVEIMAGE$,1)
+	IMSTO[4] = IMSTO[4] + FARRAY[6]
+	Call WriteIMSTO()
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub ReadIMSTO()
+try
+	Mat Read #CH_IMSTO,REC_IMSTO,0;IMSTO$
+	Mat Read #CH_IMSTO,REC_IMSTO,44;IMSTO
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub WriteIMSTO()
+try
+	Mat Write #CH_IMSTO,REC_IMSTO,0;IMSTO$
+	Mat Write #CH_IMSTO,REC_IMSTO,44;IMSTO;
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub ReadIMIDX()
+try
+	Mat Read #CH_IMIDX,REC_IMIDX,0;IMI$
+	Mat Read #CH_IMIDX,REC_IMIDX,66;IMI1
+	Mat Read #CH_IMIDX,REC_IMIDX,72;IMI2
+	Mat Read #CH_IMIDX,REC_IMIDX,80;IMI3
+else
+	include "src/callsuberr.inc"
+end try
+end sub
+
+
+sub WriteIMIDX()
+try
+	Mat Write #CH_IMIDX,REC_IMIDX,0;IMI$
+	Mat Write #CH_IMIDX,REC_IMIDX,66;IMI1
+	Mat Write #CH_IMIDX,REC_IMIDX,72;IMI2
+	Mat Write #CH_IMIDX,REC_IMIDX,80;IMI3;
+else
+	include "src/callsuberr.inc"
+end try
+end sub

@@ -1,0 +1,138 @@
+!
+! description product CPI programs 
+!
+! loadsave -w -n 100,10 -o prog/dxport/cpiavail.dl4 src/cpiavail.src
+!
+! Did not include in libcpi as this needs to be included in libprice and that
+! will cause issues with external lib links both in salespro and ERP (sfdash)
+!
+!	F			CPIQtyAvail		For a CPI Contract / Product - what's available?
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+!include structure,filehandler libs & default structure dims
+!
+include "src/inc/fileprod.inc" ! product
+Include "src/inc/filespecprice.inc" ! Special Price Lines (MANUAL KEY ADD/UPDATE ONLY!)
+Include "src/inc/filecpidet.inc" ! CPI detail information
+Include "src/inc/filerolnew.inc" ! order lines
+!
+! *declare additional dl4 intrinsic subs & functions
+Declare Intrinsic Function FindChannel
+Declare Intrinsic Sub Logic,FormatDate,DateToJulian
+!
+! *declare additional external libs & subs & functions
+!
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+!
+External Lib "libgeneral.lib"
+Declare External Sub SubErr,CreateNetStatus,GetDelimiters
+!
+
+Dim e$[500]
+! 
+!--------------------------------------------------------------------
+! CPIQtyAvail
+!
+! contractNo - contract # to check
+! product - product to check
+!
+! optional: chan[0] = control channel
+!           chan[1] = cpidet channnel
+!           chan[2] = specprice channel
+!           chan[3] = product channel
+!           chan[4] = rolnew channel
+!
+! returns Quantity available for sale including reduction for backorders
+!     check e$ for errors
+!       NULL = EVERYTHING OK
+!       "1" = not a cpi contract
+!       "2" = not a reserve stock contract
+!       "3" = unknown error
+!       IF NULL, will set recCPIDet to the CPIDET record
+!
+External Function CPIQtyAvail(e$,contractNo,prodCode$,recCPIDet,...)
+try
+	enter chan[],...
+else
+	dim 1%,chan[99]
+end try
+try
+	enter incBO
+else
+	incBo = 1
+end try
+try
+	dim pr. as prod
+	dim cpid. as cpidet
+	dim sd. as specprice
+	dim rol. as rolnew
+	dim prKey$[50],cpidKey$[50],sdKey$[50],rolKey$[50],b$[50]
+	dim 1%,CPIDC,SDC,PRC,ROLC,CCTRL,cnvtu[2]
+	dim 3%,retval,cnvta, Amount
+	dim 3%
+	
+	retval = 0
+	recCPIDet = 0
+	e$ = ""
+	b$ = " ",b$
+	! open files if needed
+	CCTRL = chan[0] \ if not(CCTRL) CCTRL = OpenFile(-9999)
+	if CCTRL=-1 error 42
+	CPIDC = chan[1] \ if not(CPIDC) CPIDC=OpenFile(-9928)
+	if cpidc=-1 Error 42 ! cpi detail
+	SDC = chan[2] \ if not(SDC) SDC=OpenFile(-1936)
+	If SDC=-1 Error 42 ! Contract Lines
+	PRC = chan[3] \ if not(PRC) PRC=OpenFile(-1792)
+	if PRC=-1 error 42
+	ROLC = chan[4] \ if not(ROLC) ROLC=OpenFile(-1888)
+	if ROLC=-1 error 42
+	prKey$ = prodCode$,b$
+	PRR=filegetprod(e$,PRC,"=",1,prKey$,pr.)
+	if prr<=0 e$ = "3" \ goto CPIQtyAvail_OUTEND ! no product??
+	cpidKey$ = " ",cpidKey$
+	cpidKey$[1,6] = contractNo using "C#####"
+	cpidKey$[7,18] = prodCode$,b$
+	cpidr=filegetcpidet(e$,cpidc,"=",1,cpidKey$,CPID.)
+	if cpidr<=0 e$ = "1" \ goto CPIQtyAvail_OUTEND ! not a CPI contract
+	if not(cpid.ResStock) e$ = "2" \ goto CPIQtyAvail_OUTEND ! not a reserve stock item
+	sdKey$ = cpidKey$
+	sdr=filegetspecprice(e$,sdc,"=",1,sdKey$,sd.)
+	if sdr<=0 e$ = "3" \ goto CPIQtyAvail_OUTEND ! no specprice record?
+	! OK - got the basics here
+	recCPIDet = cpidr
+	! convert reserve stock to base units
+	let cnvtu[0]=sd.UMQty;cnvtu[1]=0;cnvtu[2]=1
+	let cnvta=cpid.ResStock
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,CCTRL,FLAG,PR.)
+	retval = Amount - SD.QtySinceStart - CPID.QuantityAllocated
+	if incBO
+		! OK - now check for backorders as these should also reduce
+		! what can be against a reserve stock contract
+		rolKey$ = " ",rolKey$
+		rolkey$[1,6] = PRR Using "######"
+		do
+			rolr=filegetrolnew(e$,rolc,">",2,rolKey$,rol.)
+			if rolr<=0 exit do
+			if PRR <> val(rolKey$[1,6]) exit do
+			if rol.Contract = cpid.ContractNumber
+				retval = retval - rol.QtyBO
+			end if
+		loop
+	end if
+	! this is a reserve stock contract
+	e$ = ""
+	CPIQtyAvail_OUTEND: ! cleanup
+	if not(chan[1]) close #CPIDC
+	if not(chan[2]) close #SDC
+	if not(chan[3]) close #PRC
+	if not(chan[4]) close #ROLC
+Else
+   include "src/callsuberr.inc"
+End Try                                                                     
+End Function retval ! CPIQtyAvail

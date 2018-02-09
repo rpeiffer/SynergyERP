@@ -1,0 +1,715 @@
+! --- serp148.dl4
+! Alternate item maintenance program converted from mx148
+!
+! 1.0 10/30/2009 - initial conversion
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp148.dl4 src/serp148.src
+!
+! From the original code:
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: MAR 12, 2009  13:15:49
+Rem /w2/papermaster/r2005//usr/acct/becky/work/r2005/mx1/mx148.src (univ2) [becky] {47169}
+Rem  Copyright (c) 2009 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+Rem MX148    ALTERNATIVE ITEM MAINTENANCE
+Rem
+Rem  AUTHOR: UBS  MAY 29, 1990
+! ------------------------------------------------------------------------------
+! 02/27/12  vst task12482 - Omaha upgrade - copied source from 'omaha.r9' to
+!                           'xrev9' & modified with 'custom_customer$' for their
+!                           custom code ( custom code as follows: )
+! 05/28/12 jliu cct222171 - add log file code
+! ------------------------------------------------------------------------------
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+Declare External Sub CreateNetStatus
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+! include "src/inc/file?.inc"
+Declare Intrinsic Sub InpBuf,String,FindF,Time
+Declare Intrinsic function findchannel
+Option Default Dialect IRIS1
+!
+! *declare additional external libs & subs & functions
+External Lib "ubsfunc.dl4"
+Declare External Function openfile
+!Declare External Function openfile,pdate$,jdate$,Formatdate2$
+
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+dim action$[30],action1$[30],action2$[30],options$[30],userid$[8],3%
+dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[1200] ! .net delimiters
+dim tmp$[3200],tmp2$[500],b$[200]
+b$=" ",b$
+dim message$[150],webstr$[200]
+!
+! call dxopen()
+!
+! call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+Call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+
+DIM 1%,SC,SR,J4$[50]
+Dim K1$[40],K2$[40],tmp_key$[50]
+DIM K3$[40],K4$[30],K5$[50]
+Dim P1$[156],P9$[50],P60$[50],C1$[30]
+Dim UM$[4],1%,PFU1[20]
+Dim 2%,X,X1,C1,M1[2]
+Dim 3%,J1,X2,REC_LEN
+DIM time$[22]
+DIM BLANK$[80],FILE$[50],CMD$[100],DIR$[75],line1$[100]
+dim sysname$[50]
+dim custom_customer$[30]
+
+! open files
+For J0 = 2 To 6
+	Read J \ If J = -1 Goto L_830
+	Read #1,88,Abs(J);tmp$[1,16];
+	If J < 0 Ropen #J0,tmp$ Else Open #J0,tmp$
+L_830: Next J0
+Data "-1792","2352","-1104","-1728","-1808"
+Mat Read #1,19,50;P9$;
+Mat Read #1,60,50;P60$;
+mat read #1,115,60;custom_customer$;
+custom_customer$=rtrim$(custom_customer$)
+!
+! all actions require that we lookup and read the
+! existing record or init a new one
+!
+Call DxGet("AIID", tmp$) \ tmp$ = ucase$(tmp$)
+tmp$ = rtrim$(tmp$)
+if tmp$ = ""
+	e$="No alternate item code specified!"
+	error 10000
+end if
+K1$ = Ucase$(tmp$),b$ \ K1$[25] = ""
+Search #3,2,1;K1$,R1,E \ if e>1 error 42
+newRec=0
+prodEdit=0 ! can we edit the product number?  only new, non-private items
+if e
+	newRec = 1
+	gosub InitAlternate
+	! make sure the alt. item code does not match a real item
+	! code
+	gosub VerifyAlternate
+	!
+	! if private label - peel off the customer
+	! number and product portion
+	!
+	isPrivate = 0
+	If P60$[11,11] = "Y"
+		search k1$[1,7],"/",I
+		if I
+			C1 = K1$[1,I - 1]
+			If C1 > 0
+				K2$ = " ",K2$
+				K2$[1,12] = K1$[I + 1,I + 13]
+				k1$[25,36] = k2$[1,12]
+				isPrivate = 1
+			end if
+		end if
+	end if
+	if isPrivate
+		! verify customer and product DO exist
+		gosub GetCustomer
+		if C1$ = ""
+			e$ = "Private Label: Customer not on file!"
+			error 10000
+		end if
+		gosub GetProduct
+		if P1$=""
+			e$ = "Private Label: Product not on file!"
+			error 10000
+		end if
+	else
+		! we have a new, non-private label item, we need to
+		! allow entry of a new product id
+		prodEdit = 1
+	end if
+else
+	! existing record - get all the information
+	gosub ReadAlternate
+	gosub GetCustomer
+	K2$ = " ",K2$
+	K2$[1,12] = K1$[25,36]
+	gosub GetProduct
+end if
+
+!
+! get an alternate item code
+!
+if action1$ = "GETDATA"
+	gosub LoadData
+	Message$=""
+	goto OutEnd:
+!
+! SUBMITTING DATA
+!
+else if action1$ = "SUBMITDATA"
+	gosub UnloadDataAndUpdate
+	! section x - status
+	Message$="Record updated."
+	goto OutEnd:
+!
+! DELETE WH
+!
+else if action1$ = "DELETE"
+	gosub DeleteData
+	! section x - status
+	Message$="Record deleted."
+	goto OutEnd:
+!
+! UNKNOWN ACTION
+!
+else
+	e$ = "Unknown action1: "+action1$ \ error 10000
+end if
+
+! ***********************************************************************
+! Nobody but us subroutines and exit code down here
+! ***********************************************************************
+
+!----------------------------------------------------------------------------
+! Load data from either existing record or new one
+!----------------------------------------------------------------------------
+LoadData: !
+	! build section header and column header
+	tmp$=bsdel$+"TableData"+fdel$+rdel$
+	tmp$=tmp$+"AIID"+fdel$+"prodEdit"+fdel$+"ProdID"+fdel$+"ProdDesc"+fdel$
+	! need to send product desc and customer name (if possible)
+	tmp$=tmp$+"CustEdit"+fdel$+"CustID"+fdel$+"CustName"+fdel$
+	tmp$=tmp$+"UPCFlag"+fdel$
+	If P60$[11,11] = "Y"
+		tmp$=tmp$+"MinQty"+fdel$+"UOM"+fdel$+"MakeMessage"+fdel$
+		! need to send "MAKE FLAG" for product
+	end if
+	call addToStr(e$,rstr$,tmp$+rdel$)
+	! actual data
+	tmp$=k1$[1,24]+fdel$+str$(prodEdit)+fdel$+k2$[1,12]+fdel$
+	if p1$ <> ""
+		tmp$=tmp$+p1$[9,38]+fdel$
+	else
+		tmp$=tmp$+fdel$
+	end if
+	tmp$=tmp$+str$(not(IsPrivate))+fdel$+str$(c1)+fdel$+c1$+fdel$
+	tmp$=tmp$+str$(M1[1])+fdel$
+	If P60$[11,11] = "Y"
+		tmp$=tmp$+str$(M1)+fdel$+UM$+fdel$
+		If P1$[139,139] = "M"
+			tmp$=tmp$+fdel$
+		else
+			tmp$=tmp$+"Product is not a make item."+fdel$
+		end if
+	end if
+	call addToStr(e$, rstr$, tmp$+rdel$+esdel$)
+Return
+
+!----------------------------------------------------------------------------
+! unload data from web and update
+!----------------------------------------------------------------------------
+UnloadDataAndUpdate: !
+	
+	! at this point, always verify the alternate does not
+	! conflict with an actual product code
+	Gosub VerifyAlternate
+	call DxGet("ProdID", tmp$) \ tmp$ = ucase$(tmp$)
+	if prodEdit ! new, non-private label - need to complete keys
+		k2$[1,12] = tmp$,b$
+		k1$[25,36] = k2$[1,12]
+	end if
+	! k1$ key is complete, k2$ contains product code
+	! verify product is on file
+	gosub GetProduct
+	if p1$ = ""
+		e$ = "Product is not on file!" \ error 10000
+	end if
+	! verify customer
+	call DxGet("CustID", tmp$) \ c1 = tmp$
+	gosub GetCustomer
+	if C1$ = ""
+		e$ = "Customer is not on file!" \ error 10000
+	end if
+	call DxGet("UPCFlag", tmp$) \ m1[1] = tmp$
+	If P60$[11,11] = "Y"
+		call DxGet("MinQty", tmp$) \ M1 = tmp$
+	end if
+	if newRec ! need to add the record and keys
+		K2$[1,12] = K1$[25,36]
+		K2$[13,36] = k1$[1,24],""
+		E = 2 \ Search #3,1,0;K1$,R1,E \ If E Error 42
+		Search #3,4,1;K1$,R1,E \ If E Error 42
+		Search #3,4,2;K2$,R1,E \ If E Error 42
+	end if
+	gosub WriteAlternate
+	if custom_customer$="OMAHA"
+		gosub logfile: ! open log file
+		do
+			READ #ch_log;LINE1$;
+			IF rtrim$(LINE1$)="" exit do
+		loop
+		if newrec<>0
+			PRINT #ch_log;Rtrim$(USERID$[1,8]);tab 11;time$[1,22];tab 34;"ADD";tab 42;k2$[1,12];tab 55;k1$[1,24]
+		else
+			PRINT #ch_log;Rtrim$(USERID$[1,8]);tab 11;time$[1,22];tab 34;"EDIT";tab 42;k2$[1,12];tab 55;k1$[1,24]
+		endif
+	endif
+Return
+
+!----------------------------------------------------------------------------
+! unload data from web and update
+!----------------------------------------------------------------------------
+DeleteData: !
+	if (newRec) return ! new records not yet written out
+	K3$ = " ",K3$;K3$[1,12] = K1$[25,36];K3$[13] = K1$[1,24],""
+	Search #3,5,1;K1$,R1,E \ If E Error 42
+	Search #3,5,2;K3$,R1,E \ If E Error 42
+	C1 = 0
+	Gosub WriteAlternate
+	E = 3 \ Search #3,1,0;K1$,R1,E \ If E Error 42
+	if custom_customer$="OMAHA"
+		gosub logfile: ! open log file
+		do
+			READ #ch_log;LINE1$;
+			IF rtrim$(LINE1$)="" exit do
+		loop
+		PRINT #ch_log;rtrim$(USERID$[1,8]);tab 11;time$[1,22];tab 34;"DELETE";tab 42;k3$[1,12];tab 55;k1$[1,24]
+	endif
+Return
+
+!----------------------------------------------------------------------------
+! Initialize new data record
+!----------------------------------------------------------------------------
+InitAlternate: !
+	C1 = 0
+	For I = 0 To 2
+		M1[I] = 0
+	Next I
+Return
+
+!----------------------------------------------------------------------------
+! read existing data record
+!----------------------------------------------------------------------------
+ReadAlternate: !
+	Read #3,R1,0;C1
+	Mat Read #3,R1,4;M1
+Return
+
+!----------------------------------------------------------------------------
+! write existing data record
+!----------------------------------------------------------------------------
+WriteAlternate: !
+	Write #3,R1,0;C1
+	Mat Write #3,R1,4;M1
+	REC_LEN = ((Chf(303) * 2) - 2)
+	Mat Write #3,R1,REC_LEN;b$[1,1];
+Return
+
+!----------------------------------------------------------------------------
+! verify alternate item code doesn't conflict with an actual product code
+!    assumes K1$ contains alternate code
+!----------------------------------------------------------------------------
+VerifyAlternate: !
+	If K1$[13,24] = b$[13,24] ! if alt item is 12 chars or less
+		tmp_key$ = K1$[1,12],b$
+		Search #2,2,1;tmp_key$,R2,E \ if E>1 Error 42
+		if not(E)
+			e$ = "Alternate code cannot be a valid product code!"
+			error 10000
+		End If
+	End If
+Return
+
+!----------------------------------------------------------------------------
+! get customer information
+!----------------------------------------------------------------------------
+GetCustomer: !
+	C1$ = " ",C1$
+	If C1 = 0
+		C1$ = "ALL CUSTOMERS"
+		Return
+	End if
+	K5$ = C1 Using "######"
+	Search #6,2,1;K5$,R6,E \ if E>1 Error 42
+	If not(E)
+		Mat Read #6,R6,30;C1$;
+		return
+	end if
+	C1$ = ""
+Return
+
+!----------------------------------------------------------------------------
+! get product information
+!----------------------------------------------------------------------------
+GetProduct: !
+	tmp_key$ = k2$[1,12],b$
+	Search #2,2,1;tmp_key$,R2,E \ if E>1 Error 42
+	If not(E)
+		Mat Read #2,R2,0;P1$;
+		Mat Read #2,R2,512;PFU1;
+		UM$ = "     "
+		If PFU1[13] > 0 Read #5,PFU1[13],10;UM$;
+		return
+	end if
+	p1$=""
+Return
+
+LOGFILE: ! open the log file to track the fax option 
+if custom_customer$<>"OMAHA" return
+ch_tmp=findchannel()  
+LET DIR$=""
+Open #ch_tmp,"$$id -u -n"
+Read #ch_tmp;sysname$;
+!let sysname$=rtrim$(sysname$)
+let sysname$[len(sysname$)] = ""
+try close#ch_tmp else rem
+If sysname$ = "serptest"
+	!serptest - rev10
+	!REPORTDIR=/v/rev10/u/reports
+	dir$="/v/rev10/u/reports"
+else
+	If sysname$ = "serp"
+		!let dir$= ! set path for live acct
+		!serp - omaha
+		!REPORTDIR=/u/reports
+		let dir$="/u/reports"
+	endif
+endif
+!IF DIR$="REPORTDIR" OR LEN(DIR$)=0 
+IF rtrim$(DIR$)=""
+	LET FILE$="/tmp/altitemlog"+str$(intCo)                      
+ELSE                                                                    
+	LET FILE$=DIR$+"/altitemlog"+str$(intCo)                     
+ENDIF                                                                   
+Call FindF(File$,found)                                                    
+IF NOT (FOUND)                                                           
+  LET CMD$="touch "+FILE$                                               
+  SYSTEM CMD$                                                           
+ENDIF  
+ch_log=findchannel()
+OPEN #ch_log,FILE$                                                          
+IF NOT (FOUND) ! new file 
+	let tmp$=file$," <666>"
+	Modify tmp$
+	Try Close #ch_log Else Rem
+	OPEN #ch_log,FILE$ 
+	PRINT #ch_log;"          Alternate Item Tracking File   "  
+	print #ch_log;"Access Code";tab 11;"  Date/Time";tab 34;"Action";tab 42;"Item Code";tab 55;"Alt Item Code"
+	LET LINE1$=""
+	print #ch_log;line1$
+	
+endif
+Call Time(time$)
+RETURN 
+
+! L_900: Rem
+! Gosub L_8000 ! clear the record
+! K1$ = " ",K1$;K2$ = " ",K2$;BLANK$ = " ",BLANK$
+! SC = 30;SR = 4
+! Gosub L_5800 ! display the screen
+! 
+! L_1000: Rem START
+! J5$ = "Enter Alternative Item code, "
+! If P60$[11,11] = "Y" Let J5$ = J5$,"Private Label Code, "
+! J5$ = J5$," <CR>: exit"
+! J0$ = "2 002412 2" \ J1$ = ""
+! Gosub L_7000 \ If J4$ = "" Goto OUTEND
+! L_1017: J4$ = J$ \ If J4$[1,1] = " " Let J$ = J4$[2] \ Goto L_1017
+! If J4$ = "" Goto L_1000
+! If Len(J$) > 24 Print 'RB'; \ Goto L_900
+! 
+! K1$ = " ",K1$ \ K1$[1,Len(J$)] = J$[1,Len(J$)]
+! K1$[25] = ""
+! Search #3,2,1;K1$,R1,E
+! If Not(E) Goto L_1200
+! If E > 1 Gosub ERR_SEARCH
+! 
+! L_1040: Print @0,22;'CE';"IS THIS A NEW ALTERNATE ITEM? (Y/N)\7\";
+! Input ""J$ \ If J$ = "N" Goto L_900
+! If J$ <> "Y" Goto L_1040
+! 
+! If K1$[13,24] = BLANK$[13,24] ! if alt item is 12 characters
+! 	K2$ = " ",K2$ \ K2$ = K1$[1,12]
+! 	Search #2,2,1;K2$,R1,E
+! 	If E > 1 Gosub ERR_SEARCH
+! 	If E Goto L_1090
+! 	Print @0,22;'CE RB';"YOU CANNOT USE A VALID PRODUCT CODE!!";
+! 	Signal 3,30 \ Goto L_900
+! End If
+! 
+! L_1090: If P60$[11,11] = "Y" Gosub L_4200 \ Goto L_1137
+! 
+! L_1100: Rem ENTER PRODUCT
+! Print @0,10;'CE';@12,4;'CL';
+! J5$ = "Enter a Valid Item Code, <CR> to abort entry"
+! J0$ = "2 001212 4" \ J1$ = ""
+! Gosub L_7000 \ If J4$ = "" Goto L_900
+! Gosub L_6600 \ Goto L_1100 ! product lookup
+! If Len(J$) > 12 Print 'RB'; \ Goto L_1100
+! K2$ = " ",K2$ \ K2$[1,Len(J$)] = J$[1,Len(J$)]
+! L_1137: Print @12,4;K2$[1,12];
+! Search #2,2,1;K2$,R1,E
+! If Not(E) Goto L_1160
+! Print 'RB';"ITEM NOT FOUND!"
+! Signal 3,30 \ Goto L_1100
+! 
+! L_1160: Rem OKAY
+! K1$[25,36] = K2$[1,12]
+! E = 2 \ Search #3,1,0;K1$,R1,E
+! If E Gosub ERR_SEARCH
+! Search #3,4,1;K1$,R1,E \ If E Gosub ERR_SEARCH
+! K3$ = " ",K3$;K3$[1,12] = K1$[25,36];K3$[13] = K1$[1,24],""
+! Search #3,4,2;K3$,R1,E \ If E Gosub ERR_SEARCH
+! Gosub L_2500
+! Gosub L_5000
+! K = 0 \ Goto L_3000
+! 
+! ! either got an existing one, or entered a new one.
+! L_1200: Rem DISPLAY
+! Gosub L_2400
+! L_1210: Gosub L_5000
+! Goto L_2000
+! 
+! L_2000: Rem OKAY OR WHAT?
+! 	Print @0,22;'CE';"Enter:  #:field to edit,   ";
+! 	If P60$[11,11] = "Y" Print " S: specs,  ";
+! 	Print "<CR>: end,   DELETE   ";
+! 	Input ""J$ \ If J$ = "" Goto L_2200
+! 	If J$ = "DELETE" Gosub L_8900 \ Goto L_900
+! 	If P60$[11,11] = "Y" If J$ = "S" Goto L_8100
+! 	X2 = J$ \ If X2 > 0 If X2 < 4 Goto L_2100
+! Goto L_2000
+! 
+! L_2100: Rem FIELD
+! 	K = X2
+! 	On K Goto L_3000,L_3100,L_3160
+! Goto L_2000
+! 
+! L_2200: Rem DONE
+! If P60$[11,11] = "Y" Gosub L_4500 \ Goto L_2000
+! Gosub L_2500 ! write it out
+! Gosub L_8000 ! clear record
+! Goto L_900 !back to the beginning
+! 
+! L_2400: Rem READ FILE
+! 	Read #3,R1,0;C1
+! 	Mat Read #3,R1,4;M1
+! Return
+! 
+! L_2500: Rem WRITE FILE
+! 	Write #3,R1,0;C1
+! 	Mat Write #3,R1,4;M1
+! 	REC_LEN = ((Chf(303) * 2) - 2)
+! 	Mat Write #3,R1,REC_LEN;BLANK$[1,1];
+! Return
+! 
+! L_3000: Rem ENTER CUSTOMER
+! 	Print @20,6;'CL';
+! 	J0$ = "2 00062006"
+! 	J5$ = "Enter the Customer the code is valid or  0: for all "
+! 	J4$ = C1 Using "######"
+! 	L_3025: If J4$[1,1] = " " Let J1$ = J4$[2];J4$ = J1$ \ Goto L_3025
+! 	If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTDIS.hsf\177\";
+! 	Gosub L_7000
+! 	If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTIN.hsf\177\";
+! 	Gosub L_6700 \ Goto L_3000
+! 	C1 = J$ \ If C1 >= 0 If C1 <= 999999 If Not(Fra(C1)) Goto L_3050
+! 	Goto L_3000
+! 	L_3050: Gosub L_4100 \ Goto L_3000
+! 	Print @27,6;'CL';
+! 	If C1 Print Using "######";@20,6;C1;"  ";C1$;
+! 	If Not(C1) Print @20,6;"  ALL CUSTOMERS ";
+! If K = 1 Goto L_2000
+! 
+! L_3100: Rem ENTER MINIMUM
+! 	If P60$[11,11] <> "Y" Let M1 = 0 \ Goto L_1210
+! 	J0$ = "30000620 8";J1 = M1
+! 	J5$ = "Enter the Minimum Quantity for Private Label Order"
+! 	If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTDIS.hsf\177\";
+! 	Gosub L_7000
+! 	If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTIN.hsf\177\";
+! 	M1 = J1
+! If K = 2 Goto L_2000
+! 
+! L_3160: Rem IS IT FLAGED AS UPC (Y/N) Y=1
+! 	J0$ = "6 000125 9"
+! 	J5$ = "FLAG ITEM AS A UPC CODE? (Y/N)"
+! 	J1 = M1[1]
+! 	If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTDIS.hsf\177\";
+! 	Gosub L_7000
+! 	If Spc(13) = 11 Print @0,0;"\177\UWHOTSPOT.\\HOTSPOT\\HOTSPOTIN.hsf\177\";
+! 	M1[1] = J1
+! 	If K = 3 Goto L_2000
+! Goto L_2000
+! 
+! L_4000: Rem GET PROD DESC
+! 	Search #2,2,1;K2$,R2,E
+! 	If E Goto L_4050
+! 	Mat Read #2,R2,0;P1$;
+! 	Mat Read #2,R2,512;PFU1;
+! 	UM$ = "     "
+! 	If PFU1[13] > 0 Read #5,PFU1[13],10;UM$;
+! Return 1
+! 
+! L_4050: Rem NG
+! 	P1$[9] = "PRODUCT NOT FOUND!"
+! 	PFU1[13] = 0;UM$ = "ERR "
+! 	Gosub L_8900
+! Return
+! 
+! L_4100: Rem GET CUSTOMER
+! 	If C1 = 0 Return 1
+! 	K5$ = C1 Using "######"
+! 	Search #6,2,1;K5$,R6,E
+! 	If E Goto L_4150
+! 	Mat Read #6,R6,30;C1$;
+! 	Return 1
+! 	L_4150: Rem NG
+! 	C1$ = " ",C1$
+! 	C1$ = "CUSTOMER NOT FOUND!"
+! Return
+! 
+! 
+! ! private label - peel off the customer
+! ! number portion
+! 
+! L_4200: Rem AUTO
+! 	For X = 1 To 7
+! 		If K1$[X,X] = "/" Goto L_4240
+! 	Next X
+! Return 1
+! 
+! L_4240: Rem GET CUST/ITEM
+! 	C1 = K1$[1,X - 1] \ If C1 <= 0 Return 1
+! 	K2$ = " ",K2$
+! 	K2$[1,12] = K1$[X + 1,X + 13]
+! 	If C1 Print Using "######";@20,6;C1;
+! Return
+! 
+! 
+! L_4500: Rem CHECK FOR VALID
+! 	X2 = 0
+! 	For X = 1 To 7
+! 		If K1$[X,X] = "/" Goto L_4560
+! 	Next X
+! Return 1
+! 
+! L_4560: Rem CHECK CUST MATCH
+! 	X2 = K1$[1,X - 1]
+! 	If X2 = C1 Goto L_4600
+! 	J7$ = "CUSTOMER NUMBERS DON'T MATCH!" \ Gosub L_7600
+! Return
+! 
+! L_4600: Rem CHECK ITEM
+! 	J$ = " ",J$
+! 	J$ = K1$[X + 1];J$[13] = ""
+! 	If J$[1,12] = K2$[1,12] Return 1
+! 	J7$ = "PRODUCT CODES DON'T MATCH!" \ Gosub L_7600
+! Return
+! 
+! L_4650: Rem NOT A MAKE
+! 	If P1$[139,139] = "M" Return
+! 	Print @63,5;'BR';"NOT A MAKE ITEM";'ER';
+! Return
+! 
+! L_5000: Rem DISPLAY
+! 	Print @12,2;K1$[1,24];@12,4;K1$[25,36];
+! 	K2$ = " ",K2$ \ K2$ = K1$[25,36]
+! 	Gosub L_4000 \ Goto L_900
+! 	Print @30,4;P1$[9,38];
+! 	If P9$[26,26] = "Y" Print @30,5;P1$[63,92];
+! 	Gosub L_4100 \ Goto L_5030
+! 	L_5030: If C1 Print Using "######";@20,6;C1;"  ";C1$;
+! 	If Not(C1) Print @20,6;"  ALL CUSTOMERS ";
+! 	If P60$[11,11] <> "Y" Goto L_5090
+! 	Print Using "######";@20,8;M1;"  ";UM$;
+! 	Gosub L_4650
+! 	L_5090: If M1[1] = 0 Print @25,9;"N";
+! 	If M1[1] = 1 Print @25,9;"Y";
+! 	If M1[1] <> 0 If M1[1] <> 1 Print @25,9;"?";
+! Return
+! 
+! L_5800: Rem SCREEN
+! 	Print @0,0;'CS ED';"-MX148-";
+! 	Print @30,0;"ALTERNATE ITEM MAINTENANCE";
+! 	Print @0,2;"ALT. CODE: ";
+! 	Print @0,4;"TIE TO ITEM: ";
+! 	Print @4,6;"FOR CUSTOMER ";
+! 	If P60$[11,11] <> "Y" Goto L_5860
+! 	Print @4,8;"MINIMUM";
+! 	Print @42,2;"EXAMPLE FOR PRIVATE LABEL: 100/PPPPPP"
+! 
+! 	L_5860: Print 'ED';
+! 	Print @0,6;" 1>"
+! 	If P60$[11,11] = "Y" Print @0,8;" 2>"
+! 	Print @0,9;" 3> FLAG AS UPC";
+! 	Signal 3,0
+! Return
+! 
+! L_6600: Rem SWAP
+! 	If J4$[1,1] >= "0" If J4$[1,1] <= "9" Return 1
+! 	If J4$[1,1] >= "A" If J4$[1,1] <= "Z" Return 1
+! 	Call "MXPROD5",J4$,WH,CUST
+! Return
+! 
+! L_6700: Rem SWAP
+! 	If J4$ = "" Return 1
+! 	If Len(J4$) <= 6 If J4$[1,1] >= "0" If J4$[1,1] <= "9" Return 1
+! 	Swap 1,"MXCUST"
+! 	Print @20,6; \ Signal 3,0
+! 	Input ""J$ \ If J$ = "" Return
+! Return 1
+! 
+! L_8000: Rem CLEAR
+! 	C1 = 0
+! 	For J0 = 0 To 2
+! 		M1[J0] = 0
+! 	Next J0
+! Return
+! 
+! L_8100: Rem CHECK FIRST
+! 	Gosub L_4500 \ Goto L_2000
+! 	If X2 = C1 Goto L_8200
+! 	J7$ = "This is not a Private Label!" \ Gosub L_7600
+! 	Goto L_2000
+! 	L_8200: Rem SWAP TO SPECS
+! 	If Err 0 Rem
+! 	Close #22
+! 	If Err 0 Gosub ERR_TRAP
+! 	Read #1,88,1552;J2$[1,16];
+! 	Open #22,J2$
+! 	Write #22,Spc(6),0;C1;
+! 	Write #22,Spc(6),6;K1$[25,36];
+! 	Close #22
+! 	Swap 2,"MX858PL"
+! Goto L_2000
+! 
+! L_8900: Rem DELETE
+! 	K3$ = " ",K3$;K3$[1,12] = K1$[25,36];K3$[13] = K1$[1,24],""
+! 	Search #3,5,1;K1$,R1,E \ If E Gosub ERR_SEARCH
+! 	Search #3,5,2;K3$,R1,E \ If E Gosub ERR_SEARCH
+! 	C1 = 0
+! 	Gosub L_2500
+! 	E = 3 \ Search #3,1,0;K1$,R1,E
+! 	If E Gosub ERR_SEARCH
+! Return
+! 
+! 
+! OUTEND: Rem EXIT
+! Print 'CS'
+! Close 
+! Chain "MX000"
+! Stop
+
+OUTEND: Rem EXIT ROUTINE
+ReturnStatus=1
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+call addToStr(e$,rstr$,webstr$)
+call setoutput(e$,rstr$)
+Close
+else ! main try failure
+ include "src/callmainerrnet.inc"
+end try
+end

@@ -1,0 +1,563 @@
+!"serp077" === description  synergy erp Load M/U Table Maintenance
+! 
+! loadsave -w -n 100,10 -o prog/dxport/serp077.dl4 src/serp077.src
+!  08/11/2009 started
+!
+include "src/copyright.inc"
+!
+! include "src/inc/fileloadmark.inc" ! Load M/U table
+
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,JDate$,FormatDate2$
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian, JulianToDate
+
+! internal subs/function
+Declare Sub OpenFiles,UpdateLog,sndsys
+Declare Sub SndTbl,DelTbl
+Declare Sub Sbmttbl,NoGud
+Declare function getctrldesc$,addtohldot
+
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],X$[20]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim Desc$[24],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],UA2$[50]
+	Dim Mask52$[15]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,X[9],x1[9],COMM_LEV,PTC,X0
+	dim 1%,cost_lev[4],Whse,debug,cnvtu[2],2%,Q0[1]
+	DIM 1%,M5[37,5],M7[37,3],2%,M6[37,3],M8[37,3]
+	Dim 2%,X2[9],UA2[2]
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,X3[9],BTRec,HldOt[10]
+	Dim 3%,R[99],O1,UB0[16],Amount,CNVTA
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim slist$[maxcnt,1000] ! second list
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/fmaint.log" ! fields for DEBUG
+
+	! Dim lup. as loadmark  (NOT USABLE!!!) (686 fields!!) use matrix
+
+	Def FNI(H) = Int(Abs(H) +.5) * Sgn(H)
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! call dxopen() ! done in fmmenu - for standalone run
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp077"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	Action2$=UCase$(action2$)
+	Action2$=RTrim$(action2$) ! UC and trimmed
+	if debugdetail
+		dmsg$="SERP077 ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$ 
+		if Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	call OpenFiles() ! open all needed files
+	call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	! P9$[10,10]="N" ! a test only
+	Mask52$="----#.##" ! 5.2 mask
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Let Key1$=UserID$+"          " ! space fill it
+	UCC = OpenFile(-9988, intCo) \ if UCC=-1 Error 42
+	Key1$[11]="" ! cut to length
+	Search #UCC,2,1;Key1$,Rec,E
+	If Not(E)
+	  Let SCR=Rec
+	  Mat Read #ucc,scr,200;UA2;
+	  Mat read #ucc,scr,336;Ua2$;
+	  Read #ucc,scr,394;comm_lev;
+	Else
+	  Let SCR=0;comm_lev=0 ! 
+	  UA2[0]=0;UA2$=" ",UA2$
+	Endif
+	Close #UCC
+	! GET additional user data flags
+	REM UNPACK A2[0] TO B0[]                         
+	FOR X1=0 TO 15                                          
+		LET O1=2^X1 \ LET M1=1
+		! CALL $LOGIC,M1,O1,A2[0],B0[X1] ! ub
+		Call Logic(m1,O1,UA2[0],UB0[X1])
+		LET UB0[X1]=SGN(UB0[X1])
+	NEXT X1   
+	! call dxsave(0,"tmp/loadmksv.txt!") ! save web send data
+	ReturnStatus=0
+	Message$="Action 1 not found"
+  select case action1$
+
+    Case "SYSDATA" ! sys flags,droplists					doc=LMUP-GetSysData.doc
+		returnstatus=1
+		message$="OK"
+		Call Sndsys()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent flags & droplists" \ Call updatelog(debug)
+		Endif
+		! end of sysdata
+	Case "GETTABLE" ! LMUP data								doc=LMUP-GetTable.doc
+		returnstatus=1
+		message$="OK"
+		call Sndtbl()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent LMUTable "+Str$(BTRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of GETTABLE
+	Case "CLRTABLE" ! LMUP delete							doc=LMUP-ClearTable.doc
+		returnstatus=1
+		message$="OK"
+		call Deltbl()
+		if debugdetail
+			dmsg$="Clear LMUTable "+Str$(BTRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of DELTABLE
+	Case "SBMTTBL" ! LMUP changes							doc=LMUP-SubmitTable.doc
+		returnstatus=1
+		message$="OK"
+		Call Sbmttbl()
+		if debugdetail
+			dmsg$="Submit LMUTable "+Str$(BTRec)+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of SBMTTBL
+
+		! call programdump("tmp/ldmkuplog1!","")
+  End Select
+  Serp077Done: ! finished
+  ! status section                                                       
+  Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)                 
+  Call AddToStr(e$,rstr$,WebStr$)                                        
+  Call SetOutPut(e$,rstr$)       
+  if debugdetail
+		dmsg$="End of Program SERP077" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	LTC = OpenFile("LOADMARK",IntCo) \ if LTC = -1 Error 42
+	LTR = OpenFile(-9941,IntCo) \ if LTR = -1 Error 42
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!
+!------------------------------------------------------------------------------------------
+Sub sndsys()
+! send flags & droplists
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	
+	List$[0]=bsdel$,"BCODE",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	List$[2]="%",fdel$,"Percent Discount",fdel$
+	List$[3]="$",fdel$,"Dollar Discount",fdel$
+	List$[4]="G",fdel$,"Gross Margin",fdel$
+	List$[5]="H",FDEL$,"Hundred Weight",fdel$
+	List$[6]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! send lp 1 - 6
+	Clear List$[]
+	List$[0]=bsdel$,"COSTDESC",fdel$
+	List$[1]="ID",fdel$,"DESC",fdel$
+	List$[2]="0",fdel$,"NO Calculation",fdel$
+	LET J0=14 ! avg
+	tmp$=getctrldesc$(j0)
+	List$[3]="1",fdel$,tmp$,fdel$
+	LET J0=12 ! last
+	tmp$=getctrldesc$(j0)
+	List$[4]="2",fdel$,tmp$,fdel$
+	tmp$="BASE COST" ! getctrldesc$(j0)
+	List$[5]="3",fdel$,tmp$,fdel$
+	LET J0=24 ! net po
+	tmp$=getctrldesc$(j0)
+	List$[6]="4",fdel$,tmp$,fdel$
+	tmp$="As Entered"
+	List$[7]="5",fdel$,tmp$,fdel$
+	List$[8]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	Clear List$[]
+	! send order types
+	List$[0]=bsdel$,"ORDTYPES",fdel$
+	List$[1]="OTID",fdel$,"DESC",fdel$
+	row=2
+	tmpcnt=maxcnt
+	for x=1 to 38
+		J2=(x-1)*20
+		read #ctlc,62,j2;x$[1,20];
+		tmp$=RTrim$(x$)
+		if tmp$="" let tmp$="ORD TYPE "+Str$(X)
+		List$[row]=Str$(X),fdel$,tmp$,fdel$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Next X
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	! now existing tables
+	Clear List$[]
+	List$[0]=bsdel$,"CURRTBLS",fdel$
+	List$[1]="ID",fdel$,"TBLDESC",fdel$
+	let X2=999 ! chf(Ltr)-1 (HAS THE DESC @ 0)
+	row=2
+	for R=1 to x2
+		Try
+			Mat Read #LTR,R,0;Desc$; ! read only file
+		Else
+			Desc$=Blank$
+		End try
+		tmp$=Trim$(Desc$)
+		if tmp$<>"" ! has desc
+			List$[row]=Str$(R),fdel$,tmp$,fdel$
+			row=row+1
+			If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next R
+	List$[row]=esdel$
+	! calling rtn to addtostr
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndsys
+!
+!------------------------------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Sub SndTbl()
+! send table data
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Table Number Passed"
+		goto GTblDone
+	Endif
+	BTRec=tmp$
+	if BTRec<=0 or BTRec>999 or Fra(BTRec)
+		returnstatus=0
+		Message$="Invalid Table Number Passed"
+		goto GTblDone
+	Endif
+	Try
+		
+		Mat read #LTC,BTRec,0;Desc$;
+	Else
+		clear DESC$
+	End try
+	List$[0]=bsdel$,"MUPTBL",fdel$
+	Webstr$="TBLNO",fdel$,"DESC",fdel$
+	
+	List$[1]=webstr$
+	Webstr$=STR$(BTREC),fdel$,RTrim$(Desc$),fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	List$[0]=bsdel$,"TBLCALCS",fdel$
+	Webstr$="OTID",FDEL$,"OTDESC",fdel$
+	Webstr$=webstr$,"BCOST",fdel$,"VALUE1",FDEL$,"BCODE1",FDEL$
+	Webstr$=WebStr$,"VALUE2",FDEL$,"BCODE2",FDEL$
+	Webstr$=WebStr$,"VALUE3",FDEL$,"BCODE3",FDEL$
+	Webstr$=WebStr$,"VALUE4",FDEL$,"BCODE4",FDEL$
+	Webstr$=webstr$,"VALUE5",FDEL$,"BCODE5",FDEL$
+	Webstr$=WebStr$,"VALUE6",FDEL$,"BCODE6",FDEL$
+	Webstr$=WebStr$,"VALUE7",FDEL$,"BCODE7",FDEL$
+	Webstr$=WebStr$,"VALUE8",FDEL$,"BCODE8",FDEL$
+	List$[1]=webstr$
+	row=2
+	Mat Read #LTC,BTRec,24;M5;
+	Mat read #LTC,BTRec,480;M6;
+	Mat Read #LTC,BTRec,1100;m7;
+	mat read #LTC,BTRec,1404;m8;
+	for x=1 to 38 !  all ot's
+		Webstr$=Str$(x),fdel$ ! bracket #
+		J2=(x-1)*20
+		read #ctlc,62,j2;x$[1,20];
+		tmp$=RTrim$(x$)
+		if tmp$="" let tmp$="ORD TYPE "+Str$(X)
+		webstr$=webstr$,RTrim$(tmp$),fdel$ ! ot desc
+		webstr$=webstr$,Str$(M5[x-1,4]),fdel$ ! basecost
+		for X[1]=0 to 3
+			webstr$=webstr$,LTrim$(M6[x-1,x[1]] using mASK52$),fdel$
+			tmp$="%" \ if m5[x-1,x[1]]=1 let tmp$="$"
+			if m5[x-1,x[1]]=2 let tmp$="G"
+			if m5[x-1,x[1]]=3 let tmp$="H"
+			webstr$=webstr$,tmp$,fdel$
+		Next X[1]
+		for X[1]=0 to 3 ! screen group 5-8
+			webstr$=webstr$,LTrim$(M8[x-1,x[1]] using mASK52$),fdel$
+			tmp$="%" \ if m7[x-1,x[1]]=1 let tmp$="$"
+			if m7[x-1,x[1]]=2 let tmp$="G"
+			if m7[x-1,x[1]]=3 let tmp$="H"
+			webstr$=webstr$,tmp$,fdel$
+		Next X[1]
+		List$[row]=webstr$
+		row=row+1
+		If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+	Next X
+	
+	List$[row]=esdel$
+	! caller to addtostr
+	GTblDone: ! done
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SndTbl
+!
+!------------------------------------------------------------------------------------------
+Sub DelTbl()
+! Delete table
+ Try
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Table Number Passed"
+		goto DTblDone
+	Endif
+	BTRec=tmp$
+	if BTRec<=0 or BTRec>999 or Fra(BTRec)
+		returnstatus=0
+		Message$="Invalid Table Number Passed"
+		goto DTblDone
+	Endif
+	Clear Desc$
+
+	Try
+		Mat Write #LTC,BTRec,0;Desc$;
+		Mat write #LTC,BTRec,24;M5;
+		mat write #LTC,BTRec,480;M6;
+		mat write #LTC,BTRec,1100;m7;
+		mat write #LTC,BTRec,1404;m8;
+	Else
+		Returnstatus=0
+		Message$="Cannot write to "+Str$(BTRec)
+	End try
+  DTblDone: ! finished
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DelTbl
+!
+!------------------------------------------------------------------------------------------
+Sub Sbmttbl()
+! submit data (all fields)
+ Try
+	DIM 1%,cm5[37,3],cm7[37,3],2%,cm6[37,3],cm8[37,3]
+	Dim 3%
+	clear cm5[]
+	clear cm6[]
+	clear cm7[]
+	clear cm8[]
+	Call dxget("TBLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="NO Table Number Passed"
+		goto SBTblDone
+	Endif
+	BTRec=tmp$
+	if BTRec<=0 or BTRec>999 or Fra(BTRec)
+		returnstatus=0
+		Message$="Invalid Table Number Passed"
+		goto SBTblDone
+	Endif
+
+	call dxget("DESC",tmp$)
+	If RTrim$(tmp$)=""
+		returnstatus=0
+		Message$="MUST HAVE A DESCRIPTION!"
+		goto SBTblDone
+	Endif
+	Desc$=tmp$+Blank$
+	Mat Write #LTC,BTRec,0;Desc$;
+	For X=1 to 38
+		for x0=0 to 10 \ let HldOt[x0]=0 \ next x0 ! clear array
+		call dxget("BCOST"+Str$(x),tmp$)
+		x1=tmp$
+		if x1<0 or x1>5 or tmp$=""
+			Returnstatus=0
+			Message$="Invalid Cost Base OT"+Str$(X)
+			goto sbtbldone
+		Endif
+		M5[x-1,4]=x1
+		if x1=0 goto BypBrkt ! no calc - no vals or codes
+		For X1=1 to 4 ! go thru val1-4 for entries - add to hldot[] if <>0
+			Call DxGet("VALUE"+sTR$(X1)+Str$(X),tmp$)  ! so value11,value21,value12,value22
+			if tmp$="" ! not sent - ALWAYS SENT!
+				returnstatus=0
+				Message$="Missing field VALUE"+sTR$(X1)+Str$(X)
+				Goto SBTblDone
+			Endif
+			let x2[1]=tmp$   ! on up to value110,bcode110,value410,bcode410
+			if x2[1]<-9999.99 OR X2[1]>9999.99 OR FRA(X2[1]*100)
+				call NoGud()
+				Goto SBTblDone
+			Endif
+			a0=addtohldot(X2[1]) ! returns open slot or -1 if zero
+			if a0<0 goto BYPLVL1 ! no good=zero?
+			if a0>=0 let m6[X-1,A0]=X2[1] ! should always be <4
+			Call Dxget("BCODE"+Str$(X1)+Str$(X),tmp$) ! append brkt to BCODE1,2,3,4
+			if tmp$<>"%" and tmp$<>"$" and tmp$<>"G" and tmp$<>"H"
+				Message$="Missing field BCODE"+sTR$(X1)+Str$(X)
+				Goto SBTblDone
+			Endif
+			M5[x-1,A0]=0 \ if tmp$="$" let M5[x-1,A0]=1
+			if tmp$="G" let m5[x-1,A0]=2
+			if tmp$="H" let m5[x-1,A0]=3
+			if m6[x-1,A0]=0 let m5[x-1,A0]=0
+			if m6[x-1,A0]<>0 and m5[x-1,A0]=2 ! check g/p
+				if m6[x-1,A0]<1 or m6[x-1,A0]>99.99
+					call NoGud()
+					Goto SBTblDone
+				Endif
+			Endif
+		BYPLVL1: ! no
+		Next X1
+			! now group 2 using m7 & m8
+		For X1=1 to 4 ! now do value5-8, continue add to hldot[] if <>0
+			Call DxGet("VALUE"+sTR$(X1+4)+Str$(X),tmp$)  ! so value51,value61,value52,value62
+			if tmp$="" ! not sent - ALWAYS SENT!
+				returnstatus=0
+				Message$="Missing field VALUE"+sTR$(X1+4)+Str$(X)
+				Goto SBTblDone
+			Endif
+			let x2[1]=tmp$   ! on up to value538,bcode538,value838,bcode838
+			if x2[1]<-9999.99 OR X2[1]>9999.99 OR FRA(X2[1]*100)
+				call NoGud()
+				Goto Byplvl
+			Endif
+			a0=addtohldot(X2[1]) ! returns open slot or -1 if zero
+			if a0<0 goto BYPLVL ! no good=zero?
+			if a0>=0 ! ok - see which var
+				if a0>=4 let m8[X-1,a0-4]=X2[1] ! is 4 to 7 - make 0 to 3
+				if a0<4 let m6[x-1,a0]=x2[1]
+			Endif
+			Call Dxget("BCODE"+Str$(X1+4)+Str$(X),tmp$) ! append brkt to BCODE5,6,7,8
+			if tmp$<>"%" and tmp$<>"$" and tmp$<>"G" and tmp$<>"H"
+				Message$="Missing field BCODE"+sTR$(X1+4)+Str$(X)
+				Goto SBTblDone
+			Endif
+			X1[2]=0 \ if tmp$="$" let X1[2]=1
+			if tmp$="G" let x1[2]=2
+			if tmp$="H" let x1[2]=3
+			if x2[1]=0 let x1[2]=0
+			if x2[1]<>0 and x1[2]=2 ! check g/p
+				if X2[1]<1 or X2[1]>99.99
+					call NoGud()
+					Goto Byplvl
+				Endif
+			Endif
+			if a0>=0 ! ok - see which var (SAME AS M6/M8!)
+				if a0>=4 let m7[X-1,a0-4]=X1[2]
+				if a0<4 let m5[x-1,a0]=x1[2]
+			Endif
+		Byplvl: ! entry ng
+		Next X1 ! next of group
+		
+	BypBrkt: ! on 38 brackets
+	Next X
+		if returnstatus<>1 goto SBTblDone
+		
+		Mat write #LTC,BTRec,24;M5;
+		Mat write #LTC,BTRec,480;M6;
+		Mat write #LTC,BTRec,1100;M7;
+		Mat write #LTC,BTRec,1404;M8;
+	
+	
+  SBTblDone: ! finished
+ else
+	include "src/callsuberr.inc"
+  end try
+end sub ! Sbmttbl
+!
+!------------------------------------------------------------------------------------------
+Sub NoGud()
+! out of range
+Returnstatus=0
+Message$="Value entered is invalid"
+End Sub ! noGud
+!
+!------------------------------------------------------------------------------------------
+function getctrldesc$(x0)
+! get control file desc for passed field (hardcode rec 18)
+ Try
+	dim d1$[10]
+	tmp$=blank$
+	LET J2=(x0-1)*10  
+	READ #ctlc,18,J2;D1$;
+	tmp$=RTrim$(D1$)
+ Else
+	include "src/callsuberr.inc"
+  end try
+end function tmp$ ! getctrldesc$
+!
+!------------------------------------------------------------------------------------------
+function addtohldot(X3)
+! add variables to an array starting from 0
+ Try
+	a0=-1
+	for x0=0 to 8
+		if Hldot[x0]=0 and X3<>0
+			let Hldot[x0]=X3;a0=x0
+			let x0=10 ! END LOOP
+		Endif
+	Next x0
+	! only sets a0 if found
+	if a0>7 let a0=-1 ! can't go over 7 (0-3) & (4-7)
+  else
+	include "src/callsuberr.inc"
+  end try
+end function A0 ! addtohldot
+!
+!------------------------------------------------------------------------------------------

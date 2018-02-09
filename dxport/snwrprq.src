@@ -1,0 +1,1104 @@
+!"snwrprq" === description  synergy erp  Quote sn warr/repr system
+!  for line entry/edit from oemenu
+! 
+! loadsave -w -n 100,10 -o prog/dxport/snwrprq.dl4 src/snwrprq.src
+!
+!  06/12/2009 started
+!  NOTE: due to blank line # in key CANNOT USE 'std' fileupdaterolz
+!	created an internal version of it (see fupdtrolz)
+!  02/2014 - add in quotes Source=281 or 283 or 286
+!   it had to be a separate file due to the "dim rol. as rolnew" can only happen once
+!    even if it is in an if>else>endif - ONLY ONCE so this is for quotes
+!
+include "src/copyright.inc"
+!
+include "src/inc/fileprod.inc"
+include "src/inc/fileordhead.inc" ! combined ros,rot,roh
+include "src/inc/filerolz.inc" ! lines
+include "src/inc/filesproddesc.inc" ! nstk lines
+include "src/inc/fileprodwhse.inc" ! prodwhse
+include "src/inc/fileccodes.inc" ! u/m file
+include "src/inc/filea80vm.inc" ! vendor 
+include "src/inc/filepserlno.inc" ! serial no file
+include "src/inc/fileprtdefault.inc" ! port default file
+! quote files - dim as standard but use actual quote file layouts!
+include "src/inc/fileqordhead.inc"
+include "src/inc/fileqolz.inc"
+include "src/inc/fileqproddesc.inc"
+
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,JDate$,FormatDate2$
+Declare External Function ChkAltItem$,chkbadchars
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "libprodwh.lib"
+Declare External Sub mxwhcreate
+Declare External Function getwhavail
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,ProdGroup,UMDList,CompIList
+Declare External Function getpravail,getumrec,getMSDS,ComplFlag,ChkPrdUM
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "ubsvendlist.dl4"
+Declare External Sub VendList
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian, JulianToDate
+
+! internal subs/function
+Declare Sub OpenFiles,updatelog,getsnlines
+Declare Sub chkprod,chksrno,SbmtSNLines
+Declare Sub DELSNLine
+Declare Function GetOrdRec,GetQteRec,getvname$,Chk4srno
+Declare Function fupdtrolz,fupdtqolz
+
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	! NOTE ALWAYS PRR for Product Rec, PWR for Prodwhse Record!
+	! and OHR as header Record
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim Prod$[12],KPR$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],UA2$[50]
+	Dim k1$[60],mode$[5],keyval$[60],serno$[30],K$[60]
+	Dim LNID$[5]
+	dim VName$[30],Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,PRC,PWC,CCC,OHC,OTC,OSC,OLC,CMC
+	dim 1%,cost_lev[4],Whse,debug,2%,Q0[1]
+	Dim 2%,X2[9],NumProd,OrderNo,LD,UA2[2],RASL[2]
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,PRR,OHR,PWR,FChan[30],FRec[99]
+	Dim 3%,SUM,SQty,R[99],O1,UB0[16]
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/ol.log" ! fields for DEBUG
+
+	! NOTE: even if in an if else - can only dim roh. etc once!
+	Dim PR. as prod
+	Dim pw. as prodwhse
+	dim roh. as qoh
+	dim ros. as qos
+	dim rot. as qot
+	dim rol. as qol
+	dim Nstk. as qproddesc
+	dim umc. as ccodes ! um codes file
+	dim psno. as pserlno ! sn file
+	dim prt. as prtdefault ! port default
+
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! call dxopen()  ! done in oemenu - for standalone testing
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="snwrprq"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)  ! action is used in the oemenu
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	Action2$=UCase$(action2$)
+	Action2$=RTrim$(action2$) ! UC and trimmed
+	if debugdetail
+		dmsg$="SNWRPRQ ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$ 
+		if Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	Call dxget("SOURCE",tmp$) \ let source=tmp$
+	let quote=0 \ if source=281 or source=283 or source=286 let quote=1
+	call OpenFiles() ! open all needed files
+	call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Let Key1$=UserID$+"          " ! space fill it
+	UCC = OpenFile(-9988, intCo) \ if UCC=-1 Error 42
+	Key1$[11]="" ! cut to length
+	Search #UCC,2,1;Key1$,Rec,E
+	If Not(E)
+	  Let SCR=Rec
+	  Mat Read #ucc,scr,200;UA2;
+	  Mat read #ucc,scr,336;Ua2$;
+	Else
+	  Let SCR=0 ! 
+	  UA2[0]=0;UA2$=" ",UA2$
+	Endif
+	Close #UCC
+	! GET additional user data flags
+	REM UNPACK A2[0] TO B0[]                         
+	FOR X1=0 TO 15                                          
+		LET O1=2^X1 \ LET M1=1
+		! CALL $LOGIC,M1,O1,A2[0],B0[X1] ! ub
+		Call Logic(m1,O1,UA2[0],UB0[X1])
+		LET UB0[X1]=SGN(UB0[X1])
+	NEXT X1 
+	call GetPortDefault(e$,IntCO,UserID$,portnum,scr,prt.)
+	if p60$[25,25]<>"Y"
+		returnstatus=0
+		Message$="SERIAL NUMBER FLAG IS OFF"
+		Goto SNPDone
+	Endif
+	Returnstatus=0
+	Message$="ACTION1 NOT FOUND"
+	! call programdump("tmp/snlog0!","")
+   select case action1$
+
+	Case "GETWRDATA" ! show existing A B C					doc=QteL-getRepairordlines.doc
+		ReturnStatus=1
+		Message$="OK"
+		Call getsnlines()
+		! call AddToStr(e$,rstr$,List$[]) ! done in routine
+		if debugdetail
+			dmsg$="Serial Number Lines "+Str$(ORDERNO)+" sent "+Message$ \ Call updatelog(debug)
+		Endif
+		! done with getwrdata
+
+	Case "GETPROD" ! get / check prod						doc=QteL-RepairProdDetails.doc
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		call chkprod()
+		call AddToStr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Product "+RTrim$(Prod$)+" data sent "+Message$ \ Call updatelog(debug)
+		Endif
+		! done with getprod
+
+	Case "GETSNDATA" ! get/check sn							doc=QteL-RepairSNDetails.doc
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		call chksrno()
+		call AddToStr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Serial Number "+RTrim$(Serno$)+" data sent "+Message$ \ Call updatelog(debug)
+		Endif
+		! done with getsndata
+
+	Case "GETVEND" ! get / check vendor						doc=QteL-Repairgetvendor.doc
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		List$[0]=bsdel$,"VENDDATA",fdel$
+		List$[1]="VENDID",fdel$,"VENDNAME",fdel$
+		row=2
+		Call dxget("VENDID",tmp$)
+		X2=tmp$ ! zero is valid!
+		if x2=0 and tmp$[1,1]<>"0" let x2=-1
+		If X2<0 or x2>999999 or fra(x2)
+			ReturnStatus=0
+			Message$="VENDOR ID INVALID"
+			Goto VIDDone
+		Endif
+		tmp$=getvname$(X2)
+		List$[row]=Str$(X2),fdel$,RTrim$(tmp$),fdel$
+		row=row+1
+		VIDDone: ! 
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Vendor "+Str$(X2)+" data sent "+Message$ \ Call updatelog(debug)
+		Endif
+		! done with getvend
+
+	Case "SVWRDATA" ! save abc lines						doc=OrdL-SaveRepairLine.doc
+		ReturnStatus=1
+		Message$="OK"
+		Call SbmtSNLines()
+		if debugdetail
+			dmsg$="Submit SN Line "+LNID$+" complete "+Message$ \ Call updatelog(debug)
+		Endif
+		! done with SVWRDATA
+
+	case "PRODSEARCH" ! product scan						doc=OrdL-RepairProdScan.doc
+		!
+		Let ReturnStatus=1
+		Message$="OK"
+		X2=0 ! IT'S Normal TYPE SCAN
+		Call ProdList(e$,IntCo,List$[],maxcnt,ctlc,prc,pwc,x2,debugdetail,dblog$,UserId$)
+		If E$<>""
+		  Let ReturnStatus=0
+		  Message$=E$
+		Endif
+		call AddToStr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Product Search complete "+Message$ \ Call updatelog(debug)
+		Endif
+		! done with ProdSearch
+
+	case "VENDSEARCH" ! vendor search						doc=OrdL-RepairVendList.doc
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		Call DXGet("STEXT",K1$)                                       
+		LET Mode$="1" ! it's begins with or contains?
+		Call DXGet("SEARCHFIELD",tmp$) \ tmp$ = UCase$(tmp$)    
+		if tmp$="" let tmp$="1"
+		key1$="" ! starting?
+		Call DXGet("VENDID",tmp1$) \ vend = tmp1$                         
+		Call VendList(Intco,maxcnt,K1$,mode$,tmp$, Key1$, vend, list$[])
+		call AddToStr(e$,rstr$,List$[]) ! "add the list from subs to string
+		Call AddToStr(e$,rstr$,esdel$) ! end of section  
+		if debugdetail
+			dmsg$="Vendor Search sent "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of VENDSEARCH
+
+	 Case "DELLINE" ! delete a line							doc=QteL-DelRepairLine.doc
+		ReturnStatus=1
+		Message$="OK"
+		Call DELSNLINE()
+		if debugdetail
+			dmsg$="Delete SN Line "+LNid$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! done with DELLINE
+
+   End Select
+  	SNPDone: ! 
+	! status section - always send
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	! done with it
+	call SetOutput(e$,rstr$) ! 
+  ! call dxclose()
+  if debugdetail
+		dmsg$="End of Program SNWRPR" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	PRC = OpenFile(1792,intCo) \ If PRC = -1 Error 42 ! prod
+	PWC = OpenFile(1744,intCo) \ If PWC = -1 Error 42 ! prodwhse
+	CCC = OpenFile(-1728,intCo) \ If CCC = -1 Error 42 ! u/m codes file
+	if Not(Quote)
+	OHC = OpenFile(1840,IntCo) \ if ohc = -1 Error 42 ! order header
+	OSC = OpenFile(1856,IntCo) \ if osc = -1 Error 42 ! order shipto
+	OTC = OpenFile(1872,IntCo) \ if otc = -1 Error 42 ! order totals
+	OLC = OpenFile(1888,IntCo) \ if olc = -1 Error 42 ! order lines
+	NSC = OpenFile(2128,IntCo) \ if nsc = -1 Error 42 ! non-stock lines
+	else
+	OHC = OpenFile(1280,IntCo) \ if ohc = -1 Error 42 ! order header
+	OSC = OpenFile(1392,IntCo) \ if osc = -1 Error 42 ! order shipto
+	OTC = OpenFile(2656,IntCo) \ if otc = -1 Error 42 ! order totals
+	OLC = OpenFile(1344,IntCo) \ if olc = -1 Error 42 ! order lines
+	NSC = OpenFile(1424,IntCo) \ if nsc = -1 Error 42 ! non-stock lines
+	endif
+	VDC = OpenFile(-2400,IntCo) \ if vdc = -1 Error 42 ! vendor
+	PSC = OpenFile(-416,IntCo) \ if psc = -1 Error 42 ! serial no
+
+
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+
+!------------------------------------------------------------------------------------------
+Function GetOrdRec(e$,OHC,OSC,OTC,OrderNo,roh. as roh, ros. as ros, rot. as rot)
+! search thru all status for Order
+! ohc,osc,otc = channels for roh, ros, rot
+! orderNo = Order # to find
+! roh.,ros.,rot. = structs for roh,ros,rot
+! returns 
+! X3 = order header rec #
+	Try
+		Dim KOHC$[20]
+		Dim 1%,X[9],SCHN[2]
+		Dim 2%,X2[9]
+		Dim 3%,X3[9],OHR
+		SCHN[0]=OHC;SCHN[1]=OSC;SCHN[2]=OTC
+		Let X2=OrderNo
+		let OHR=-1 ! not found as default
+		if debugdetail
+			dmsg$="Look for Order "+Str$(X2) \ Call updatelog(debug)
+		Endif
+		For X=1 to 99
+			If X<20 or x>24 ! skip deleted
+				Let KOHC$=" ",KOHC$
+				KOHC$[1,2]=X Using "##"
+				KOHC$[3]=OrderNo Using "######"
+				if Not(Quote)
+					X3=filegetrohz(e$,SCHN[],"=",1,kohc$,roh.,ros., rot.)
+				else
+					X3=filegetqohz(e$,SCHN[],"=",1,kohc$,roh.,ros., rot.)
+				endif
+				If X3>0 ! found it
+				  Exit function X3
+				Endif
+			Endif
+		Next X
+		if debugdetail
+			dmsg$="Order NOT FOUND "+Str$(X2) \ Call updatelog(debug)
+		Endif
+	else
+    include "src/callsuberr.inc"
+  end try
+end Function OHR ! getordrec
+! 
+!--------------------------------------------------------------------
+Function GetQteRec(e$,OHC,OSC,OTC,OrderNo,roh. as qoh, ros. as qos, rot. as qot)
+! search thru all status for Order
+! ohc,osc,otc = channels for roh, ros, rot
+! orderNo = Order # to find
+! roh.,ros.,rot. = structs for roh,ros,rot
+! returns 
+! X3 = order header rec #
+	Try
+		Dim KOHC$[20]
+		Dim 1%,X[9],SCHN[2]
+		Dim 2%,X2[9]
+		Dim 3%,X3[9],OHR
+		SCHN[0]=OHC;SCHN[1]=OSC;SCHN[2]=OTC
+		Let X2=OrderNo
+		let OHR=-1 ! not found as default
+		if debugdetail
+			dmsg$="Look for Order "+Str$(X2) \ Call updatelog(debug)
+		Endif
+		For X=1 to 99
+			If X<20 or x>24 ! skip deleted
+				Let KOHC$=" ",KOHC$
+				KOHC$[1,2]=X Using "##"
+				KOHC$[3]=OrderNo Using "######"
+				if Not(Quote)
+					X3=filegetrohz(e$,SCHN[],"=",1,kohc$,roh.,ros., rot.)
+				else
+					X3=filegetqohz(e$,SCHN[],"=",1,kohc$,roh.,ros., rot.)
+				endif
+				If X3>0 ! found it
+				  Exit function X3
+				Endif
+			Endif
+		Next X
+		if debugdetail
+			dmsg$="Order NOT FOUND "+Str$(X2) \ Call updatelog(debug)
+		Endif
+	else
+    include "src/callsuberr.inc"
+  end try
+end Function OHR ! getqterec
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Sub getsnlines()
+! go thru passed order and send existing lines back
+ Try
+	Dim KOL$[60],KPW$[60],KCM$[50],KLP$[60]
+	Dim ZOL$[60]
+	Dim 1%,FCDays,cnvtu[2],elflag
+	Dim 2%,OrderNo,row,tmpcnt,JDate[5],FDate
+	Dim 3%,OLR,FutCost,CNVTA,Amount
+	dim ZROL. as qol
+	if debugdetail
+		dmsg$="Start get Existing SN Lines" \ Call updatelog(debug)
+	Endif
+
+	ReturnStatus=1
+	Message$="OK"
+	Call DXGet("ORDERID",tmp$)
+	X2=tmp$
+	If X2<1 or X2>999999 or Fra(X2) ! not valid
+		ReturnStatus=0
+		Message$="ORDER NOT PASSED"
+		goto golDone:
+	Endif
+	OrderNo=x2
+	if Not(Quote)
+		OHR=GetOrdRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.)
+	else
+		OHR=GetQteRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.)
+	endif
+	If OHR<=0 ! not found
+		ReturnStatus=0
+		Message$="ORDER NOT FOUND"
+		goto golDone:
+	Endif
+	if roh.OrdType<>21 and roh.OrdType<>22
+		ReturnStatus=0
+		Message$="ORDER NOT REPAIR TYPE"
+		goto golDone:
+	Endif
+	CREDIT=0 \ if ros.status=32 let credit=1
+	if credit and roh.ShipType=3 let cost_lev[1]=0 ! no cost on cm price error
+	tmp$=""
+	if roh.Ordtype=21 let tmp$="WARRANTY REPAIR"
+	if roh.ordtype=22 let tmp$="NON-WARRANTY REPAIR"
+	Clear List$[]
+	List$[0]=bsdel$,"SNWRTRPR",fdel$
+	List$[1]="ORDERID",FDEL$,"ORDTYPE",fdel$,"OTDESC",fdel$
+	List$[2]=Str$(Orderno),fdel$,Str$(roh.OrdType),fdel$,tmp$,fdel$
+	List$[3]=esdel$
+	!	List$[row]=esdel$ ! finished
+	Row=4;tmpcnt=maxcnt
+	! okay - see if lines
+	KOL$=" ",KOL$;NumLines=0
+	KOL$=OrderNo Using "######"
+	! what if start with or only zlines on order??
+	Do
+		if Not(Quote)
+			OLR=filegetrolz(e$,OLC,">",1,kol$,rol.)
+		else
+			OLR=filegetqolz(e$,OLC,">",1,kol$,rol.)
+		endif
+		If OLR<0 exit do
+		X2=kol$[1,6] \ if x2<>orderno exit do
+		if (roh.OrdType=21 or roh.OrdType=22) and kol$[7,9]<>"   " goto bpldtl ! ot 21/22
+		! x2=kol$[7,9] \ if x2>900 exit do ! as in pm
+		NonStk=rol.NStkItem
+		ZLine=0 \ if rol.LineType=3 and NonStk let ZLine=1 ! need for later
+		If kol$[10,10]="A"
+			List$[row]=bsdel$,"LINEA",fdel$
+			row=row+1
+			List$[row]="PROD",fdel$,"DESC1",fdel$,"DESC2",fdel$,"LTYPE",fdel$
+			row=row+1
+			tmp$="STK" \ if NonStk let tmp$="NSTK"
+			webstr$=RTrim$(rol.ProdCode$),fdel$,RTrim$(rol.Desc1$),fdel$
+			Webstr$=webstr$,RTrim$(rol.Desc2$),fdel$,tmp$,fdel$
+			List$[row]=webstr$
+			row=row+1
+			List$[row]=esdel$
+			row=row+1
+		Endif
+		if kol$[10,10]="B"
+			List$[row]=bsdel$,"LINEB",fdel$
+			row=row+1
+			List$[row]="LPRODB",fdel$,"SRLNO",fdel$,"MODEL",fdel$,"VENDID",fdel$,"VENDNAME",fdel$
+			row=row+1
+			Webstr$="SERIAL NO:",fdel$,RTrim$(rol.desc1$),fdel$,RTrim$(rol.desc2$),fdel$
+			x2=rol.Vendor
+			tmp$=getvname$(x2)
+			webstr$=webstr$,Str$(X2),fdel$,RTrim$(tmp$),fdel$
+			List$[row]=webstr$
+			row=row+1
+			List$[row]=esdel$
+			row=row+1
+		Endif
+		If kol$[10,10]="C"
+			List$[row]=bsdel$,"LINEC",fdel$
+			row=row+1
+			List$[row]="LPRODC",fdel$,"LDESC1",fdel$,"LDESC2",fdel$
+			row=row+1
+			Webstr$="PROBLEM:",fdel$,RTrim$(rol.desc1$),fdel$,RTrim$(rol.desc2$),fdel$
+			List$[row]=webstr$
+			row=row+1
+			List$[row]=esdel$
+			row=row+1
+		Endif
+	bpldtl: ! bypass invalid lines
+	Loop
+	!List$[7]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	GolDone: ! finish ord line get
+	! status section
+	if debugdetail
+		dmsg$="Existing SN Lines "+Str$(Orderno)+" "+Message$ \ Call updatelog(debug)
+	Endif
+
+	! call programdump("/tmp/ollog6!","")
+  else
+    include "src/callsuberr.inc"
+ end try
+end sub ! getsnlines
+! 
+!--------------------------------------------------------------------
+Function getvname$(vend)
+! get vendor name
+ Try
+	Dim KeyV$[60]
+	VName$=" ",VName$
+	If x2<=0
+		VName$="VENDOR NOT SPECIFIED"
+	Else
+		Keyv$=X2 Using "######"
+		Search #VDC,2,1;Keyv$,R,E
+		if not(e)
+			Mat read #VDC,r,0;VName$;
+		Else
+			VName$="VENDOR NOT ON FILE"
+		Endif
+	Endif
+
+ Else
+  include "src/callsuberr.inc"
+ end try
+end Function VName$ ! getvname$
+! 
+!--------------------------------------------------------------------
+Sub chkprod()
+! get prod desc's
+ try
+	
+	Call DXGet("ORDERID",tmp$)
+	X2=tmp$
+	If X2<1 or X2>999999 or Fra(X2) ! not valid
+		ReturnStatus=0
+		Message$="ORDER NOT PASSED"
+		goto ChkPDone:
+	Endif
+	OrderNo=x2
+	if Not(Quote)
+		OHR=GetOrdRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.)
+	else
+		OHR=GetQteRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.)
+	endif
+	If OHR<=0 ! not found
+		ReturnStatus=0
+		Message$="ORDER "+Str$(Orderno)+" NOT FOUND"
+		goto ChkPDone:
+	Endif
+	if roh.OrdType<>21 and roh.OrdType<>22
+		ReturnStatus=0
+		Message$="ORDER "+Str$(OrderNo)+" NOT REPAIR TYPE"
+		goto ChkPDone:
+	Endif
+	Call dxget("PRODID",tmp$)
+	Prod$=UCase$(RTrim$(tmp$))+Blank$
+	tmp$=ChkAltItem$(e$,IntCo,Prod$,roh.CustNum)
+	If tmp$<>"" If tmp$[1,2]<>"  " let prod$=tmp$ ! has alt item
+	Let kpr$=Prod$
+	Let kpr$[13]="";e=0 ! no lock
+	If prod$[1,3]="Z  " let Nonstk=1;ZLine=1
+	If Prod$[1,3]="Z Z" let nonstk=1
+	if nonstk
+		Clear pr.
+	Else
+		PRR=filegetprod(E$,PRC,"=",1,KPR$,pr.)
+		If PRR<=0
+			clear pr.
+			Nonstk=1
+		Endif
+	Endif
+	tmp$="STK" \ if nonstk let tmp$="NSTK"
+	List$[0]=bsdel$,"PRODDATA",fdel$
+	WebStr$="PRODID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+	Webstr$=webstr$,"MODEL",fdel$,"VENDOR",fdel$,"VENDNAME",fdel$
+	webstr$=webstr$,"LTYPE",fdel$
+	List$[1]=webstr$
+	WebStr$=Rtrim$(Prod$),fdel$,RTrim$(pr.desc1$),fdel$
+	Webstr$=webstr$,RTrim$(pr.desc2$),fdel$,RTrim$(pr.SnModelNum$),fdel$
+	x2=pr.primvend
+	tmp1$=getvname$(X2)
+	Webstr$=webstr$,Str$(pr.PrimVend),fdel$,RTrim$(tmp1$),fdel$
+	webstr$=webstr$,tmp$,fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	ChkPDone: ! done
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! chkprod
+! 
+!--------------------------------------------------------------------
+Sub chksrno()
+! get sn data
+ try
+	call dxget("SRLNO",tmp$)
+	if RTrim$(tmp$)=""
+		returnstatus=0
+		message$="SERIAL NUMBER NOT PASSED"
+		goto chksndone
+	Endif
+	let serno$=tmp$+blank$
+	Call dxget("PRODID",tmp$)
+	Prod$=UCase$(RTrim$(tmp$))+Blank$
+	call dxget("LTYPE",tmp$)
+	tmp$=UCASE$(RTRIM$(tmp$))
+	if tmp$<>"STK" and tmp$<>"NSTK"
+		returnstatus=0
+		Message$="PRODUCT TYPE NOT PASSED"
+		goto chksndone
+	Endif
+	! if tmp$="NSTK" let prod$=Blank$ ! no prod - send what's entered
+	snfnd=Chk4srno(serno$,prod$,R)
+	if snfnd
+		PSR=R
+		Read record #PSC,PSR,0;psno.;
+		fflag=1
+	Else
+		clear psno.
+		fflag=0
+	Endif
+	List$[0]=bsdel$,"SNDATA",fdel$
+	webstr$="SRLNO",fdel$,"MODEL",fdel$,"PRODID",fdel$
+	webstr$=webstr$,"VENDID",fdel$,"VENDNAME",fdel$,"FFLAG",fdel$
+	List$[1]=webstr$
+	Webstr$=RTrim$(SERNO$),fdel$,RTrim$(psno.ModelNumber$),fdel$
+	webstr$=webstr$,RTrim$(psno.ProductCode$),fdel$,Str$(psno.Vendor),fdel$
+	X2=psno.Vendor
+	tmp$=getvname$(X2)
+	webstr$=webstr$,RTrim$(tmp$),fdel$,Str$(FFLAG),fdel$
+	List$[2]=webstr$
+	List$[3]=esdel$
+	
+	CHKSNDone: ! done
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! chksrno
+! 
+!--------------------------------------------------------------------
+Sub SbmtSNLines()
+! save out the 3 sn lines
+ Try
+
+	Call DXGet("ORDERID",tmp$)
+	X2=tmp$
+	If X2<1 or X2>999999 or Fra(X2) ! not valid
+		ReturnStatus=0
+		Message$="ORDER NOT PASSED"
+		goto SBMSDone:
+	Endif
+	OrderNo=x2
+	if Not(Quote)
+		OHR=GetOrdRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.)
+	Else
+		OHR=GetQteRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.)
+	endif
+	If OHR<=0 ! not found
+		ReturnStatus=0
+		Message$="ORDER "+Str$(Orderno)+" NOT FOUND"
+		goto SBMSDone:
+	Endif
+	if roh.OrdType<>21 and roh.OrdType<>22
+		ReturnStatus=0
+		Message$="ORDER "+Str$(Orderno)+" NOT REPAIR TYPE"
+		goto SBMSDone:
+	Endif
+	CREDIT=0 \ if ros.status=32 let credit=1
+	call dxget("LINEID",tmp$)
+	tmp$=UCase$(RTRIM$(tmp$))
+	if tmp$<>"LINEA" and tmp$<>"LINEB" and tmp$<>"LINEC"
+		returnstatus=0
+		Message$="Line Identifier not passed"
+		goto SBMSDone
+	Endif
+	LNID$=tmp$
+	clear rol.
+	! set up main rol vars
+	rol.status=11 \ if credit let rol.status=12
+	rol.OrdNum=orderno
+	rol.UpdtStk=0 ! NEVER UPDATE STOCK
+	rol.Slsm=roh.SlsmNum
+	rol.Whse=roh.wh
+	rol.Desc1$=blank$
+	rol.Desc2$=blank$
+	rol.ProdCode$=blank$
+	rol.SpareNU3$=blank$
+	rol.KitDesignation$=blank$
+	rol.ComdtyCode$=blank$
+	rol.MatCode$=blank$
+	rol.RepairLine$=blank$
+	rol.VendItemCode$=blank$
+	rol.OrgProdCode$=blank$
+	rol.HldForPo$=blank$
+	rol.SpareNU1$=blank$
+	rol.AwmDeal$=blank$
+	rol.SpareNu$=blank$
+	rol.EntBy=prt.EntBy
+	if rol.EntBy<=0 let rol.EntBy=roh.EntBy
+	if LNID$="LINEA"
+		Call dxget("LTYPE",tmp$)
+		tmp$=UCASE$(RTRIM$(tmp$))
+		if tmp$<>"STK" and tmp$<>"NSTK"
+			returnstatus=0
+			message$="LINE TYPE not passed"
+			goto SBMSDone
+		Endif
+		NonStk=0 \ if tmp$="NSTK" let NonStk=1
+		call dxget("PRODID",tmp$)
+		prod$=UCASE$(RTRIM$(tmp$))
+		rol.ProdCode$=tmp$+Blank$
+		call dxget("DESC1",tmp$)
+		strgok=chkbadchars(e$,tmp$)
+		if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Product Decription"
+			goto SBMSDone
+		endif
+		rol.Desc1$=tmp$+Blank$
+		call dxget("DESC2",tmp$)
+		strgok=chkbadchars(e$,tmp$)
+		if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Product Decription"
+			goto SBMSDone
+		endif
+		rol.Desc2$=tmp$+Blank$
+		If not(NonStk) ! get prod data
+			PRR=filegetprod(e$,PRC,"=",1,prod$,pr.)
+			If PRR<=0
+				NonStk=1
+			Else
+				let rol.PSlsCat=pr.ProdCat
+				rol.PDRecNum=PRR
+				rol.MatCode$=pr.MatCode$
+				rol.ComdtyCode$=pr.ComdtyCode$
+				rol.UMSell=pr.BaseUM
+				rol.UMPrice=pr.BaseUM
+				rol.UMCost=pr.baseUM
+			Endif
+		Endif
+		rol.RepairLine$="A"
+		let rol.NStkItem=NonStk
+	Endif
+	If LNID$="LINEB"
+		call dxget("SRLNO",tmp$)
+		if rtrim$(tmp$)=""
+			returnstatus=0
+			message$="Serial Number not passed"
+			goto SBMSDone
+		Endif
+		let rol.ProdCode$="SERIAL NO:"+Blank$
+		rol.NStkItem=1
+		rol.LineType=3
+		rol.RepairLine$="B"
+		rol.Desc1$=UCase$(tmp$)+Blank$
+		call dxget("MODEL",tmp$)
+		strgok=chkbadchars(e$,tmp$)
+		if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Model"
+			goto SBMSDone
+		endif
+		rol.Desc2$=tmp$+Blank$
+		call dxget("VENDID",tmp$)
+		x2=tmp$
+		if x2<0 or x2>999999 or fra(x2)
+			returnstatus=0
+			message$="INVALID VENDOR NUMBER"
+			goto SBMSDone
+		Endif
+		rol.Vendor=tmp$
+	Endif
+	If LNID$="LINEC"
+		rol.NStkItem=1
+		rol.LineType=3
+		rol.RepairLine$="C"
+		call dxget("LDESC1",tmp$)
+		strgok=chkbadchars(e$,tmp$)
+		if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Product Decription"
+			goto SBMSDone
+		endif
+		rol.Desc1$=tmp$+Blank$
+		call dxget("LDESC2",tmp$)
+		strgok=chkbadchars(e$,tmp$)
+		if not(strgok)
+			returnstatus=0
+			Message$="Invalid Characters in Product Decription"
+			goto SBMSDone
+		endif
+		rol.Desc2$=tmp$+Blank$
+		rol.ProdCode$="PROBLEM:"+Blank$
+		! line c used to have estimate - but on PM this is NOT USED
+		! because it added to totals??
+	Endif
+	K$=rol.OrdNum using "######","   ",rol.RepairLine$
+	Search #OLC,2,1;K$,OLR,E
+	if not(E)
+		mode$="c"
+	Else
+		If E=1 let mode$="a"
+		if e>1 
+			returnstatus=0
+			message$="Search Error "+Str$(E)+" checking "+K$+" rol dir 1"
+			goto sbmsdone
+		Endif
+	Endif
+	! as we CANNOT use 'std' fileupdate - create INTERNAL CUSTOM VERSION
+	if Not(Quote)
+		R=fupdtrolz(e$,OLC,mode$,OLR,rol.)
+	else
+		R=fupdtqolz(e$,OLC,mode$,OLR,rol.)
+	endif
+	If R<0
+		returnstatus=0
+		message$="Search Error "+Str$(ABS(R))+" "+e$+" during file update"
+	Endif
+	SBMSDone: ! finito
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! SbmtSNLines
+! 
+!--------------------------------------------------------------------
+Sub DELSNLine()
+! delete a sn line
+ Try
+
+	Call DXGet("ORDERID",tmp$)
+	X2=tmp$
+	If X2<1 or X2>999999 or Fra(X2) ! not valid
+		ReturnStatus=0
+		Message$="ORDER NOT PASSED"
+		goto DelSDone:
+	Endif
+	OrderNo=x2
+	if Not(Quote)
+		OHR=GetOrdRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.)
+	else
+		OHR=GetQteRec(e$,OHC,OSC,OTC,OrderNo,roh.,ros.,rot.)
+	endif
+	If OHR<=0 ! not found
+		ReturnStatus=0
+		Message$="ORDER "+Str$(OrderNo)+" NOT FOUND"
+		goto DelSDone:
+	Endif
+	if roh.OrdType<>21 and roh.OrdType<>22
+		ReturnStatus=0
+		Message$="ORDER "+Str$(OrderNo)+" NOT REPAIR TYPE"
+		goto DelSDone:
+	Endif
+	call dxget("LINEID",tmp$)
+	tmp$=UCase$(RTRIM$(tmp$))
+	if tmp$<>"LINEA" and tmp$<>"LINEB" and tmp$<>"LINEC"
+		returnstatus=0
+		Message$="Line Identifier not passed"
+		goto DelSDone
+	Endif
+	LNID$=tmp$
+	tmp$=blank$;mode$=Blank$
+	if LNID$="LINEA" let tmp$="A"
+	if LNID$="LINEB" let tmp$="B"
+	if LNID$="LINEC" let tmp$="C"
+	K$=OrderNo using "######","   ",tmp$
+	Search #OLC,2,1;K$,OLR,E
+	if not(E)
+		mode$="d"
+		read record #OLC,OLR,0;rol.
+	Else
+		if e=1 goto DelSDone ! bypass it
+		if e>1 
+			returnstatus=0
+			message$="Search Error "+Str$(E)+" checking "+K$+" rol dir 1"
+			goto delsdone
+		Endif
+	Endif
+	if rtrim$(mode$)="d"
+		! as we CANNOT use 'std' fileupdate - create INTERNAL CUSTOM VERSION
+		if Not(Quote)
+			R=fupdtrolz(e$,OLC,mode$,OLR,rol.)
+		else
+			R=fupdtqolz(e$,OLC,mode$,OLR,rol.)
+		endif
+		If R<0
+			returnstatus=0
+			message$="Search Error "+Str$(ABS(R))+" "+e$+" during file delete"
+		Endif
+	Endif
+	DelSDone: ! finito	
+
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! DELSNLine
+! 
+!--------------------------------------------------------------------
+Function Chk4srno(serno$,prod$,R)
+! check if serial number exists for product
+  Try
+	dim cpsno. as pserlno
+	snexst=1
+	keyval$=SERNO$
+	mode$=">"
+	do
+		R=filegetpserlno(e$,PSC,mode$,1,keyval$,cpsno.)
+		if r<0 let snexst=0 \ exit do
+		if keyval$[1,30]<>serno$ let snexst=0 \ exit do
+		if Prod$[1,12]<>Blank$[1,12]
+			IF cpsno.ProductCode$=prod$ exit do
+		Else ! no prod even
+			exit do ! first match is one
+		Endif
+	loop
+  else
+    include "src/callsuberr.inc"
+  end try
+end Function snexst ! Chk4srno
+! 
+!--------------------------------------------------------------------
+Function fupdtrolz(e$,OLC,mode$,rcdno,rolz. as rolnew)
+! for ot 21 & 22 - NO LINE # and 10,10=repair line
+  try
+	dim ok$[60],ok1$[60]
+	dim LNNo$[3],lmode$[1]
+	Lmode$ = lcase$(mode$[1,1])
+	LNNO$=Blank$[1,3]  ! 3 CHARACTER BLANK FOR KEY (LINE #)
+	if lmode$="a"
+		k$=" ",k$
+		k$=rolz.OrdNum using "######",LNNO$,rolz.RepairLine$
+		search #OLC,2,1;K$,R,E
+		if not(e)
+			message$="Key "+k$+" already on file - add"
+			exit function -9
+		Endif
+		let e=2;r=0
+		search #OLC,1,0;k$,R,E
+		if e exit function e*-1
+		write record #OLC,R,0;rolz.;
+		Search #OLC,4,1;k$,R,E
+		if e
+			message$="SE "+Str$(E)+" add dir 1"
+			exit function e*-1
+		Endif
+		k1$=" ",k1$
+		k1$=rolz.PDRecNum using "######",k$
+		if rolz.NStkItem=0
+			search #OLC,4,2;K1$,R,E
+			if e
+				message$="SE "+Str$(E)+" add dir 2"
+				exit function e*-1
+			Endif
+		Endif
+		let E=R ! send back record
+	Endif
+	if lmode$="c"
+		dim orolz. as qol
+		r = rcdno \ oldr=rcdno
+		read record #OLC,R,0;orolz.
+		write record #OLC,R,0;rolz.; ! write new
+		k$=rolz.OrdNum using "######",LNNO$,rolz.RepairLine$
+		ok$=orolz.OrdNum using "######",LNNO$,orolz.RepairLine$
+		k1$=rolz.PDRecNum using "######",k$
+		ok1$=orolz.PDRecNum using "######",ok$
+		if k$<>OK$
+			Search #OLC,5,1;ok$,R[1],E
+			search #OLC,4,1;k$,R,E
+		Endif
+		
+		if k1$<>ok1$
+			if orolz.NStkItem=0 Search #OLC,5,2;ok1$,R[1],E
+			if rolz.NStkItem=0 Search #OLC,4,2;k1$,R,E
+		Endif
+	Endif
+	if lmode$="d"
+		k$=rolz.OrdNum using "######",LNNO$,rolz.RepairLine$
+		k1$=rolz.PDRecNum using "######",k$
+		If rolz.NStkItem=0 Search #OLC,5,2;k1$,R[1],E
+		search #OLC,5,1;k$,R[1],E
+		Let E=3;r=rcdno
+		search #OLC,1,0;k$,R,E
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end Function E ! fupdtrolz
+! 
+!--------------------------------------------------------------------
+Function fupdtqolz(e$,OLC,mode$,rcdno,rolz. as qol)
+! for ot 21 & 22 - NO LINE # and 10,10=repair line
+  try
+	dim ok$[60],ok1$[60]
+	dim LNNo$[3],lmode$[1]
+	Lmode$ = lcase$(mode$[1,1])
+	LNNO$=Blank$[1,3]  ! 3 CHARACTER BLANK FOR KEY (LINE #)
+	if lmode$="a"
+		k$=" ",k$
+		k$=rolz.OrdNum using "######",LNNO$,rolz.RepairLine$
+		search #OLC,2,1;K$,R,E
+		if not(e)
+			message$="Key "+k$+" already on file - add"
+			exit function -9
+		Endif
+		let e=2;r=0
+		search #OLC,1,0;k$,R,E
+		if e exit function e*-1
+		write record #OLC,R,0;rolz.;
+		Search #OLC,4,1;k$,R,E
+		if e
+			message$="SE "+Str$(E)+" add dir 1"
+			exit function e*-1
+		Endif
+		k1$=" ",k1$
+		k1$=rolz.PDRecNum using "######",k$
+		if rolz.NStkItem=0
+			search #OLC,4,2;K1$,R,E
+			if e
+				message$="SE "+Str$(E)+" add dir 2"
+				exit function e*-1
+			Endif
+		Endif
+		let E=R ! send back record
+	Endif
+	if lmode$="c"
+		dim orolz. as qol
+		r = rcdno \ oldr=rcdno
+		read record #OLC,R,0;orolz.
+		write record #OLC,R,0;rolz.; ! write new
+		k$=rolz.OrdNum using "######",LNNO$,rolz.RepairLine$
+		ok$=orolz.OrdNum using "######",LNNO$,orolz.RepairLine$
+		k1$=rolz.PDRecNum using "######",k$
+		ok1$=orolz.PDRecNum using "######",ok$
+		if k$<>OK$
+			Search #OLC,5,1;ok$,R[1],E
+			search #OLC,4,1;k$,R,E
+		Endif
+		
+		if k1$<>ok1$
+			if orolz.NStkItem=0 Search #OLC,5,2;ok1$,R[1],E
+			if rolz.NStkItem=0 Search #OLC,4,2;k1$,R,E
+		Endif
+	Endif
+	if lmode$="d"
+		k$=rolz.OrdNum using "######",LNNO$,rolz.RepairLine$
+		k1$=rolz.PDRecNum using "######",k$
+		If rolz.NStkItem=0 Search #OLC,5,2;k1$,R[1],E
+		search #OLC,5,1;k$,R[1],E
+		Let E=3;r=rcdno
+		search #OLC,1,0;k$,R,E
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end Function E ! fupdtqolz
+! 
+!--------------------------------------------------------------------

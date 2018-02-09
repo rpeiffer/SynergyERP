@@ -1,0 +1,1726 @@
+! SOPOLINECREATE -- Creates Sales Order Line from Purchase Order Line
+!
+!loadsave -w -n 100,10 -o prog/dxport/sopolinecreate.dl4 src/sopolinecreate.src
+! 09/2013 - NEW LASTPRICE FILES AFTER rev1.8.4.0
+include "src/copyright.inc"
+Declare Intrinsic Sub DateToJulian,InpBuf,Logic,String,VerifyDate
+Declare Intrinsic Sub dxopen,dxget,dxset,dxclose,dxsave,programdump,env
+! Option Default Dialect IRIS1
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,taxflag,GetCostLevels
+Declare External Function OpenFile,PDate$,FormatDate2$,OpenMySQLMirror
+Declare External Function ChkAltItem$
+Declare External Function taxable,JDate$
+Include "src/inc/sql_prod.inc"
+External Lib "libprod.lib"
+Declare External Sub ProdList,ProdGroup,UMDList,CompIList
+Declare External Function getpravail,getumrec,getMSDS,ComplFlag,ChkPrdUM
+External Lib "libprodwh.lib"
+Declare External Sub mxwhcreate,chkrprod
+Declare External Function getwhavail
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+External Lib "libprice.lib"
+Declare External Sub SysPriceCalc
+External Lib "librasl.lib"
+Declare External Sub allocordlot,chkwhrasl
+External Lib "libedittrack.lib"
+Declare External Sub MakeEdittrack
+
+Declare Sub GetNewProdDtl, GetPrice, SetupSpecs, SetNewRol, Nsfrmlp, chktowhse,SetNewProdline
+Declare Sub UpdateLog,GetCust,EdtTrkDo
+Declare Function UMtoFactor,getnxtline
+
+include "src/inc/fileprodwhse.inc" ! product warehouse
+include "src/inc/fileprod.inc" ! product
+include "src/inc/filepohead.inc" ! purchase order header
+include "src/inc/filepoline.inc" ! purchase order line
+include "src/inc/filerolz.inc" ! sales order line number
+include "src/inc/fileordhead.inc" ! sales order header/total/line
+include "src/inc/filelastprice.inc" ! last price file
+include "src/inc/filecust.inc" ! customer file
+include "src/inc/filecommhead.inc" !commhead
+include "src/inc/filesproddesc.inc" ! non-stock file - sales orders
+include "src/inc/fileedittrack.inc" ! edittrack
+include "src/inc/filetaxcode.inc" ! tax code file
+
+Enter Chan[],sospec[],msg$,errtype,userid$
+! dxgets needed for # of order lines to copy, order line num, # order message line copy, order msg line #
+!! call parameters are as follows
+!sospec[0] = purchase order line record #
+!sospec[1] = Purchase order header record #
+!sospec[2] = Purchase Order Number
+!sospec[3] = Sales Order Number
+!sospec[4] = product record #
+!sospec[5] = prodwhse record #
+!sospec[6] = Sales Order Line record#
+!sospec[7] = Sales Order Line Non-stock record #
+!sospec[8] = User Record #
+!sospec[9] = Company #
+rec_pol=sospec[0]
+rec_poh=sospec[1]
+poid=sospec[2]
+sorder=sospec[3]
+!chan[0] = cntrl file
+!chan[1] = purchase order header  #60 	
+!chan[2] = purchase order lines   #61
+!chan[3] = order header #62
+!chan[4] = product file #64
+!chan[5] = product warehouse #65
+!chan[6] = nonstock #66
+!chan[7] = unit of measure file #67
+!chan[8] = order lines #68
+!chan[9] = po messages #69 Not Used
+!chan[10] = order message #70
+!chan[11] = po gen work #72
+!chan[12] = deals #19
+!chan[13] = customer
+!chan[14] = order total
+!chan[15] = altvend
+!chan[16] = nonstock
+!chan[17] = lastprice
+!chan[18] = commodity code header
+
+!errtype = 0 = no errors copied ok, 1=error/warning has occurred
+!msg$= message for error ""
+
+
+!errtype=0
+!msg$=""
+r8=sospec[0] ! set purchase order header record #
+sorder=sospec[1] ! set the sales order #
+If Err 0 Gosub ERR_TRAP
+Dim pr. As prod 
+Dim pw. As prodwhse
+Dim PR. as prod
+Dim sql_prod. as sql_prod
+Dim pw. as prodwhse
+dim roh. as roh ! order header
+dim ros. as ros ! order ship to file
+dim rot. as rot ! order total file
+dim rol. as rolnew ! order lines
+dim orol. as rolnew ! for the old order line 
+dim pol. as poline ! purchase order line
+dim poh. as pohead ! purchase order header
+dim clp. as lastprice ! last price file
+dim cust. as cust ! customer file
+dim cmc. as commhead ! commodity code header file
+Dim Nstk. as sproddesc ! non-stock file
+Dim ETR. as edittrack ! EDITTRACKING
+Dim prdesc. as sproddesc ! non-stock file for orders
+
+dim Message$[200],ProdKey$[60],OrgProd$[12],tmp2$[100],Blank$[100]    
+dim TPWKey$[60],tmp1$[300],Msgdesc$[150]                              
+dim dmsg$[256],dblog$[60] \ dblog$="files/6/ol.log" ! fields for DEBUG
+dim 1%,L1[5],NSD1[7],PFU1[20],CNVTU[9],SC,SR,Z9[9],COST_LEV[3],COPY_FLAG
+dim 1%,FLAGS[11],SOURCE,COPY_SALES_ORD
+dim 2%,L2[2],L9,NSD2[4],S9[9],ORDER,LINE_,ELINE,HA3,RASL[2]
+dim 3%,msglinenum,linenum,totmsgline,totordline
+dim 3%,L3[6],NSD3[9],PFU2[6],CNVTA[4],A[33]
+dim J4$[50],L1$[120],NSD$[96],PROD$[12],VEND$[50]
+Dim 1%,C8[9,9],D1,E,J0,J2,J3,J4,J5,J6,J8,J9[5],T8[4],W1[2],X1[9],H4[3]
+Dim 1%,WH0[3],WH8[47],OLL3[3],OLUN[2],OLS2[1],PL0[4],OLEUN[2],DL1[6]
+Dim 1%,COPY_FLAG,POMISC[2],PR_PO[1],CTWT,savepriceflag, savetaxflag
+Dim 1%,STAT[2],CH[10]
+DIM 1%,OCHAN[50],2%,OS9[9],3%,OPARAM[20]
+Dim 2%,B[24],B1,B2,C7[2],H0[12],H3[4],T3[4],W2[9],X2[9],WHBLD[2],AV2[6]
+Dim 2%,PC_DATE,DT3[1],JDATE[5],podisc[1]
+Dim 2%,WH7[3],W7[1],OLL2[1],OLL4[3],OLL6[5],OLL9[1],SOPO,OH5[16],DL2[4],OH0[12]
+Dim 3%,B0,J1,H8[9],R0,R8,R9,T9[9],Q1[4],Q9,W3[24],X3[9],PL[5],OLOLM[6],OLUNF[6]
+Dim 1%,DCLVL,MCTXBL[9]
+Dim 2%,MCODE[9],T1[1]
+Dim 3%,MCHARGE[9,1],T2[25],TOT[4]
+dIM 2%,CFIN[8],KEYCUST$[30]
+Dim 3%,W5[25],WH9[23],TO_[3],M1[12],A1[7],OLL5[3],OLL7[12],OLS3[17],PL4[23]
+Dim 3%,DL3[3],R24,PL5[9],PL6[10],DISP_COST,DISP_QTY,DISP_EXT
+Dim 3%,REC[10],LBSFACTOR,LBSUNIT,WHMISC2[7],PARM[5]
+dim 3%,polnum
+Dim J$[40],J0$[12],J1$[40],J2$[40],J5$[75],J7$[75],J9$[40],F$[16],e$[500]
+Dim A$[156],M1$[14],P$[80],S$[20],S1$[10],U5$[50],W1$[32],X$[22]
+Dim W2$[36],VEND$[50],I$[5],OLL6$[60],OLL1$[20],OLS3$[33],K12$[50]
+Dim K20$[50],K21$[50],K22$[50],K23$[50],K24$[18],K25$[50],K26$[50],P9$[50]
+Dim K26$[50],K27$[50],AV1$[32],CK$[20],K69$[9],POM$[60]
+Dim P60$[50],WHPROD$[12],OM1$[40],K70$[50],Z$[50],TMP$[50]
+Dim P61$[256],Custom_customer$[30],H$[82]
+dim rstr$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+dim 3%,rec_poh,rec_pol,olr,OHR,poid,sorder,prr, rec_prwh
+dim 3%,FlePtr[20,1],Specs[50] ! for price
+dim 3%,ordlvar[30]
+rec_pol=sospec[0] !po line rec#
+rec_poh=sospec[1] ! po header rec#
+poid=sospec[2] ! purchase order #
+sorder=sospec[3] ! sales order #
+prr=sospec[4] ! product record #
+rec_prwh=sospec[5] ! prodwhse record #
+rec_rol = sospec[6] ! sales order line record #
+!sospec[8] = User Record #
+intco =sospec[9] != Company #
+
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+Def FNU(H) = Int(Abs(H)) + Sgn(Fra(Abs(H))) * Sgn(H)
+Z9[1] = 3 \ Z9[2] = 7
+let intco=sospec[9] ! set the company #
+! openfiles 
+if not (chan[0]) ! cntrl file
+	ctlc = OpenFile(9999,intCo) \ If ctlc = -1 Error 42 !control 
+else
+	let ctlc=chan[0]
+endif
+if not (chan[1]) ! purchase order header  #60
+	 Ch_Poh = openfile(2416,intCo) \ If Ch_Poh = -1 Error 42     !"po header file
+else
+	ch_poh=chan[1]
+endif
+if not (chan[2]) ! po lines #61
+	Ch_PoL = openfile(2432,intCo) \ If Ch_Pol = -1 Error 42     !"po lines file
+else
+	let ch_pol=chan[2]
+endif
+if not (chan[3]) ! order header #62
+	 OHC = openfile(1840,intCo) \ If OHC = -1 Error 42     !order  header file
+else
+	let OHC=chan[3]
+endif
+if not (chan[4]) ! product file #64
+	 prc = OpenFile(1792,intCo) \ If prc = -1 Error 42  !product file 
+else
+	let prc=chan[4]
+endif
+if not (chan[5]) ! product warehouse #65
+	pwc = OpenFile(1744,intCo) \ If pwc = -1 Error 42  !"product warehouse file
+else
+	let pwc=chan[5]
+endif
+if not (chan[6]) !  nonstock #66
+	ch_nstk=OpenFile(2448,intCo) \ If Ch_nstk = -1 Error 42 ! nonstock product
+else
+	let ch_nstk=chan[6]
+endif
+if not (chan[7]) ! unit of measure file #67
+	ccc = OpenFile(-1728,intCo) \ If ccc = -1 Error 42  !u/m codes file
+else
+	let ccc=chan[7]
+endif
+if not (chan[8]) ! order lines #68
+	olc=OpenFile(1888,intCo) \ If olc = -1 Error 42 ! order line
+else
+	let olc=chan[8]
+endif
+
+
+If not (chan[12]) ! deals #19
+	ch_deal=OpenFile(864,intCo) \ If Ch_deals = -1 Error 42 ! deals file
+else
+	let ch_deal=chan[12]
+endif
+If not (chan[13]) ! customer file
+	cuc=OpenFile(1808,intCo) \ If CUC = -1 Error 42 ! customer file
+else
+	let cuc=chan[13]
+endif
+If not (chan[14]) ! order total
+	 Ch_Rot = openfile(1872,intCo) \ If Ch_Rot = -1 Error 42     !"order total file
+else      
+	let ch_rot=chan[14]
+endif
+If not (chan[15]) ! alt vend
+	ch_alt=OpenFile(-1568,intCo) \ If Ch_alt = -1 Error 42 !alternate vendor code
+else
+	let ch_alt=chan[15]
+endif
+if not(chan[16])
+	nsc = OpenFile(2128,IntCo) \ if nsc = -1 Error 42 ! non-stock lines ! Orders
+else
+	let nsc=chan[16]
+endif
+! sqlChan = OpenMySQLMirror(e$)  remove for testing mtg
+if not(chan[17]) ! last price file
+	lPC = OpenFile(-1376,IntCo) \ if lpc = -1 error 42 ! lastprice
+ELSE
+	LET LPC=CHAN[17]
+ENDIF
+if not(chan[18])
+	CMC = OpenFile(-2288,IntCo) \ if cmc = -1 Error 42 ! commod code(HEAD)
+else
+	cmc = chan[18]
+endif
+if not(chan[19])
+	ch_ros = OpenFile(1856,IntCo) \ if ch_ros = -1 Error 42 ! order shipto
+else
+	let ch_ros=chan[19]
+endif
+PLTC=OpenFile(2528,IntCo) \ if PLTC = -1 Error 42 ! PRODLOT
+SLTC=OpenFile(2320,IntCo) \ if SLTC = -1 Error 42 ! SORDLOT
+splc = OpenFile(-1936,IntCo) \ if splc=-1 Error 42 ! special price
+cphc = OpenFile(-2880,IntCo) \ if cphc = -1 Error 42 ! contr head
+btc = OpenFile(-1952,IntCo) \ if btc = -1 Error 42 ! break tbl chann
+! need fleptr variables
+fleptr[1,0]=prc;fleptr[2,0]=pwc;fleptr[3,0]=cmc
+fleptr[4,0]=lpc;fleptr[5,0]=splc;fleptr[6,0]=cphc
+fleptr[7,0]=ccc;fleptr[8,0]=btc
+let r8=sospec[0] ! purchase order record #
+Mat Read #ctlc,3,172;PC_DATE;
+X2 = PC_DATE \ Gosub L_7820 \ X2 = 0
+If X2 Let JDATE[0] = X2 Else Let JDATE[0] = Tim(6)
+Mat Read #ctlc,19,50;P9$;
+Mat Read #ctlc,60,50;P60$;
+Mat Read #ctlc,61,0;P61$;
+MAT  READ #ctlc,115,60;CUSTOM_CUSTOMER$;
+custom_customer$=UCase$(Trim$(custom_customer$))
+! set flag settings based upon customer
+let savepriceflag=0; savetaxflag=0
+if custom_customer$="MAYFIELD" 
+	let savepriceflag=99
+endif
+if custom_customer$="PIEDMONT"
+	LET savepriceflag=99
+	let savetaxflag=99
+endif
+if custom_customer$="GTI"
+	let savepriceflag=99
+endif
+if custom_customer$="ADMIRAL"
+	let savepriceflag=99
+endif
+Read record #ch_poh,rec_poh,0;poh.;
+Read record #ch_pol,rec_pol,0;pol.;
+Read record #pwc,rec_prwh,0;pw.;
+Read record #prc,prr,0;pr.;!errtype=0
+Read record #olc,rec_rol,0;orol.;! delete order lines
+IF savepriceflag<>0 ! if custom_customer$="GTI" or custom_customer$="PIEDMONT", MAYFIELD
+	ordlvar[0]=orol.UnitPrice
+	ordlvar[1]=orol.LineDiscPct
+	ordlvar[2]=orol.LineDisc
+	ordlvar[3]=orol.PriceOrigin
+	ordlvar[4]=orol.NetPrice
+	ordlvar[5]=orol.NewPPFlg 
+endif
+If savetaxflag<>0 ! if custom_customer$="PIEDMONT"
+	let ordlvar[6]=orol.TaxFlg
+endif
+let nsr=orol.pdrecnum
+read record #nsc,nsr,0;prdesc.;
+X3 = fileupdatesproddesc(e$,nsc,"d",nsr,prdesc.) ! delete sproddesc 
+X3 = fileupdaterolz(e$,OLC,"d",rec_rol,orol.)
+!msg$=""
+
+For X = 0 To 11 \ FLAGS[X] = 0 \ Next X
+For ST = 1 To 99
+  K22$[1,2] = ST Using "##"
+  K22$[3] = SORDER Using "######"
+  Search #OHC,2,1;K22$,OHR,E 
+  If E > 1 
+	errtype=1
+	let msg$=msg$+"SALES ORDER "+str$(Sorder)+" NOT FOUND. "
+	Goto OUTEND
+  endif
+  If Not(E) Goto L_2100
+  If ST > 7 And ST < 57 Let ST = 57
+Next ST
+let errtype=1
+let msg$=msg$+"SALES ORDER "+str$(sorder)+" NOT FOUND. "
+Goto OUTEND
+l_2100: ! sales order found
+Read Record #OHC,OHR,0;roh.;
+Read Record #ch_rot,roh.TotRec,0;rot.;
+Read Record #ch_ros,roh.ShipRec,0;ros.;
+For X = 0 To 11 \ FLAGS[X] = 0 \ Next X
+X2 = Pol.flags ! ! REM UNPACK pol.Flags TO FLAGS[x]       
+For K = 0 To 11                                           
+	flags[K] = Sgn(Fra(X2 / 2)) \ X2 = Int(X2 / 2)          
+Next K                                                    
+NonStk = flags[0]                                         
+Closedshort = flags[1]                                         
+ZLine = flags[2]
+let closed=0
+if pol.status=3 let closed=99
+if poh.status=7 let closed=99
+sqty=pol.QtyOrd
+sum=pr.UMSellDefault
+PROD$ = pol.ProdCode$
+SHQTY=0
+BOQTY=0
+!OHR=OHR
+!Call GetNewProdDtl()
+Call GetNewProdDtl(e$,Prod$,Sqty,SUM,OHR,SHQty,BOQty)
+!goto outend:
+! set up order total
+    Mat Read #ohc,ohr,0;H0;
+	REC_ROT=h0[3]
+	Mat Read #ch_rot,REC_ROT,0;T1         
+	Mat Read #ch_rot,REC_ROT,8;T2         
+	Mat Read #ch_rot,REC_ROT,168;MCODE    
+	Mat Read #ch_rot,REC_ROT,208;MCHARGE  
+	Mat Read #ch_rot,REC_ROT,328;TOT      
+	Mat Read #ch_rot,REC_ROT,358;MCTXBL   
+	Mat Read #ch_rot,REC_ROT,378;DCLVL;   
+	let keycust$=" ",keycust$
+	let keycust$[1,6]=h0[4] using "######"
+	Search #CUC,2,1;Keycust$,CUR,E
+	if e<>0 GOTO OUTEND:
+	Mat Read #CUC,CUR,544;CFIN
+	CHNL = 99                                                   
+	OCHAN[0] = ctlc
+	OCHAN[1] = 0                                              
+	OCHAN[2] = 0 ! zone
+	OCHAN[3] = prc
+	OCHAN[4] = 0! commodity code
+	OCHAN[5] = CUC ! cust        
+	OCHAN[6] = pwc
+	OCHAN[7] = 0 ! ch_ros
+	OCHAN[8] = ohc
+	OCHAN[9] = ch_rot! ch_rot
+	OCHAN[10] = olc                                                                              
+	OCHAN[11] = 0
+	OCHAN[12] = 0! custtax
+	OCHAN[13] = 0 !ch_slsm
+	OCHAN[14] = 0 !ch_tax            
+	OCHAN[15] = 0 ! ch_prlt
+	OCHAN[16] = 0 !ch_ordl
+	OCHAN[17] = ccc                     
+	OPARAM[0] = 0                                                              
+	OPARAM[1] = 1                                                              
+	OPARAM[2] = 0                                                              
+	OPARAM[3] = 1                                                              
+	OPARAM[4] = 1                                                              
+	If P60$[40,40] = "S" Let OPARAM[4] = 1                                     
+	OPARAM[5] = 0                                                              
+	OPARAM[6] = 1 
+	OPARAM[10] = 99! ar term misc cost charge   - bypass 
+	OS9[4] = 208                                                               
+	R5 = 0! rec_cust
+	H1 = ohr
+	V1 = 0 ! REC_SLSM                                  
+	Call "ORDERTOTAL",OS9[],H1,OPARAM[],OCHAN[],T1[],T2[],MCODE[],MCHARGE[],TOT[],MCTXBL[],DCLVL,R5,V1,CFIN[]                                                      
+	
+goto outend: ! done
+
+X$ = " ",X$ \ X$[10] = ""
+X$[1,3] = Int(X2 / 10 ^ 2 - Int(X2 / 10 ^ 4) * 10 ^ 2) + 10 ^ 2 Using "###"
+X$[4,6] = Fra(X2 / 10 ^ 2) * 10 ^ 2 + 10 ^ 2 Using "###"
+X$[7,9] = Int(X2 / 10 ^ 4) + 10 ^ 2 Using "###"
+X$[4,4] = "/" \ X$[7,7] = "/" \ X$ = X$[2]
+Return 
+DT3[0] = X2;FLAG = 1;X$ = " "
+Call "JULIANUTIL",DT3[],X$,FLAG
+Return 
+Call VerifyDate(X$,X$,E) \ If E Let X$ = "    "
+X2 = X$[1,6] \ Return 
+L_7820: Rem  CONVERT YYMMDD TO JULIAN (RETURN=NOGOOD, +1=OKAY)
+X$ = X2 Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E) \ If E Return 
+X2 = X$[1,5] \ Return 1
+DT3[0] = X2;DT3[1] = X2;FLAG = 0
+Call "JULIANUTIL",DT3[],X$,FLAG
+Return 
+X$ = X2 Using "&&&&"
+DT3[0] = X$[1,2];DT3[1] = X$[3,4]
+If DT3[0] > 67 Let DT3[0] = 1900 + DT3[0]
+If DT3[0] < 68 Let DT3[0] = 2000 + DT3[0]
+X$[1,4] = DT3[0] Using "&&&&";X$[5,6] = DT3[1] Using "&&"
+X2 = X$[1,6] \ Return 
+
+
+!--------------------------------------------------------------------
+Sub GetNewProdDtl(e$,Prod$,Sqty,SUM,OHR,SHQty,BOQty)
+! send prod, qty, um, order Rec
+! sends back list$ with details (use rol. varnames)
+! ALSO CREATE ORDER LINE NOW! allocates & edittrack
+! added: 04/19/10 - Nonstock (from lastprice)
+! added: 08/17/11 - Option to just load data - NO UPDATE (maxcnt<0)
+Try
+	Dim KPR$[60],KPW$[60],kcm$[50],k1$[50]
+	Dim 1%,Cnvtu[2],Flag,E,X[9],Pram[5]
+	Dim 1%,FCDays,Zline,NonStk
+	Dim 2%,X2[9],TaxBack,JDate[5],FDate,ShipDate
+	Dim 3%,CNVTA,Amount,x3[9],FutCost,LPR
+	Dim 3%,MSHQty,MBOQty,s9[20]
+
+	Dim NRol. as rolnew ! store new sent data
+	if debugdetail
+		dmsg$="Start New Line" \ Call updatelog(debug)
+	Endif
+	e$="";ZLine=0;NonStk=0
+	Read #ctlc,2,198;FCDays; ! days to check future cost
+	Read #ctlc,3,188;ShipDate; ! for inv levels
+	If FCDays<1 or FCDays>999 or Fra(FCDays) Let FCDays=30 ! check range
+	if nonstk ! additional data from SetNewProdline
+		let lpnstk=1 ! customer(master) ! default to 1 for now- new product
+		! let lpnstk=2 ! shiplist(site)
+		!if lpnstk=2 ! need sllst file
+		!	SLC=OpenFile(-9982,IntCo) \ if slc=-1 Error 42
+		!Endif
+		if lpnstk=0
+			Let E$=" No Last Price File Sent" ! +Prod$
+			Let ReturnStatus=0
+			if debugdetail
+				dmsg$=prod$+e$ \ Call updatelog(debug)
+			Endif
+			Exit Sub
+		Endif
+		if lpnstk=1 let x3=chf(LPC)-1
+		if lpnstk=2 let x3=chf(SLC)-1
+		if lprec<=0 or lprec>x3 or fra(lprec)
+			Let E$=" Invalid Last Price Record Sent" ! +Prod$
+			Let ReturnStatus=0
+			if debugdetail
+				dmsg$=prod$+e$ \ Call updatelog(debug)
+			Endif
+			if lpnstk=2 try close #slc Else rem
+			Exit Sub
+		Endif
+		Prod$="Z ZZZZZZZZZZ" ! set for default/missing
+		chan=lpc
+		if lpnstk=2 let chan=slc
+		read record #chan,lprec,0;clp.;
+		call NSFRMLP()
+		if lpnstk=2
+			if slc try close #slc Else rem
+		Endif
+		goto GotLPNS
+	Else ! stock item
+		tmp$=ChkAltItem$(e$,IntCo,Prod$,roh.CustNum)
+		If tmp$<>"" If tmp$[1,2]<>"  " let prod$=tmp$ ! has alt item
+	Endif
+	Let kpr$=Prod$
+	Let kpr$[13]="";e=0 ! no lock
+	If prod$[1,3]="Z  " let Nonstk=1;ZLine=1
+	If Prod$[1,3]="Z Z" let nonstk=1
+	If Abs(SQty)>9999999 or ABS(SHQTY)>9999999 or ABS(BOQTY)>9999999
+		E$="Quantity is out of range"
+		returnstatus=0
+		Exit Sub
+	Endif
+	If not(ZLine) ! still get prod for nonstk
+	 PRR = filegetprod(e$,PRC,"=",1,KPr$,PR.,e)
+	 clear e$
+	 If PRR<=0 ! not found
+		Let E$=" PRODUCT NOT FOUND" ! +Prod$
+		Let ReturnStatus=0
+		if debugdetail
+			dmsg$=prod$+e$ \ Call updatelog(debug)
+		Endif
+		Exit Sub
+	 Endif
+	Endif
+	
+	Clear rol. ! clear rol. to start
+	GotLPNS: ! start for nonstk from lp (rol filled)
+	Clear nrol. ! clear new data (as is none yet)
+	Clear specs[] ! clear specs vars
+	FlePtr[4,1]=0;LPR=0 ! clear last price info! 239790
+	! check if valid um# sent
+	if SUM=0 ! was not(nonstk) and 
+		let sum=pr.UMSellDefault
+		!if source=251 and pr.UMPrdtnDefault<>0 let sum=pr.UMPrdtnDefault
+	Endif
+	If not(nonstk) and SUM<>0 ! can't check what's not there!
+	 Flag=ChkPrdUM(e$,SUM,IntCo,Pr.)
+	 If Not(Flag)
+		Let E$=" INVALID QUANTITY U/M" ! +Prod$
+		Let ReturnStatus=0
+		if debugdetail
+			dmsg$=e$+" Rec "+Str$(SUM) \ Call updatelog(debug)
+		Endif
+		Exit Sub
+	 Endif
+	Endif
+	Read Record #OHC,OHR,0;roh.; ! still there from getordrec?
+	Credit=0 \ if roh.Status>=8 and roh.Status<=12 Let Credit=1
+	If ROH.OrgStatus>=8 AND ROH.OrgStatus<=12 let Credit=1
+	if returnstatus<>0
+			!call verifystat()
+			!if returnstatus=99
+			!	exit sub
+			!endif
+	endif
+	if credit and roh.ShipType=3 let cost_lev[1]=0 ! no cost on cm price error
+	OrderNo=roh.OrdNum
+	If ZLine ! set needed, rest zero/null
+		rol.NStkItem=1
+		rol.OrdNum=roh.OrdNum
+		rol.Desc1$=Blank$
+		rol.Desc2$=Blank$
+		rol.whse=roh.wh
+		let rol.linetype=3
+		rol.ProdCode$="Z"+Blank$
+		rol.PSlsCat=20
+		rol.ComdtyCode$="MISC"
+		goto GNPDDone ! clear & submit nothing for zlines
+	Endif ! of zline
+	X1=roh.ordtype
+	if SQty<0 and (credit Or (x1=4 or x1=7 or x1=8 or x1=15 or x1=16 or x1=19 or x1=24))
+		E$="No Negative Order Quantity allowed"
+		returnstatus=0
+		Exit sub
+	Endif
+	! okay, convert qty to BASE
+	!let cnvtu[0]=SUM;cnvtu[1]=0;cnvtu[2]=1
+	!let cnvta=SQty  ! BIG Q: is cutting known at this point??? *****
+	!Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	Let rol.QtyOrd=Int(sqty) ! always integer base - just cut it
+	IF SQTY<0 AND (SHQTY<>0 or BOQTY<>0) ! NO BO AND SHIP SAME!
+		SHQTY=SQTY;BOQTY=0
+	Endif	
+	if SHQty ! order pad detl allows entry
+		!cnvta=SHQty ! CUTTING??
+		!Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		!MSHQty=Amount;rol.QtyShip=Amount
+		mshqty=shqty;rol.qtyship=shqty
+	Endif
+	
+	If BOQty ! order pad detl allows entry
+		!cnvta=BOQty
+		!Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		!MBOQty=Amount;rol.QtyBO=Amount
+		mboqty=boqty;rol.qtybo=boqty
+	Endif
+	If SQTY>0 and (SHQTY<0 or BOQTY<0)
+		Let E$=" INVALID QUANTITY ENTERED +/- " ! +Prod$
+		Let ReturnStatus=0
+		Exit Sub
+	Endif
+	If SQTY<0 and (SHQTY>0 or BOQTY>0)
+		Let E$="INVALID QUANTITY ENTERED -/+ " ! +Prod$
+		Let ReturnStatus=0
+		Exit Sub
+	Endif
+	! set up rol. vars for ease of use
+	
+	! now get whse
+	Let kpw$=" ",kpw$;e=0
+	kpw$=prod$+roh.Wh Using "##"
+	if roh.ordtype=7 let kpw$=prod$+roh.ConsWh Using "##"
+	If Not(NonStk)
+	 rol.ComdtyCode$=pr.ComdtyCode$+Blank$
+	 if roh.ordtype=8 or roh.ordtype=16 ! see if to whse exists
+	   If Roh.ConsWh>0 and roh.conswh<100
+		Let TPWKey$=" ",tpwKey$
+		TPWkey$[1,12]=prod$[1,12]+Blank$
+		TPWKey$[13]=ROH.ConsWh Using "##"
+		call chktowhse(TPWKey$,pr.PrimVend)
+	   Endif
+	 Endif
+	 rec_prwh=filegetprodwhse(e$,pwc,"=",1,KPw$,PW.,e)
+	 clear e$
+	 if rec_prwh<0 ! NOT FOUND
+		clear pw.
+		If P61$[59,59]="Y" or (Credit and (roh.ordtype=7 or roh.ordtype=8)) ! not allowed new prodwhse
+			Let E$="Product "+Prod$+"Not Available In this Warehouse"
+			Let ReturnStatus=0
+			if debugdetail
+				dmsg$=e$+" Sysflag 61-59,59 Y "+Str$(roh.wh) \ Call updatelog(debug)
+			Endif
+			Exit Sub
+		Endif
+		If rec_prwh=-1 ! not found - add now?
+			x3=kpw$[13,14] ! header/cons whse
+			Whbld[0]=pwc;Whbld[1]=x3;WhBld[2]=pr.PrimVend
+			if x3<>1 let Whbld[1]=x3+.01 ! fra=copy whse 1
+			Call mxwhcreate(e$,IntCo,PROD$,WHBLD[])
+			rec_prwh=Whbld[2];E$=""
+			Read record #pwc,rec_prwh,0;PW.;
+			if debugdetail
+				dmsg$="Build new whse  "+kpw$ \ Call updatelog(debug)
+			Endif
+		Endif
+	 Endif ! of whse not found
+	Else ! is nonstk
+	 Clear pw.
+	 rol.UpdtStk=0 ! can't happen!
+	Endif
+	! Needs a Prodgroup check (in case single entry!)
+	If PW.ProdGrp>0 ! has a group
+		Pram[0]=ROH.OrdType !  \ if TScan=2 Let Pram[0]=0-OType
+		Pram[1]=PW.ProdGrp
+		Pram[5]=0 ! file not opened
+		![0]=Order or (-)PO Type
+		! [1]=Product Group
+		! [2]=Allow on Ord/PO (1=y, 0=N)
+		! [3]=Update Stock (1=y, 0=N)
+		! [4]=On Price List (0/1)
+		! [5]=Channel of 2/ProdGrp#
+		Call ProdGroup(e$,intco,Pram[])
+		If Pram[2]=0  ! not allowed on OType
+			E$="Product "+Prod$+"Not Allowed on this Order Type!"
+			returnstatus=0
+			if debugdetail
+				dmsg$=E$+" OT "+Str$(ROH.OrdType)+" PG "+Str$(PW.ProdGrp) \ Call updatelog(debug)
+			Endif
+			Exit Sub
+		Endif
+		rol.UpdtStk=Pram[3] ! update Stock
+	Endif
+	If not(nonStk) ! now a restricted item check
+		! set up 
+		clear x[]
+		clear s9[]
+		clear pram[]
+		x[1]=PRC;X[2]=CUC ! prod,cust chan
+		S9[1]=prr;s9[2]=CUR ! prod,cust records
+		pram[2]=roh.wh ! whse to check
+		if roh.ordtype=7 let pram[2]=roh.ConsWh ! use consignment?
+		Clear tmp2$
+		call chkrprod(e$,intco,X[],S9[],PRAM[],Tmp2$)
+		if pram[0]=0  ! 0=restrict, <>0=ok
+			e$=tmp2$;returnstatus=0
+			if debugdetail
+				dmsg$=E$ \ Call updatelog(debug)
+			Endif
+			exit sub
+		Endif
+	Endif
+	Call SetNewRol() ! use std routine to define rol vars
+	! remainder = get prices,costs,tax, rbt/sp, wh/ttl avail, last price info, future cost
+	if rol.ComdtyCode$="" or rol.ComdtyCode$=Blank$[1,4]
+		If Not(NonStk) Let rol.ComdtyCode$=pr.ComdtyCode$
+	Endif
+	if MSHQty or MBOQty ! entered something manually (and setnewrol defaults to Ordqty)
+		let rol.QtyShip=MSHQty ! as entered (override calc)
+		let rol.QtyBO=MBOQty ! as entered
+	Endif
+	rol.UMSell=SUM ! just in case
+	rol.AltSupsd=afrm ! where added-0=normal,1=alt,2=supersede
+	rol.OrgProdCode$=blank$
+	if afrm let rol.OrgProdCode$=OrgProd$+blank$
+	
+	! as call prodgroup changes updtstk flag - redo it
+	IF CREDIT AND roh.ShipType=3 LET rol.UpdtStk=0
+	IF CREDIT AND roh.ShipType=7 LET rol.UpdtStk=0
+	IF roh.OrdType=16 and ROH.XferAuth=0 let rol.UpdtStk=0 ! whxfer not auth
+	if roh.ordtype=15 or roh.ordtype=4 let Cust.BoSAllowedFlag=1 ! will always allow bo's
+	IF roh.ordtype=2 or roh.ordtype=5 let rol.UpdtStk=0
+	if roh.ordtype=3 and p60$[22,22]<>"Y" LET rol.UpdtStk=0 ! indir no stk
+	if custom_customer$="OMAHA"
+        ! default ord type 38 to update stock=N cct176559/task10467
+		if roh.ordtype=38 let rol.updtstk=0 
+	endif
+	If roh.ordtype=36 
+		If Not(Credit) Or (Credit And roh.ShipType=16)
+			Let rol.UpdtStk=0 ! "default to "N"
+		Endif
+	Endif
+	tmp$=rol.ComdtyCode$
+	if tmp$="LABR" OR tmp$="TIME" OR tmp$="MACH" LET rol.UpdtStk=0 ! comm's no stk
+	If NonStk ! can't call price
+		rol.NStkItem=1;rol.UpdtStk=0
+		! rol.umsell=0
+		FutCost=0
+		LPR=0;fleptr[4,1]=0
+		tmp$=" ",tmp$;tmp$=Pr.ComdtyCode$+Blank$;tmp$[5]=""
+		CMR=filegetcommhead(e$,CMC,"=",1,tmp$,cmc.)
+		clear e$
+		Goto NSBypass
+	Endif
+	! and extensions for all
+	Call SetupSpecs()
+	! the above matches a mx299 call (no price/cost/etc
+	
+	Call getprice()
+	! parse out returned data
+	if Specs[0]=0 ! no error - process away
+		rol.UpChrg=Specs[16]
+		rol.UnitCost=Specs[17]
+		rol.LineCost2=Specs[18]
+		rol.UnitPrice=Specs[20]
+		rol.LineDisc=Specs[21]
+		rol.LineDiscPct=Specs[22]
+		rol.NetPrice=Specs[23]
+		rol.RebtContract=Specs[24]
+		rol.PriceOrigin=Specs[25]
+		rol.CostOrigin=Specs[26]
+		rol.Contract=Specs[27]
+		rol.SpCommPct=Specs[28]
+		rol.BrkLvl=Specs[29]
+		rol.LoadUpchrg=Specs[40]	
+	Endif
+	if savepriceflag<>0 ! if custom_customer$="GTI" or custom_customer$="PIEDMONT", Mayfield
+			rol.UnitPrice=ordlvar[0]
+			rol.LineDiscPct=ordlvar[1]
+			rol.LineDisc=ordlvar[2]
+			rol.PriceOrigin=ordlvar[3]
+			rol.NetPrice=ordlvar[4]
+			rol.NewPPFlg=ordlvar[5]
+	endif
+	if savetaxflag<>0 ! if custom_customer$="PIEDMONT"
+		 let rol.TaxFlg=ordlvar[6]
+	endif
+	! needs UM check after price call
+	Let LPR=fleptr[4,1] ! sent last price record
+	If LPR>0
+		Read record #LPC,LPR,0;clp.;
+		if custom_customer$="SWP"
+			if MSGDESC$[1,9]="Permanent"
+				if Clp.Umprice<>rol.umprice
+					rol.umprice=Clp.UMPrice
+					rol.PriceFactor = UMtoFactor(rol.umprice) 
+				endif
+			endif
+		endif
+	Else
+		! Cust flag a$[138,138] = auth buy list (only if on lastprice file!)
+		If cust.AuthBuyList$="Y"
+			E$="Product "+Prod$+"Not on the Buy List!"
+			if debugdetail
+				dmsg$=E$+" "+rol.prodcode$ \ Call updatelog(debug)
+			Endif
+			Exit Sub
+		Endif
+		
+	Endif
+	If LPR<=0 and not(rol.NStkItem) ! no lastprice on stkitem
+		if P61$[25,25]="P" and not(credit) ! and rol.AltSupsd=0
+			if substitm let rol.AltSupsd=Int(rol.AltSupsd)+.1
+		Endif
+	Endif ! prompt if not in lastprice and prod
+	! sys flag p61$[12,12] (set OE UM = LP UM)
+	If P61$[12,12]="Y" and LPR>0 AND PR.CatchwgtItem$<>"Y"
+		IF clp.UMSell LET rol.UMSell=clp.UMSell  ! ;SUM=clp.UMSell
+		IF clp.UMPrice LET rol.UMPrice=clp.UMPrice
+		IF clp.UMCost LET rol.UMCost=clp.UMCost
+	Endif
+	! sys flag p60$[30,30] = price um = sell um (UN[1]=UN[0])
+	If P60$[30,30]="Y" and PR.CatchwgtItem$<>"Y"
+		let rol.UMPrice=rol.UMSell
+	Endif
+	! sys flag p61$[61,61] = cost um = price um
+	If P61$[61,61]="Y" Let rol.UMCost=rol.UMPrice
+	If Rol.umsell<>SUM ! UM change - reget base
+		! okay, reconvert qty to BASE
+		let cnvtu[0]=Rol.umsell;cnvtu[1]=0;cnvtu[2]=1
+		let cnvta=SQty  ! BIG Q: is cutting known at this point??? *****
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		Let rol.QtyOrd=Int(Amount) ! always integer base - just cut it
+		let rol.QtyShip=rol.qtyord
+		SUM=Rol.UMSell
+	Endif
+	rol.SellFactor=UMtoFactor(rol.UMSell) ! reget in case changed!
+	rol.PriceFactor=UMtoFactor(rol.UMPrice)
+	rol.CostFactor=UMtoFactor(rol.UMCost)
+	! future cost = cost as of xx days from today (specs[5] chg)
+	JDate=TIM(6)+FCDays ! ## days from today
+	tmp$=JDate$(jdate) ! from ddddd to MM/DD/YYYY
+	tmp1$=Formatdate2$(tmp$) ! now MM/DD/YYYY to YYYYMMDD
+	Let FDate=tmp1$[3,8] ! just need yymmdd
+	Let Specs[5]=0-FDate
+	Call getprice() ! call price w/all entries above
+	If Specs[0]=0 ! okay
+		Let X3=Specs[17]
+		cnvtu[0]=0;cnvtu[1]=rol.UMCost;cnvtu[2]=2
+		Cnvta=X3 \ if rol.numout>0 let cnvta=x3/rol.numout
+		FutCost=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	Endif
+	! quick avail check! If we're here - it's not cutting
+	x2[9]=rol.whse \ if roh.ordtype=7 let x2[9]=roh.ConsWh
+	If RTrim$(rol.ProdCode$)<>""
+		X3[1]=getwhavail(e$,intco,pwc,rol.ProdCode$,X2[9])
+	Else
+		x3[1]=0 
+	Endif
+	! note was dnr AND - causes issue - change to IF
+	if not(credit) ! credits not DNR check
+	 if pw.DNReordFlg=1 If ((ROL.UpdtStk and x3[1]<=0) or (Not(ROL.UpdtStk))) ! dnr and no avail
+		E$="Product "+Prod$+"is a Do Not Reorder!"
+		if debugdetail
+			dmsg$=E$+" DNR "+Str$(pw.DNReordFlg)+" AVL "+Str$(x3[1]) \ Call updatelog(debug)
+		Endif
+		Exit Sub
+	 Endif
+	Endif ! credit no dnr chk
+	kit=0
+	If not(nonstk) ! wait for complete to write zline/nonstk
+	 IF P9$[2,2]="D" AND P9$[20,20]<>"F" AND pr.MBFlg$="M" 
+		IF P9$[22,22]="Y" AND NOT(CREDIT)
+			if rol.LineType=0 and rol.qtyship>0 ! only stock items
+				LET KIT=1
+			Endif
+		Endif
+	 ENDIF
+	Endif
+	x=0 \ if p60$[27,27]="S" let x=1
+	if p60$[27,27]="B" let x=2
+	if p60$[27,27]="E" let x=3
+	if kit let x=0 ! will build it
+	!if maxcnt<0 let x=0 ! no check - use what's sent
+	if Not(credit) and X>0 ! has bochk set
+		If rol.QtyOrd>0 and ROL.UpdtStk and rol.QtyOrd>X3[1] ! order > whavail
+			if x3[1]>0 ! has some avail
+				Let rol.QtyShip=X3[1] ! take it all
+				Let rol.QtyBO=rol.QtyOrd-rol.QtyShip
+			Else ! zero or <0 avail
+				Let rol.QtyShip=0
+				Let rol.QtyBO=rol.QtyOrd ! all backordered
+			Endif
+		Endif ! of updt and ord>avail
+	Endif
+	! added 2/28 - convert shipped/bo to sell 2 dec - 2316
+	if rol.qtyship<>0
+		cnvtu[0]=0;cnvtu[1]=rol.UMSell;cnvtu[2]=1
+		cnvta=rol.qtyship
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		tmp$=LTrim$(amount using "----------#.##")
+		amount=tmp$ ! now 2 decimals only
+		cnvtu[0]=rol.UMSell;cnvtu[1]=0;cnvtu[2]=1
+		cnvta=amount
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		if amount<>rol.qtyship ! it changed
+			rol.qtyship=amount
+			if rol.qtyship>x3[1] let rol.qtyship=x3[1] ! no overship!
+			Let rol.QtyBO=rol.QtyOrd-rol.QtyShip
+		Endif
+	Endif ! of recalc qty ship based on 2 dec
+	NSBypass: ! can't get price avail etc for non-stk
+	if MSHQty or MBOQty ! manually entered this - keep it?
+		let rol.QtyShip=MSHQty ! as entered (override calc)
+		let rol.QtyBO=MBOQty ! as entered
+	Endif
+	if roh.ordtype=15 let rol.qtyship=0;rol.qtybo=0 ! starts as zero
+	if Cust.BoSAllowedFlag=0 Let rol.QtyBO=0 ! no bo's allowed
+	if pw.DNReordFlg=1 and rol.qtybo let rol.qtybo=0 ! no bo
+	GNPDDone: ! go here for zline / nonstk (DO NOT CREATE LINE!)
+	! we need to make sure base is correct for display
+	cnvtu[0]=0;cnvtu[1]=rol.umprice;cnvtu[2]=2 ! base to display
+	cnvta=rol.UnitPrice
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	cnvtu[0]=rol.umprice;cnvtu[1]=0;cnvtu[2]=6 ! display back to base
+	cnvta=amount
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	rol.unitprice=amount ! done unit price
+	cnvtu[0]=0;cnvtu[1]=rol.umprice;cnvtu[2]=2 ! base to display
+	cnvta=rol.NetPrice
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	cnvtu[0]=rol.umprice;cnvtu[1]=0;cnvtu[2]=6 ! display back to base
+	cnvta=amount
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	rol.NetPrice=amount ! done net price
+	cnvtu[0]=0;cnvtu[1]=rol.UMCost;cnvtu[2]=2 ! base to display
+	cnvta=rol.UnitCost
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	cnvtu[0]=rol.UMCost;cnvtu[1]=0;cnvtu[2]=6 ! display back to base
+	cnvta=amount
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	rol.UnitCost=amount ! done unit cost
+	Let elflag=0 ! NOT an existing line
+	! won't be cut or LOT Price here?
+	! ADDED - Create line NOW! (unless maxcnt<0)
+	! clear / set up misc fields
+	IF rol.UMCutCost=-3 AND rol.QtyOrd LET CHBASE=(rol.CutCost/rol.QtyOrd) ELSE  LET CHBASE=rol.CutCost
+	X3[4]=rol.UnitCost+CHBase
+	X3[3]=X3[4]
+	IF rol.LoadUpchrg ! has cost up
+		IF rol.LoadUpchrg<0 ! $ amount
+			X3[3]=X3[4]+Abs(rol.LoadUpchrg)
+		Else ! percent
+			X3[3]=X3[4]+(X3[4]*(rol.LoadUpchrg/100))
+		Endif
+	Endif
+	NetCost=X3[3]
+	cnvtu[0]=0;cnvtu[1]=rol.UMCost;cnvtu[2]=2 ! base to display
+	cnvta=NetCost
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	cnvtu[0]=rol.UMCost;cnvtu[1]=0;cnvtu[2]=6 ! display back to base
+	cnvta=amount
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	NetCost=amount ! done net cost
+	If roh.OrdType=37  ! "EVAP Ship - NO Price - any order in here
+		If Not(Credit) Or (Credit And roh.ShipType=16)
+			Let rol.UnitPrice=0;rol.NetPrice=0;rol.CutChrg=0
+			Let rol.LineDisc=0;rol.LineDiscPct=0;rol.UpChrg=0
+		Endif
+	Endif
+	If roh.OrdType=36 ! "EVAP Billing - NO Cost - Any type order
+		If Not(Credit) Or (Credit And roh.ShipType=16)
+			Let rol.UnitCost=0;rol.CostOrigin=0;rol.RebtContract=0
+			Let rol.CutCost=0;rol.ExtCutCost=0;rol.ExtLoadShip=0;rol.ExtLoadOrd=0
+			rol.LoadUpchrg=0
+		ENDIF
+	Endif
+	LET rol.ExtOrdAmt=FNR(rol.QtyOrd*Rol.NetPrice)
+	LET rol.ExtLoadOrd=FNR(rol.QtyOrd*NETCOST)
+	IF roh.ordtype=4 OR roh.ordtype=15 ! "bill and hold
+	  IF roh.ordtype=15 
+		if roh.BOCTR=0 let rol.CurrBillQty=rol.QtyOrd Else let rol.CurrBillQty=0
+	  Endif
+	  IF roh.ordtype=4 let rol.CurrRelQty=rol.QtyShip
+	  If roh.ordtype=4 and custom_Customer$="MORRISETTE" let rol.CurrBillQty=rol.Qtyship
+	  LET rol.ExtShipAmt=FNR(rol.CurrBillQty*Rol.NetPrice)
+	  LET rol.ExtLoadShip=FNR(rol.CurrBillQty*NETCOST)
+	ELSE
+	  LET rol.ExtShipAmt=FNR(rol.QtyShip*Rol.NetPrice)
+	  LET rol.ExtLoadShip=FNR(rol.QtyShip*NETCOST)
+	ENDIF
+	IF rol.UMPrice=-2 ! lot
+	  LET rol.ExtOrdAmt=FNR(Rol.NetPrice)*SGN(rol.QtyOrd)
+	  IF roh.ordtype=4 OR roh.ordtype=15
+		LET rol.ExtShipAmt=FNR(SGN(rol.CurrBillQty)*Rol.NetPrice)
+	  ELSE
+		LET rol.ExtShipAmt=FNR(Rol.NetPrice)*SGN(rol.QtyShip)
+	  ENDIF
+	ENDIF
+	IF rol.UMCost=-2 ! LOT
+	  LET rol.ExtLoadOrd=FNR(NETCOST*SGN(rol.QtyOrd))
+	  IF roh.ordtype=4 OR roh.ordtype=15
+        LET rol.ExtLoadShip=FNR(NETCOST*SGN(rol.CurrBillQty))
+	  ELSE
+		LET rol.ExtLoadShip=FNR(NETCOST*SGN(rol.QtyShip))
+	  ENDIF
+	ENDIF
+	if rol.WgtFactor<=0 let rol.WgtFactor=1
+	rol.ExtNetWgt=FNR(Abs((rol.QtyShip*rol.LbsUnit)/rol.WgtFactor))
+	rol.Status=11 \ if credit let rol.Status=12
+	rol.KitDesignation$=blank$
+	ROL.MWgt=rol.LbsUnit
+	rol.RepairLine$=blank$
+	rol.HldForPo$=blank$
+	rol.SpareNU1$=blank$
+	rol.AwmDeal$=blank$
+	!rol.SpareNU$ = Blank$;X0=LEN(rol.SpareNU$)
+	!		IF X0>1
+	!			rol.SpareNU$[X0-1] = ""  ! for the key
+	!		ENDIF
+	clear rol.SpareNU$ ! for dl4
+	if debugdetail
+		dmsg$="New Line Setup "+Str$(Orderno)+" - "+rol.prodcode$ \ Call updatelog(debug)
+	Endif
+	! special processing here!!!
+	if roh.OrdType=8 or roh.OrdType=16 ! cons/trans - no price/cost
+		rol.UnitCost=0;rol.CostOrigin=0;rol.RebtContract=0
+		rol.UnitPrice=0;rol.CutChrg=0;rol.CutCost=0
+		rol.LineDisc=0;rol.ExtOrdAmt=0;rol.ExtShipAmt=0
+		rol.LineDiscPct=0;rol.ExtCutChg=0;rol.ExtCutCost=0
+		rol.ExtLoadShip=0;rol.ExtLoadOrd=0;rol.NetPrice=0
+		rol.TaxAmt=0;rol.LoadUpchrg=0;rol.UpChrg=0
+	Endif
+	If p61$[46,46]="Y" and Credit and roh.shiptype=3 ! price fix - no cost
+		rol.UnitCost=0;rol.CostOrigin=0;rol.RebtContract=0
+		rol.CutCost=0;rol.ExtCutCost=0;rol.ExtLoadShip=0;rol.ExtLoadOrd=0
+		rol.LoadUpchrg=0
+	Endif
+	!if roh.ordtype=15
+	!	if roh.BOCTR=0 let rol.CurrBillQty=rol.QtyOrd Else let rol.CurrBillQty=0
+	!	rol.ExtShipAmt=FNR(rol.CurrBillQty*rol.NetPrice) ! ext price
+	!	rol.ExtLoadShip=FNR(rol.CurrBillQty*X3[3]) ! ext net cost
+	!Endif
+	If not(nonstk) ! wait for complete to write zline/nonstk
+	 IF P9$[2,2]="D" AND P9$[20,20]<>"F" AND pr.MBFlg$="M" 
+		IF P9$[22,22]="Y" AND NOT(CREDIT)
+			if rol.LineType=0 and rol.qtyship>=0 ! only stock items
+				LET rol.KitDesignation$="KIT"
+			Endif
+		Endif
+	 ENDIF
+	 rol.PDRecNum=PRR
+	 rol.SpareNU3$=blank$
+	 !if maxcnt<0 exit sub ! DON'T CREATE A LINE FLAG!!
+	 clear rol.SpareNu$ ! dl4 fix
+	 X2=GetNxtLine(orderno) ! GET NEXT LINE# 
+	 rol.linenum=x2;E=0;olr=0
+	 rol.ponum=pol.ponum
+	 OLR=fileupdaterolz(e$,OLC,"a",e,rol.)
+	 clear e$
+	 If Not(nonstk) and rol.UpdtStk and OLR>0
+		if debugdetail
+			dmsg$="New Line Added "+Str$(Orderno)+"-"+Str$(rol.Linenum) \ Call updatelog(debug)
+		Endif
+		if Not(Credit) and rol.UpdtStk ! add NEW qty ord to prod & whse
+			tmp$=ShipDate Using "&&&&&&"
+			Call DateToJulian(1,tmp$,tmp1$,F)
+			IF F let tmp1$=""
+			JDate[1]=tmp1$;F=0 ! julian sys shipdate
+			tmp$=roh.ShipDate Using "&&&&&&"
+			if roh.ShipDate<>999999 Call DateToJulian(1,tmp$,tmp1$,F)
+			If f let tmp1$=""
+			JDate[2]=tmp1$ ! julian ord shipdate
+			Read record #PRC,PRR,0;PR.
+			If rec_prwh>0 Read Record #pwc,rec_prwh,0;pw.
+			X3=ROL.QtyShip ! as mxline does it
+			if roh.OrdType=4 or roh.OrdType=15 or roh.OrdType=19 let x3=rol.QtyOrd-rol.PrevQtyShip-rol.QtyBO
+			if custom_customer$="MORRISETTE"
+				If roh.OrdType=4 Let x3=ROL.QtyShip ! "cct 129415 - only commit shipping qty
+			Endif
+			IF roh.OrdType=15 AND roh.BOCTR<>0 LET x3=0        
+			IF roh.OrdType=15 AND roh.BOCTR=0 LET x3=rol.QtyOrd
+			pr.QtyOnOrd=pr.QtyOnOrd+X3
+			pw.QtyOnOrd=pw.QtyOnOrd+x3
+			IF JDATE[1]>=JDATE[2]
+				LET pr.Lvl1Qty=pr.Lvl1Qty+x3
+				Let pw.Lvl1Qty=pw.Lvl1Qty+x3
+			ELSE
+				LET pr.Lvl2Qty=pr.Lvl2Qty+x3
+				Let pw.Lvl2Qty=pw.Lvl2Qty+x3
+			Endif
+			if pr.CatchwgtItem$="Y"
+				X=1 \ if rol.QtyOrd<0 let x=-1 ! neg ord/ship (wgt always +)
+				IF roh.OrdType=15 AND roh.BOCTR<>0 LET x=0 ! NO QTY
+				pr.LbsOnOrder=pr.LbsOnOrder+(rol.ExtNetWgt*x)
+				pw.LbsOnOrder=pw.LbsOnOrder+(rol.ExtNetWgt*x)
+			Endif
+			Write Record #PRC,PRR,0;PR.;
+			!if sqlChan >= 0 ! MySQL enabled and channel opened
+			!	call prod_DL4SQLConvert(e$,"FROMDL4",PR.,sql_prod.,PRR)
+			!	e = prod_SQLAddUpdate(e$,sqlChan,sql_prod.) ! mode="a" or "c"
+			!	if e <> 1 ! returns the number of records add/updated/deleted
+			!		error 11000
+			!	end if
+			!end if
+			If rec_prwh>0 Write Record #pwc,rec_prwh,0;pw.;
+			
+		Endif ! write on order to prod/whse
+		! do allocate to none/stock location now! unless rasl & invoice or status>1
+		Call ChkWhRasl(e$,intco,Ctlc,WHI,rol.Whse,RASL[])
+		if rasl=0 ! or credit ! or not(invoice)
+			Atype=0 \ if credit let Atype=1
+			FChan[0]=OHC;FChan[1]=OLC;FChan[2]=SLTC;FChan[3]=PLTC
+			FRec[0]=OHR;FRec[1]=OLR
+			call Allocordlot(e$,intCo,AType,FChan[],FRec[],Rasl,Status)
+			if roh.ordtype=8 or roh.ordtype=16 ! needs the "to" whse set (just in case)
+				Clear FChan[]
+				fchan[0]=PRC;fchan[1]=OHC;fchan[2]=OLC
+				fchan[3]=SLTC;fchan[4]=PLTC
+				clear FREC[]
+				FRec[2]=OHR \ if credit let FRec[3]=4
+				call "mx201lcon5.dl4",intco,Ctlc,FRec[],FCHAN[] ! do to whse
+			Endif
+		Else ! is rasl let rasl decide (even for credits!?)
+			S9[2]=OHR;S9[3]=0;S9[4]=source ! determine program #?
+			If credit let S9[3]=4;S9[4]=243 ! credit
+			if s9[4]<=0 let s9[4]=208 ! send something!
+			S9[12]=OLR ! PASS THE LINE JUST UPDATED (new single line mxrasl5)?
+			FChan[0]=1;FChan[1]=PRC;FCHan[2]=OHC;FChan[3]=OLC
+			FChan[4]=0;FChan[5]=ccc;FChan[6]=PLTC;FChan[7]=0
+			FChan[8]=SLTC;FChan[9]=0
+			! Call dxsave(0,"/tmp/jcs.txt!")
+			Call "MXRASL5.DL4",intco,Ctlc,S9[],FChan[]
+		Endif
+		if debugdetail
+			dmsg$="New Line Allocated " \ Call updatelog(debug)
+		Endif
+		
+	 Endif ! of stk update
+	 Elflag=1 ! not new anymore
+	Else ! do nonstk update (no zline on erp!)
+      If not(ZLine)
+		 X2=GetNxtLine(orderno) ! GET NEXT LINE# 
+		 rol.linenum=x2;E=0;olr=0
+		 nstk.LineNum=x2
+		 rol.ProdCode$ = roh.OrdNum Using "######"                      
+		 rol.ProdCode$ = rol.ProdCode$ + "-" + rol.LineNum Using "&&&"
+		 rol.ProdCode$ = rol.ProdCode$ + Blank$                        
+		 nstk.ProdCode$ = rol.ProdCode$ 
+		 rol.SpareNU3$=blank$
+		 clear rol.SpareNu$ ! dl4 fix
+		 OLR=fileupdaterolz(e$,OLC,"a",e,rol.) 
+		 clear e$
+		 If OLR > 0 ! has to have a record!                           
+				nstk.OrdLineRec = OLR  
+				If CREDIT Let x = -1 Else Let x = 1 
+				nstk.QtyShip=rol.QtyShip*x
+				nstk.ExtShipAmt = (rol.ExtShipAmt * x) ! store credits as neg
+				nstk.SpareNu$=blank$;nstk.NS_UDA1=0;nstk.NS_UDA2$=blank$
+				nstk.NS_UDA3$=blank$;nstk.NS_UDA4$=blank$;nstk.NS_UDA5$=blank$
+				clear nstk.Spare$ ! dl4 fix
+				nsr = fileupdatesproddesc(e$,nsc,"a",0,nstk.) 
+				clear e$
+				If nsr > 0                                                    
+					 rol.PDRecNum = nsr
+				Else                                                          
+					 e$ = "NONSTOCK " + rol.ProdCode$ + " FILE NOT ADDED"
+					 NSR=0 ! neg is no good in file
+				End If
+				rol.PDRecNum=NSR
+				Write Record #olc,olr,0;rol.; 
+		 Else
+			e$="Nonstock Line not added for "+rol.prodcode$
+		 End If  
+		 elflag=1 ! NOT NEW
+	  Endif ! no zline  
+	 
+	Endif ! of add stock/nstk line NOW
+	If P60$[44,44]="Y" AND olr>0
+		clear etr.
+		etr.EtAction=11 ! send action
+		call EdttrkDO(nrol.,rol.) ! org,new
+		if debugdetail
+			dmsg$="Line Edittrack " \ Call updatelog(debug)
+		Endif
+	Endif ! of edit tracking
+	! Call LineMainDtl() ! generate/write list$ 
+	! call programdump("/tmp/ollog1!","")
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetNewProdDtl
+! 
+!--------------------------------------------------------------------
+Sub GetPrice()
+! finish price setup & call it
+ Try
+	dim 1%,dbg,dlog$[50],3%
+	!let Debug=0 ! no, 1=yes
+	!let Dlog$="/usr/dxport/files/6/dx.log" ! whence the debug log
+	!If debugdetail let debug=1;dlog$=dblog$ ! set to this program
+	!CALL "price.dl4",FLEPTR[],SPECS[],MSGDESC$,intco,debug,dlog$
+	Let dbg=debug;dlog$=dblog$ ! pass what this program uses
+	Call SysPriceCalc(e$,FLEPTR[],SPECS[],MSGDESC$,dbg,dlog$)
+	e$=""
+	if debugdetail
+		!debug=1 ! reset
+		dmsg$="PRICE CALLED "+Str$(SPECS[0]) \ Call updatelog(debug)
+	Endif
+
+	!
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetPrice
+
+!--------------------------------------------------------------------
+Sub SetUpSpecs()
+! this sets up the specs[]
+! the rol has already be set up!
+Try 
+	Dim KCM$[50],K1$[50]
+	Dim 1%,PT[37]
+	Dim 3%,ORDWGT
+
+	KCM$=" ",kcm$;kcm$=rol.ComdtyCode$+Blank$;kcm$[5]=""
+	CMR=filegetcommhead(e$,CMC,"=",1,kcm$,CMC.) ! need comm rec#
+	clear e$
+	If CMR<0 Let CMR=0
+	Call getcust()
+	! send rec #'s
+	let x2=Cust.LpPpGrpCust
+	! If P60$[33,33]<>"Y" Let X2=0
+	If CUST.AuthBuyList$="Y" Let X2=0
+	If X2=CUST.CustomerCode let x2=0
+	if x2<1 or x2>999999 or Fra(X2) Let X2=0
+	IF P61$[100,100]<>"Y" let x2=0
+	let fleptr[0,1]=X2 ! perm price group
+	fleptr[1,1]=PRR;fleptr[2,1]=rec_prwh;fleptr[3,1]=CMR ! prod,prodwh,comm
+	if rol.WgtFactor<=1 Let rol.WgtFactor=1
+	ordWgt=(ABS((rol.LbsUnit*rol.QtyOrd)/rol.WgtFactor)) ! PRICE USES ORDERED!
+	Specs[0]=0;Specs[1]=rol.QtyOrd;Specs[2]=ORDWGT ! rol.ExtNetWgt
+	IF ROL.Numout>0 
+		let Specs[1]=rol.qtyord*rol.numout
+		let Specs[2]=ORDWgt*rol.numout
+	Endif
+	Specs[3]=roh.CustNum;Specs[4]=rol.Whse;Specs[5]=roh.OrdDate
+	Specs[6]=rol.Dept;Specs[8]=roh.OrdType
+	Let Specs[7]=roh.PriceType \ if specs[7]<=0 let Specs[7]=cust.PriceType
+	! default cost from prtype file
+	cpt=openfile(-752,Intco) \ if cpt=-1 Error 42
+	mat read #cpt,specs[7],28;PT;
+	Close #cpt ! that's all we needed from file
+	X=Specs[8]-1 ! pt[] is 0 to 37
+	If X<0 let x=0
+	X2=PT[x] \ if x2=0 let x2=P60$[29,29]
+	Specs[9]=X2 ! default cost
+	Specs[13]=rol.UMSell;Specs[14]=rol.UMPrice;Specs[15]=rol.UMCost
+	Specs[16]=rol.UpChrg
+	Specs[17]=rol.UnitCost
+	Specs[18]=rol.LineCost2
+	Specs[20]=rol.UnitPrice
+	Specs[21]=rol.LineDisc
+	Specs[22]=rol.LineDiscPct
+	Specs[23]=rol.NetPrice
+	Specs[24]=rol.RebtContract
+	Specs[25]=rol.PriceOrigin
+	Specs[26]=rol.CostOrigin
+	Specs[27]=rol.Contract
+	Specs[28]=rol.SpCommPct
+	Specs[29]=rol.BrkLvl
+	Specs[40]=rol.LoadUpchrg
+	if debugdetail
+		dmsg$="Price Specs setup "+rol.prodcode$ \ Call updatelog(debug)
+	Endif
+else
+    include "src/callsuberr.inc"
+ end try
+end sub ! SetupSpecs
+!--------------------------------------------------------------------------
+!--------------------------------------------------------------------
+Sub SetNewROL()
+! a routine for setting rol. variables
+! this assumes the prod & prodwhse are already read!
+! also roh. ros. rot. have been read!
+! AND the qtyord is already known and SellUM is in SUM
+ Try
+	Dim K1$[50]
+	dim 1%,PRAM[5]
+	Dim 2%,X2[9]
+	Dim 3%,X3[9]
+
+	Dim tax. as taxcode
+	
+	rol.OrdNum=roh.OrdNum
+	rol.UpdtStk=1 ! yes
+	
+	rol.PSlsCat=PR.ProdCat
+	rol.Slsm=roh.SlsmNum
+	rol.Whse=roh.Wh
+	rol.ComdtyCode$=pr.ComdtyCode$+Blank$
+	rol.Dept=roh.Dept
+	rol.QtyBO=0
+	rol.QtyShip=rol.QtyOrd
+	rol.MatCode$=pr.MatCode$
+	rol.EntBy=ROH.EntBy ! how's this gotten? (MXLINE=PORTDEFAULT) OR H5[0]
+	If nonstk 
+		if p61$[76,76]="Y" and NOT(CREDIT) ! auto bo nonstk
+		  if custom_customer$="HTBERRY" or roh.ordtype<>2 ! per group not on DIRECTS
+			let Rol.QtyBO=rol.QtyOrd;rol.QtyShip=0 ! bo=ord,ship=0
+		  Endif
+		Endif
+		goto NStkSUBypass ! don't load the remainder
+	Endif
+	rol.CubeUnit=PR.CubicFeet
+	rol.LbsUnit=pr.LbsUnit
+	rol.TaxFlg=0 ! --------- needs setup (below)
+	rol.Desc1$=pr.Desc1$
+	rol.Desc2$=pr.Desc2$
+	rol.ProdCode$=pr.ProdCode$
+	if SUM=0 and source=251 and pr.UMPrdtnDefault<>0 let sum=pr.UMPrdtnDefault
+	rol.UMSell=SUM ! as passed!
+	if SUM=0 Let rol.UMSell=pr.UMSellDefault
+	rol.UMPrice=pr.UMPriceDefault
+	rol.UMCost=pr.UMCostDefault
+	rol.Vendor=pr.PrimVend ! may chg to whse
+	rol.MSDSNo=getMSDS(e$,IntCo,roh.CustNum,rol.ProdCode$,ros.ShipCust,ros.ShipCode,pr.Msds,pr.DotHazardous)
+	rol.VendItemCode$=pr.VendItem$ ! cb whse
+	rol.UMBase=pr.BaseUM
+	rol.UMPurch=pr.UMPurchDefault
+	rol.CubeFactor=PR.CubicFtFactor \ if rol.CubeFactor<=0 Let rol.CubeFactor=1
+	rol.WgtFactor=pr.LbsFact \ if rol.WgtFactor<=0 Let rol.WgtFactor=1
+	rol.CatchWgtItem=pr.CatchWgtItm
+	rol.SellFactor=UMtoFactor(rol.UMSell)
+	rol.PriceFactor=UMtoFactor(rol.UMPrice)
+	rol.CostFactor=UMtoFactor(rol.UMCost)
+	rol.PurchFactor=UMtoFactor(rol.UMPurch)
+	let rol.currid=roh.currid
+	let rol.currfact=roh.currfact
+	
+	IF P9$[32,32]="Y" ! whse pricing
+	  If PW.Vend>0 Let rol.Vendor=pw.vend
+	  IF PW.VendPN$>"  " let rol.VendItemCode$=pw.VendPN$
+	  if pw.CostLastPo let rol.UnitGLCost=pw.CostLastPo
+	Endif
+	otok=0 \ if roh.OrdType=2 let otok=1
+	if custom_customer$="HTBERRY" and roh.ordtype=25 let otok=1
+	if otok or (roh.OrdType=3 and P60$[22,22]="N") ! gl cost
+		if rol.UnitGLCost<=0 let rol.UnitGLCost=pr.CostPO
+	Else
+		rol.UnitGLCost=0
+	Endif
+	! Needs a Prodgroup check (in case single entry!)
+	If PW.ProdGrp>0 ! has a group
+		Pram[0]=ROH.OrdType !  \ if TScan=2 Let Pram[0]=0-OType
+		Pram[1]=PW.ProdGrp
+		Pram[5]=0 ! file not opened
+		![0]=Order or (-)PO Type
+		! [1]=Product Group
+		! [2]=Allow on Ord/PO (1=y, 0=N)
+		! [3]=Update Stock (1=y, 0=N)
+		! [4]=On Price List (0/1)
+		! [5]=Channel of 2/ProdGrp#
+		Call ProdGroup(e$,intco,Pram[])
+		! If Pram[2]=0  ! not allowed on OType
+		!	E$="Product Not Allowed on this Order!"
+		!	Exit Sub
+		! Endif  ! DO THIS ON ENTRY ONLY!
+		rol.UpdtStk=Pram[3] ! update Stock
+	Endif ! prodgroup
+	X2=roh.OrdType
+	if x2=2 OR X2=5 LET rol.UpdtStk=0 ! not on directs
+	if x2=3 and p60$[22,22]<>"Y" LET rol.UpdtStk=0 ! indir no stk
+	! if x2=16 and roh.XferAuth=0 LET rol.UpdtStk=0 ! whxfer not auth
+	tmp$=pr.ComdtyCode$
+	if tmp$="LABR" OR tmp$="TIME" OR tmp$="MACH" LET rol.UpdtStk=0 ! comm's no stk
+	If nonstk LET rol.UpdtStk=0
+	IF CREDIT AND roh.ShipType=3 LET rol.UpdtStk=0
+	IF CREDIT AND roh.ShipType=7 LET rol.UpdtStk=0
+	NStkSUBypass: ! bypass a lot on new nonstk
+	! tax flag / rate
+	K1$=roh.CustNum Using "######"
+	ProdKey$=rol.ProdCode$
+	if nonstk let ProdKey$=rol.VendItemCode$ ! nonstk use venditem as key
+	Call TaxFlag(k1$,ProdKey$,ros.ShipCust,ros.ShipCode,rol.Dept,pr.TaxType,intco,roh.TaxCode,ros.ShipTaxType,Taxback)
+	rol.TaxFlg=Taxback ! contains what's needed
+	if savetaxflag<>0 ! if custom_customer$="PIEDMONT"
+		 let rol.TaxFlg=ordlvar[6]
+	endif
+	If P60$[42,42]<>"Y" ! has y/n only - get rate from header tax
+		TaxNo=roh.TaxCode
+	Else ! is a code
+		TaxNo=rol.TaxFlg
+	Endif
+	If TaxNo>0
+		Tcc=Openfile(-2176,IntCo) \ if Tcc = -1 Error 42
+		Read record #tcc,taxno,0;tax.;
+		Close #tcc
+	Else ! no taxcode
+		clear tax.
+	Endif
+	rol.TaxPct=tax.TaxRate
+	! extensions, etc to be calculated when sent back!
+	! call programdump("/tmp/ollog4!","")
+	if debugdetail
+		dmsg$="Rol. Setup "+rol.prodcode$+Message$ \ Call updatelog(debug)
+	Endif
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! Setnewrol
+!--------------------------------------------------------------
+!--------------------------------------------------------------------
+Sub NSFRMLP()
+! set up for nonstock from lastprice
+ Try
+	clear pr.
+	clear pw.
+	pr.UMSellDefault=clp.UMSell
+	pr.UMPriceDefault=clp.UMPrice
+	pr.UMCostDefault=clp.UMCost
+	pr.VendItem$=clp.VendItemCode$
+	pr.Desc1$=clp.LineDesc1$
+	pr.Desc2$=clp.LineDesc2$
+	pr.ComdtyCode$=clp.ComdtyCode$
+	pr.PrimVend=clp.VendNum
+	pr.ProdCat=clp.PSCat
+	pr.MatCode$=clp.MatCode$
+	pr.LbsUnit=clp.UnitWgt
+	pr.CubicFeet=clp.UnitCube
+	pw.Buyer=clp.Buyer
+	pr.BaseUM=clp.UMBase
+	pr.UMPurchDefault=clp.UMPurch
+	x=2
+	clear x2[]
+	clear x3[]
+	if pr.UMSellDefault and pr.UMSellDefault<>pr.BaseUM
+		x2[x]=pr.UMSellDefault;x3[x]=clp.SellUnitFactor
+		x=x+1
+	Endif
+	if pr.UMPriceDefault and pr.UMPriceDefault<>pr.BaseUM 
+		x2[x]=pr.UMPriceDefault;x3[x]=clp.PriceUnitFactor
+		x=x+1
+	Endif
+	if pr.UMCostDefault and pr.UMCostDefault<>Pr.BaseUM 
+		x2[x]=pr.UMCostDefault;x3[x]=clp.CostUnitFactor
+		x=x+1
+	Endif
+	if pr.UMPurchDefault and pr.UMPurchDefault<>pr.BaseUM
+		x2[x]=pr.UMPurchDefault;x3[x]=clp.PurchUnitFactor
+		! x=x+1
+	Endif
+	for x1=2 to x ! start 2 up to 5 max diff um's
+		if x2[x1]<>0 ! diff than base
+			X2=X2[X1]
+			IF pr.UM2=0 ! no um2
+				pr.um2=x2;pr.UM2Fact=x3[x1]
+			Else ! has 2
+				if x2<>pr.um2 ! diff than 2
+					if pr.um3=0 ! no um3
+						pr.um3=x2;pr.um3fact=x3[x1]
+					Else ! has 3
+						if x2<>pr.um3
+							if pr.um4=0 ! no 4
+								pr.um4=x2;pr.um4fact=x3[x1]
+							Else ! has 4
+								pr.um5=x2;pr.um5fact=x3[x1] ! max 5
+							Endif ! of 4
+						Endif ! diff 3
+					Endif ! of 3
+				Endif ! diff 2
+			Endif ! of 2
+		Endif ! not zero
+	Next X1 ! loop
+	pr.CubicFtFactor=clp.CubeFactor
+	pr.LbsFact=clp.WgtFactor
+	! anything else - load rol? nstk?
+	clear rol.
+	clear nstk.
+	! let's load what we can
+	! these not loaded by setnewrol
+	rol.NStkItem=1
+	rol.UpdtStk=0
+	rol.CubeUnit=PR.CubicFeet
+	rol.LbsUnit=pr.LbsUnit
+	rol.TaxFlg=0 ! --------- needs setup (below)
+	rol.Desc1$=pr.Desc1$
+	rol.Desc2$=pr.Desc2$
+	rol.ProdCode$=Blank$ ! pr.ProdCode$ (don't know line yet!)
+	rol.UMSell=SUM ! as passed!
+	if SUM=0 Let rol.UMSell=pr.UMSellDefault
+	rol.UMPrice=pr.UMPriceDefault
+	rol.UMCost=pr.UMCostDefault
+	rol.Vendor=pr.PrimVend ! may chg to whse
+	rol.MSDSNo=0
+	rol.VendItemCode$=pr.VendItem$ ! cb whse
+	rol.UMBase=pr.BaseUM
+	rol.UMPurch=pr.UMPurchDefault
+	rol.CubeFactor=PR.CubicFtFactor \ if rol.CubeFactor<=0 Let rol.CubeFactor=1
+	rol.WgtFactor=pr.LbsFact \ if rol.WgtFactor<=0 Let rol.WgtFactor=1
+	rol.CatchWgtItem=pr.CatchWgtItm
+	rol.SellFactor=clp.SellUnitFactor ! UMtoFactor(rol.UMSell)
+	rol.PriceFactor=clp.PriceUnitFactor ! UMtoFactor(rol.UMPrice)
+	rol.CostFactor=clp.CostUnitFactor ! UMtoFactor(rol.UMCost)
+	rol.PurchFactor=clp.PurchUnitFactor ! UMtoFactor(rol.UMPurch)
+	rol.TaxFlg=clp.TaxCode
+	rol.UnitCost=clp.UnitCost
+	rol.UnitPrice=clp.UnitPrice
+	rol.PriceOrigin=clp.LastPriceType
+	rol.UnitGLCost=0 ! not in lp
+	rol.NetPrice=rol.UnitPrice ! no upchg in lp - MAKE SAME!
+	rol.CostOrigin=clp.LastCostOrg
+	rol.LineCost2=clp.LpUnitCost ! loadit
+	nstk.OrdNum=roh.OrdNum
+	nstk.Desc1$=rol.desc1$
+	nstk.Desc2$=rol.Desc2$
+	nstk.UnitCost=rol.UnitCost
+	nstk.UnitPrice=rol.UnitPrice
+	nstk.PSlsCat=pr.ProdCat
+	nstk.ComdtyCode$=pr.ComdtyCode$
+	nstk.Unused$=blank$
+	nstk.Buyer=clp.Buyer
+	nstk.HazClass$=blank$ ! no place to get haz info
+	nstk.PackGrp$=blank$
+	nstk.DotID$=blank$
+	nstk.ERGdbk$=blank$
+	nstk.SpareNu$=blank$
+	nstk.NS_UDA1=0;nstk.NS_UDA2$=blank$
+	nstk.NS_UDA3$=blank$;nstk.NS_UDA4$=blank$;nstk.NS_UDA5$=blank$
+	clear nstk.Spare$ ! dl4 fix ! nstk.Spare$=blank$
+	! load rest of cnstk at write
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! NSFRMLP
+! ----------------------------------------------------------------------
+!--------------------------------------------------------------------
+Sub ChkTOWhse(Tpwkey$,Vendor)
+ ! need a check / create of whse going to (OT 8 & 16)
+ ! pass in the key to check & Vendor Number
+ Try
+	dim cpw. as prodwhse ! don't use normal
+	dim 1%,TWH
+	Dim 3%,TWHBld[5],Trec_prwh
+	If tpwkey$[1,1]="" or tpwkey$[1,12]=Blank$[1,12] Exit sub ! NO PROD - NO CHECK
+	TWH=tpwkey$[13,14]
+	TPWKey$[15]=""
+	if TWH>0 and TWH<100 and Not(Fra(TWH)) ! only valid whses
+		Trec_prwh=filegetprodwhse(e$,pwc,"=",1,TPWKey$,cpw.)
+		clear e$
+		If Trec_prwh=-1 ! not found - build it
+			TWhbld[0]=pwc;TWhbld[1]=TWH;TWhBld[2]=Vendor
+			if twh<>1 let TWHBLD[1]=TWH+.01 ! fra=COPY WHSE 1
+			Call mxwhcreate(e$,IntCo,TPWKey$[1,12],TWHBLD[])
+			IF TWHBLD[2]>0
+				if debugdetail
+					dmsg$="Build new ConsXfer whse "+tpwkey$ \ Call updatelog(debug)
+				Endif
+			Else ! error
+				if debugdetail
+					dmsg$="ERROR "+Str$(TWHBLD[2])+" Build new ConsXfer whse "+tpwkey$ \ Call updatelog(debug)
+				Endif
+			Endif ! of good build
+		Endif ! of no pwhse found
+	Endif ! of valid whse
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! ChkTOWhse
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!-------------------------------------------------------------------
+Sub GetCust()
+! get customer data (after header read!)
+ Try
+	Dim KCust$[60]
+	Dim 3%,CUR
+	KCust$=" ",KCust$
+	KCust$=roh.CustNum Using "######"
+	CUR=filegetcust(e$,CUC,"=",1,KCust$,Cust.) ! need customer fields
+	clear e$
+	If CUR<0 clear cust.
+	if debugdetail
+		dmsg$="Get Customer "+kcust$+" REC="+Str$(CUR) \ Call updatelog(debug)
+	Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! GetCust
+!--------------------------------------------------------------------
+Function UMtoFactor(UMRec)
+! from sent um # - get um factor for it
+! if no match - send factor back as one (base?)
+ Try
+	
+	dim 3%,factor
+	let factor=0
+	if umrec=-1 let factor=-1 ! web wants umrec in factor
+	if umrec=-3 let factor=-3 ! for these
+	if umrec<=0 exit function Factor ! 0 ! no um - no factor!
+	If umrec=Pr.BaseUM let factor=1
+	if umrec=PR.UM2 let factor=pr.UM2Fact
+	if umrec=PR.UM3 let factor=pr.UM3Fact
+	if umrec=PR.UM4 let factor=pr.UM4Fact
+	if umrec=PR.UM5 let factor=pr.UM5Fact
+	if umrec=PR.UM6 let factor=pr.UM6Fact
+	if umrec=PR.UM7 let factor=pr.UM7Fact
+	if umrec=PR.UM8 let factor=pr.UM8Fact
+	!if umrec=-1 let factor=-1 ! web wants umrec in factor
+	!if umrec=-3 let factor=-3 ! for these
+	if debugdetail
+		dmsg$="UM to Factor" \ Call updatelog(debug)
+	Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function Factor ! umtofactor
+! 
+!--------------------------------------------------------------------
+!--------------------------------------------------------------------
+Function getnxtline(OrderNum)
+! get first available order line number
+ Try
+	Dim OLK$[60]
+	Dim 3%,LRec,NRec
+
+	Dim CRol. as rolnew ! do not use rol. or nrol.!(would overwrite)
+	dim cnstk. as sproddesc ! pm also checks nonstk file
+	
+	
+	X2=1
+	CHKNXTLN: ! loop til not found (get first available line)
+	OLK$=" ",OLK$
+	OLK$[1,6]=OrderNum Using "######"
+	OLK$[7,9]=X2 Using "###"
+	OLK$[11]="" ! cut to length
+	LRec=filegetrolz(e$,OLC,"=",1,OLK$,crol.)
+	clear e$
+	If LRec>0 ! found a line with same number
+		x2=x2+1
+		if x2>999 Error 10000 ! bomb it!
+		goto chknxtln
+	Endif ! not found - check sproddesc
+	NRec=filegetsproddesc(e$,NSC,"=",1,OLK$,cnstk.)
+	clear e$
+	If NRec>0 ! found a line with same number
+		x2=x2+1
+		if x2>999 Error 10000 ! bomb it!
+		goto chknxtln
+	Endif ! not found - drop thru and send back
+	e$="" ! clear any not found messg
+	if debugdetail
+		dmsg$="Get new Line No "+Str$(rol.OrdNum)+"-"+Str$(X2) \ Call updatelog(debug)
+	Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function X2 ! getnxtline
+
+!----------------------------------------------------------------------
+!--------------------------------------------------------------------
+Sub EdtTrkDo(oorl. as rolnew, corl. as rolnew)
+! roh. and rot. read PREVIOUSLY
+! Have etr.etaction SET UP ALREADY
+! oorl. = Original rol data
+! corl. = Current/new rol data (CANNOT BE CLEAR!)
+ Try
+	If etr.EtAction=0 EXIT SUB ! no action
+	fChan[0]=-1;fchan[1]=-1 ! no files open - etrack/usercntrl
+	etr.OrdNum=corl.OrdNum
+	etr.LineNum=corl.LineNum
+	etr.Status=roh.OrgStatus \ IF etr.Status<=0 let etr.Status=roh.Status
+	etr.ProdCode$=corl.ProdCode$
+	etr.OrgQtyOrd=oorl.Qtyord;etr.NewQtyOrd=corl.QtyOrd
+	etr.OrgQtyShip=oorl.QtyShip;etr.NewQtyShip=corl.QtyShip
+	etr.OrgQtyBO=oorl.QtyBo;etr.NewQtyBO=corl.QtyBO
+	e$=""
+	! date,time,port,access gotten in call
+	etr.AccessCode$=Userid$+Blank$
+	etr.UMSell=corl.UMSell
+	etr.NstkFlag=corl.NStkItem
+	etr.OrgOrdTot=rot.OrdTot
+	etr.CustNum=roh.CustNum
+	etr.InvNum=roh.InvNum
+	etr.Slsm=roh.SlsmNum
+	etr.OrgUnitPrice=oorl.NETPRICE ! UnitPrice (actually net price)
+	etr.NewUnitPrice=corl.netprice ! UnitPrice
+	etr.UMPrice=corl.UMPrice
+	etr.UMCost=corl.UMCost
+	etr.OrgLoadCost=oorl.UnitCost
+	etr.NewLoadCost=corl.UnitCost
+	etr.UnitNetWgt=corl.LbsUnit
+	etr.NetWgtFact=corl.WgtFactor
+	etr.SpareNU$=Blank$
+	if etr.etaction=11 or etr.etaction=2 ! add SET ORIG=NEW/cURR on ADD or DELETE
+		etr.OrgQtyOrd=etr.NewQtyOrd
+		etr.OrgQtyShip=etr.NewQtyShip
+		etr.OrgQtyBO=etr.NewQtyBO
+		etr.OrgUnitPrice=etr.NewUnitPrice
+		etr.OrgLoadCost=etr.NewLoadCost
+	Endif	
+	Call MakeEdittrack(e$,IntCo,fchan[],etr.)
+	if debugdetail
+		dmsg$="Edittrack "+Str$(etr.OrdNum)+"-"+Str$(etr.LineNum)+" "+Str$(etr.EtAction)+e$ \ Call updatelog(debug)
+	Endif
+	e$=""
+ else
+    include "src/callsuberr.inc"
+ end try
+end sub ! EdtTrkDo
+! 
+!------------------------------------------------------------------------
+OUTEND: Rem EXIT
+
+If Err 0 Rem
+! close files opened in the prog
+if not (chan[0]) and ctlc<>1 close #ctlc ! cntrl file
+if not (chan[1]) close #ch_poh ! purchase order header  #60
+if not (chan[2]) close #ch_pol ! po lines #61
+if not (chan[3]) close #OHC! order header #62
+if not (chan[4]) close #prc ! product file #64
+if not (chan[5]) close #pwc! product warehouse #65
+if not (chan[6]) close #ch_nstk!  nonstock #66
+if not (chan[7]) close #ccc! unit of measure file #67
+if not (chan[8]) close #olc ! order lines #68
+
+
+If not (chan[12]) close #ch_deal ! deals #19
+If not (chan[13]) close #cuc ! customer file
+If not (chan[14]) close #ch_rot ! order total
+if not (chan[15]) close #ch_alt ! alternate vendor
+if not (chan[16]) close #nsc! order nonstock line
+if not (chan[17]) close #lpc ! last price file
+if not (chan[18]) close #cmc ! commodity code header
+if not (chan[19]) close #ch_ros ! order ship to file
+Try Close #sltc Else Rem
+Try Close #pltc Else Rem
+Try Close #splc Else Rem 
+Try Close #cphc Else Rem
+Try Close #btc Else Rem
+if sqlChan >= 0 close #sqlChan
+If Err 0 Gosub ERR_TRAP
+End 
+
+
+L_20000: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)   ! 20040
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+If CNVTU[2] = 3 Or CNVTU[2] = 4 Goto L_20050
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[2] = 0 Goto L_20050
+L_20050: Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+If CNVTU[2] = 0 Goto L_20160
+If FLAG Let E = FLAG !\ Gosub ERR_SEARCH
+AMOUNT = CNVTA
+L_20160: Return 
+
+Rem {begin rtn.error.s}
+ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+include "src/callmainerrnet_call.inc"
+End

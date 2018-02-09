@@ -1,0 +1,615 @@
+!"serp767" === description  synergy erp Purchase Rebate Maintenance
+! 
+! loadsave -w -n 100,10 -o prog/dxport/serp767.dl4 src/serp767.src
+!  02/21/2010 started
+!  - Unibasic program: mx767 DD 186691
+!   - has bug with Directory 2 (no mask on numbers)
+!   - Per DD 02/2010 - WILL NOT FIX PM - USE AS IS
+!  - BUT in here - to avoid SE on #'s > 99999 - WE USE MASKS!
+!  - let maint worry about "native mode"
+!
+include "src/copyright.inc"
+!
+include "src/inc/filevendrebate.inc" ! vrebate file
+include "src/inc/fileprod.inc"
+include "src/inc/filea80vm.inc" ! vendor
+include "src/inc/fileccodes.inc" ! UM Codes
+
+! external libs for subs/functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault,GetCostLevels
+Declare External Function OpenFile,PDate$,JDate$,FormatDate2$
+Declare External Function chkDteFrmt$,ChkAltItem$
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,UMDList
+Declare External Function getumrec,ChkPrdUM
+
+Declare Intrinsic sub programdump,env,Logic
+Declare Intrinsic Sub DateToJulian, JulianToDate
+Declare Intrinsic Function findchannel
+
+! internal subs/function
+Declare Sub OpenFiles,GetProd,GetVend,Sndsys
+Declare Sub GetRbt,SbmRbt,DelRbt,updatelog
+
+OPTION GOSUB NESTING 16  ! Default is 8
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[2000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],X$[20]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim Prod$[12],Vend$[10],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],UA2$[50],CMDKey$[60]
+	Dim Mask34$[10]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	Dim 1%,PRC,COMM_LEV,CMD,PTC,CMH
+	dim 1%,cost_lev[4],Whse,debug,cnvtu[2],2%,Q0[1]
+	Dim 2%,X2[9],UA2[2]
+	Dim 2%,maxcnt \ maxcnt=50 ! init max records in arrays for list
+	Dim 3%,PRR,VNR,RBR,PTR
+	Dim 3%,R[99],O1,UB0[16],Amount,CNVTA
+	dim List$[maxcnt,500] ! for .net (larger size - ZLines)
+	dim slist$[maxcnt,500] ! second list
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/vrbt.log" ! fields for DEBUG
+
+	Dim PR. as prod
+	Dim rbt. as vendrebate
+	Dim vend. as a80vm
+	Dim um. as ccodes
+
+	Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+
+	! call dxopen() ! done in pomenu - for standalone run
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp767"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action$=UCase$(Action$)
+	ACtion$=RTrim$(Action$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	Action2$=UCase$(action2$)
+	Action2$=RTrim$(action2$) ! UC and trimmed
+	if debugdetail
+		dmsg$="SERP767 ACTION "+action$
+		If Action1$<>"" let dmsg$=dmsg$+" ACTION1 "+action1$ 
+		if Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	call OpenFiles() ! open all needed files
+	call GetCostLevels(e$,Cost_Lev[],IntCO,UserID$) ! get cost security
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Mat Read #CTLC,115,40;Q0;
+	Mask34$="###.####" ! 3.4 mask
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	Let Key1$=UserID$+"          " ! space fill it
+	UCC = OpenFile(-9988, intCo) \ if UCC=-1 Error 42
+	Key1$[11]="" ! cut to length
+	Search #UCC,2,1;Key1$,Rec,E
+	If Not(E)
+	  Let SCR=Rec
+	  Mat Read #ucc,scr,200;UA2;
+	  Mat read #ucc,scr,336;Ua2$;
+	  Read #ucc,scr,394;comm_lev;
+	Else
+	  Let SCR=0;comm_lev=0 ! 
+	  UA2[0]=0;UA2$=" ",UA2$
+	Endif
+	Close #UCC
+	! GET additional user data flags
+	REM UNPACK A2[0] TO B0[]                         
+	FOR X1=0 TO 15                                          
+		LET O1=2^X1 \ LET M1=1
+		! CALL $LOGIC,M1,O1,A2[0],B0[X1] ! ub
+		Call Logic(m1,O1,UA2[0],UB0[X1])
+		LET UB0[X1]=SGN(UB0[X1])
+	NEXT X1   
+	! call dxsave(0,"tmp/vrbtsv.txt!") ! save web send data
+	ReturnStatus=0
+	Message$="Action 1 not found"
+  select case action1$
+
+    Case "SYSDATA" ! sys flags,droplists					doc=VRB767-GetSysData.doc
+		returnstatus=1
+		message$="OK"
+		Call Sndsys()
+		call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+		if debugdetail
+			dmsg$="Sent flags & droplists" \ Call updatelog(debug)
+		Endif
+		! end of sysdata
+	Case "GETPROD" ! prod data								doc=VRB767-GetProdData.doc
+		returnstatus=1
+		message$="OK"
+		call dxget("PRODID",tmp$)
+		Prod$=UCase$(RTrim$(tmp$))
+		If Prod$<>""
+			tmp$=ChkAltItem$(e$,IntCo,Prod$)
+			If tmp$<>"" If tmp$[1,2]<>"  " let prod$=tmp$ ! has alt item
+		Endif
+		If Prod$<>""
+		  Prod$=prod$+Blank$
+		  If Len(Prod$)>12 let Prod$[13]=""
+		  PRR=filegetProd(e$,PRC,"=",1,Prod$,pr.)
+		  if PRR<=0
+			returnstatus=0
+			message$="Product not found"
+			goto serp767done
+		  Endif
+		Else
+			returnstatus=0
+			message$="No Product Sent"
+			goto Serp767Done
+		End If 
+		Clear List$[]
+		List$[0]=bsdel$,"PRODINFO",fdel$
+		List$[1]="PRODID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+		List$[2]=Prod$,fdel$,RTrim$(pr.Desc1$),fdel$,RTrim$(pr.Desc2$),fdel$
+		List$[3]=esdel$
+		call addtostr(e$,rstr$,List$[])
+		! send u/m droplist? Yes let's do it now! assume it's cost um's
+		CALL UMDList(e$,"COST",PRC,PRR,List$[],IntCo,Pr.)
+		call addtostr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Sent Product "+Prod$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of GETPROD
+	Case "GETVEND" ! Vendor data							doc=VRB767-GetVendData.doc
+		returnstatus=1
+		message$="OK"
+		Call dxget("VENDID",tmp$)
+		X3=tmp$
+		if x3<=0 or x3>999999 or fra(x3)
+			returnstatus=0
+			message$="Invalid Vendor ID"
+			goto serp767done
+		Endif
+		vend$=X3 Using "######"
+		VNR=filegeta80vm(e$,VNC,"=",1,Vend$,vend.)
+		if VNR<=0
+			RETURNSTATUS=0
+			Message$="Vendor not found"
+			goto serp767done
+		Endif
+		Clear List$[]
+		List$[0]=bsdel$,"VENDINFO",fdel$
+		List$[1]="VENDID",fdel$,"NAME",fdel$
+		List$[2]=Vend$,fdel$,RTrim$(vend.Name$),fdel$
+		List$[3]=esdel$
+		call addtostr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Send Vendor "+Vend$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of GETVEND
+	Case "GETRBT" ! rebate data							doc=VRB767-GetRebateData.doc
+		returnstatus=1
+		message$="OK"
+		CALL dxget("PRODID",tmp$)
+		Prod$=UCase$(RTrim$(tmp$))+Blank$
+		Prod$=prod$+Blank$
+		If Len(Prod$)>12 let Prod$[13]=""
+		PRR=filegetProd(e$,PRC,"=",1,Prod$,pr.)
+		if PRR<=0
+			returnstatus=0
+			message$="Product not found"
+			goto serp767done
+		Endif
+		call dxget("VENDID",tmp$)
+		Vend=tmp$
+		if vend<1 or vend>999999 or fra(vend)
+			returnstatus=0
+			message$="Invalid Vendor ID"
+			goto serp767done
+		Endif
+		call dxget("CONTRID",tmp$)
+		Contrno=tmp$
+		if Contrno<1 or contrno>999999 or fra(contrno)
+			returnstatus=0
+			message$="Invalid Contract ID"
+			goto serp767done
+		Endif
+		LET KEY1$=" ",KEY1$                      
+		LET KEY1$[1,6]=VEND USING "######"
+		LET KEY1$[7,18]=PROD$[1,12]         
+		LET KEY1$[19,24]=CONTRNO USING "######" 
+		Call getrbt()
+		call addtostr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="Get Rebate "+Key1$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of GETRBT
+	Case "SBMRBT" ! submit rebate						doc=VRB767-SubmitRebateData.doc
+		returnstatus=1
+		message$="OK"
+		CALL dxget("PRODID",tmp$)
+		Prod$=UCase$(RTrim$(tmp$))+Blank$
+		If Len(Prod$)>12 let Prod$[13]=""
+		PRR=filegetProd(e$,PRC,"=",1,Prod$,pr.)
+		if PRR<=0
+			returnstatus=0
+			message$="Product not found"
+			goto serp767done
+		Endif
+		call dxget("VENDID",tmp$)
+		Vend=tmp$
+		if vend<1 or vend>999999 or fra(vend)
+			returnstatus=0
+			message$="Invalid Vendor ID"
+			goto serp767done
+		Endif
+		call dxget("CONTRID",tmp$)
+		Contrno=tmp$
+		if Contrno<1 or contrno>999999 or fra(contrno)
+			returnstatus=0
+			message$="Invalid Contract ID"
+			goto serp767done
+		Endif
+		LET KEY1$=" ",KEY1$                      
+		LET KEY1$[1,6]=VEND USING "######"
+		LET KEY1$[7,18]=PROD$[1,12]         
+		LET KEY1$[19,24]=CONTRNO USING "######"
+		Call SbmRbt()
+		if debugdetail
+			dmsg$="Submit Rebate "+Key1$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of SBMRBT
+	Case "DELRBT" ! delete									doc=VRB767-DeleteRebateData.doc
+		returnstatus=1
+		message$="OK"
+		CALL dxget("PRODID",tmp$)
+		Prod$=UCase$(RTrim$(tmp$))+Blank$
+		call dxget("VENDID",tmp$)
+		Vend=tmp$
+		if vend<1 or vend>999999 or fra(vend)
+			returnstatus=0
+			message$="Invalid Vendor ID"
+			goto serp767done
+		Endif
+		call dxget("CONTRID",tmp$)
+		Contrno=tmp$
+		if Contrno<1 or contrno>999999 or fra(contrno)
+			returnstatus=0
+			message$="Invalid Contract ID"
+			goto serp767done
+		Endif
+		LET KEY1$=" ",KEY1$                      
+		LET KEY1$[1,6]=VEND USING "######"
+		LET KEY1$[7,18]=PROD$[1,12]         
+		LET KEY1$[19,24]=CONTRNO USING "######"
+		Call DelRbt()
+		if debugdetail
+			dmsg$="Delete Rebate "+Key1$+" "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of DELRBT
+  End Select
+  Serp767Done: ! finished
+  ! status section                                                       
+  Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)                 
+  Call AddToStr(e$,rstr$,WebStr$)                                        
+  Call SetOutPut(e$,rstr$)       
+  if debugdetail
+		dmsg$="End of Program SERP767" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	PRC = OpenFile(-1792,intCo) \ If PRC = -1 Error 42 ! prod
+	VNC = OpenFile(-2400,intco) \ if VNC=-1 Error 42 ! vendor
+	CCC = OpenFile(-1728,Intco) \ if CCC=-1 Error 42 ! um codes
+	RBC = findchannel()
+	tmp$="3/VNDREBATE"+Str$(IntCo)
+	Try
+		Open #RBC,tmp$
+	Else
+		error 42
+	End try
+	whi=Openfile(-2768,IntCo) \ if WHI=-1 error 42 ! whinfo
+
+	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+!
+!------------------------------------------------------------------------------------------
+Sub sndsys()
+! send flags & droplists
+ Try
+	dim WDesc$[30]
+	Clear List$[]
+	tmpcnt=maxcnt
+	! WHSE LIST (WITH 0=ALL)
+	List$[0]=bsdel$,"WHLIST",fdel$
+	List$[1]="WHSE",fdel$,"NAME",fdel$
+	List$[2]="0",fdel$,"ALL WHSES",fdel$
+	row=3
+	For R=0 to 98 ! so is 1-99
+		Try
+			mat read #WHI,R,4;wdesc$;
+		Else
+			wdesc$=blank$
+		End try
+		tmp$=RTrim$(wdesc$)
+		If tmp$<>""
+			List$[row]=Str$(R+1),fdel$,tmp$,fdel$
+			row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Endif
+	Next R
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[]) ! add droplist to string
+	clear list$[]
+	! send rbt type
+	List$[0]=bsdel$,"RBTTYPE",fdel$
+	List$[1]="TYPE",fdel$,"DESC",fdel$
+	List$[2]="%",fdel$,"Percent",fdel$
+	List$[3]="$",fdel$,"Dollars",fdel$
+	List$[4]=esdel$
+	! calling rtn to addtostr
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! sndsys
+!
+!------------------------------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+RTrim$(Userid$)+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Sub GetRbt()
+! send contract data
+ Try
+	Clear List$[]
+	tmpcnt=maxcnt
+	RBR=filegetvendrebate(e$,RBC,"=",1,Key1$,rbt.)
+	if rbr<=0 ! assume new if missing
+		clear rbt.
+		rbt.UMRebate=pr.UMCostDefault
+	Endif
+	rbt.ProdCode$=Prod$
+	rbt.Vend=Vend
+	rbt.Contract=contrno
+	
+	List$[0]=bsdel$,"VRBTDETAIL",fdel$
+	Webstr$="STDATE",fdel$,"ENDDATE",fdel$,"FACTOR",fdel$,"TYPE",fdel$,"UM",fdel$
+	Webstr$=Webstr$,"WHSE",fdel$,"VENDITEM",fdel$,"NEFLAG",fdel$
+	List$[1]=webstr$
+	tmp$=""
+	if rbt.StartDate>101
+		tmp$=PDate$(rbt.StartDate)
+	Endif
+	webstr$=RTrim$(tmp$),fdel$
+	tmp$=""
+	if rbt.EndDate>101 ! min is 01/01/00
+		tmp$=PDate$(rbt.EndDate)
+	Endif
+	webstr$=webstr$,RTrim$(tmp$),fdel$ ! end date
+	tmp$=rbt.Factor using QMask$ ! there is no convert - use as is
+	webstr$=webstr$,LTrim$(tmp$),fdel$ ! factor
+	tmp$="%" \ if rbt.Type=2 let tmp$="$"
+	webstr$=webstr$,tmp$,fdel$ ! type
+	tmp$=""
+	if rbt.UMRebate let tmp$=XUnit$(rbt.UMRebate,ccc)
+	webstr$=webstr$,tmp$,fdel$ ! um
+	webstr$=webstr$,str$(rbt.Whse),fdel$ ! whse
+	webstr$=webstr$,RTrim$(rbt.VendItem$),fdel$
+	tmp$="N"
+	if RBR>0 let tmp$="E"
+	webstr$=webstr$,tmp$,fdel$ ! new/existing
+	List$[2]=webstr$
+	row=3
+	List$[row]=esdel$
+	! caller to addtostr
+	GRbtdone: ! done
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! Getrbt
+!
+!------------------------------------------------------------------------------------------
+Sub DelRbt()
+! Delete rebate data
+ Try
+	dim key2$[60]
+	RBR=filegetvendrebate(e$,RBC,"=",1,key1$,rbt.)
+	if rbr<0 goto DRbtDone ! no dir1 no need to delete
+	LET KEY2$=" ",KEY2$             
+	LET KEY2$[1,12]=PROD$[1,12]
+	LET KEY2$[13,18]=VEND Using "######" ! First try mask, PM NO MASK!?
+	LET KEY2$[19,24]=CONTRNO  using "######"     
+	Search #RBC,2,2;key2$,R,E
+	if not(e) ! found it
+		search #RBC,5,2;key2$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error ",Str$(E)," delete dir 2 ",key2$
+		Endif
+	Else ! as PM missing mask - try that
+		LET KEY2$=" ",KEY2$             
+		LET KEY2$[1,12]=PROD$[1,12]
+		LET KEY2$[13,18]=VEND ! Using "######" ! PM NO MASK!?
+		LET KEY2$[19,24]=CONTRNO  ! using "######"     
+		Search #RBC,2,2;key2$,R,E
+		if not(e) ! found it
+			search #RBC,5,2;key2$,R,E
+			if e
+				returnstatus=0
+				message$="Search Error ",Str$(E)," delete dir 2 ",key2$
+			Endif
+		Endif
+	Endif
+	search #RBC,5,1;key1$,R,E
+	if e
+		returnstatus=0
+		message$="Search Error ",Str$(E)," delete dir 1 ",key1$
+	Endif
+	let e=3;r=RBR
+	Search #RBC,1,0;Key1$,R,E
+	if e
+		returnstatus=0
+		message$="Search Error ",Str$(E)," return record ",Str$(R)
+	Endif
+  DRbtDone: ! finished
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! DelRbt
+!
+!------------------------------------------------------------------------------------------
+Sub SbmRbt()
+! Submit Rebate Data
+ Try
+	dim KEY2$[60]
+	RBR=filegetvendrebate(e$,RBC,"=",1,key1$,rbt.)
+	if rbr<0 ! it's new
+		clear rbt.
+		rbt.ProdCode$=prod$
+		rbt.sOpen$=blank$
+		rbt.Vend=vend
+		rbt.Contract=contrno
+	Endif
+	call dxget("STDATE",tmp$) \ tmp$=RTrim$(tmp$)
+	if tmp$="0" let tmp$=""
+	if tmp$<>""
+		tmp$=chkDteFrmt$(e$,tmp$)
+	Endif
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	if tmp$<>""
+		tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+		rbt.StartDate=tmp1$[3,8]
+	Else
+		let rbt.StartDate=0
+	Endif
+	call dxget("ENDDATE",tmp$) \ tmp$=RTrim$(tmp$)
+	if tmp$="0" let tmp$=""
+	if tmp$<>""
+		tmp$=chkDteFrmt$(e$,tmp$)
+	Endif
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	if tmp$<>""
+		tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+		rbt.EndDate=tmp1$[3,8]
+	Else
+		let rbt.EndDate=0
+	Endif
+	call dxget("FACTOR",tmp$) ! no convert - use as is
+	x3=tmp$
+	If x3<0 or x3>9999999.99 or fra(x3*100)
+		returnstatus=0
+		message$="Factor is invalid"
+		goto SRbtDone
+	Endif
+	rbt.Factor=x3
+	call dxget("TYPE",tmp$)
+	if tmp$<>"%" and tmp$<>"$"
+		returnstatus=0
+		message$="Type is only % or $"
+		goto srbtdone
+	Endif
+	x1=1 \ if tmp$="$" let x1=2
+	rbt.Type=x1
+	call dxget("UM",tmp$)
+	tmp$=UCase$(RTrim$(tmp$))
+	X2=GetUMRec(e$,CCC,tmp$,IntCo,Pr.)
+	if x2=0
+		returnstatus=0
+		message$="UM not found"
+		goto srbtdone
+	Endif
+	x1=ChkPrdUM(e$,X2,IntCo,Pr.)
+	if x1=0
+		returnstatus=0
+		message$="UM not on file for product"
+		goto srbtdone
+	Endif
+	rbt.UMRebate=x2
+	call dxget("WHSE",tmp$)
+	x2=tmp$
+	if x2<0 or x2>99 or fra(x2)
+		returnstatus=0
+		message$="Warehouse is 0-99 only"
+		goto srbtdone
+	Endif
+	rbt.Whse=x2
+	call dxget("VENDITEM",tmp$)
+	rbt.VendItem$=tmp$+blank$
+	! done - do file stuff
+	If RBR>0 ! existing - assume no key change
+		write record #RBC,RBR,0;rbt.;
+	Else ! is new - add record/keys/etc
+		let e=2;r=0
+		search #RBC,1,0;Key1$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error ",Str$(E)," getting new record"
+			goto srbtdone
+		Endif
+		RBR=R
+		search #RBC,4,1;key1$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error ",Str$(E)," adding index 1 ",Key1$
+			goto srbtdone
+		Endif
+		LET KEY2$=" ",KEY2$             
+		LET KEY2$[1,12]=PROD$[1,12]
+		LET KEY2$[13,18]=VEND Using "######" ! PM NO MASK!?
+		LET KEY2$[19,24]=CONTRNo using "######"  !  Per DD - leave as is?! NO - let's avoid SE!  
+		Search #RBC,4,2;key2$,R,E
+		if e
+			returnstatus=0
+			message$="Search Error ",str$(E)," adding index 2 ",key2$
+			goto srbtdone
+		Endif
+		write record #RBC,RBR,0;rbt.;
+	Endif
+	! just status return
+  SRbtDone: ! finito
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SbmRbt
+!
+!------------------------------------------------------------------------------------------

@@ -1,0 +1,949 @@
+! --- serpccpostauth
+! description Post Authorization Hold Program
+!
+! 1.0 mm/dd/yyyy change??
+!
+! loadsave -w -n 100,10 -o prog/dxport/serpccpostauth.dl4 src/serpccpostauth.src
+!
+!include copyright, common libs, common intrinsics
+include "src/copyright.inc"
+!
+!
+!
+!include structure,filehandler libs & default structure dims
+Include "src/inc/filecust.inc" ! custome
+include "src/inc/fileordhead.inc" ! combined ros,rot,roh
+include "src/inc/filesordcash.inc" 
+include "src/inc/fileprod.inc" ! product file
+include "src/inc/filerolz.inc" ! order lines
+include "src/inc/fileedittrack.inc" ! edit tracker
+Include "src/inc/filesorddep.inc" ! deposits
+
+!
+External Lib "libedittrack.lib"
+Declare External Sub MakeEdittrack
+!
+! *declare additional dl4 intrinsic subs & functions
+!
+Declare Intrinsic sub programdump,env,FindF
+Declare Intrinsic Sub Time
+
+!
+! *declare additional external libs & subs & functions
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Function AddToMYReports
+External Lib "ubsfunc.dl4"
+Declare External Function openfile,JDate$,PDate$
+Declare Intrinsic Function FindChannel
+Declare Intrinsic Sub DateToJulian
+
+!
+!
+!
+! **main procedure
+Declare Sub OpenFiles, SetPostAuthHold, LinePrint, PrntDebugData,getpostlog,submitpostlog
+!
+!
+! dim variables used by program
+!
+dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+!
+try
+	Option String Redim is legal ! in case subs dim/use same names
+	OPTION GOSUB NESTING 12  ! Default is 8
+	DIM DATE$[8],CNAME$[30],mode$[1],TVAR$[26],tdate$[6]
+	dim ReportDir$[75],Basename1$[75],StatusFile$[150],1%,statchan,3%
+	dim action$[30],options$[30],userid$[8],b$[200],3%
+	dim action1$[30],action2$[30],action3$[30] ! actions for programs
+	dim bsdel$[20],esdel$[20],rdel$[20],fdel$[20],rstr$[5500] ! .net delimiters
+	Dim WebStr$[2500],Message$[200],dblog$[50],tmp$[200],blank$[100],work$[20]
+	Dim Cust$[60],p9$[50],p60$[50],p61$[256],K$[60],custom_customer$[30]
+	dim response$[1],avscode$[1],avsmessage$[254],cvvcode$[1],cvvmessage$[254]
+	dim filename$[20]
+	dim errmessage$[30],ckey$[20]
+	dim keyrod$[50],keychk$[50],3%,rec_rod,depamt
+	dim 1%,tday,tmonth,tyear,purper$[4],cmd$[80]
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2],UCA5[10],badexpflag,getpostflag,ch_debug
+	DIM 2%,thr,tmin,tsec,tdate,logfname$[50],debugfname$[50],x$[10]
+	Dim 2%,Q0[1],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,2500] ! for .net (larger size
+	dim 1%,X1[9],Chans[20]
+	Dim 2%,CustNo,x2[9],sysdate,currdate,jdate,expdate
+	Dim 1%,ttlords,schn[2]
+	Dim 2%,ORDNo,s9[9],INVDATE
+	Dim 3%,CFin[8]
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR,SHR,SDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99],ccamount
+	dim keyroc$[30],k0$[50]
+	Dim KOHC$[60],Statd$[80],hokey$[60]
+	dim 2%,holdcodeflag[12]
+	dim 3%,requestid, processid,authcode,ccmessage$[254]
+	dim 3%,newauthcode$[10]
+	Dim 3%,OHR,tranamt,tmp
+
+ blank$=" ",blank$
+ Dim cust. as cust ! customer
+ dim roh. as roh ! order header
+ dim ros. as ros ! order ship to file
+ dim rot. as rot ! order total file
+ DIM PR. as prod ! prodfile
+ dim rol. as rolnew ! order lines
+ Dim ETR. as edittrack ! EDITTRACKING
+ dim roc. as sordcash ! sale order cash file
+ dim rod. as sorddep ! sales order deposit file
+
+ !
+ ! call dxopen()  - DONE IN OEMENU!
+ !
+ call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+ !
+ ! open files - may add a check to see if user can run an action/program
+ !
+ Action1$=UCase$(action1$)
+ action1$=RTrim$(action1$) ! UPPERCASE & TRIMMED
+ !etc for all files needed
+ !close #1 ! getsession opens it as READONLY!
+ !
+ Call OpenFiles() ! open any/all files (include ctlc
+ 
+ mat read #ctlc,19,50;p9$;
+ mat read #ctlc,60,50;p60$;
+ mat read #ctlc,61,0;p61$;
+ MAT READ #CTLC,0,182;INVDATE;
+ mat read #ctlc,115,60;custom_customer$; ! ALT
+ Read #CTLC,0,100;DATE$;
+ Read #CTLC,3;CNAME$; 
+ custom_customer$=UCase$(Trim$(custom_customer$))
+ Statd$="INV ENT'DINV PRT'DINV REG'D"  ! ONLY ONE NEEDED/USED
+ Call Time(TVAR$) 
+ let thr=tvar$[15,16]
+ let tmin=tvar$[18,19]
+ let tsec=tvar$[21,22]
+ let tmp$=tim(4) using "&&&&&&" ! mmddyy
+ let tdate$=tmp$[5,6],tmp$[1,4]! yymmdd format
+ let tdate=tdate$
+ 
+ ch_rod=0
+ If P61$[94,94] ="Y"
+		ch_rod = OpenFile(-10106,intCo)
+ endif
+
+ 
+ SCHN[0]=OHC;SCHN[1]=OSC;SCHN[2]=OTC
+ ReturnStatus=0
+ debugdetail=99
+ Message$="ACTION1 NOT FOUND"  ! action is used for menu routing
+ select case action1$ ! go to various programs based on action
+   case "GETPOSTAUTH" !   call in orders - PCA.GetPostAuth
+	    let logfname$="tmp/getpostauth"+str$(tdate)+str$(thr)+str$(tmin)+".txt!"
+	    Call dxsave(0,logfname$) ! Call dxsave(0,"tmp/getpostauth.txt!")
+		if debugdetail<>0
+			let debugfname$="tmp/logpostauth"+str$(tdate)+str$(thr)+str$(tmin)+".txt"
+			Call FindF(Debugfname$,TMP)
+			If TMP <>0
+					Kill Debugfname$  
+			endif  
+			ch_debug = FindChannel() ! channel to build text file 
+			Build #ch_debug,Debugfname$ As "TEXT"                 
+			Close #ch_debug                                       
+			Open #ch_debug,Debugfname$                            
+			Print #ch_debug;"Get Post Authorization Process as of ";tvar$
+			Print #ch_debug;"Order#";tab 10;"Transid";tab 35;"Curr Invoice Amt";tab 52;"Pay Amt";tab 70;"Type"
+			getpostflag=99
+		endif
+		let tmp$=tim(4) using "&&&&&&" ! mmddyy
+		let work$=tmp$[5,6],tmp$[1,2],tmp$[3,4]
+		let currdate=work$ !yymmdd format
+        Let X$=currdate Using "&&&&&&"
+		call DatetoJulian(1,X$,X$,E) \ if e Let X$="00000"
+		Let expdate=x$[1,5] ! "expire in julian
+		let expdate=expdate-7 ! expires in 7 days
+		dim ckey$[20]
+		dim 3%
+		Statd$="INV ENT'DINV PRT'DINV REG'D"  ! ONLY ONE NEEDED/USED!
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		tmpcnt=maxcnt
+		List$[0]=bsdel$,"POSTAUTHLIST",fdel$
+		Webstr$="TransType",fdel$
+		Webstr$=webstr$,"TransAmount",fdel$
+		Webstr$=webstr$,"TransTax",fdel$
+		Webstr$=webstr$,"TransInvoice",fdel$
+		Webstr$=webstr$,"TransCustId",fdel$
+		Webstr$=webstr$,"TransNote",fdel$
+		Webstr$=webstr$,"CardNumber",fdel$
+		Webstr$=webstr$,"CardHolder",fdel$
+		Webstr$=webstr$,"CardExpDate",fdel$
+		Webstr$=webstr$,"AVSStreet",fdel$
+		Webstr$=webstr$,"AVSZipCode",fdel$
+		Webstr$=webstr$,"CVV",fdel$
+		Webstr$=webstr$,"TransId",fdel$
+		Webstr$=webstr$,"PaymentSeq",fdel$ ! 1 or 2
+		Webstr$=webstr$,"OrderCustId",fdel$ ! ordering customer id
+		Webstr$=webstr$,"OrderId",fdel$
+		Webstr$=webstr$,"CustName",fdel$
+		List$[1]=webStr$
+		Row=2
+
+	
+		
+	
+	
+	Statd$="INV ENT'DINV PRT'DINV REG'D"  ! ONLY ONE NEEDED/USED!
+	KOHC$=" ",KOHC$
+	KOHC$[1,2]=" 5"
+	hokey$[1,2]=" 6"
+	Do
+		OHR=filegetrohz(e$,SCHN[],">",1,kohc$,roh.,ros., rot.)
+		If OHR<=0 or kohc$[1,2]>hokey$[1,2] Exit do ! not in range
+		If roh.status>6 Exit Do  ! ONLY STATUS 5 !!  Include status 6 that are flagged as "A"
+		if not(roh.HoldOver) and rot.holdcode<>0 goto NVOrd ! On Hold
+		if ROH.ordtype=16 goto NVOrd ! bypass warehouse transfer
+		if ROH.ordtype=37 goto NVOrd ! bypass evap
+		let keyroc$=roh.OrdNum using "######" 
+		rec_roc = filegetsordcash(e$,Ch_roc,"=",1,keyroc$,roc.)
+		if rec_roc<0 goto NVOrd
+		if int(roc.Paytype1)<>3 and int(roc.Paytype2)<>3 goto NVORD
+			Cust$=roh.custnum Using "######"
+			ckey$=" ",cKey$
+			cKey$=Cust$
+			CUR=filegetcust(e$,CUC,"=",1,CKey$,cust.)
+			If CUR<0
+				clear cust.
+				cust.Name$="CUSTOMER NOT FOUND"+Blank$
+			Endif
+		If int(roc.PayType1)=3 and Ucase$(roc.ccauthtype$[1,1])="A"
+			badexpflag=0
+			webstr$=""
+			! validate expiration date
+			let tmp$=roc.ccexp1 using "&&&&&&"
+			let tmp3=tmp$[1,2]
+			if tmp3<1 or tmp3>12
+				!let badexpflag=99
+				!let roc.ccauthtype$[1,1]="X" ! flag as bad expiration date
+				!Write Record #ch_roc,rec_roc;roc.;
+				!Call SetPostAuthHold()
+				!goto bypasscard: 
+			endif
+			let tmp3=tmp$[3,4]
+			if tmp3<>20 ! bad year
+				!let badexpflag=99
+				!let roc.ccauthtype$[1,1]="X" ! flag as bad expiration date
+				!Write Record #ch_roc,rec_roc;roc.;
+				!if debugdetail<>0
+				!	let webstr$="X"
+				!	call PrntDebugData()
+				!endif
+				!Call SetPostAuthHold()
+				!goto bypasscard: 
+			endif
+			! validate pre-authorization period
+			!if roc.preauthdate>010101 and roc.preauthdate<991231
+			!	let x$=roc.preauthdate using "&&&&&&"
+			!else
+			!	Let X$=roh.orddate Using "&&&&&&"
+			!endif
+			!call DatetoJulian(1,X$,X$,E) \ if e Let X$="00000"
+			!Let jdate=x$[1,5] ! "expire in julian
+			!if jdate<expdate
+			!	if debugdetail<>0
+			!		let webstr$="O" ! set to "O" for out dated to report 
+			!		call PrntDebugData()
+			!	endif
+			!	let tranamt=roc.payamt1
+			!	let webstr$="O" ! 
+			!	if roc.ccauthtype$[3,3]<>"O"
+			!		IF CUSTOM_customer$<>"MIDATLANTIC"
+			!			Call SetPostAuthHold()! put on hold
+			!		endif
+			!		call getpostlog()
+			!		let roc.ccauthtype$[3,3]="O"
+			!		Write Record #ch_roc,rec_roc;roc.;
+			!	endif
+			!	
+			!	goto bypasscard: ! not putting on hold, not autorizing, leaving as is
+			!endif
+			! Webstr$="P",fdel$ ! transaction type P for post authorize
+			! check for deposit amount
+			let depamt=0
+			if p61$[94,94]="Y" and not(credit)
+				let keyrod$=" ",keyrod$
+				let keyrod$[1,6]=roh.custnum using "######"
+				let keyrod$[7,12]=roh.ordnum using "######"
+				do
+					search #ch_rod,3,1;keyrod$,rec_rod,e
+					if e<>0 exit do
+					let tmp3=keyrod$[1,6]\if tmp3<>roh.custnum exit do
+					let tmp3=keyrod$[7,12]\if tmp3<>roh.ordnum exit do
+					read record #ch_rod, rec_rod;rod.;
+					let depamt=depamt+rod.ChkAmt
+				loop
+			endif
+			!!! functionality for card connect
+			let webstr$="P",fdel$ ! ! visa and mastercard - post authorize amount change
+			tranamt=(rot.ordtot-depamt-roc.payamt2)
+			if roc.payamt1<=(rot.OrdTot-depamt-roc.payamt2) let tranamt=roc.payamt1
+			Webstr$=webstr$,str$(tranamt),fdel$
+			Webstr$=webstr$,str$(rot.TaxAmt),fdel$ 
+			Webstr$=webstr$,str$(roh.InvNum),fdel$
+			Webstr$=webstr$,str$(roh.BillTo),fdel$ ! bill to customer
+			Webstr$=webstr$,rtrim$(roc.PayDesc1$),fdel$
+			Webstr$=webstr$,rtrim$(roc.PayAcct1$),fdel$
+			Webstr$=webstr$,rtrim$(roc.CcName1$),fdel$
+			Webstr$=webstr$,str$(roc.CcExp1),fdel$
+			Webstr$=webstr$,rtrim$(roc.CcAddr1$),fdel$
+			Webstr$=webstr$,rtrim$(roc.CcZip1$),fdel$
+			Webstr$=webstr$,str$(roc.CcVerif1),fdel$
+			Webstr$=webstr$,rtrim$(roc.transid$),fdel$  ! only 1 transid per record
+			Webstr$=webstr$,"1",fdel$ ! 1 - for 1st payment and 2 for 2nd payment
+			Webstr$=webstr$,str$(roh.CustNum),fdel$ ! ordering customer id
+			Webstr$=webstr$,str$(roh.OrdNum),fdel$
+			webstr$=webstr$,rtrim$(cust.Name$),fdel$ ! customer name		
+			List$[row]=webstr$
+			if debugdetail<>0
+				call PrntDebugData()
+			endif
+			call getpostlog()
+			let row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		endif
+		
+		bypasscard: !
+		If int(roc.PayType2)=3 and Ucase$(roc.ccauthtype$[2,2])="A"
+			webstr$=""
+			Webstr$="P",fdel$ ! transaction type P for post authorize
+			!if roc.payacct2$[1,1]="3" let webstr$="M",fdel$ ! for amext
+			Webstr$=webstr$,str$(roc.PayAmt2),fdel$
+			Webstr$=webstr$,str$(rot.TaxAmt),fdel$ 
+			Webstr$=webstr$,str$(roh.InvNum),fdel$
+			Webstr$=webstr$,str$(roh.BillTo),fdel$ ! bill to customer
+			Webstr$=webstr$,rtrim$(roc.PayDesc2$),fdel$
+			Webstr$=webstr$,rtrim$(roc.PayAcct2$),fdel$
+			Webstr$=webstr$,rtrim$(roc.CcName2$),fdel$
+			Webstr$=webstr$,str$(roc.CcExp2),fdel$
+			Webstr$=webstr$,rtrim$(roc.CcAddr2$),fdel$
+			Webstr$=webstr$,rtrim$(roc.CcZip2$),fdel$
+			Webstr$=webstr$,str$(roc.CcVerif2),fdel$
+			!Webstr$=webstr$,str$(roc.CcAppr2 ),fdel$ ! transaction id stored in pre-approval
+			Webstr$=webstr$,rtrim$(roc.transid$),fdel$  ! only 1 transid per record
+			Webstr$=webstr$,"2",fdel$ ! 2 - for 1st payment and 2 for 2nd payment
+			Webstr$=webstr$,str$(roh.CustNum),fdel$ ! ordering customer id
+			Webstr$=webstr$,str$(roh.OrdNum),fdel$
+			webstr$=webstr$,rtrim$(cust.Name$),fdel$ ! customer name
+			List$[row]=webstr$
+			if debugdetail<>0
+				call PrntDebugData()		
+			endif
+			let row=row+1
+			if row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		endif
+		NVOrd: ! not in range or 
+	Loop
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+
+	! end of getordlist
+	case "SUBMITPOSTAUTH" ! submit orders	
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		tmpcnt=maxcnt
+		let logfname$="tmp/subpostauth"+str$(tdate)+str$(thr)+str$(tmin)+".txt!"
+	    Call dxsave(0,logfname$) !Call dxsave(0,"tmp/subpostauth.txt!")
+		List$[0]=bsdel$,"REJECTAUTHLIST",fdel$
+		WebStr$="OrderCustId",fdel$,"CustName",fdel$,"OrderId",fdel$,"InvoiceId",fdel$
+		Webstr$=webstr$,"Code",fdel$
+		Webstr$=webstr$,"Response",fdel$
+		Webstr$=webstr$,"Message",fdel$
+		webstr$=webstr$,"AVSCode",fdel$
+		webstr$=webstr$,"AVSMessage",fdel$
+		webstr$=webstr$,"CVVCode",fdel$
+		webstr$=webstr$,"CVVMessage",fdel$
+		webstr$=webstr$,"OtherError",fdel$
+		List$[1]=webStr$
+		Row=2
+		Call DXGet("TOTREC",tmp$)
+		tmp3=tmp$
+		if tmp3<1 
+			let message$="Invalid Number of Records Submitted to Process "
+			let returnstatus=0
+			goto EndSubPostAuth:
+		endif
+		let totlines=tmp3
+		! rem let t9=0
+		ReportDir$ = "REPORTDIR" \ System 28,ReportDir$
+		BaseName1$ = "post_auth"+dateusing$(Tim#(0),"YYMMDDHHNNSS")
+		StatusFile$ = ReportDir$ + "/"+BaseName1$
+		Call FindF(StatusFile$,tmp)
+		If tmp Kill StatusFile$
+		StatChan = FindChannel() ! channel to build text file
+		Build #StatChan,StatusFile$ As "TEXT"
+		Close #StatChan
+		Open #StatChan,StatusFile$
+		! Print #StatChan;"\214\";
+		Print #StatChan;cname$! ;"\15\"
+		Print #StatChan;"Credit Card Post Authorization As of ";TVAR$; ! Date$[1,8];
+		Print #StatChan;tab 80;"Page 1"! ;"\15\"! need 
+		pageno=1
+		e = AddToMYReports(BaseName1$) 
+		if e<0
+			returnstatus=0
+			message$=message$+"Error adding to my reports!" 
+			let eflg=eflg+1
+			goto EndSubPostAuth:
+		endif
+		Print #statchan;"Cust#";tab 7;"Name";tab 38;"Order#";tab 46;"InvNum";tab 62;"Amount";tab 70;"Message$"! ;"\15\"! do the page heading
+		let prtline=2
+		FOR CTR=1 TO TOTLINES
+			errmessage$=""
+			Call DXGet("OrderCustId"+STR$(CTR),TMP$)
+			let custNo=tmp$
+			If CustNo<=0 Or CustNo>999999
+				errMessage$="INVALID CUSTOMER NUMBER"
+				ReturnStatus=1
+				Goto rejectitem:
+			Endif
+			
+			Call DXGet("OrderId"+STR$(CTR),TMP$)
+			let orderid=tmp$
+			Call DXGet("PaymentSeq"+STR$(CTR),TMP$)
+			let payseq=tmp$
+			Call DXGet("RequestID"+STR$(CTR),TMP$)
+			let requestid=tmp$
+			Call DXGet("Response"+STR$(CTR),TMP$)
+			let response$=tmp$
+			Call DXGet("ProcessID"+STR$(CTR),TMP$)
+			let processid=tmp$
+			if rtrim$(tmp$)<>"" and ucase$(rtrim$(response$))="A"
+				if rtrim$(tmp$)<>rtrim$(roc.transid$)
+					let roc.transid$=rtrim$(tmp$)+blank$
+				endif
+			endif
+			Call DXGet("Response"+STR$(CTR),TMP$)
+			let response$=tmp$
+			Call DXGet("Code"+STR$(CTR),TMP$)
+			let newauthcode$=rtrim$(tmp$)
+			!let authcode=tmp$  -- was using roc.ccappr1
+			if rtrim$(tmp$)<>"" and ucase$(rtrim$(response$))="A"
+				if rtrim$(tmp$)<>rtrim$(roc.Authcode1$)
+					let roc.Authcode1$=rtrim$(tmp$)+blank$
+				endif
+			endif
+			Call DXGet("Message"+STR$(CTR),TMP$)
+			let ccmessage$=rtrim$(tmp$)+blank$
+			Call DXGet("AVSCode"+STR$(CTR),TMP$)
+			let avscode$=tmp$
+			Call DXGet("AVSMessage"+STR$(CTR),TMP$)
+			let avsmessage$=rtrim$(tmp$)+tmp$
+			Call DXGet("CVVCode"+STR$(CTR),TMP$)
+			let cvvcode$=tmp$
+			Call DXGet("CVVMessage"+STR$(CTR),TMP$)
+			let cvvmessage$=rtrim$(tmp$)+blank$
+			Cust$=CustNO Using "######"
+			ckey$=" ",cKey$
+			cKey$=Cust$
+			CUR=filegetcust(e$,CUC,"=",1,CKey$,cust.)
+			If CUR<0
+				clear cust.
+				cust.Name$="CUSTOMER NOT FOUND"+Blank$
+			Endif
+			OrdNo=X2
+			KOHC$=" ",KOHC$
+			KOHC$=CustNo Using "######"
+			KOHC$[7]=OrderId Using "######"
+			OHR=filegetrohz(e$,SCHN[],"=",2,kohc$,roh.,ros., rot.)
+			if ohr<=0 
+				let errMessage$="Customer's Order Not Found "
+				goto rejectitem:
+			endif
+			if roh.status<5 or roh.status>6
+				let errMessage$="Order is at Status "+str$(roh.status)
+			endif
+			let keyroc$=roh.OrdNum using "######" 
+			rec_roc = filegetsordcash(e$,Ch_roc,"=",1,keyroc$,roc.)
+			if rec_roc<0 
+				let errMessage$="No Payment Record on file "	
+				goto rejectitem:
+			endif
+			let depamt=0
+			if p61$[94,94]="Y" and not(credit)
+				let keyrod$=" ",keyrod$
+				let keyrod$[1,6]=roh.custnum using "######"
+				let keyrod$[7,12]=roh.ordnum using "######"
+				do
+					search #ch_rod,3,1;keyrod$,rec_rod,e
+					if e<>0 exit do
+					let tmp3=keyrod$[1,6]\if tmp3<>roh.custnum exit do
+					let tmp3=keyrod$[7,12]\if tmp3<>roh.ordnum exit do
+					read record #ch_rod, rec_rod;rod.;
+					let depamt=depamt+rod.ChkAmt
+				loop
+			endif
+			ccamount=0
+			if payseq=1
+				if roc.ccauthtype$[1,1]="P" goto SOLDONE: ! already post authorized
+				! if roc.ccauthtype$[1,1]<>"A" goto SOLDONE: ! not authorized
+				let ccamount=roc.payamt1
+				if UCASE$(RTRIM$(response$))="A"	
+					!let roc.Authcode1$=rtrim$(tmp$)+blank$ ! was roc.ccappr1
+					if roc.payamt1>(rot.OrdTot-depamt-roc.payamt2)
+						let roc.payamt1=(rot.OrdTot-depamt-roc.payamt2)
+						ccamount=rot.Ordtot
+						tranamt=(rot.OrdTot-depamt-roc.payamt2)
+						let roc.ccauthtype$[1,1]="P" ! flag as post-authorized
+						!if roc.payacct1$[1,1]="3"  !  per conf call 12/1/15 remove post auth for visa
+						!	let roc.ccauthtype$[1,1]="A" ! flag as authorized for amex! void authorized
+						!	if rtrim$(errmessage$)="" let errmessage$="Pre-Authorized New Amount"+blank$
+						!endif
+					else
+						let roc.ccauthtype$[1,1]="P" ! flag as post-authorized
+						tranamt=roc.payamt1
+						if rtrim$(errmessage$)="" let errmessage$="PostAuthorized"+blank$
+					endif
+					Write Record #ch_roc,rec_roc;roc.;
+					Read Record #OTC,roh.totrec;rot.
+					let rot.CashSaleFlag=1
+					let rot.AmtRcvd=roc.payamt1+roc.payamt2
+					Write Record #OTC,roh.totrec;rot.
+					call submitpostlog()
+					goto rejectitem:
+					!goto SOLDONE:
+				else
+					if UCASE$(RTRIM$(response$))="D"
+						LET ROC.CCAUTHTYPE$[1,1]="D" ! declined
+						Write Record #ch_roc,rec_roc;roc.;
+						Read Record #OTC,roh.totrec;rot.
+						let rot.CashSaleFlag=1
+						tranamt=roc.payamt1
+						let roc.payamt1=0 ! zero the transaction amount so it does not process
+						let rot.AmtRcvd=roc.payamt1+roc.payamt2			
+						Write Record #OTC,roh.totrec;rot.
+						call submitpostlog()
+						Call SetPostAuthHold()
+						goto rejectitem:
+					else
+						if UCASE$(RTRIM$(response$))="V"
+							tranamt=roc.payamt1
+							LET ROC.CCAUTHTYPE$[1,1]="V" ! voided
+							Write Record #ch_roc,rec_roc;roc.;
+							Read Record #OTC,roh.totrec;rot.
+							let rot.CashSaleFlag=1
+							let rot.AmtRcvd=roc.payamt1+roc.payamt2
+							Write Record #OTC,roh.totrec;rot.
+							!goto SOLDONE:
+							if rtrim$(errmessage$)="" let errmessage$="Void"+blank$
+							Call SubmitPostLog()
+							goto rejectitem:
+						else
+							if UCASE$(RTRIM$(response$))="E" ! error
+								LET ROC.CCAUTHTYPE$[1,1]="E" ! declined
+								Read Record #OTC,roh.totrec;rot.
+								let rot.CashSaleFlag=1
+								tranamt=roc.payamt1
+								let roc.payamt1=0 ! zero the transaction amount so it does not process
+								let rot.AmtRcvd=roc.payamt1+roc.payamt2	
+								Write Record #ch_roc,rec_roc;roc.;
+								Write Record #OTC,roh.totrec;rot.
+								call submitpostlog()
+								Call SetPostAuthHold()
+								goto rejectitem:
+							ELSE
+								if UCASE$(RTRIM$(response$))="" ! no response
+									LET ROC.CCAUTHTYPE$[1,1]="Q" ! need to query transaction info
+									Read Record #OTC,roh.totrec;rot.
+									let rot.CashSaleFlag=1
+									tranamt=roc.payamt1
+									!let roc.payamt1=0 ! zero the transaction amount so it does not process
+									let rot.AmtRcvd=roc.payamt1+roc.payamt2	
+									Write Record #ch_roc,rec_roc;roc.;
+									Write Record #OTC,roh.totrec;rot.
+									call submitpostlog()
+									Call SetPostAuthHold()
+									goto rejectitem:
+								else
+									tranamt=rot.ordtot
+									Call SubmitPostLog()
+								endif
+							endif
+						ENDIF
+					endif
+				endif ! accept/decline
+			endif ! pays
+			if payseq=2
+				tranamt=roc.payamt2
+				if UCASE$(RTRIM$(response$))="A"
+					let roc.ccauthtype$[2,2]="P" ! flag as post-authorized
+					tranamt=roc.payamt2
+					! let roc.CcAppr2=tmp$
+					Write Record #ch_roc,rec_roc;roc.;
+					Read Record #OTC,roh.totrec;rot.
+					let rot.CashSaleFlag=1
+					let rot.AmtRcvd=roc.payamt1+roc.payamt2
+					Write Record #OTC,roh.totrec;rot.
+					Call SubmitPostLog()
+					goto rejectitem:
+					!goto SOLDONE:
+				else
+					if UCASE$(RTRIM$(response$))="D"
+						LET ROC.CCAUTHTYPE$[2,2]="D" ! declined	
+						Read Record #OTC,roh.totrec;rot.
+						tranamt=roc.payamt2
+						let roc.payamt2=0
+						let rot.CashSaleFlag=1
+						let rot.AmtRcvd=roc.payamt1+roc.payamt2	
+						Write Record #ch_roc,rec_roc;roc.;
+						Write Record #OTC,roh.totrec;rot.
+						Call SubmitPostLog()
+						Call SetPostAuthHold()
+						goto rejectitem:
+					else
+						if UCASE$(RTRIM$(response$))="E" ! error
+							LET ROC.CCAUTHTYPE$[2,2]="E" ! error
+							Read Record #OTC,roh.totrec;rot.
+							let rot.CashSaleFlag=1
+							tranamt=roc.payamt1
+							let roc.payamt2=0 ! zero the transaction amount so it does not process
+							let rot.AmtRcvd=roc.payamt1+roc.payamt2	
+							Write Record #ch_roc,rec_roc;roc.;
+							Write Record #OTC,roh.totrec;rot.
+							call submitpostlog()
+							Call SetPostAuthHold()
+							goto rejectitem:
+						else
+							if UCASE$(RTRIM$(response$))="" ! no response
+									LET ROC.CCAUTHTYPE$[2,2]="Q" ! need to query transaction info
+									Read Record #OTC,roh.totrec;rot.
+									let rot.CashSaleFlag=1
+									tranamt=roc.payamt2
+									let rot.AmtRcvd=roc.payamt1+roc.payamt2	
+									Write Record #ch_roc,rec_roc;roc.;
+									Write Record #OTC,roh.totrec;rot.
+									call submitpostlog()
+									Call SetPostAuthHold()
+									goto rejectitem:
+							 else
+								tranamt=rot.ordtot
+								Call SubmitPostLog()
+							endif
+						endif
+					endif
+				endif
+			endif
+			goto SOLDONE:
+			rejectitem: ! 
+			Call LinePrint()
+			WebStr$=str$(roh.CustNum),fdel$ !OrderCustId"
+			Webstr$=webstr$+rtrim$(cust.name$),fdel$
+			Webstr$=webstr$+str$(roh.OrdNum),fdel$
+			Webstr$=webstr$+str$(roh.InvNum),fdel$
+			Webstr$=webstr$+rtrim$(newauthcode$),fdel$ ! code
+			Webstr$=webstr$+rtrim$(response$),fdel$		
+			Webstr$=webstr$,rtrim$(ccmessage$),fdel$
+			webstr$=webstr$,rtrim$(avscode$),fdel$
+			webstr$=webstr$,rtrim$(AVSMessage$),fdel$
+			webstr$=webstr$,rtrim$(cvvcode$),fdel$
+			webstr$=webstr$,rtrim$(CVVMessage$),fdel$
+			webstr$=webstr$,rtrim$(errmessage$),fdel$
+			List$[row]=webStr$	! enter here 
+			row=row+1 \ if row>tmpcnt let tmpcnt=expandarray(e$,List$[])	
+		SOLDone: ! finished
+	next ctr
+	Print #statchan;"Complete "
+	 Print #statchan;"\14\"
+	try
+		close #statchan
+	else
+		! tmpcnt=tmpcnt
+	end try
+	EndSubPostAuth: ! end post authorization
+	List$[row]=esdel$
+	call AddToStr(e$,rstr$,List$[])
+	
+	! end of submitordlist
+	
+  end select  !action options
+ 
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+	if action1$="SUBMITPOSTAUTH" ! remove 
+		Try
+			let tday=tdate$[5,6]
+			if tday>=28 ! purge day ! going back 2 months
+				let tmonth=tdate$[3,4]
+				let tyear=tdate$[1,2]
+				let tmonth=tmonth-1
+				if tmonth<1
+					let tmonth=12
+					let tyear=tyear-1
+				endif
+				let tmonth=tmonth-1
+				if tmonth<1
+					let tmonth=12
+					let tyear=tyear-1
+				endif
+				let purper$[1,2]=tyear using "&&"
+				let purper$[3,4]=tmonth using "&&"
+				let tdate=purper$
+				let logfname$="tmp/getpostauth"+str$(tdate)+"*"+".txt"+" 2>/dev/null"
+				let cmd$="rm "+logfname$
+				System CMD$
+				let logfname$="tmp/subpostauth"+str$(tdate)+"*"+".txt"+" 2>/dev/null"
+				let cmd$="rm "+logfname$
+				System CMD$
+				if debugdetail<>0
+					let debugfname$="tmp/logpostauth"+str$(tdate)+"*"+".txt"+" 2>/dev/null"
+					let cmd$="rm "+debugfname$
+					System CMD$
+				endif
+			endif
+		Else
+			tmp$=tmp$
+		End Try
+	endif
+ 
+ !call dxclose()
+else
+ include "src/callmainerrnet.inc"
+end try
+end ! of main program
+	
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC=OpenFile(-9999,IntCo) \ if ctlc=-1 Error 42 ! control file read/write
+	CUC=OpenFile(-1808,IntCo) \ If CUC=-1 Error 42 ! customer
+	PRC=OpenFile(-1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(-1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	OHC=OpenFile(1840,IntCo) \ if OHC=-1 Error 42 ! order header
+	OSC=OpenFile(1856,IntCo) \ if OSC=-1 Error 42 ! order shipto
+	OTC=OpenFile(1872,IntCo) \ if OTC=-1 Error 42 ! order Totals
+	OLC=OpenFile(-1888,IntCo) \ if OLC=-1 Error 42 ! order lines
+	SNC=OpenFile(-2944,IntCo) \ if SNC=-1 Error 42 ! serial numbers
+	ch_roc = OpenFile(2224,IntCo) \if ch_roc=-1 Error 42 ! scash file
+	
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+
+!--------------------------------------------------------------------
+
+Sub SetPostAuthHold()
+! generate Invoices from a list of orders for a customer
+! Use CustNo as customer
+  Try
+		Clear holdcodeflag[]  
+		Read Record #OTC,roh.totrec;rot.
+		tmp3 = rot.HoldCode                                   
+		For xTR = 1 To 12                                     
+			holdcodeflag[xTR] = Sgn(Fra(tmp3 / 2))              
+			tmp3 = Int(tmp3 / 2)                                
+		Next xTR  
+		let holdcodeflag[9]=1! flag on hold
+		let tmp3=0
+		for xtr=0 to 11
+			IF holdcodeflag[xtr+1] LET tmp3=tmp3+2^xtr   
+		next xtr
+		let rot.holdcode=tmp3
+		Write Record #OTC,roh.totrec;rot.
+	
+	IF P60$[44,44]="Y" ! edittrack record
+		etr.NewQtyOrd=rot.holdcode
+		LET ETR.Printer=0
+		LET ETR.OrdNum=roh.Ordnum ! H0[7]
+		LET ETR.Status=roh.Status ! H6[2]
+		LET ETR.InvNum=roh.InvNum ! OREF[1]
+		LET ETR.CustNum=roh.CustNum ! H0[4]
+		LET ETR.OrgOrdTot=rot.OrdTot ! T2[0]
+		LET etr.EtAction=12 ! hold code set by system
+		LET ETR.LineNum=0
+		etr.AccessCode$=Userid$+Blank$
+		LET ETR.ProdCode$="AUTHDECLINE" ! 237 USING "###" ! +Blank$ ?
+		if badexpflag<>0
+			let etr.prodcode$="BAD EXP DATE"
+	    ENDIF
+		LET ETR.UMSell=0;ETR.NstkFlag=0 
+		etr.SpareNU$=Blank$
+		x2[0]=-1;x2[1]=-1 ! no files open
+		Call MakeEdittrack(e$,IntCo,X2[],etr.)
+	Endif
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! SetPostAuthHold()
+! 
+
+
+!--------------------------------------------------------------------
+
+Sub LinePrint()
+! generate Invoices from a list of orders for a customer
+! Use CustNo as customer
+  Try
+	let prtline=prtline+1
+	if prtline>60
+		pageno=pageno+1
+		Print #Statchan;"\14\"; 
+		Print #StatChan;cname$
+		Print #StatChan;"Credit Card Post Authorization As of " ;TVAR$;
+		Print #StatChan;tab 80;"Page ";pageno! ;"\15\"
+		Print #statchan;"Cust#";tab 7;"Name";tab 38;"Order#";tab 46;"InvNum";tab 62;"Amount";tab 70;;"Message"! ;"\15\"! do the page heading
+		Print #statchan;""
+		let prtline=4
+	endif
+	Print #StatChan;using "######";roh.CustNum;
+	Print #StatChan;tab 7;cust.name$;
+	Print #StatChan;using "######";Tab 38;roh.OrdNum;
+	Print #StatChan;using "##########";tab 46;roh.InvNum;
+	print #StatChan;using "--------.##";tab 58;ccamount;
+	if rtrim$(CCMessage$)=""
+		let ccmessage$=errmessage$
+		let errmessage$=""
+	endif
+	print #statchan;tab 70;rtrim$(ccmessage$[1,60])!;"\5\"
+	if rtrim$(avsmessage$)<>""
+		print #statchan;tab 62;"AVS: ";
+		print #statchan;tab 70;rtrim$(avsmessage$[1,60])!;"\15\"
+		let prtline=prtline+1
+	endif
+	if rtrim$(cvvmessage$)<>""
+		print #statchan;tab 62;"CVV: ";
+		PRINT #statchan;tab 70;rtrim$(cvvmessage$[1,60])! ;"\15\"
+		let prtline=prtline+1
+	endif
+	if rtrim$(errmessage$)<>""
+		print #statchan;tab 70;rtrim$(errmessage$)! ;"\15\"
+		let prtline=prtline+1
+	endif
+
+else
+    include "src/callsuberr.inc"
+  end try
+end sub ! LinePrint()
+
+
+
+!--------------------------------------------------------------------
+
+Sub PrntDebugData()
+  Try
+	if debugdetail<>0
+		Print #ch_debug;using "########";roh.ordnum;
+		print #ch_debug;tab 10;roc.transid$;
+		print #ch_debug;using "----------.##";tab 35;rot.ordtot;
+		if webstr$[1,1]="M" or webstr$="U"
+			print #ch_debug;using "----------.##";tab 52;tranamt;
+		else
+			if payseq<>2
+				print #ch_debug;using "----------.##";tab 52;roc.payamt1;
+			else
+				print #ch_debug;using "----------.##";tab 52;roc.payamt2;
+			endif
+		endif
+		print #ch_debug;tab 70;webstr$[1,1]
+	endif
+
+else
+    include "src/callsuberr.inc"
+  end try
+end sub ! PrntDebugData()
+! 
+
+
+!--------------------------------------------------------------------
+! GETPOSTLOG: 
+Sub GETPOSTLOG()
+Try
+	IF P60$[44,44]="Y" ! edittrack record
+		etr.NewQtyOrd=0
+		LET ETR.Printer=0
+		LET ETR.OrdNum=roh.Ordnum ! H0[7]
+		LET ETR.Status=roh.Status ! H6[2]
+		LET ETR.InvNum=roh.InvNum ! OREF[1]
+		LET ETR.CustNum=roh.CustNum ! H0[4]
+		LET ETR.OrgOrdTot=tranamt ! T2[0]
+		LET etr.EtAction=65 ! hold code set by system
+		let etr.UMSELL=65 ! mark for sending data to post-auth
+		LET ETR.LineNum=0
+		etr.AccessCode$=Userid$+Blank$
+		LET ETR.ProdCode$="GETPOSTAUTH"+BLANK$! 237 USING "###" ! +Blank$ ?
+		IF WEBSTR$[1,1]="M" LET ETR.ProdCode$="MARKPAYMENT"+BLANK$		
+		IF WEBSTR$[1,1]="V" let etr.prodcode$="VOID"+blank$
+		IF webstr$[1,1]="P" let etr.prodcode$="APPR NEW AMT"+BLANK$
+		IF webstr$[1,1]="U" let etr.prodcode$="MARK NEW AMT"+BLANK$
+		IF webstr$[1,1]="O" let etr.prodcode$="PREAUTH EXP"+BLANK$
+		ETR.NstkFlag=0 
+		etr.SpareNU$=Blank$
+		x2[0]=-1;x2[1]=-1 ! no files open
+		Call MakeEdittrack(e$,IntCo,X2[],etr.)
+	Endif
+else
+    include "src/callsuberr.inc"
+end try
+end sub ! getpostlog()
+!--------------------------------------------------------------------
+!--------------------------------------------------------------------
+Sub SUBMITPOSTLOG()
+Try
+	IF P60$[44,44]="Y" ! edittrack record
+		etr.NewQtyOrd=0
+		LET ETR.Printer=0
+		LET ETR.OrdNum=roh.Ordnum ! H0[7]
+		LET ETR.Status=roh.Status ! H6[2]
+		LET ETR.InvNum=roh.InvNum ! OREF[1]
+		LET ETR.CustNum=roh.CustNum ! H0[4]
+		LET ETR.OrgOrdTot=tranamt ! T2[0]
+		LET etr.EtAction=65 ! hold code set by system
+		let etr.UMSELL=67 ! mark for receiving data from post auth
+		LET ETR.LineNum=0
+		etr.AccessCode$=Userid$+Blank$
+		LET ETR.ProdCode$="POSTAUTH"+BLANK$! 237 USING "###" ! +Blank$ ?
+		IF ucase$(response$[1,1])="D"
+			LET ETR.ProdCode$="DECLINED"+BLANK$
+		ELSE
+			if ucase$(RESPONSE$[1,1])="A"
+				if payseq<>2
+					if roc.ccauthtype$[1,1]="A" 
+						let etr.prodcode$="PREAUTH AMT"+BLANK$
+					ELSE
+						let etr.prodcode$="MARKED"+blank$
+					endif
+				else
+					if roc.ccauthtype$[2,2]="A" 
+						let etr.prodcode$="PREAUTH AMT"+BLANK$
+					ELSE
+						let etr.prodcode$="MARKED"+blank$
+					endif
+
+				endif
+			else
+				IF ucase$(RESPONSE$[1,1])="V"
+					let etr.prodcode$="VOIDED"+blank$
+				else
+					if ucase$(RESPONSE$[1,1])="E"
+						let etr.prodcode$="ERROR"+blank$
+					endif
+					if ucase$(RTRIM$(response$))=""
+						let etr.prodcode$="UNKNOWN"+BLANK$
+					ENDIF
+				endif
+			ENDIF
+		ENDIF
+		ETR.NstkFlag=0 
+		etr.SpareNU$=Blank$
+		x2[0]=-1;x2[1]=-1 ! no files open
+		Call MakeEdittrack(e$,IntCo,X2[],etr.)
+	Endif
+else
+    include "src/callsuberr.inc"
+  end try
+end sub ! subpostlog()

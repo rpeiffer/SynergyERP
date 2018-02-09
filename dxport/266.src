@@ -1,0 +1,2319 @@
+! >>> Program 266
+!
+! description Back Order Reallocate
+!
+! loadsave -w -n 100,10 -o prog/dxport/266.dl4 src/266.src
+!
+! 1.0 mm/dd/yyyy change??
+!
+! ERP Assistant Enabled
+!
+include "src/copyright.inc" ! dx
+Rem mx266 reallocate back orders
+Rem       author: rjs 02/20/1997
+Rem       this program will go thru status 1 order for a specified ship date
+!       It will check for any back ordered items & compare to the available
+!       if it can be filled, will update ship qty & retotal the order
+!  jlp 01/19/98 cct109701 delete sordlot with zero qty
+!  jliu 3/01/99 cct120351 don't filled the order when the ship date is 999999
+! rjs 04/14/00 cct133683 ADD activity report
+! jliu 07/31/00 cct137912 read prod file to get the pfu1[9] 
+! zyc  07/31/01 cct149028 no ship date of 999999
+! zyc  08/08/01 cct149363 problem with qty
+! rjs 03/08/02 cct154285 ask to compare shippped to odered for non-b/o items
+! jliu 7/01/02 cct158507 if there are no back orders, change ot to 1 from 9
+! jliu 8/14/03 cct165651 if ot is 16 and ship date is 999999, set the ship
+!              date by zone
+! swu 08/25/05 cct193976 salespro, add directory 4 for 2/edittrack#
+! jliu 2/21/08 cct222990 rounding type
+! jcs 08/09/11 - is leaving sordlots with neg backorders and no order line?
+!   scenario - orig=0 ship/bo - user chgs to 1 ship/0 bo (cust no bo's ovrride?)
+!	run thru here - ends up back at 0 ship/bo - sord/sprod/prod/pwh are -1 bo?
+!   as 0 ship/bo - accept deletes line - leaves orphan sordlot?
+
+! ---------------  notes for CUSTOM H T Berry  --------------------
+! rjs 05/05/05 cct189778 - change label on report chuck confused
+! rjs 12/10/09 cct224914 - if order type=9 and source code(H5[9])=9, set order
+!                           type=35.  (if source code<>9 - set o/t=1
+! TASK#21594/05/14/09 rjs cct225460 - master delivery customer ( set ch[20]=0 arterms )
+! ------------------------------------------------------------------------------
+! ----- notes for Synergy/ERP (xrev9) upgrade for Athens Janitor Supply -------
+! 01/27/09 jliu cct229044 - change program to check order type 16's against the
+!                      entered ship date when deciding to adjust the allocations
+! 06/16/11  txc task#5452 - req_ship_date was not being set if user did not go  
+!                            back to edit the field
+! ------------------------------------------------------------------------------
+! ------------------------------------------------------------------------------
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: JAN 19, 2009  09:51:53
+Rem  Copyright (c) 2009 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+include "src/inc/fileedittrack.inc" ! edit tracking
+include "src/inc/sql_prod.inc" ! SQL defintions
+! external libs & calls
+External Lib "librasl.lib"
+Declare External Sub chkwhrasl
+External Lib "libedittrack.lib"
+Declare External Sub MakeEdittrack
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Sub ERPCronSuccess
+Declare External Function GetParameter$
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault
+Declare External Function OpenFile,PDate$,getuidrec,JDate$,OpenMySQLMirror
+
+Declare Intrinsic sub programdump,env,getglobals
+Declare Intrinsic function findchannel
+Declare Intrinsic Sub DateToJulian,FindF,InpBuf,String,VerifyDate
+!Option Default Dialect IRIS1
+
+If Err 0 Gosub ERR_TRAP
+Dim ETR. as edittrack ! EDITTRACKING
+Dim 1%,ohcurrid,olcurrid,3%,ohcurrfact,olcurrfact
+dim 3%,otype,prec[3],ldstat[2]
+	dim 3%,wh,orgloadcost,newloadcost,ld1,ltbl
+	Dim keysot$[10],1%,ch_sot,ot2[15],3%,rec_sot,2%,lc0[1]
+
+Rem {begin src/inc/dim.prod.i}
+dim 1%,ch_prod,3%,rec_prod
+Dim pr_A$[156],HZ$[90],PR_A2$[30],C1$[32],PSN$[20],U3$[60]
+Dim PRFLG$[10],PRMKUPTYP$[4],PIC$[50],PRIML$[12]
+Dim 1%,LLC,PFTB[3],LM[1],UPCT,PR_PO[1]
+Dim 1%,PRBASE,PRPARC2[3],PRD1[4],AGEDAY
+Dim 2%,A2,A3[2],B[24],PR_C4[10],PFCO[3],PLC[3],PSN[1],U2,U4[1]
+Dim 2%,STK[2],FDT[1],PRMKUP[3],PRD0[2]
+Dim 3%,A1[7],PF_LOAD2,PLV[1],PRPARC[3],U3,PFN[1]
+Dim 3%,LBSORD,FUT[1],PRREDI[1],PRD2[3]
+Rem {end dim.prod.i}
+
+Rem {begin src/inc/dim.prwh.i}
+dim 1%,ch_prwh,3%,rec_prwh,Key_prwh$[16]
+Dim W1$[32],WH3$[24],WHFLG$[10],WHMKUPTYP$[4],WCOMM$[4]
+Dim 2%,W2[9],W7[14],WH7[3],WHLPOOL,WHFDT[1],WHMKUP[3]
+Dim 1%,W0[3],W1[2],WH8[47],WHPARC[5],WHRPLN,WHLM[1],FCWGT
+Dim 1%,RESTRICTED,WHBASE,WHPARC2[3]
+Dim 3%,W3[24],W5[25],WH9[25],WHLV[2],WHMISC[6],WHMISC2[7]
+Dim 3%,WHFUT[2],VLIST,WHREDI[1],WHLBS[1]
+
+
+Dim CCD$[4]
+Dim A$[156],1%,PFU1[20],3%,A[33],PFU2[6],PLV[1]
+Dim 2%,B[24]
+Dim 3%,W3[24],WHLV[2],WHLBS[1]
+Dim 3%,C9[3]
+Rem {begin src/inc/dim.roh.i}
+Dim 1%,H3[1],H4[2],LOCKPORT,OWHT[1],PICKBY[1]
+Dim 2%,H0[12],H5[16],ST3[24],SLSM[9],H6[8],HFAX[1]
+Dim 2%,HSTI[1],H2[0],OWHT1[1]
+Dim 3%,TOT_SELL,SCOM[4],SMER[4],SCST[4],TOTGL,OREF[5]
+Dim V0$[12],H0$[20],H1$[6],HMAT$[2],P0$[20]
+Rem {end dim.roh.i}
+Rem {begin src/inc/dim.rol.i}
+Dim 1%,L3[3],PL[1],UN[2],S2[1],EUN[2],OWHS,LPRINTED,CTWT[1]
+Dim 2%,L2[1],L4[3],L6[5],L9[1],LCO[1],LTAX2,LP_DATE,LP_TIME
+Dim 3%,L5[3],L7[12],S3[17],OLM[6],UNF[6],CST[0],LTAX1,INVNO,QPB,ROL0
+Dim L6$[60],L1$[20],MT$[2],S3$[33]
+Rem {end dim.rol.i}
+Rem {begin src/inc/dim.ros.i}
+Dim 1%,S6[1]
+Dim 2%,S1[1],S5
+Dim 3%,SRN[5],INVNO
+Dim S1$[118],S2$[20]
+Rem {end dim.ros.i}
+Rem {begin src/inc/dim.rot.i}
+Dim 1%,DCLVL,MCTXBL[9]
+Dim 2%,MCODE[9],T1[1],JRNL
+Dim 3%,MCHARGE[9,1],T2[25],TOT[4],INVNO
+Rem {end dim.rot.i}
+DIM 2%,arterm2[1]
+Dim A1$[142],Miscfile$[16],CSZone$[2]
+Dim P9$[50],P60$[50],J$[75],DATE$[10],DATE1$[10],LOC$[6],LOT$[12],S0$[36],RETVAL$[512]
+Dim OL2$[16],SORD_KEY$[80],SPROD_KEY$[80],PO$[66],P1$[6],K$[50],F2$[80],F1$[80]
+Dim ROH_KEY$[50],ROL_KEY$[50],WORKKEY$[80],SORTKEY$[50],WORK$[50],WORK1$[50],WORKKEY1$[80]
+Dim J8$[8],CNAME$[30],K5$[50],ETUSER$[10],ETPROD$[12],ET$[50],SCRATCH$[80]
+Dim CMPDATE$[8],DISPSHIPDATE$[8],J0$[75],J1$[75],J4$[75],J5$[80],X$[10],K2$[2]
+Dim SHIPDATE$[8],PRODKEY$[50],DISPCMPDATE$[8],CMPFLAG$[1],P61$[256],FILLIFONPO$[1]
+Dim BLANK$[90],FILLSHIPCOMP$[1],SHIP9$[1],FILLBOCOMP$[1],RTYPE$[1],ot9$[1]
+Dim 1%,FLAG,INVLEVEL,INCONPO,P1[1],CH[99],OL1[3],P4,T9[11],RETVAL,MS2[2]
+Dim 1%,CNVTU[2],GOFORWARD,RATYPE,USEPRI,C7[4],C8,FILLSHIPCOMP,FILLBOCOMP
+Dim 1%,OWHT[1],OPEN_CH[10],ALLOCPHASE,FOUNDNONE,STAT,WARN
+Dim 3%,CNVTA,AMOUNT,BOAMNT,OAVAIL,NBOAMNT,NAVAIL,ResStkAmt,QtyAllocated
+Dim 4%,J1
+Dim 1%,ETLINE,ETSTAT,ETUNIT,ETNONSTOCK,RASL[5],BACK_ORDERED,ETPRINT
+Dim 1%,ETPUNIT,FILLIFONPO,FChan[20]
+Dim 2%,REQ_SHIP_DATE,ORD_SHIP_DATE,PASSINFO[20],S9[9],D8,OL2[3],P2[2],REQ_COMP_DATE
+Dim 2%,ETORDER,ETDATE,ETTIME,ETPORT,ETACTION,ETCUST,A0[3],DT3[1],D0
+Dim 2%,ETCUST,ETSLS,Q0[1]
+Dim 3%,AVAIL,BOWORK,P3[4],OL3[5],WORK,R5,V1,PLTR,X2,ORIG_AVAIL,R_AVAIL,PCTR
+Dim 3%,LBSORD,WHLBS[1],LBSHIP,CFIN[8],VDATE,PARAM[5]
+Dim 3%,ETOQTY[2],ETNQTY[2],ETORIGTOT,FILLWORK,ETINVOICE,ETUNITPRICE[1]
+DIM keypol$[30],1%,pol1[3]
+Dim 3%,rec_pol,POL3[6],POPL4[23],TMP3
+Dim HOLDPOFLAG$[1],Custom_customer$[30]
+Dim msg$[100]
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+Dim tmp$[800],tmp1$[200],nextblockid$[8],Message$[600],WebStr$[600],blockid$[100]
+Dim action$[30],options$[30],userid$[8],b$[200],3%,fdel$[10],rstr$[2000],bsdel$[10],esdel$[10],rdel$[10]
+B$=" ",B$
+!Try 
+!call dxopen() ! may not need this! NEEDS FOR DXTEST RUN!!
+!Else
+	Rem
+!End try
+call env(1,"ERP_FROM_CRON",tmp$) \ erpCron = tmp$
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$)
+COID=IntCo 
+Try Close #9  Else REM ! do not need sortfile on chan #9
+Mat Read #1,19,50;P9$;
+Mat Read #1,60,50;P60$;
+Mat Read #1,61,0;P61$;
+MAT  READ #1,115,40;Q0; \ IF NOT(Q0[1]) LET Q0[1]=2
+Read #1,0,100;J8$;
+Read #1,3;CNAME$;
+mat read #1,115,60;custom_customer$;
+Custom_customer$=UCase$(Trim$(custom_customer$))
+Read #1,3,172;D8;
+ShipDate$=D8 Using "&&&&&&"
+CmpDate$=ShipDate$
+DispShipDate$=ShipDate$[3,4]+"/"+ShipDate$[5,6]+"/"+Shipdate$[1,2]
+DISPCMPDATE$=DispShipDate$
+RASL = 0 \ If P9$[41,41] = "Y" Or P9$[41,41] = "W" Let RASL = 9
+PAGE_LEN = 60
+IF Q0[1]<2 LET Q0[1]=2 ! MIN=2 decimals
+IF Q0[1]>5 LET Q0[1]=5 ! MAX=5 decimals
+BLANK$ = " ",BLANK$
+If P60$[26,26] = "Y" Let INVLEVEL = 1
+If P9$[28,28] = "Y" Let INCONPO = 1
+If P9$[32,33] = "YY"
+  WHSEPR = 1
+Else 
+  WHSEPR = 0
+End If 
+LOT$ = "STOCK       "
+Def FNR(H) = Int(Abs(H) * 100 + .5) * .01 * Sgn(H)
+Def FNV(H) = Int(Abs(H) * 100 + .9999999) * .01 * Sgn(H)
+Def FNN(H) = Int(Abs(H) * 10 ^ Q0[1] + .5) * 10 ^ - Q0[1] * Sgn(H)
+Def FNT(H) = Int(Abs(H) * 10 ^ Q0[1]) * 10 ^ - Q0[1] * Sgn(H)
+Def FNU(H) = Int(Abs(H) + Sgn(Fra(Abs(H)))) * Sgn(H)
+
+! we are just going to fall on through to start point - no gosubs
+OPENFILES: Rem
+For J = 2 To 32
+  Read J1
+  If J1 <> -1
+    Read #1,88,abs(J1);J$;
+    if j1>0
+		Open #J,J$
+	else
+		ropen #j,j$
+	endif
+  End If 
+Next J
+Data "1920","1792","2288","1808","-1","1856","1840","-1","1872","1888","2128","928","1824"
+Data "2176","2528","2320","1728","-1","-1","-1","-1","-1","-1","-1","-1","-1","-1","-1","1744"
+Data "-1","-2432"
+CH_CNTRL = 1
+CH_ZONE = 2
+CH_PROD = 3
+CH_COMCDE = 4
+CH_CUST = 5
+CH_PRWH = 30
+CH_ROS = 7
+CH_ROH = 8
+CH_SORT = 19   ! Sort on 19 instead of 9 (diff name)
+CH_ROT = 10
+CH_ROL = 11
+CH_SPRODDESC = 12
+CH_CUSTTAX = 13
+CH_SLSM = 14
+CH_TAXCODE = 15
+CH_SPRODLOT = 16
+CH_SORDLOT = 17
+CH_CCODES = 18
+CH_ET = 20
+ch_tmp=77
+CH_SQL = 31
+CH_SQL = OpenMySQLMirror(e$,CH_SQL) ! will set to -1 if not avail
+CH_POL=32 ! POLINE
+if p61$[111,111] = "Y" ! CPI FLAG
+	ch_cpidet = OpenFile(9928,IntCo) \ if ch_cpidet = -1 error 42
+END IF
+SCRATCH$ = Str$(COID)
+Open #CH_ET,"2/EDITTRACK" + Str$(COID)
+
+CH_SOT=FindChannel()
+Open #ch_sot,"3/sordtype"+scratch$
+
+WORK$ = Spc(6) \ WORK$ = WORK$[2,Len(WORK$) - 1]
+F1$ = "6/BOALWORK*30"
+L_12030: If F1$[Len(F1$)] = " " Let F1$ = F1$[1,Len(F1$) - 1] \ Goto L_12030
+P2 = 0 \ Let F2$ = F1$ To "*" : P2 \ If Not(P2) Let F1$ = "6/SORTWORK*30";P2 = 11
+KSIZE = F1$[P2 + 1]
+If KSIZE <> 30 Let KSIZE = 30
+F1$[P2] = WORK$
+Call FindF(F1$,H1)
+If H1 Kill F1$
+F2$ = "[1:256] ",F1$,"!"
+Build #CH_SORT,F2$
+Search #CH_SORT,0,1;K$,KSIZE,E \ If E Gosub ERR_SEARCH
+L1 = 1000 \ Search #CH_SORT,0,0;K$,L1,E \ If E Gosub ERR_SEARCH
+Close #CH_Sort
+Open #ch_sort,F1$
+
+GETPARAMETERS: Rem
+GOFORWARD = 0
+SELECTIONLOOP: Rem
+!Print @0,22;'CL';"#: field to edit  R: reselect  ";"Y: yes continue S: save defaults  E: exit ";
+!Input "";J$
+!Print @0,22;'CL';
+Call dxget("RN266",tmp$)
+if erpCron tmp$ = "Y" ! running from cron - of course we want to do it!
+Let j$="E" \ if tmp$<>"" Let J$="Y"
+Call String(1,J$)
+If J$ = "Y" Let GOFORWARD = 1 ! \ Goto ENDSELECTIONLOOP
+If J$ = "E" Goto OutEnd1 ! ENDSELECTIONLOOP
+
+ENDSELECTIONLOOP: Rem
+
+GETREALLOCATIONTYPE: Rem
+!Print @1,12;" 1> Reallocation Type: ";
+!J0$ = "3000013012"
+!J5$ = "1: Order Deallocate, 2: Back Order Reallocate, 3: Both."
+j1 = GetParameter$("RATYPE")
+!Call "INPUT",J1,J$,J0$,J1$,J4$,J5$
+If J1 < 1 Or J1 > 3
+  Message$="Reallocation type must be between 1 and 3!"
+  ReturnStatus=1
+  Goto BadData ! GETREALLOCATIONTYPE
+End If 
+RATYPE = J1
+RETVAL$[8,8] = RATYPE Using "#"
+!Return 
+SHIP_DATE_SELECT: Rem
+!Print @1,13;" 2> Ship date : ";
+!Print @0,22;'CL';"Enter the Ship Date MMDDYY,  ";"<CR> for the System Date ";
+J$ = "" !\ Input @30,13;J$
+j$=rtrim$(GetParameter$("SHPDATE"))
+!call programdump("/tmp/j266!","")   ! ENTERED ON WEB AS MM/DD/YY returns as MMDDYY !!?
+If J$ <> ""
+  WORK = J$
+  WORK$ = WORK Using "&&&&&&"
+  DISPSHIPDATE$ = " ",DISPSHIPDATE$
+  DISPSHIPDATE$ = WORK$[1,2] + "/" + WORK$[3,4] + "/" + WORK$[5,6]
+End If 
+!Print @30,13;'CL';DISPSHIPDATE$
+Call VerifyDate(DISPSHIPDATE$,DATE1$,E)
+If E
+  Message$="Invalid Ship date"
+  ReturnStatus=1
+  Goto BadData ! SHIP_DATE_SELECT
+Else 
+  Call DateToJulian(1,DATE1$,DATE$,E)
+  If E
+    Message$="Invalid Ship date"
+	ReturnStatus=1
+	Goto BadData ! SHIP_DATE_SELECT
+  Else 
+    REQ_SHIP_DATE = DATE$
+  End If 
+End If 
+SHIPDATE$ = DATE1$
+!Return 
+COMP_DATE_SELECT: Rem
+!Print @1,14;" 3> Ship Complete date: ";
+! Print @0,22;'CL';"Enter the Ship Complete Date MMDDYY (order type 9),";"  <CR> for the Default Date ";
+J$ = "" ! \ Input @30,14;J$
+j$=rtrim$(GetParameter$("SCDATE"))
+!call programdump("/tmp/j2661!","")  ! ENTERED ON WEB AS MM/DD/YY returns as MMDDYY !!?
+If J$ <> ""
+  WORK = J$
+  WORK$ = WORK Using "&&&&&&"
+  DISPCMPDATE$ = " ",DISPCMPDATE$
+  DISPCMPDATE$ = WORK$[1,2] + "/" + WORK$[3,4] + "/" + WORK$[5,6]
+End If 
+!Print @30,14;'CL';DISPCMPDATE$
+Call VerifyDate(DISPCMPDATE$,DATE1$,E)
+If E
+  Message$="Invalid Ship Complete date"
+  ReturnStatus=1
+  Goto BadData ! COMP_DATE_SELECT
+Else 
+  Call DateToJulian(1,DATE1$,DATE$,E)
+  If E
+    Message$="Invalid Ship Complete date"
+	ReturnStatus=1
+	Goto BadData !COMP_DATE_SELECT
+  Else 
+    REQ_COMP_DATE = DATE$
+  End If 
+End If 
+CMPDATE$ = DATE1$
+RETVAL$[1,6] = DATE1$[1,6]
+!Return 
+COMP_ORD_TO_SHIP: Rem
+!Print @1,15;" 4> Include comparing Ordered qty to ship qty for ";"non-back ordered lines ?";
+J$ = "" ! \ Input @77,15;J$
+tmp$ = GetParameter$("ORD2SHP")
+  J$="N"
+  if erpCron
+	j$ = ucase$(tmp$)
+  else
+	j$="N" \ if tmp$<>"" Let J$="Y" ! Call String(1,J$,E) ! checkbox
+  end if
+  ! If J$ <> "Y" If J$ <> "N" Goto COMP_ORD_TO_SHIP
+  WORK$ = J$
+
+CMPFLAG$ = WORK$[1,1]
+CMPFLAG = 0
+If CMPFLAG$ = "Y" Let CMPFLAG = 1
+RETVAL$[7,7] = CMPFLAG$[1,1]
+!Return 
+GETUSEPRI: Rem
+!Print @1,16;" 5> Use customer priority flag for stock reallocations ?";
+!J0$ = "6000015916"
+!J5$ = "Enter 'Y' to use customer priority during allocations ","(101, screen 2)."
+tmp$ = GetParameter$("USCPRTY")
+j1=0
+if erpCron
+	if ucase$(tmp$) = "Y" j1=1
+else
+	if tmp$<>"" Let j1=1
+end if
+!J1 = USEPRI
+!Call "INPUT",J1,J$,J0$,J1$,J4$,J5$
+USEPRI = J1
+RETVAL$[9,9] = USEPRI Using "#"
+!Return 
+FILL_SHIP_COMPLETE: Rem fill ship complete orders that can be filled competely?
+!Print @1,17;" 6> Only fill a ship complete line if the entire order ";"amount can be filled ?";
+J$ = ""
+!Input @79,17;J$
+tmp$ = GetParameter$("FSCL")
+if erpCron
+	j$ = ucase$(tmp$)
+else
+	J$="N" \ if tmp$<>"" Let J$="Y"
+end if
+  ! If J$ <> "Y" If J$ <> "N" Goto FILL_SHIP_COMPLETE
+  WORK$ = J$
+
+FILLSHIPCOMP$ = WORK$[1,1]
+FILLSHIPCOMP = 0
+If FILLSHIPCOMP$ = "Y" Let FILLSHIPCOMP = 1
+RETVAL$[10,10] = FILLSHIPCOMP$[1,1]
+!Return 
+SHIPDATE999999: Rem should we see orders of ship date 999999
+!Print @1,18;" 7> Include ship date of 999999?"
+tmp$ = GetParameter$("SD9")
+J1=0
+if erpCron
+	if ucase$(tmp$) = "Y" J1=1
+else
+	if tmp$<>"" Let j1=1
+end if
+If J1
+  SHIP9$ = "Y"
+Else 
+  SHIP9$ = "N"
+End If 
+RETVAL$[11,11] = SHIP9$[1,1]
+!Return 
+FILL_BO_COMPLETE: Rem fill  orders that can be filled competely?
+!Print @1,19;" 8> Only fill an order line if the entire back order can be filled ? "
+J$ = ""
+!Input @70,19;J$
+tmp$ = GetParameter$("OEBO")
+if erpCron
+	j$ = ucase$(tmp$)
+else
+	J$="N" \ if tmp$<>"" let J$="Y"
+end if
+  !If J$ <> "Y" If J$ <> "N" Goto FILL_BO_COMPLETE
+  WORK$ = J$
+
+FILLBOCOMP$ = WORK$[1,1]
+FILLBOCOMP = 0
+If FILLBOCOMP$ = "Y" Let FILLBOCOMP = 1
+RETVAL$[12,12] = FILLBOCOMP$[1,1]
+!Return 
+FILL_IF_ON_PO: Rem fill  orders copied to a po
+!Print @1,20;" 9> Allocate inventory to order lines linked to a PO ? "
+tmp$ = GetParameter$("OLPO")
+if erpCron
+	j$ = ucase$(tmp$)
+else
+	J$="N" \ if tmp$<>"" let j$="Y"
+end if
+  !If J$ <> "Y" If J$ <> "N" Goto FILL_IF_ON_PO
+  WORK$ = J$
+
+FILLIFONPO$ = WORK$[1,1]
+FILLIFONPO = 0
+If FILLIFONPO$ = "Y" Let FILLIFONPO = 1
+RETVAL$[13,13] = FILLIFONPO$[1,1]
+
+tmp$ = GetParameter$("OT9")
+let ot9$="N"
+if rtrim$(tmp$)<>"" let ot9$="Y"
+!Return 
+!! --------------------------------------------- END OF SELECTIONS -------------------------------
+If Not(GOFORWARD) Goto OUTEND1
+J8=0
+Try let J9=CHF(0) Else Let j8=49
+if j8 ! cannot do xml as 2+ different format reports!!
+	Message$="CANNOT RUN TO BROWSER!"
+	ReturnStatus=1
+	goto baddata
+Endif
+If J8 = 0 !if pdf or print, new method, after edits,setouput,dxclose
+  Call setoutput(e$,rstr$,2) !2 flag puts 0 status section in w/print in process msg, puts </page> in
+End If 
+
+If RATYPE <> 2 !* if we are doing order deallocations
+  ALLOCPHASE = 1
+  Gosub CLEARSORTFILE
+  Gosub SORTLINESDEALLOCATE
+  Gosub PROCESSLINESDEALLOCATE
+  Gosub TOTAL_ORDER
+End If 
+If RATYPE > 1 !* if we are doing back order reallocations
+  ALLOCPHASE = 2
+  Gosub CLEARSORTFILE
+  Gosub SORTLINESREALLOCATE
+  Gosub PROCESSLINESREALLOCATE
+  Gosub TOTAL_ORDER
+End If 
+Goto OUTEND
+CLEARSORTFILE: Rem
+SORTKEY$ = " ",SORTKEY$
+CLEARSORTLOOP: Rem
+Search #CH_SORT,3,1;SORTKEY$,REC_ROL,E \ If E > 2 Gosub ERR_SEARCH
+If E Goto ENDCLEARSORTLOOP
+Search #CH_SORT,5,1;SORTKEY$,REC_ROL,E \ If E Gosub ERR_SEARCH
+Goto CLEARSORTLOOP
+ENDCLEARSORTLOOP: Rem
+Return 
+SORTLINESDEALLOCATE: Rem figure out what we should keep
+PCTR = 0
+!Print @0,22;'CL';"Sorting for deallocations, please wait...";
+ROHDEALLOCATELOOP: Rem search thru order header for proper ship dates
+Search #CH_ROH,3,1;ROH_KEY$,REC_ROH,E \ If E > 2 Gosub ERR_SEARCH
+If E Or ROH_KEY$[1,2] > " 1" Return 
+PCTR = PCTR + 1
+!If Not(Fra(PCTR / 50)) Print Using "#######";@43,22;PCTR;" Records Processed";
+Gosub READ_ROH
+LET REC_ROS=H0[2]   
+ GOSUB READ_ROS:     
+if CUSTOM_CUSTOMER$="ACME"
+if H5[7]<>9 GOTO ROHDEALLOCATELOOP
+ENDIF
+If H5[7] = 2 Or (H5[7] = 3 And P60$[22,22] <> "Y") Goto ROHDEALLOCATELOOP
+IF CUSTOM_CUSTOMER$<>"PIEDMONT" 
+IF H5[7] = 8 Goto ROHDEALLOCATELOOP
+ENDIF
+If H5[7] = 4 Or H5[7] = 12 Or H5[7] = 15 Goto ROHDEALLOCATELOOP
+If H5[7] = 16 And P61$[54,54] <> "N" ! "using auth/req - otherwise do any
+  Mat Read #CH_ROH,REC_ROH,486;OWHT;
+  If Not(OWHT[0]) Goto ROHDEALLOCATELOOP
+End If 
+If H5[7] = 21 Or H5[7] = 22 Or H5[7] = 24 Goto ROHDEALLOCATELOOP
+If SHIP9$ <> "Y" And H0[10] = 999999 Goto ROHDEALLOCATELOOP
+if ot9$="Y" and h5[7]<>9 goto ROHdeallocateloop:   !"task#11684
+DATE1$ = " ",DATE1$
+If H0[10] = 999999
+  ORD_SHIP_DATE = 999999
+  Goto SKIP_999999_CHECK
+End If 
+DATE1$ = H0[10] Using "&&&&&&"
+Call DateToJulian(1,DATE1$,DATE$,FLAG)
+If FLAG Goto ROHDEALLOCATELOOP
+ORD_SHIP_DATE = DATE$
+If ORD_SHIP_DATE = 0 Goto ROHDEALLOCATELOOP
+If H5[7] = 9
+  If ORD_SHIP_DATE > REQ_COMP_DATE Goto ROHDEALLOCATELOOP
+Else 
+  If ORD_SHIP_DATE > REQ_SHIP_DATE Goto ROHDEALLOCATELOOP
+End If 
+SKIP_999999_CHECK: Rem! if they are including ship 99999 stuff, jump here
+REC_ROT = H0[3]
+Gosub READ_ROT
+Gosub UNPACK_HOLDS
+if custom_customer$<>"HTBERRY" ! normal
+	If T9[0]
+	  If Not(H6[1]) Goto ROHDEALLOCATELOOP
+	End If 
+Else ! htberry custom
+	!! PER CCT#227413-ANY ORDER TYPE 9'S TO RELEASE EVEN IF A CREDIT HOLD IS
+	!! ON THAT ORDER. JUST EASIER TO DO IT-WMB 8/2008
+	IF H5[7]<>9
+		if t9[0] 
+			if not(h6[1]) goto ROHDeallocateLoop
+		endif
+	ENDIF
+Endif ! custom or not
+Gosub GET_CUST
+ROL_KEY$ = ROH_KEY$[3,8]
+ROLDEALLOCATELOOP: Rem let's check out the order lines
+Search #CH_ROL,3,1;ROL_KEY$,REC_ROL,E
+If E If E <> 2 Gosub ERR_SEARCH
+If E = 2 Goto ROHDEALLOCATELOOP
+If ROL_KEY$[1,6] <> ROH_KEY$[3,8] Goto ROHDEALLOCATELOOP
+Gosub READ_ROL
+If custom_customer$ = "STERLING" Or custom_customer$ = "PIEDMONT"         
+if h0[0]=1                               
+if s1$[118,118]="2"                      
+IF LPRINTED GOTO ROLDEALLOCATELOOP:   
+ENDIF                                    
+ENDIF                                    
+ENDIF 
+If S2[0] = 3 Goto ROLDEALLOCATELOOP
+If L3[0] Goto ROLDEALLOCATELOOP
+If L3[1] = 0 Goto ROLDEALLOCATELOOP
+! If L3[2] > 990 Goto ROLDEALLOCATELOOP
+If L7[4] <= 0 Goto ROLDEALLOCATELOOP
+If L7[11] Goto ROLDEALLOCATELOOP
+WHSE = L4[3] \ If WHSE < 1 Or WHSE > 99 Let WHSE = H4[2]
+WORKKEY$ = " ",WORKKEY$
+WORKKEY$[1,12] = L1$[1,12]
+WORKKEY$[13] = WHSE Using "##"
+Search #CH_PRWH,2,1;WORKKEY$,REC_PRWH,E
+If E > 1 Gosub ERR_SEARCH
+If E Goto ROLDEALLOCATELOOP
+Gosub READ_PRWHSE
+Gosub GET_AVAIL
+If AVAIL >= 0 Goto ROLDEALLOCATELOOP
+If P9$[41,41] = "W" ! Call "CHKWRASL",WHSE,RASL[]
+	WHI=0 ! no whse info file
+	Call ChkWhRasl(e$,intco,CH_CNTRL,WHI,Whse,RASL[])
+Endif
+If RASL
+  Gosub CHECKFORALLOCATIONS
+  If RETVAL Or Not(FOUNDNONE) Goto ROHDEALLOCATELOOP
+End If 
+SORTKEY$ = " ",SORTKEY$
+SORTKEY$[1,2] = WHSE Using "##"
+SORTKEY$[3,14] = L1$[3,14]
+If USEPRI !* did user want to use customer priority?
+  SORTKEY$[15,15] = C7[3] Using "#"
+Else 
+  SORTKEY$[15,15] = "0"
+End If 
+SORTKEY$[16,21] = (999999 - ORD_SHIP_DATE) Using "&&&&&&"
+SORTKEY$[22,30] = ROL_KEY$
+SORTKEY$[31,36] = REC_ROH Using "######"
+Search #CH_SORT,4,1;SORTKEY$,REC_ROL,E
+If E Gosub ERR_SEARCH
+Goto ROLDEALLOCATELOOP
+ENDROLDEALLOCATELOOP: Rem
+ENDROHDEALLOCATELOOP: Rem
+Return 
+CHECKFORALLOCATIONS: Rem
+RETVAL = 0
+FOUNDNONE = 0
+WORKKEY$ = " ",WORKKEY$
+WORKKEY$[1,6] = L2[1] Using "######"
+WORKKEY$[7,9] = L3[2] Using "###"
+WORKKEY$[10,11] = WHSE Using "##"
+CHECKALLOCLOOP: Rem
+Search #CH_SORDLOT,3,3;WORKKEY$,REC_WORK,E
+If E > 2 Gosub ERR_SEARCH
+If E Or Val(WORKKEY$[1,6]) <> L2[1] Or Val(WORKKEY$[1,6]) <> L3[2] Goto ENDCHECKALLOCLOOP
+If WORKKEY$[12,17] <> "NONE  "
+  Mat Read #CH_SORDLOT,REC_WORK,60;OL3;
+  If OL3[0] - OL3[1] <> 0 !* amount allocated!
+    RETVAL = 1
+    Goto ENDCHECKALLOCLOOP
+  End If 
+Else 
+  FOUNDNONE = 1
+End If 
+Goto CHECKALLOCLOOP
+ENDCHECKALLOCLOOP: Rem
+Return 
+PROCESSLINESDEALLOCATE: Rem* go through items with stock that is overallocated
+!Print @0,22;'CL';"Processing deallocations, please wait...";
+SORTKEY$ = ""
+PCTR = 0
+PAGE = 0
+L = 99
+PROCESSLINEDEALLOCATE: Rem
+Search #CH_SORT,3,1;SORTKEY$,REC_ROL,E \ If E > 2 Gosub ERR_SEARCH
+If E Goto ENDPROCESSLINEDEALLOCATE
+PCTR = PCTR + 1
+!If Not(Fra(PCTR / 10)) Print Using "#######";@42,22;PCTR;" Records Processed";
+REC_ROH = SORTKEY$[31,36]
+Gosub READ_ROH
+LET REC_ROS=H0[2]   
+ GOSUB READ_ROS:     
+
+Gosub READ_ROL
+If custom_customer$ = "STERLING" Or custom_customer$ = "PIEDMONT"          
+if h0[0]=1                               
+if s1$[118,118]="2"                      
+IF LPRINTED GOTO PROCESSLINEDEALLOCATE:     
+ENDIF                                    
+ENDIF                                    
+ENDIF        
+WHSE = L4[3] \ If WHSE < 1 Or WHSE > 99 Let WHSE = H4[2]
+If P9$[41,41] = "W" ! Call "CHKWRASL",WHSE,RASL[]
+	WHI=0 ! no whse info file
+	Call ChkWhRasl(e$,intco,CH_CNTRL,WHI,Whse,RASL[])
+Endif
+If RASL !* check again to see if allocations done
+  Gosub CHECKFORALLOCATIONS
+  If RETVAL
+    Search #CH_SORT,5,1;SORTKEY$,REC_ROL,E
+    If E Gosub ERR_SEARCH
+    Goto PROCESSLINEDEALLOCATE
+  End If 
+End If 
+WORKKEY$ = " ",WORKKEY$
+WORKKEY$[1,12] = L1$[1,12]
+WORKKEY$[13] = WHSE Using "##"
+Search #CH_PRWH,2,1;WORKKEY$,REC_PRWH,E
+If E > 1 Gosub ERR_SEARCH
+If E !* no prod wh rec - skip / delete sort line
+  Search #CH_SORT,5,1;SORTKEY$,REC_ROL,E
+  If E Gosub ERR_SEARCH
+  Goto PROCESSLINEDEALLOCATE
+End If 
+Gosub READ_PRWHSE
+Gosub GET_AVAIL
+If AVAIL >= 0 ! we're OK now - skip / delete sort line
+  Search #CH_SORT,5,1;SORTKEY$,REC_ROL,E
+  If E Gosub ERR_SEARCH
+  Goto PROCESSLINEDEALLOCATE
+End If 
+FILLWORK = L7[4]
+If Not(FILLWORK) !* nothing shipping - skip / delete sort line
+  Search #CH_SORT,5,1;SORTKEY$,REC_ROL,E
+  If E Gosub ERR_SEARCH
+  Goto PROCESSLINEDEALLOCATE
+End If 
+Gosub GET_CUST
+BOWORK = FILLWORK
+AVAIL = AVAIL + FILLWORK
+If AVAIL > 0 Let BOWORK = FILLWORK - AVAIL ! so can be neg!? avl=20, ship=10, bowork=-10?
+H1 = REC_ROH
+R_AVAIL = ORIG_AVAIL + BOWORK
+BOAMNT = 0 \ If C7[0] Let BOAMNT = BOWORK
+Gosub READ_ROH
+LET REC_ROS=H0[2]   
+ GOSUB READ_ROS:     
+let ot2[12]=0
+if rec_roh<>0
+	Mat Read #ch_roh,rec_roh,104;H5;   ! The NEW ORDER #'s H5
+	let keysot$=h5[7] using "##"
+	search #ch_sot,2,1;keysot$,rec_sot,e
+	if e<>0
+		let ot2[12]=0
+	else
+		mat read #ch_sot,rec_sot,32;ot2;
+	endif!
+endif
+Gosub ETRACK_INIT
+Gosub SET_EDIT_STATUS
+Gosub UPDATE_PROD
+Gosub UPDATE_PRWHSE
+if P61$[111,111] = "Y" and OLM[2] GOSUB UPDATE_CPI
+Gosub UPDATE_SPRODLOT
+Gosub UPDATE_SORDLOT
+Gosub ADJUST_LINE
+Gosub ETRACK_COMPLETE
+PRODKEY$ = " ",PRODKEY$
+PRODKEY$[1,12] = L1$[1,12]
+Search #CH_PROD,2,1;PRODKEY$,PROD_REC,E
+If E Gosub ERR_SEARCH
+REC_CCODES = PFU1[8]
+Gosub READ_CCODES
+CNVTU[0] = 0
+CNVTU[1] = PFU1[8]
+CNVTU[2] = 1
+CNVTA = ORIG_AVAIL
+Gosub CONVERT
+OAVAIL = AMOUNT
+CNVTA = R_AVAIL
+Gosub CONVERT
+NAVAIL = AMOUNT
+CNVTA = BOAMNT
+Gosub CONVERT
+BOAMNT = AMOUNT
+CNVTA = BOWORK
+Gosub CONVERT
+NBOAMNT = AMOUNT
+Gosub PRINT_DETAIL
+Goto PROCESSLINEDEALLOCATE
+ENDPROCESSLINEDEALLOCATE: Rem
+Return 
+SORTLINESREALLOCATE: Rem figure out what we should keep
+PCTR = 0
+!Print @0,22;'CL';
+ROH_KEY$ = " ",ROH_KEY$
+ROH_KEY$ = 1 Using "##"
+ROH_LOOP: Rem search thru order header for proper ship dates
+Search #CH_ROH,3,1;ROH_KEY$,REC_ROH,E
+If E
+  If E <> 2 Gosub ERR_SEARCH
+  Return 
+End If 
+if custom_customer$="ACME"
+	IF P9$[45,45]="Y" OR P9$[45,45]="A"  
+	   if roh_key$[1,2]>" 2" return ! to be defor pick ticket print   
+    else
+	   if roh_key$[1,2]>" 1" return ! to be defor pick ticket print
+    endif
+Else
+	If ROH_KEY$[1,2] > " 1" Return 
+Endif
+!Print @0,22;"Sorting, Please Wait...";
+PCTR = PCTR + 1
+!If Not(Fra(PCTR / 50)) Print Using "#######";@25,22;PCTR;" Records Processed";
+Gosub READ_ROH
+REC_ROS = H0[2]
+Gosub READ_ROS
+If custom_customer$ = "STERLING" Or custom_customer$ = "PIEDMONT"                                   
+rem task 422223 release on pick orders                            
+ if h0[0]>1                                                       
+ if s1$[118,118]="2" goto roh_loop:! on pick list don't process   
+ endif                                                            
+else                                                              
+if s1$[118,118]="2" goto roh_loop:! on pick list don't process    
+endif                                                             
+if custom_customer$="ACME"
+	IF h5[7]<>9 Goto ROH_LOOP
+ENDIF
+If H5[7] = 2 Or (H5[7] = 3 And P60$[22,22] <> "Y") Goto ROH_LOOP
+if custom_customer$<>"PIEDMONT" 
+	IF H5[7] = 8 Goto ROH_LOOP
+ENDIF
+If H5[7] = 4 Or H5[7] = 12 Or H5[7] = 15 Goto ROH_LOOP
+If H5[7] = 16
+  Mat Read #CH_ROH,REC_ROH,486;OWHT;
+  If Not(OWHT[0]) Goto ROH_LOOP
+End If 
+If H5[7] = 21 Or H5[7] = 22 Or H5[7] = 24 Goto ROH_LOOP
+If H5[7] <> 16 If SHIP9$ <> "Y" And H0[10] = 999999 Goto ROH_LOOP
+if ot9$="Y" and H5[7]<>9 goto roh_loop:
+WHSE = H4[2]
+if custom_customer$<>"ATHENS" ! athens rems out
+	If H5[7] = 16
+	  Gosub GETSHIPDATE
+	  H0[10] = VDATE
+	End If 
+Endif
+DATE1$ = " ",DATE1$
+DATE1$ = H0[10] Using "&&&&&&"
+If H0[10] = 999999
+  ORD_SHIP_DATE = 999999
+  Goto SKIP_COMPDATE
+End If 
+Call DateToJulian(1,DATE1$,DATE$,FLAG)
+If FLAG Goto ROH_LOOP
+ORD_SHIP_DATE = DATE$
+if custom_customer$<>"ATHENS" ! athens rems out
+	If H5[7] = 16 Goto SKIP_COMPDATE
+Endif
+If ORD_SHIP_DATE = 0 Goto ROH_LOOP
+If H5[7] = 9 ! handle type 9's separate, ship complete, dates in future
+  If ORD_SHIP_DATE > REQ_COMP_DATE Goto ROH_LOOP
+Else 
+  If ORD_SHIP_DATE > REQ_SHIP_DATE Goto ROH_LOOP
+End If 
+SKIP_COMPDATE: Rem
+If H5[7] = 16
+  Mat Write #CH_ROH,REC_ROH,0;H0;
+End If 
+REC_ROT = H0[3]
+Gosub READ_ROT
+Gosub UNPACK_HOLDS
+IF CUSTOM_CUSTOMER$="HTBERRY"                                            
+ REM PER CCT#227413-ANY ORDER TYPE 9'S TO RELEASE EVEN IF A CREDIT HOLD IS                                                                              
+ REM ON THAT ORDER. JUST EASIER TO DO IT-WMB 8/2008                      
+	iF H5[7]<>9                                                            
+		IF T9[0]                                                              
+			IF NOT(H6[1]) GOTO ROH_LOOP                                        
+		ENDIF                                                                
+	ENDIF                                                                  
+ELSE                                                                      
+	IF T9[0]                                                                
+		IF NOT(H6[1]) GOTO ROH_LOOP                                          
+	ENDIF                                                                  
+ENDIF  !! berry                                                          
+Gosub GET_CUST
+ROL_KEY$ = ROH_KEY$[3,8]
+ROL_LOOP: Rem let's check out the order lines for backorders
+Search #CH_ROL,3,1;ROL_KEY$,REC_ROL,E
+If E If E <> 2 Gosub ERR_SEARCH
+If E = 2 Goto ROH_LOOP
+If ROL_KEY$[1,6] <> ROH_KEY$[3,8] Goto ROH_LOOP
+Gosub READ_ROL
+If custom_customer$ = "STERLING" Or custom_customer$ = "PIEDMONT"         
+if h0[0]=1                               
+if s1$[118,118]="2"                      
+IF LPRINTED GOTO ROL_LOOP:   
+ENDIF                                    
+ENDIF                                    
+ENDIF 
+If Not(FILLIFONPO) If L4[2] Goto ROL_LOOP
+If P61$[74,74] = "Y"
+  If HOLDPOFLAG$[1,1] = "Y" Goto ROL_LOOP
+End If 
+If S2[0] = 3 Goto ROL_LOOP ! LINE TYPE MESSAGE
+If L3[0] Goto ROL_LOOP ! Bypass Non-Stock item
+If L3[1] = 0 Goto ROL_LOOP ! Bypass Stock Update is N 
+! If L3[2] > 990 Goto ROL_LOOP
+If L7[11] Goto ROL_LOOP ! Bypass Back Order Release Process
+If p61$[86,86]="B" or p61$[86,86]="S"
+	if l4[2]<>0 ! has a purchase order
+		let keypol$=" ",keypol$
+		let keypol$[1,6]=l4[2] using "######"
+		POL_LOOP: ! find link on purchase order
+		Search #ch_pol,3,1;keypol$,rec_pol,e
+		if e=2 goto end_POl_Loop:
+		if e<>0 gosub err_search
+		let tmp3=keypol$[1,6]\if tmp3<>l4[2] goto end_pol_loop:
+		mat read #ch_pol,rec_pol,0;pol1;
+		if pol1[0]<>3 ! not filled
+			mat read #ch_pol,rec_pol,24;pol3;
+			mat read #ch_pol,rec_pol,232;popl4;
+			if pol3[1]=L4[0] and popl4[10]=l4[2] and popl4[11]=l3[2] goto rol_loop: ! prod rec, order # and line # matches
+		endif
+		goto pol_loop:
+		End_POL_loop:
+	endif
+ENDIF
+
+BACK_ORDERED = 0
+If L7[3] Or (CMPFLAG And (L7[0] + L7[4]) < L7[2]) !* is BO: put in sort file
+  SORTKEY$ = " ",SORTKEY$
+  If USEPRI !* did user want to use customer priority?
+    SORTKEY$[1,1] = 9 - C7[3] Using "#"
+  Else 
+    SORTKEY$[1,1] = "0"
+  End If 
+  SORTKEY$[2,7] = ORD_SHIP_DATE Using "&&&&&&"
+  SORTKEY$[8,16] = ROL_KEY$
+  SORTKEY$[17,22] = REC_ROH Using "######"
+  Search #CH_SORT,4,1;SORTKEY$,REC_ROL,E
+  If E Gosub ERR_SEARCH
+End If 
+Goto ROL_LOOP
+Return 
+PROCESSLINESREALLOCATE: Rem go thru sort file of backordered items see what we can fill
+! Print @0,22;'CL';
+SORTKEY$ = ""
+PCTR = 0
+PAGE = 0
+L = 99
+PROCESS_LINE_LOOP: Rem
+Search #CH_SORT,3,1;SORTKEY$,REC_ROL,E
+If E If E <> 2 Gosub ERR_SEARCH
+If E Return 
+!Print @0,22;"Updating, Please Wait...";
+PCTR = PCTR + 1
+!If Not(Fra(PCTR / 10)) Print Using "#######";@25,22;PCTR;" Records Processed";
+Gosub READ_ROL
+If custom_customer$ = "STERLING" Or custom_customer$ = "PIEDMONT"         
+if h0[0]=1                               
+if s1$[118,118]="2"                      
+IF LPRINTED GOTO PROCESS_LINE_LOOP:   
+ENDIF                                    
+ENDIF                                    
+ENDIF 
+WHSE = L4[3]
+! IF L7[11]=0 LET L7[12]=0 ! No flg - no relqty!!
+If P9$[41,41] = "W" ! Call "CHKWRASL",WHSE,RASL[]
+	WHI=0 ! no whse info file
+	Call ChkWhRasl(e$,intco,CH_CNTRL,WHI,Whse,RASL[])
+Endif
+WORKKEY$ = " ",WORKKEY$
+WORKKEY$[1,12] = L1$[1,12]
+WORKKEY$[13] = WHSE Using "##"
+Search #CH_PRWH,2,1;WORKKEY$,REC_PRWH,E
+If Not(E)
+  FILLWORK = 0
+  BACK_ORDERED = 0
+  Gosub READ_PRWHSE
+  Gosub GET_AVAIL
+  If AVAIL <= 0 ! no available delete out of sort file
+    Search #CH_SORT,5,1;SORTKEY$,REC_ROL,E
+    If E Gosub ERR_SEARCH
+  Else 
+    If L7[3]
+      FILLWORK = L7[3]
+      BACK_ORDERED = 1
+    Else 
+      If CMPFLAG
+        FILLWORK = L7[2] - (L7[0] + L7[4] + L7[12]) ! ORD-(PSHIP+SHIP+BOREL)
+      End If 
+    End If 
+  End If 
+  If FILLWORK<=0 Goto PROCESS_LINE_LOOP ! DON'T INCLUDE OVERSHIPS!
+  BOWORK = FILLWORK
+  H1 = SORTKEY$[17]
+  REC_ROH = H1
+  Gosub READ_ROH
+  LET REC_ROS=H0[2]   
+ GOSUB READ_ROS:     
+  If H5[7] = 9 !  a ship complete order? or fill bo compete
+    If FILLSHIPCOMP ! if only fill if we can completely fill
+      If AVAIL < FILLWORK
+        Search #CH_SORT,5,1;SORTKEY$,REC_ROL,E
+        If E Gosub ERR_SEARCH
+        goto process_line_loop ! Goto PROCESSLINESREALLOCATE
+      End If 
+    End If 
+  Else 
+    If FILLBOCOMP ! if only fill if we can completely fill
+      If AVAIL < FILLWORK
+        Search #CH_SORT,5,1;SORTKEY$,REC_ROL,E
+        If E Gosub ERR_SEARCH
+        goto process_line_loop ! Goto PROCESSLINESREALLOCATE
+      End If 
+    End If 
+  End If 
+  AVAIL = AVAIL - FILLWORK
+  If AVAIL < 0 Let BOWORK = FILLWORK + AVAIL
+  H1 = SORTKEY$[17]
+  REC_ROH = H1
+  Gosub READ_ROH
+  LET REC_ROS=H0[2]   
+ GOSUB READ_ROS:     
+  R_AVAIL = ORIG_AVAIL - BOWORK
+  BOAMNT = FILLWORK
+  Gosub READ_ROH
+  LET REC_ROS=H0[2]   
+ GOSUB READ_ROS:     
+  Gosub ETRACK_INIT
+  Gosub GET_CUST
+  Gosub SET_EDIT_STATUS
+  If SHIP9$ = "Y" And H0[10] = 999999
+    Gosub GETSHIPDATE
+    Write #CH_ROH,H1,40;H0[10]
+  End If 
+  Gosub UPDATE_PROD
+  Gosub UPDATE_PRWHSE
+  if P61$[111,111] = "Y" and OLM[2] GOSUB UPDATE_CPI
+  Gosub UPDATE_SPRODLOT
+  Gosub UPDATE_SORDLOT
+  Gosub ADJUST_LINE
+  Gosub ETRACK_COMPLETE
+  PRODKEY$ = " ",PRODKEY$
+  PRODKEY$[1,12] = L1$[1,12]
+  Search #CH_PROD,2,1;PRODKEY$,PROD_REC,E
+  If E Gosub ERR_SEARCH
+  REC_CCODES = PFU1[8]
+  Gosub READ_CCODES
+  CNVTU[0] = 0
+  CNVTU[1] = PFU1[8]
+  CNVTU[2] = 1
+  CNVTA = ORIG_AVAIL
+  Gosub CONVERT
+  OAVAIL = AMOUNT
+  CNVTA = R_AVAIL
+  Gosub CONVERT
+  NAVAIL = AMOUNT
+  CNVTA = BOAMNT
+  Gosub CONVERT
+  BOAMNT = AMOUNT
+  CNVTA = BOWORK
+  Gosub CONVERT
+  NBOAMNT = AMOUNT
+  Gosub PRINT_DETAIL
+End If 
+Goto PROCESS_LINE_LOOP
+Return 
+GET_AVAIL: Rem ===== get available
+AVAIL = 0
+AVAIL = W3[0] - W3[2]
+If INCONPO Let AVAIL = AVAIL + W3[1]
+ORIG_AVAIL = AVAIL
+Return 
+UPDATE_PRWHSE: Rem update whse record
+If P9$[33,33] = "N" Return 
+Mat Read #CH_PRWH,REC_PRWH,78;W3
+Mat Read #CH_PRWH,REC_PRWH,780;WHLV
+Mat Read #CH_PRWH,REC_PRWH,980;WHLBS
+If ALLOCPHASE = 1
+  W3[2] = W3[2] - BOWORK
+  If A$[127,127] = "Y" Let WHLBS[1] = WHLBS[1] - (LBSHIP * BOWORK)
+  WHLV[0] = WHLV[0] - BOWORK
+End If 
+If ALLOCPHASE = 2
+  W3[2] = W3[2] + BOWORK
+  If A$[127,127] = "Y" Let WHLBS[1] = WHLBS[1] + (LBSHIP * Sgn(BOWORK))
+  WHLV[0] = WHLV[0] + BOWORK
+End If
+if w3[2]<0 let w3[2]=0
+if whlbs[1]<0 let whlbs[1]=0
+if whlv[0]<0 let whlv[0]=0
+Mat Write #CH_PRWH,REC_PRWH,78;W3
+Mat Write #CH_PRWH,REC_PRWH,780;WHLV;
+Mat Write #CH_PRWH,REC_PRWH,980;WHLBS;
+Return 
+UPDATE_CPI: !
+	if p61$[111,111] <> "Y" return
+	! determine if this line
+	! is on a cpi contract
+	tmp$ = " ",tmp$
+	tmp$[1,6] = OLM[2] using "C#####"
+	tmp$[7,18] = l1$[1,12]
+	search #ch_cpidet,2,1;tmp$,r_cpi,e \ if e>1 GOSUB ERR_SEARCH
+	if e return ! not a cpi contract
+	mat read #ch_cpidet,r_cpi,42;ResStkAmt;
+	if not(ResStkAmt) return ! not a reserve stock contract
+	mat read #ch_cpidet,r_cpi,68;QtyAllocated
+	If ALLOCPHASE = 1
+		QtyAllocated = QtyAllocated - BOWORK
+	End If 
+	If ALLOCPHASE = 2
+		QtyAllocated = QtyAllocated + BOWORK
+	End If
+	mat write #ch_cpidet,r_cpi,68;QtyAllocated;
+Return
+UPDATE_PROD: Rem UPDATE PROD
+WORKKEY$ = L1$[1,12]
+Search #CH_PROD,2,1;WORKKEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+Mat Read #CH_PROD,REC_WORK;A$
+Mat Read #CH_PROD,REC_WORK,156;B
+Mat Read #CH_PROD,REC_WORK,256;A
+Mat Read #CH_PROD,REC_WORK,512;PFU1
+Mat Read #CH_PROD,REC_WORK,554;PFU2
+Mat Read #CH_PROD,REC_WORK,664;LBSORD
+Mat Read #CH_PROD,REC_WORK,990;PLV
+If A[5] <= 0 Let A[5] = 1
+LBSHIP = FNR(Abs((L6[4] * BOWORK) / A[5]))
+If ALLOCPHASE = 1
+  A[3] = A[3] - BOWORK
+  If A$[127,127] = "Y" Let LBSORD = LBSORD - (LBSHIP * BOWORK)
+  PLV[0] = PLV[0] - BOWORK
+End If 
+If ALLOCPHASE = 2
+  A[3] = A[3] + BOWORK
+  If A$[127,127] = "Y" Let LBSORD = LBSORD + (LBSHIP * Sgn(BOWORK))
+  PLV[0] = PLV[0] + BOWORK
+End If 
+if A[3]<0 LET A[3]=0
+IF LBSORD<0 LET LBSORD=0
+IF PLV[0]<0 LET PLV[0]=0
+Mat Write #CH_PROD,REC_WORK,256;A
+Mat Write #CH_PROD,REC_WORK,664;LBSORD
+Mat Write #CH_PROD,REC_WORK,990;PLV;
+if CH_SQL >= 0
+	e = prod_UpdateSQLFromDL4(e$, intCo, WORKKEY$, CH_SQL, CH_PROD)
+	if e <> 1 ! returns the number of records add/updated/deleted
+		gosub ERR_SEARCH
+	end if
+end if
+Return 
+UPDATE_SPRODLOT: Rem UPDATE SPROD LOT
+WORKKEY$ = " ",WORKKEY$
+WORKKEY$[1,12] = L1$[1,12]
+WORKKEY$[13,14] = WHSE Using "##"
+WORKKEY$[15,20] = "STOCK "
+WORKKEY$[21,27] = WHSE Using "STOCK##"
+workkey$[28]="" ! in case exact key match
+UPD_SPRD_LOOP: Rem
+Search #CH_SPRODLOT,3,2;WORKKEY$,REC_WORK,E \ If E > 2 Gosub ERR_SEARCH
+If Not(E) And WORKKEY$[1,12] = L1$[1,12] And WORKKEY$[15,20] = "STOCK " And WORKKEY$[21,25] = "STOCK"
+  Mat Read #CH_SPRODLOT,REC_WORK;PO$
+  Mat Read #CH_SPRODLOT,REC_WORK,66;P1
+  Mat Read #CH_SPRODLOT,REC_WORK,70;P2
+  Mat Read #CH_SPRODLOT,REC_WORK,82;P3
+  Read #CH_SPRODLOT,REC_WORK,112;P4
+  Mat Read #CH_SPRODLOT,REC_WORK,114;P1$
+  Read #CH_SPRODLOT,REC_WORK,120;PLTR
+  If P1[0] <> WHSE Goto UPD_SPRD_LOOP
+  If ALLOCPHASE = 1 And C7[0] Let P3[4] = P3[4] + BOWORK
+  If ALLOCPHASE = 2 And BACK_ORDERED Let P3[4] = P3[4] - BOWORK
+  If P3[4] < 0 Let P3[4] = 0
+  If Not(RASL) ! non-rasl
+    If ALLOCPHASE = 1 Let P3[3] = P3[3] - BOWORK
+    If ALLOCPHASE = 2 Let P3[3] = P3[3] + BOWORK
+  End If 
+  if p3[3]<0 let p3[3]=0
+  Mat Write #CH_SPRODLOT,REC_WORK,82;P3;
+Else 
+  If C7[0] And ALLOCPHASE = 1 Gosub ADD_SPRODLOT
+End If 
+If RASL !rasl use "NONE" location for qty shipped
+  WORKKEY1$ = " ",WORKKEY1$
+  WORKKEY1$[1,12] = L1$[1,12]
+  WORKKEY1$[13,14] = WHSE Using "##"
+  WORKKEY1$[15,20] = "NONE  "
+UPD_SPRD_LOOP1: Rem
+  Search #CH_SPRODLOT,3,2;WORKKEY1$,REC_WORK,E \ If E > 2 Gosub ERR_SEARCH
+  If Not(E) And WORKKEY1$[1,12] = L1$[1,12] And WORKKEY1$[15,20] = "NONE  "
+    If WORKKEY1$[21,25] <> "STOCK" Goto UPD_SPRD_LOOP1
+    Mat Read #CH_SPRODLOT,REC_WORK,66;P1
+    Mat Read #CH_SPRODLOT,REC_WORK,82;P3
+    If P1[0] <> WHSE Goto UPD_SPRD_LOOP1
+    If ALLOCPHASE = 1 Let P3[3] = P3[3] - BOWORK
+    If ALLOCPHASE = 2 Let P3[3] = P3[3] + BOWORK
+	if p3[3]<0 let p3[3]=0
+    Mat Write #CH_SPRODLOT,REC_WORK,82;P3;
+  Else 
+    If ALLOCPHASE = 1 Let E = 0 \ Gosub ERR_SEARCH
+    Gosub ADD_SPRODLOT
+  End If 
+End If 
+END_UPD_SPRD_LOOP: Rem
+Return 
+UPDATE_SORDLOT: Rem UPDATE SORDLOT
+WORKKEY$ = " ",WORKKEY$
+WORKKEY$[1,12] = L1$[1,12]
+WORKKEY$[13,18] = L2[1] Using "######"
+WORKKEY$[19,21] = L3[2] Using "###"
+WORKKEY$[22,23] = WHSE Using "##"
+WORKKEY$[24,29] = "STOCK "
+UPD_SORDLOT_LOOP: Rem
+Search #CH_SORDLOT,3,1;WORKKEY$,REC_WORK,E \ If E > 2 Gosub ERR_SEARCH
+If Not(E) And WORKKEY$[1,12] = L1$[1,12] And WORKKEY$[24,29] = "STOCK " ! prod
+  X2 = WORKKEY$[13,18]
+  If X2 <> L2[1] Goto UPD_SORDLOT_LOOP
+  X2 = WORKKEY$[19,21]
+  If X2 <> L3[2] Goto UPD_SORDLOT_LOOP
+  X2 = WORKKEY$[22,23]
+  If X2 <> WHSE Goto UPD_SORDLOT_LOOP
+  Mat Read #CH_SORDLOT,REC_WORK,60;OL3;
+  If Not(RASL) ! non-rasl increase qty required/fulfilled
+    If ALLOCPHASE = 1
+      OL3[1] = OL3[1] - BOWORK
+      If C7[0]
+        OL3[3] = OL3[3] + BOWORK
+      Else 
+        OL3[3] = OL3[3] - BOWORK
+      End If 
+    End If 
+    If ALLOCPHASE = 2
+      OL3[1] = OL3[1] + BOWORK
+      If BACK_ORDERED
+        OL3[3] = OL3[3] - BOWORK
+      Else 
+        OL3[3] = OL3[3] + BOWORK
+      End If 
+    End If 
+	IF OL3[1]<0 LET OL3[1]=0
+	IF OL3[3]<0 LET OL3[3]=0
+  Else 
+    If ALLOCPHASE = 1 And C7[0]
+      OL3[0] = OL3[0] + BOWORK
+      OL3[3] = OL3[3] + BOWORK
+    End If 
+    If ALLOCPHASE = 2
+      OL3[0] = OL3[0] - BOWORK
+      OL3[3] = OL3[3] - BOWORK
+    End If 
+  End If 
+  if ol3[1]<0 let ol3[1]=0
+  if ol3[0]<0 let ol3[0]=0
+  IF OL3[3]<0 LET OL3[3]=0
+  Mat Write #CH_SORDLOT,REC_WORK,60;OL3;
+  If Not(OL3[0] + OL3[1] + OL3[3]) Gosub DEL_SORDLOT ! was If RASL (do for all)
+Else 
+  If RASL And ALLOCPHASE = 1 And C7[0] Gosub ADD_SORDLOT
+  If Not(RASL) And ALLOCPHASE = 2 And C7[0]
+    ALLOCPHASE = 3
+    Gosub ADD_SORDLOT
+    ALLOCPHASE = 2
+  End If 
+End If 
+If RASL !RASL UPDATE "NONE" LOCATION
+  WORKKEY1$ = " ",WORKKEY1$
+  WORKKEY1$[1,12] = L1$[1,12]
+  WORKKEY1$[13,18] = L2[1] Using "######"
+  WORKKEY1$[19,21] = L3[2] Using "###"
+  WORKKEY1$[22,23] = WHSE Using "##"
+  WORKKEY1$[24,29] = "NONE  "
+UPD_SORDLOT_LOOP1: Rem
+  Search #CH_SORDLOT,3,1;WORKKEY1$,REC_WORK,E \ If E > 2 Gosub ERR_SEARCH
+  If Not(E) And WORKKEY1$[1,12] = L1$[1,12] And WORKKEY1$[24,29] = "NONE  " ! prod
+    X2 = WORKKEY1$[13,18]
+    If X2 <> L2[1] Goto UPD_SORDLOT_LOOP1
+    X2 = WORKKEY1$[19,21]
+    If X2 <> L3[2] Goto UPD_SORDLOT_LOOP1
+    X2 = WORKKEY1$[22,23]
+    If X2 <> WHSE Goto UPD_SORDLOT_LOOP1
+    Mat Read #CH_SORDLOT,REC_WORK,60;OL3;
+    If ALLOCPHASE = 1
+      OL3[0] = OL3[0] - BOWORK
+      OL3[1] = OL3[1] - BOWORK
+    End If 
+    If ALLOCPHASE = 2
+      OL3[0] = OL3[0] + BOWORK
+      OL3[1] = OL3[1] + BOWORK
+    End If 
+	if ol3[0]<0 let ol3[0]=0
+	if ol3[1]<0 let ol3[1]=0
+    Mat Write #CH_SORDLOT,REC_WORK,60;OL3;
+  Else 
+    If ALLOCPHASE = 1 Let E = 0 \ Gosub ERR_SEARCH
+    Gosub ADD_SORDLOT
+  End If 
+End If 
+END_UPD_SORDLOT_LOOP: Rem
+Return 
+ADJUST_LINE: Rem ADJUST LINE
+If ALLOCPHASE = 1
+  If C7[0] Let L7[3] = L7[3] + BOWORK
+  L7[4] = L7[4] - BOWORK
+  IF CUSTOM_CUSTOMER$="JPAPER"                                 
+  IF SRN[0]=1 LET SRN[0]=0                                   
+  WRITE #CH_ROS,REC_ROS,154;SRN[0] ! clear the roadnet flag                                                           
+ENDIF          
+End If 
+If ALLOCPHASE = 2
+  If BACK_ORDERED Let L7[3] = L7[3] - BOWORK
+  L7[4] = L7[4] + BOWORK
+  IF CUSTOM_CUSTOMER$="JPAPER"                                 
+  IF SRN[0]=1 LET SRN[0]=0                                   
+  WRITE #CH_ROS,REC_ROS,154;SRN[0] ! clear the roadnet flag                                                           
+ENDIF       
+End If
+if l7[3]<0 let l7[3]=0
+if l7[4]<0 let l7[4]=0
+If UN[1] <> -2 Let L5[3] = FNR(L7[4] * OLM[3])
+If S2[1] ! order cuts
+  L7[5] = FNU(L7[4] / S2[1])
+Else 
+  L7[5] = L7[4]
+End If 
+S3[4] = FNR(Abs((L6[4] * L7[4]) / A[5]))
+If S3[8] <> -3 Let S3[9] = FNR(S3[0] * L7[4])
+If S3[11] <> -3 Let S3[10] = FNR(S3[1] * L7[4])
+  ! update sales order load cost section
+let ot2[12]=0
+If not(rec_roh) let rec_roh=h1
+if rec_roh<>0
+	Mat Read #ch_roh,rec_roh,104;H5;   ! The NEW ORDER #'s H5
+	let keysot$=h5[7] using "##"
+	search #ch_sot,2,1;keysot$,rec_sot,e
+	if not(e)
+		mat read #ch_sot,rec_sot,32;ot2;
+	endif!
+endif
+if ot2[12]<>1 goto endloadcstupd:
+if l3[0]<>0 goto endloadcstupd: ! not a stock item
+if lcO=11 goto endloadcstupd: !11 - special salesman cost
+if lcO=10 goto endloadcstupd: ! !10 - rebate salesman cost 
+if l4[0]<=0 goto endloadcstupd: ! 
+! read the product file
+REC_PROD = L4[0]
+gosub read_prod1:   
+let ld1=0 ! that is the new load cost
+ORGLOADCOST=0
+NEWLOADCOST=0
+If P9$[32,32] = "Y" ! warehouse pricing
+	! get prodwhse file
+	let whlm[0]=0;w3[17]=0
+	Key_prwh$ = " ",Key_prwh$
+	Key_prwh$[1,12] =L1$[1,12]
+	Key_prwh$[13,14] = H4[2] Using "##"
+	Search #CH_PRWH,2,1;Key_prwh$,REC_PRWH,E \ If E goto outend:
+	If Not(E)
+		gosub read_prwh:
+	else
+		goto endwhload:
+	endif
+	if whlm[0]=0 ! no table use warehouse load cost
+       	LD1 = W3[17]
+		if LD1<=0 goto endwhload:
+		GOTO ENDLOADCOST:
+	endif
+	WH = H4[2];LTBL = WHLM[0]
+    Gosub CALC_LOAD
+    LD1 = CNVTA
+	if ld1>0 goto endloadcost: 
+End If 
+endwhload: ! end warehouse load costing
+! check the product load table
+If LM[0]
+       WH = 0;LTBL = LM[0]
+       Gosub CALC_LOAD
+       LD1 = CNVTA 
+Else 
+      	LD1 = B[8]
+End If ! find load table
+endloadcost: ! end finding load cost
+if ld1>0 and ld1<>l5[1]
+	let OrgLoadCost=l5[1]
+	let NewLoadCost=ld1 ! get load cost		
+	let l5[1]=ld1
+endif
+endloadcstupd: ! 
+If UN[2] <> -2 
+	Let S3[12] = FNR((L5[1] * L7[4]) + S3[10])
+ELSE 
+	LET S3[12]=FNR(L5[1])
+ENDIF
+Gosub WRITE_ROL
+Return 
+TOTAL_ORDER: Rem retotal order
+SORTKEY$ = ""
+PAGE = 0
+L = 99
+TOTAL_LOOP: Rem reset channel stuff when looping
+Clear CH[]
+CH[2] = CH_ZONE;CH[3] = CH_PROD;CH[4] = CH_COMCDE;CH[5] = CH_CUST
+CH[6] = CH_PRWH;CH[7] = CH_ROS;CH[8] = CH_ROH;CH[9] = CH_ROT;CH[10] = CH_ROL
+CH[11] = CH_SPRODDESC;CH[12] = CH_CUSTTAX;CH[13] = CH_SLSM;CH[14] = CH_TAXCODE
+CH[15] = CH_SPRODLOT;CH[16] = CH_SORDLOT;CH[17] = CH_CCODES
+if P61$[109,109]="Y" let ch[20]=0 ! "ar terms
+Clear PassInfo[]
+PASSINFO[0] = 0                      
+ if P61$[57,57]="Y"  ! screen 3 page 2 field 17      
+ passinfo[1]=1 ! do a  cred check                   
+ ELSE                                                
+ passinfo[1]=0 ! dont do a  cred check               
+ ENDIF                                               
+PASSINFO[2] = 0
+PASSINFO[3] = 1
+PASSINFO[4] = 1
+If P60$[40,40] = "S" Let PASSINFO[4] = 1
+PASSINFO[5] = 0
+PASSINFO[6] = 1
+PASSINFO[10] = 99! ar term misc cost charge   - bypass  
+Search #CH_SORT,3,1;SORTKEY$,H1,E
+If E
+  If E <> 2 Gosub ERR_SEARCH
+  Return 
+End If 
+If ALLOCPHASE = 1 Let H1 = SORTKEY$[31]
+If ALLOCPHASE = 2 Let H1 = SORTKEY$[17]
+S9[4] = 266
+Call "ordertotal",S9[],H1,PASSINFO[],CH[],T1[],T2[],MCODE[],MCHARGE[],TOT[],MCTXBL[],DCLVL,R5,V1,CFIN[]
+If ALLOCPHASE = 1 Let H1 = SORTKEY$[31]
+If ALLOCPHASE = 2 Let H1 = SORTKEY$[17]
+S9[0] = 0;S9[2] = 0
+REC_ROH = H1
+Gosub READ_ROH
+LET REC_ROS=H0[2]   
+ GOSUB READ_ROS:     
+If T2[21] And Not(H6[1]) Gosub PRINT_HOLD
+Gosub CHANGE_OT9
+If UPDATEOTFLAG
+	If custom_customer$<>"HTBERRY" ! normal
+		If H5[7] = 9  ! FUTURE ORDER
+			Let H5[7] = 1
+			Mat Write #CH_ROH,REC_ROH,104;H5;
+			! check if delivery charges need to be calculated
+			if P61$[36,36] <> "Y"
+				S9[4] = 266
+				Call "ordertotal",S9[],H1,PASSINFO[],CH[],T1[],T2[],MCODE[],MCHARGE[],TOT[],MCTXBL[],DCLVL,R5,V1,CFIN[]
+			else
+				If custom_customer$="RUTHERFORD"
+				! check if cod cust
+					CODCUST = 0 
+					if h0[12]>0
+						Try Close #ch_tmp Else Rem
+						Open #CH_tmp,"2/ARTERMCODE" + Str$(COID)
+						Mat Read #CH_tmp,h0[12],52;arterm2;  
+						If arterm2[1] = 99 Let CODCUST = 1 
+						Try Close #ch_tmp Else Rem
+						if codcust<>0
+							Call "ordertotal",S9[],H1,PASSINFO[],CH[],T1[],T2[],MCODE[],MCHARGE[],TOT[],MCTXBL[],DCLVL,R5,V1,CFIN[]
+						endif ! if codcust
+					endif ! if arterm>0
+				endif ! if rutherford
+			endif ! if deliv chrg 36,36 <> Y
+			If P61$[34,34]="Y" Gosub CSMZone: ! per ld add cust/ship multizone
+		Endif ! H5[7]=9 future order
+	Else ! custom htberry
+		IF H5[7]=9 
+			if h5[9]=9! source code 9 CCT 224914
+				let	h5[7]=35!
+			else
+				LET H5[7]=1              
+			end if
+			MAT  WRITE #CH_ROH,REC_ROH,104;H5;  
+		end if
+	Endif ! of custom or not
+End If ! updateotflag
+If H5[7] = 16 OR H5[7]=8
+  S9[0] = H0[7]
+  S9[2] = REC_ROH
+  OPEN_CHAN[0] = CH_PROD
+  OPEN_CHAN[1] = CH_ROH
+  OPEN_CHAN[2] = CH_ROL
+  OPEN_CHAN[3] = CH_SORDLOT
+  OPEN_CHAN[4] = CH_SPRODLOT
+  Call "MX201LCON5.dl4",IntCo,CH_Cntrl,S9[],OPEN_CHAN[]
+End If 
+Gosub CLEAR_EDIT_STATUS
+If ALLOCPHASE = 2 Let SORTKEY$[17,22] = "999999999"
+Goto TOTAL_LOOP
+Return 
+CHANGE_OT9: Rem"cct158507
+UPDATEOTFLAG = 0
+BOFLAG = 0
+If H5[7] <> 9 Return 
+ROL_KEY$ = H0[7] Using "######"
+ROL_LOOP2: Rem let's check out the order lines for backorders
+Search #CH_ROL,3,1;ROL_KEY$,REC_ROL,E
+If E If E <> 2 Gosub ERR_SEARCH
+If E = 2 Goto END_CHANGE_OT9
+ORDNUM = ROL_KEY$[1,6]
+If ORDNUM <> H0[7] Goto END_CHANGE_OT9
+Gosub READ_ROL
+If custom_customer$ = "STERLING" Or custom_customer$ = "PIEDMONT"           
+if h0[0]=1                               
+if s1$[118,118]="2"                      
+IF LPRINTED GOTO ROL_LOOP2:    
+ENDIF                                    
+ENDIF                                    
+ENDIF 
+If P61$[74,74] = "Y"
+  If HOLDPOFLAG$[1,1] = "Y" Goto ROL_LOOP2
+End If 
+If S2[0] = 3 Goto ROL_LOOP2
+if custom_customer$<>"HTBERRY" ! normal
+	If L3[0] Goto ROL_LOOP2
+	! If L3[2] > 990 Goto ROL_LOOP2
+Endif ! htberry above 2 lines REM'D OUT
+If L7[11] Goto ROL_LOOP2
+If L7[3] Let BOFLAG = 1
+Goto ROL_LOOP2:
+END_CHANGE_OT9: Rem
+If BOFLAG Let UPDATEOTFLAG = 0 Else Let UPDATEOTFLAG = 1
+if CUSTOM_CUSTOMER$="ACME" Let UPDATEOTFLAG = 0  ! acme does not update type
+Return
+
+CSMZone: ! "Cust/Shipto MultiZone
+! "passed: Cust,Shipto,OrdDate,OrdDiv,OrdWhse,ShipDate,Zone,Stop
+! "Back will be new ShipDate,Zone,Stop
+If Not(Srn[2]) Let SRN[2]=H0[4]
+Let X2=H0[9];H0[9]=D8 ! "set to today for Calc
+! save orig date and set date to TODAY
+Let CSZone$=S2$[19,20] ! curr zone
+Call "MXOHCSZONE",SRN[2],SRN[1],H0[9],H5[8],H4[2],H0[10],CSZone$,H4[1],IntCo
+
+IF Custom_customer$="GSC" or custom_customer$="JPAPER"
+	if H4[1] Let C7[4]=H4[1] ! "stop number
+Else
+	Let S2$[19,20]=CSZone$ ! "zone
+Endif
+Let H0[9]=X2 ! "set back to original
+! now write the date,zone,stop,etc
+MAT WRITE #CH_ROH,REC_ROH,0;H0;
+MAT WRITE #CH_ROH,REC_ROH,78;H4;
+MAT WRITE #CH_ROH,REC_ROH,104;H5;
+mat write #CH_ROS,REC_ROS,126;S2$;
+mat Write #CH_ROS,REC_ROS,154;SRN;
+
+Return
+
+PRINT_DETAIL: Rem
+Gosub PRINT_DETAIL_HEADING
+Print #0; Using " ###### ";A$[140,151];" ";A$[9,35];H0[4];A1$[31,55];L2[1];
+Print #0; Using "#### ";L3[2];
+If ALLOCPHASE = 1 Print #0; Using " --------#";OAVAIL;BOAMNT;NBOAMNT;NAVAIL;" ";CCD$[1,4]
+If ALLOCPHASE = 2 Print #0; Using " #########";OAVAIL;BOAMNT;NBOAMNT;NAVAIL;" ";CCD$[1,4]
+L = L + 1
+Return 
+PRINT_HOLD: Rem print stuff on hold
+Gosub PRINT_HOLD_HEADING
+Gosub GET_CUST
+Gosub UNPACK_HOLDS
+Print #0; Using "######"; Tab 1;H0[7]; Tab 12;H0[4]; Tab 25;A1$[31,60]
+L = L + 1
+Return 
+PRINT_DETAIL_HEADING: Rem print heading for deatil lines
+If L + 1 <= PAGE_LEN Return 
+If PAGE Print #0;"\14\";
+PAGE = PAGE + 1 \ L = 7
+Print #0;"\15\";
+Print #0;"-266- ";DISPSHIPDATE$; Tab (64 - Len(CNAME$) / 2);CNAME$; Tab 120;"PAGE";PAGE
+If ALLOCPHASE = 1
+  Print #0; Tab 26;"DEALLOCATE ORDERS FOR OVERALLOCATED STOCK AUDIT LISTING - ";"IN STOCKING UNIT"
+End If 
+If ALLOCPHASE = 2
+  Print #0; Tab 36;"REALLOCATE BACK ORDER AUDIT LISTING - IN STOCKING UNIT"
+End If 
+Print #0; Tab 10;"FOR SHIP DATE: ";DISPSHIPDATE$; Tab 50;"FOR SHIP COMPLETE DATE: ";DISPCMPDATE$
+Print #0;""
+If ALLOCPHASE = 1
+  Print #0; Tab 88;"ORIGINAL"; Tab 100;"SHIP AMT."; Tab 110;"AMT. ADD"; Tab 120;"NEW"
+End If 
+If ALLOCPHASE = 2
+  Print #0; Tab 88;"ORIGINAL"; Tab 100;"AMOUNT"; Tab 110;"AMOUNT"; Tab 120;"NEW"
+End If 
+Print #0;"PRODUCT "; Tab 13;"DESCRIPTION"; Tab 39;"CUSTOMER"; Tab 58;"NAME";
+Print #0; Tab 73;"ORDER # "; Tab 81;"LINE";
+If ALLOCPHASE = 1
+  Print #0; Tab 87;"AVAILABLE "; Tab 100;"REDUCED";
+  Print #0; Tab 110;"TO BO"; Tab 116;"AVAILABLE"
+End If 
+If ALLOCPHASE = 2
+  Print #0; Tab 87;"AVAILABLE "; Tab 100;"NEEDED";
+  Print #0; Tab 110;"FILLED "; Tab 116;"AVAILABLE"
+End If 
+Print #0;""
+Return 
+PRINT_HOLD_HEADING: Rem print heading for orders put on hold
+If L + 1 <= PAGE_LEN Return 
+Print #0;"\14\";
+PAGE = PAGE + 1 \ L = 5
+Print #0;"\15\";
+Print #0;"-266- ";DISPSHIPDATE$; Tab (64 - Len(CNAME$) / 2);CNAME$; Tab 120;"PAGE";PAGE
+if custom_customer$<>"HTBERRY"
+	Print #0; Tab 46;"REALLOCATE BACK ORDER - ORDERS PUT ON HOLD LISTING"
+Else
+	PRINT #0; TAB 46;"REALLOCATE BACK ORDER CREDIT HOLD LISTING" 
+Endif
+Print #0; Tab 10;"FOR SHIP DATE: ";DISPSHIPDATE$; Tab 50;"FOR SHIP COMPLETE DATE: ";DISPCMPDATE$
+Print #0;""
+Print #0;"ORDER # "; Tab 10;"CUSTOMER"; Tab 31;"NAME"
+Print #0;""
+Return 
+GET_CUST: Rem
+K5$ = H0[4] Using "######"
+Search #CH_CUST,2,1;K5$,R5,E
+If E Gosub ERR_SEARCH
+Mat Read #CH_CUST,R5;A1$
+Mat Read #CH_CUST,R5,378;C7
+Read #CH_CUST,R5,412;C8
+Mat Read #CH_CUST,R5,486;A0
+Mat Read #CH_CUST,R5,544;CFIN;
+Return 
+GET_SLSM: Rem GET SLSM/COMM
+S3$ = " ",S3$ \ S3$ = H0[11] Using "###"
+Search #CH_SLSM,2,1;S3$,V1,E
+If E Gosub ERR_SEARCH
+Read #CH_SLSM,V1,118;C9;
+Return 
+DO_DISCOUNT: Rem
+If H6[7] = 0 Let T2[3] = 0
+If H6[7] Let T2[3] = FNR(T2[1] * H6[7] * .01)
+If H5[7] = 6 Or H5[7] = 10 Or H5[7] = 38 Let T2[3] = T2[1]
+Return 
+DO_TAXES: Rem
+TAXABLE = T2[8] \ TTAX = 0
+For SCR = 0 To 9
+  If MCTXBL[SCR]
+    TAXABLE = TAXABLE + MCHARGE[SCR,0]
+    TTAX = TTAX + MCHARGE[SCR,0]
+  End If 
+Next SCR
+If DTAX Let TAXABLE = TAXABLE - T2[3] \ TTAX = TTAX - T2[3]
+If HTAX Let TAXABLE = TAXABLE + T2[6] \ TTAX = TTAX + T2[6]
+If FTAX Let TAXABLE = TAXABLE + T2[5] + H6[6] \ TTAX = TTAX + T2[5] + H6[6]
+If T2[1] > 0 If TAXABLE < 0 Let TAXABLE = 0
+T2[11] = TAXABLE
+If P60$[42,42] <> "Y"
+  T2[7] = 0
+  T2[7] = FNR(TAXABLE * (T2[2] / 100))
+  If RTYPE$ = "U" Let T2[7] = FNV(TAXABLE * (T2[2] / 100))
+End If 
+If P60$[42,42] = "Y"
+  TOT[3] = FNR(TTAX * (T2[2] / 100))
+  If RTYPE$ = "U" Let TOT[3] = FNV(TTAX * (T2[2] / 100))
+  T2[7] = LINETAX + TOT[3]
+End If 
+Return 
+GET_FREIGHT_CHG: Rem -------------------------from level on freight table
+If H5[7] = 16 Or H5[7] = 14 or h5[7]=8 Return 
+If T2[16] = 0 Return 
+If H5[7] = 2 Or H5[7] = 38
+  SCR = 174
+Else 
+  SCR = 173
+End If 
+Mat Read #1,SCR,0;MAXWGT;
+Mat Read #1,SCR,48;DFLTCOST;
+Mat Read #1,SCR,96;MINCOST;
+Mat Read #1,SCR,144;MAXCOST;
+Mat Read #1,SCR,192;DFLTCHG;
+Mat Read #1,SCR,240;FTFLG;
+WGT = T2[16]
+For LEVEL = 0 To 6
+  If WGT <= MAXWGT[LEVEL] Goto FOUND_LEVEL
+Next LEVEL
+If LEVEL > 6 Let LEVEL = 6
+FOUND_LEVEL: Rem
+If FTFLG = -1 ! cwt
+  T2[5] = FNR(DFLTCHG[LEVEL] * (WGT / 100))
+  T2[20] = FNR(DFLTCOST[LEVEL] * (WGT / 100))
+Else !flat
+  T2[5] = DFLTCHG[LEVEL]
+  T2[20] = DFLTCOST[LEVEL]
+End If 
+If MINCOST[LEVEL] And T2[20] < MINCOST[LEVEL] Let T2[20] = MINCOST[LEVEL]
+If MAXCOST[LEVEL] And T2[20] > MAXCOST[LEVEL] Let T2[20] = MAXCOST[LEVEL]
+Return 
+CHECK_4DELIV_CHG: Rem ---------------------------------------------
+If P61$[36,36] = "Y" Return 
+If P61$[53,53] = "N" Return 
+If H5[7] = 16 or h5[7] = 8 Return 
+If DCLVL
+  If H5[7] <> 2 And H5[7] <> 38
+    SCR = 172
+  Else 
+    SCR = 171
+  End If 
+  Mat Read #1,SCR,48;DCHRG;
+  Mat Read #1,SCR,96;DCOST;
+  Mat Read #1,SCR,240;DFLAG;
+  PASS = 0
+  For SCR = 0 To 9
+    If Int(MCODE[SCR]) = 0 Or Int(MCODE[SCR]) = DFLAG[1]
+      PASS = 1
+      Goto END_CHECK_EXISTING_CHRG
+    End If 
+  Next SCR
+END_CHECK_EXISTING_CHRG: Rem
+  If PASS
+	CHNL = findchannel() ! 99 \ Gosub GETCHAN
+    CHMISC = CHNL
+    Mat Read #1,88,2032;MISCFILE$;
+    Open #CHMISC,MISCFILE$
+    If Int(MCODE[SCR]) = DFLAG[1]
+      T2[4] = T2[4] - MCHARGE[SCR,0]
+      TOT[0] = TOT[0] - MCHARGE[SCR,1]
+      If Fra(MCODE[SCR]) Let TOT[2] = TOT[2] - MCHARGE[SCR,1]
+    End If 
+    MCODE[SCR] = DFLAG[1] + .1
+    If DFLAG[0] = -3 ! flat rate
+      MCHARGE[SCR,0] = DCHRG[DCLVL - 1]
+      MCHARGE[SCR,1] = DCOST[DCLVL - 1]
+    Else ! CWT
+      MCHARGE[SCR,0] = DCHRG[DCLVL - 1] * (T2[16] / 100)
+      MCHARGE[SCR,1] = DCOST[DCLVL - 1] * (T2[16] / 100)
+    End If 
+    ! MCTXBL[SCR] = FTAX
+	If MCODE[SCR]
+      Mat Read #CHMISC,Int(MCODE[SCR]),38;MS2;
+      MCTXBL[SCR] = MS2[0]
+      If Not(MTAX) Let MCTXBL[SCR] = MTAX
+	  if T2[1]<>0 and T2[8]=0 LET MCTXBL[SCR] = 0 ! NO taxable mdse - not taxable
+    End If 
+    T2[4] = T2[4] + MCHARGE[SCR,0]
+    TOT[0] = TOT[0] + MCHARGE[SCR,1]
+    If Fra(MCODE[SCR]) Let TOT[2] = TOT[2] + MCHARGE[SCR,1]
+	try close #CHMisc Else Rem
+  End If 
+End If 
+Return 
+SET_EDIT_STATUS: Rem "=================================== 91 = EDIT
+If H0 >= 90 Return 
+Read #CH_ROH,H1,416;H6[2]
+Read #CH_ROH,H1,64;LOCKPORT
+H6[2] = H0
+LOCKPORT = Spc(6)
+K$ = " ",K$;K$[1,2] = H0 Using "##";K$[3] = H0[7] Using "######"
+Search #CH_ROH,2,1;K$,R1,E \ If E = 1 Goto L_17110
+If E Gosub ERR_SEARCH
+Search #CH_ROH,5,1;K$,R1,E
+If E Gosub ERR_SEARCH
+H0 = 91
+L_17110: K$[1,2] = H0 Using "##"
+E = 0;R1 = H1
+Search #CH_ROH,4,1;K$,R1,E
+If E > 1 Gosub ERR_SEARCH
+Write #CH_ROH,H1,0;H0
+Write #CH_ROH,H1,416;H6[2]
+Write #CH_ROH,H1,64;LOCKPORT;
+Return 
+CLEAR_EDIT_STATUS: Rem "=================================== RESET STATUS
+If H0 < 90 Return 
+Read #CH_ROH,H1,416;H6[2]
+Read #CH_ROH,H1,64;LOCKPORT
+If H6[2] <= 1 And H5[7] <> 5 ! "not for future orders
+  If P9$[45,45] = "Y" Let H6[2] = 2
+End If 
+If H6[2] <= 0 Let H6[2] = 1
+If H6[2] > 11 Or Fra(H6[2]) Let H6[2] = 1
+K$ = " ",K$;K$[1,2] = H0 Using "##";K$[3] = H0[7] Using "######"
+Search #CH_ROH,2,1;K$,R1,E
+If E > 1 Gosub ERR_TRAP
+If Not(E)
+  Search #CH_ROH,5,1;K$,R1,E
+  If E Gosub ERR_TRAP
+End If 
+K$[1,2] = H6[2] Using "##"
+E = 0;R1 = H1
+Search #CH_ROH,4,1;K$,R1,E
+If E > 1 Gosub ERR_TRAP
+H0 = H6[2];H6[2] = 0
+LOCKPORT = 0
+Write #CH_ROH,H1,0;H0
+Write #CH_ROH,H1,416;H6[2]
+Write #CH_ROH,H1,64;LOCKPORT;
+Return 
+GET_FTAX: Rem CHECK TO SEE IF FREIGHT IS TAXABLE
+FTAX = 0
+HTAX = 0
+MTAX = 0
+DTAX = 0
+Mat Read #CH_CUSTTAX,A0[3],36;TAX;
+FTAX = TAX[99]
+DTAX = TAX[100]
+HTAX = TAX[97]
+MTAX = TAX[98]
+Return 
+GP_COMPONENTS: Rem "================================= gp component(s)
+H5[13] = T2[1] \ H5[14] = T2[17]
+If P9$[35,35] = "Y" Let H5[13] = H5[13] + T2[5]
+If P9$[36,36] = "Y" And H5[7] <> 38 Let H5[13] = H5[13] - T2[3]
+If P9$[37,37] = "Y" Let H5[14] = H5[14] + T2[20]
+If P9$[38,38] = "Y" Let H5[13] = H5[13] + T2[6]
+H5[13] = H5[13] + TOT[1];H5[14] = H5[14] + TOT[2]
+! If B0[9] <> H1 Let H0[8] = 0;OREF[1] = 0 ! what is B0[]?? never refd/read anywhere!
+Gosub WRITE_ROH
+Return 
+ADD_SPRODLOT: Rem
+PO$ = " ",PO$
+PO$[1,12] = L1$[1,12]
+PO$[13,19] = WHSE Using "STOCK&#"
+If ALLOCPHASE = 1 Let P1$ = "STOCK "
+If ALLOCPHASE = 2 Let P1$ = "NONE  "
+If Not(RASL) Let P1$ = "STOCK "
+P1[0] = WHSE
+P1[1] = 3
+P2[0] = H0[9]
+P2[1] = 0;P2[2] = 0
+P3[0] = 0;P3[1] = 0
+P3[2] = B[21]
+If ALLOCPHASE = 1 Let P3[4] = BOWORK
+If ALLOCPHASE = 2 Let P3[3] = BOWORK
+P3[4] = 0
+SPROD_KEY$ = " ",SPROD_KEY$
+E = 2
+Search #CH_SPRODLOT,1,0;SPROD_KEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+Mat Write #CH_SPRODLOT,REC_WORK;PO$
+Mat Write #CH_SPRODLOT,REC_WORK,66;P1
+Mat Write #CH_SPRODLOT,REC_WORK,70;P2
+Mat Write #CH_SPRODLOT,REC_WORK,82;P3
+Write #CH_SPRODLOT,REC_WORK,112;P4
+Mat Write #CH_SPRODLOT,REC_WORK,114;P1$
+Write #CH_SPRODLOT,REC_WORK,120;PLTR
+SPROD_KEY$[1,12] = PO$[13,24]
+SPROD_KEY$[13,22] = PO$[55,64]
+SPROD_KEY$[23,24] = P1[0] Using "##"
+SPROD_KEY$[25,30] = P1$[1,6]
+SPROD_KEY$[31,42] = PO$[1,12]
+Search #CH_SPRODLOT,4,1;SPROD_KEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+SPROD_KEY$ = " ",SPROD_KEY$
+SPROD_KEY$[1,12] = PO$[1,12]
+SPROD_KEY$[13,14] = P1[0] Using "##"
+SPROD_KEY$[15,20] = P1$[1,6]
+SPROD_KEY$[21,32] = PO$[13,24]
+SPROD_KEY$[33,42] = PO$[55,64]
+Search #CH_SPRODLOT,4,2;SPROD_KEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+SPROD_KEY$ = " ",SPROD_KEY$
+SPROD_KEY$[1,2] = P1[0] Using "##"
+SPROD_KEY$[3,8] = P1$[1,6]
+SPROD_KEY$[9,20] = PO$[1,12]
+SPROD_KEY$[21,32] = PO$[13,24]
+SPROD_KEY$[33,42] = PO$[55,64]
+Search #CH_SPRODLOT,4,3;SPROD_KEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+SPROD_KEY$ = " ",SPROD_KEY$
+SPROD_KEY$[1,12] = PO$[1,12]
+SPROD_KEY$[13,14] = P1[0] Using "##"
+SPROD_KEY$[15,26] = PO$[13,24]
+SPROD_KEY$[27,36] = PO$[55,64]
+SPROD_KEY$[37,42] = P1$[1,6]
+Search #CH_SPRODLOT,4,4;SPROD_KEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+Return 
+ADD_SORDLOT: Rem
+S0$ = " ",S0$
+S0$[1,12] = L1$[1,12]
+S0$[13,19] = WHSE Using "STOCK&#"
+OL1[0] = L3[2]
+OL1[1] = 2
+OL1[2] = WHSE
+OL2[0] = H0[7]
+OL2[1] = H0[9]
+OL2[2] = H0[4]
+OL2[3] = H0[10]
+OL3[0] = BOWORK
+If ALLOCPHASE = 1
+  OL3[1] = 0
+  OL3[3] = BOWORK
+End If 
+If ALLOCPHASE = 2 Or ALLOCPHASE = 3
+  OL3[1] = BOWORK
+  OL3[3] = 0
+End If 
+OL3[2] = P3[2]
+OL2$ = " ",OL2$
+If ALLOCPHASE = 1 Or ALLOCPHASE = 3 Let OL2$[11,16] = "STOCK "
+If ALLOCPHASE = 2 Let OL2$[11,16] = "NONE  "
+If Not(RASL) Let OL2$[11,16] = "STOCK "
+E = 2
+Search #CH_SORDLOT,1,0;SORD_KEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+Mat Write #CH_SORDLOT,REC_WORK;S0$
+Mat Write #CH_SORDLOT,REC_WORK,36;OL1
+Mat Write #CH_SORDLOT,REC_WORK,44;OL2
+Mat Write #CH_SORDLOT,REC_WORK,60;OL3
+Mat Write #CH_SORDLOT,REC_WORK,96;OL2$;
+SORD_KEY$ = " ",SORD_KEY$
+SORD_KEY$[1,12] = S0$[1,12]
+SORD_KEY$[13,18] = OL2[0] Using "######"
+SORD_KEY$[19,21] = OL1[0] Using "###"
+SORD_KEY$[22,23] = OL1[2] Using "##"
+SORD_KEY$[24,29] = OL2$[11,16]
+SORD_KEY$[30,41] = S0$[13,24]
+SORD_KEY$[42,51] = OL2$[1,10]
+Search #CH_SORDLOT,4,1;SORD_KEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+SORD_KEY$ = " ",SORD_KEY$
+SORD_KEY$[1,12] = S0$[13,24]
+SORD_KEY$[13,22] = OL2$[1,10]
+SORD_KEY$[23,28] = OL2[0] Using "######"
+SORD_KEY$[29,31] = OL1[0] Using "###"
+SORD_KEY$[32,33] = OL1[2] Using "##"
+SORD_KEY$[34,39] = OL2$[11,16]
+SORD_KEY$[40,51] = S0$[1,12]
+Search #CH_SORDLOT,4,2;SORD_KEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+SORD_KEY$ = " ",SORD_KEY$
+SORD_KEY$[1,6] = OL2[0] Using "######"
+SORD_KEY$[7,9] = OL1[0] Using "###"
+SORD_KEY$[10,11] = OL1[2] Using "##"
+SORD_KEY$[12,17] = OL2$[11,16]
+SORD_KEY$[18,29] = S0$[13,24]
+SORD_KEY$[30,39] = OL2$[1,10]
+Search #CH_SORDLOT,4,3;SORD_KEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+Return 
+DEL_SORDLOT: Rem delete STOCK record if zero
+S0$ = " ",S0$
+S0$[1,12] = L1$[1,12]
+S0$[13,19] = WHSE Using "STOCK&#"
+OL1[0] = L3[2]
+OL1[2] = WHSE
+OL2[0] = H0[7]
+OL2$ = " ",OL2$
+OL2$[11,16] = "STOCK "
+SORD_KEY$ = " ",SORD_KEY$
+SORD_KEY$[1,12] = S0$[1,12]
+SORD_KEY$[13,18] = OL2[0] Using "######"
+SORD_KEY$[19,21] = OL1[0] Using "###"
+SORD_KEY$[22,23] = OL1[2] Using "##"
+SORD_KEY$[24,29] = OL2$[11,16]
+SORD_KEY$[30,41] = S0$[13,24]
+SORD_KEY$[42,51] = OL2$[1,10]
+Search #CH_SORDLOT,5,1;SORD_KEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+SORD_KEY$ = " ",SORD_KEY$
+SORD_KEY$[1,12] = S0$[13,24]
+SORD_KEY$[13,22] = OL2$[1,10]
+SORD_KEY$[23,28] = OL2[0] Using "######"
+SORD_KEY$[29,31] = OL1[0] Using "###"
+SORD_KEY$[32,33] = OL1[2] Using "##"
+SORD_KEY$[34,39] = OL2$[11,16]
+SORD_KEY$[40,51] = S0$[1,12]
+Search #CH_SORDLOT,5,2;SORD_KEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+SORD_KEY$ = " ",SORD_KEY$
+SORD_KEY$[1,6] = OL2[0] Using "######"
+SORD_KEY$[7,9] = OL1[0] Using "###"
+SORD_KEY$[10,11] = OL1[2] Using "##"
+SORD_KEY$[12,17] = OL2$[11,16]
+SORD_KEY$[18,29] = S0$[13,24]
+SORD_KEY$[30,39] = OL2$[1,10]
+Search #CH_SORDLOT,5,3;SORD_KEY$,REC_WORK,E
+If E Gosub ERR_SEARCH
+Return 
+UNPACK_HOLDS: Rem UNPACK T2[21] TO T9[x]
+X2 = T2[21]
+For K = 0 To 11
+  T9[K] = Sgn(Fra(X2 / 2))
+  X2 = Int(X2 / 2)
+Next K
+Return 
+! ---------------------------------------------------
+read_prod1:! read product file
+Rem {begin src/inc/read.prod.i}
+    Mat Read #CH_PROD,REC_PROD,0;PR_A$
+    Mat Read #CH_PROD,REC_PROD,156;B
+    Mat Read #CH_PROD,REC_PROD,256;A
+    Mat Read #CH_PROD,REC_PROD,460;A1
+    Mat Read #CH_PROD,REC_PROD,508;A2
+    Mat Read #CH_PROD,REC_PROD,512;PFU1
+    Mat Read #CH_PROD,REC_PROD,554;PFU2
+    Mat Read #CH_PROD,REC_PROD,596;PRPARC
+    Mat Read #CH_PROD,REC_PROD,620;LM
+    Mat Read #CH_PROD,REC_PROD,624;PR_PO
+    Mat Read #CH_PROD,REC_PROD,628;AGEDAY
+    Read #CH_PROD,REC_PROD,630;LLC
+    Mat Read #CH_PROD,REC_PROD,632;PSN$
+    Mat Read #CH_PROD,REC_PROD,652;PSN
+    Mat Read #CH_PROD,REC_PROD,660;U2
+    Mat Read #CH_PROD,REC_PROD,664;LBSORD
+    Mat Read #CH_PROD,REC_PROD,670;U4
+    Read #CH_PROD,REC_PROD,678;U3
+    Mat Read #CH_PROD,REC_PROD,684;U3$
+    Mat Read #CH_PROD,REC_PROD,744;HZ$
+    Mat Read #CH_PROD,REC_PROD,834;A3
+    Mat Read #CH_PROD,REC_PROD,846;PFTB
+    Read #CH_PROD,REC_PROD,854;UPCT
+    Mat Read #CH_PROD,REC_PROD,856;C1$
+    Mat Read #CH_PROD,REC_PROD,894;PR_C4
+    Read #CH_PROD,REC_PROD,938;PF_LOAD2
+    Mat Read #CH_PROD,REC_PROD,944;PR_A2$
+    Mat Read #CH_PROD,REC_PROD,974;PFCO
+    Mat Read #CH_PROD,REC_PROD,990;PLV
+    Mat Read #CH_PROD,REC_PROD,1002;PLC
+    Mat Read #CH_PROD,REC_PROD,1018;PFN
+    Mat Read #CH_PROD,REC_PROD,1030;STK
+    Mat Read #CH_PROD,REC_PROD,1048;FDT
+    Mat Read #CH_PROD,REC_PROD,1056;PRFLG$
+    Mat Read #CH_PROD,REC_PROD,1066;PRBASE
+    Mat Read #CH_PROD,REC_PROD,1068;PRMKUP
+    Mat Read #CH_PROD,REC_PROD,1084;PRMKUPTYP$
+    Mat Read #CH_PROD,REC_PROD,1088;FUT
+    Mat Read #CH_PROD,REC_PROD,1100;PRPARC2
+    Mat Read #CH_PROD,REC_PROD,1108;PRREDI
+    Mat Read #CH_PROD,REC_PROD,1120;PIC$
+    Mat Read #CH_PROD,REC_PROD,1270;PRD0
+    Mat Read #CH_PROD,REC_PROD,1282;PRIML$
+    Mat Read #CH_PROD,REC_PROD,1294;PRD1
+    Mat Read #CH_PROD,REC_PROD,1304;PRD2
+	If Not(A[5]) Let A[5] = 1
+    Rem {end read.prod.i}
+return
+! --------------------------------------------------
+read_prwh: ! read prodwhse ifle
+	Rem {begin src/inc/read.prwh.i}
+		Mat Read #CH_PRWH,REC_PRWH,0;W1$
+		Mat Read #CH_PRWH,REC_PRWH,32;W1
+		Mat Read #CH_PRWH,REC_PRWH,38;W2
+		Mat Read #CH_PRWH,REC_PRWH,78;W3
+		Mat Read #CH_PRWH,REC_PRWH,228;W5
+      Mat Read #CH_PRWH,REC_PRWH,384;WHPARC
+      Read #CH_PRWH,REC_PRWH,396;WHLPOOL
+      Mat Read #CH_PRWH,REC_PRWH,400;WCOMM$
+      Read #CH_PRWH,REC_PRWH,404;FCWGT
+      Mat Read #CH_PRWH,REC_PRWH,420;W0
+      Mat Read #CH_PRWH,REC_PRWH,428;WH7
+      Mat Read #CH_PRWH,REC_PRWH,444;WH8
+      Mat Read #CH_PRWH,REC_PRWH,540;WH9
+      Mat Read #CH_PRWH,REC_PRWH,696;W7
+      Mat Read #CH_PRWH,REC_PRWH,756;WH3$
+      Mat Read #CH_PRWH,REC_PRWH,780;WHLV
+      Read #CH_PRWH,REC_PRWH,798;WHRPLN
+      Mat Read #CH_PRWH,REC_PRWH,800;WHMISC
+      Mat Read #CH_PRWH,REC_PRWH,842;WHLM
+      Mat Read #CH_PRWH,REC_PRWH,846;WHMISC2
+      Read #CH_PRWH,REC_PRWH,894;RESTRICTED
+      Mat Read #CH_PRWH,REC_PRWH,896;WHFUT
+      Mat Read #CH_PRWH,REC_PRWH,914;WHFDT
+      Read #CH_PRWH,REC_PRWH,922;VLIST
+      Mat Read #CH_PRWH,REC_PRWH,928;WHFLG$
+      Read #CH_PRWH,REC_PRWH,938;WHBASE
+      Mat Read #CH_PRWH,REC_PRWH,940;WHMKUP
+      Mat Read #CH_PRWH,REC_PRWH,956;WHMKUPTYP$
+      Mat Read #CH_PRWH,REC_PRWH,960;WHPARC2
+      Mat Read #CH_PRWH,REC_PRWH,968;WHREDI
+      Mat Read #CH_PRWH,REC_PRWH,980;WHLBS
+      Rem {end read.prwh.i}
+return
+!------------------------------------------------
+CALC_LOAD: Rem
+PREC[0] = REC_PROD
+IF NOT(PREC[0]) LET PREC[0]=L4[0]
+PREC[2] = FNR(Abs((L6[4] * L7[2]) / A[5]))
+If L6[4] And L6[4] <> A[6] ! line lbs different from prod file lbs
+  PREC[3] = L6[4]
+Else 
+  PREC[3] = 0
+End If 
+CNVTA = -999 ! SET TO CALCULATE BASED UPON PROD/PRODWHSE
+OTYPE = - H5[7] 
+Call "MXLOAD5.DL4",OTYPE,WH,LTBL,PREC[],CNVTA,LDSTAT[2],E$,RSTR$
+Return 
+!--------------------------------------------------
+
+
+ETRACK_INIT: Rem ---------------------------------------------------
+Clear ETR.
+ETR.OrdNum = H0[7]
+ETR.LineNum = L3[2]
+ETR.Status = H6[2]
+ETR.ProdCode$ = L1$[1,12]+B$
+ETR.OrgQtyOrd = L7[2]
+ETR.OrgQtyShip = L7[4]
+ETR.OrgQtyBO = L7[3]
+ETR.ETDATE = Tim(6)
+ETR.ETTIME = Tim(11) * 10000 + Tim(12) * 100 + Tim(13)
+ETR.ETPORT = Spc(6)
+ETR.AccessCode$ = "PROG266"+B$
+ETR.UMSell = UN[0]
+ETR.InvNum = OREF[1]
+ETR.OrgOrdTot = T2[0]
+ETR.CustNum = H0[4]
+ETR.Slsm = H0[11]
+ETR.SpareNU$=B$
+Return 
+
+ETRACK_COMPLETE: Rem ----------------------------------------------
+ETR.NewQtyOrd = L7[2]
+ETR.NewQtyShip = L7[4]
+ETR.NewQtyBO = L7[3]
+ETR.ETACTION = 1
+IF ORGLOADCOST<>0 OR NEWLOADCOST<>0
+	IF ORGLOADCOST<>NEWLOADCOST
+	    let etr.umcost=un[2]
+		let etr.OrgLoadCost=ORGLOADCOST
+		let etr.NewLoadCost=NEWLOADCOST ! get load cost
+	ENDIF
+ENDIF
+! use standard call to add to edittrack!
+FChan[0]=ch_et;fchan[1]=-1
+Call MakeEdittrack(e$,IntCo,fchan[],etr.)
+Return
+
+READ_CCODES: Rem read unit of measure file
+Mat Read #CH_CCODES,REC_CCODES,10;CCD$;
+Return 
+READ_CUST: Rem read customer master file
+Mat Read #CH_CUST,REC_CUST,0;A1$
+Mat Read #CH_CUST,REC_CUST,378;C7
+Mat Read #CH_CUST,REC_CUST,410;C8
+Mat Read #CH_CUST,REC_CUST,486;A0
+Mat Read #CH_CUST,REC_CUST,544;CFIN
+Return 
+READ_PRWHSE: Rem warehouse record
+Mat Read #CH_PRWH,REC_PRWH,78;W3;
+Return 
+READ_ROH: Rem read order header
+Rem {begin src/inc/read.roh.i}
+Mat Read #CH_ROH,REC_ROH,0;H0
+Mat Read #CH_ROH,REC_ROH,52;H3
+Mat Read #CH_ROH,REC_ROH,56;TOT_SELL
+Mat Read #CH_ROH,REC_ROH,64;LOCKPORT
+Mat Read #CH_ROH,REC_ROH,66;V0$
+Mat Read #CH_ROH,REC_ROH,78;H4
+Mat Read #CH_ROH,REC_ROH,84;H0$
+Mat Read #CH_ROH,REC_ROH,104;H5
+Mat Read #CH_ROH,REC_ROH,172;ST3
+Mat Read #CH_ROH,REC_ROH,272;H1$
+Mat Read #CH_ROH,REC_ROH,278;SLSM
+Mat Read #CH_ROH,REC_ROH,318;SCOM
+Mat Read #CH_ROH,REC_ROH,348;SMER
+Mat Read #CH_ROH,REC_ROH,378;SCST
+Mat Read #CH_ROH,REC_ROH,408;H6
+Mat Read #CH_ROH,REC_ROH,444;HMAT$
+Mat Read #CH_ROH,REC_ROH,446;P0$
+Mat Read #CH_ROH,REC_ROH,466;HFAX
+Mat Read #CH_ROH,REC_ROH,474;HSTI
+Mat Read #CH_ROH,REC_ROH,482;H2
+Mat Read #CH_ROH,REC_ROH,486;OWHT
+Mat Read #CH_ROH,REC_ROH,490;OWHT1
+Mat Read #CH_ROH,REC_ROH,498;TOTGL
+Mat Read #CH_ROH,REC_ROH,504;PICKBY
+Mat Read #CH_ROH,REC_ROH,512;OREF
+mat read #ch_roh,rec_roh,624;ohcurrid;
+mat read #ch_roh,rec_roh,626;ohcurrfact ! 
+Rem {end read.roh.i}
+Read #CH_TAXCODE,H4[0],414;RTYPE$;
+If RTYPE$ <> "N" And RTYPE$ <> "U" Let RTYPE$ = "N"
+Return 
+READ_ROL: Rem read order lines
+Rem {begin src/inc/read.rol.i}
+Mat Read #CH_ROL,REC_ROL,0;L2
+Mat Read #CH_ROL,REC_ROL,8;L3
+Mat Read #CH_ROL,REC_ROL,16;L4
+Mat Read #CH_ROL,REC_ROL,32;L5
+Mat Read #CH_ROL,REC_ROL,56;L6
+Mat Read #CH_ROL,REC_ROL,80;L6$
+Mat Read #CH_ROL,REC_ROL,140;L1$
+Mat Read #CH_ROL,REC_ROL,160;L9
+Mat Read #CH_ROL,REC_ROL,168;L7
+Mat Read #CH_ROL,REC_ROL,246;PL
+Mat Read #CH_ROL,REC_ROL,250;UN
+Mat Read #CH_ROL,REC_ROL,256;S2
+Mat Read #CH_ROL,REC_ROL,260;S3
+Mat Read #CH_ROL,REC_ROL,368;MT$
+Mat Read #CH_ROL,REC_ROL,370;S3$
+Mat Read #CH_ROL,REC_ROL,404;OLM
+Mat Read #CH_ROL,REC_ROL,446;EUN
+Mat Read #CH_ROL,REC_ROL,452;UNF
+Mat Read #CH_ROL,REC_ROL,494;LCO
+Mat Read #CH_ROL,REC_ROL,502;CST
+Mat Read #CH_ROL,REC_ROL,508;LTAX1
+Mat Read #CH_ROL,REC_ROL,514;CTWT
+Mat Read #CH_ROL,REC_ROL,518;INVNO
+Mat Read #CH_ROL,REC_ROL,538;LTAX2
+Mat Read #CH_ROL,REC_ROL,542;QPB
+Read #CH_ROL,REC_ROL,548;LPRINTED
+Read #CH_ROL,REC_ROL,550;OWHS
+Read #CH_ROL,REC_ROL,552;LP_DATE
+Read #CH_ROL,REC_ROL,556;LP_TIME
+Read #CH_ROL,REC_ROL,564;ROL0
+Rem {end read.rol.i}
+Read #CH_ROL,REC_ROL,403;HOLDPOFLAG$
+mat read #ch_rol,rec_rol,624;olcurrid;
+mat read #ch_rol,rec_rol,626;olcurrfact ! 
+Return 
+READ_ROS: Rem order ship to
+Rem {begin src/inc/read.ros.i}
+Mat Read #CH_ROS,REC_ROS,0;S1
+Mat Read #CH_ROS,REC_ROS,8;S1$
+Mat Read #CH_ROS,REC_ROS,126;S2$
+Mat Read #CH_ROS,REC_ROS,146;S5
+Mat Read #CH_ROS,REC_ROS,150;S6
+Mat Read #CH_ROS,REC_ROS,154;SRN
+Mat Read #CH_ROS,REC_ROS,190;INVNO
+Rem {end read.ros.i}
+Return 
+READ_ROT: Rem order totals
+Rem {begin src/inc/read.rot.i}
+Mat Read #CH_ROT,REC_ROT,0;T1
+Mat Read #CH_ROT,REC_ROT,8;T2
+Mat Read #CH_ROT,REC_ROT,164;JRNL
+Mat Read #CH_ROT,REC_ROT,168;MCODE
+Mat Read #CH_ROT,REC_ROT,208;MCHARGE
+Mat Read #CH_ROT,REC_ROT,328;TOT
+Mat Read #CH_ROT,REC_ROT,358;MCTXBL
+Mat Read #CH_ROT,REC_ROT,378;DCLVL
+Mat Read #CH_ROT,REC_ROT,400;INVNO
+Rem {end read.rot.i}
+Return 
+WRITE_ROH: Rem "write header
+Rem {begin src/inc/write.roh.i}
+Mat Write #CH_ROH,REC_ROH,0;H0
+Mat Write #CH_ROH,REC_ROH,52;H3
+Mat Write #CH_ROH,REC_ROH,56;TOT_SELL
+Mat Write #CH_ROH,REC_ROH,64;LOCKPORT
+Mat Write #CH_ROH,REC_ROH,66;V0$
+Mat Write #CH_ROH,REC_ROH,78;H4
+Mat Write #CH_ROH,REC_ROH,84;H0$
+Mat Write #CH_ROH,REC_ROH,104;H5
+Mat Write #CH_ROH,REC_ROH,172;ST3
+Mat Write #CH_ROH,REC_ROH,272;H1$
+Mat Write #CH_ROH,REC_ROH,278;SLSM
+Mat Write #CH_ROH,REC_ROH,318;SCOM
+Mat Write #CH_ROH,REC_ROH,348;SMER
+Mat Write #CH_ROH,REC_ROH,378;SCST
+Mat Write #CH_ROH,REC_ROH,408;H6
+Mat Write #CH_ROH,REC_ROH,444;HMAT$
+Mat Write #CH_ROH,REC_ROH,446;P0$
+Mat Write #CH_ROH,REC_ROH,466;HFAX
+Mat Write #CH_ROH,REC_ROH,474;HSTI
+Mat Write #CH_ROH,REC_ROH,482;H2
+Mat Write #CH_ROH,REC_ROH,486;OWHT
+Mat Write #CH_ROH,REC_ROH,490;OWHT1
+Mat Write #CH_ROH,REC_ROH,498;TOTGL
+Mat Write #CH_ROH,REC_ROH,504;PICKBY
+Mat Write #CH_ROH,REC_ROH,512;OREF;
+mat write #ch_roh,rec_roh,624;ohcurrid;
+mat write #ch_roh,rec_roh,626;ohcurrfact; ! 
+Rem {end write.roh.i}
+Return 
+WRITE_ROL: Rem write order lines
+Rem {begin src/inc/write.rol.i}
+Mat Write #CH_ROL,REC_ROL,0;L2
+Mat Write #CH_ROL,REC_ROL,8;L3
+Mat Write #CH_ROL,REC_ROL,16;L4
+Mat Write #CH_ROL,REC_ROL,32;L5
+Mat Write #CH_ROL,REC_ROL,56;L6
+Mat Write #CH_ROL,REC_ROL,80;L6$
+Mat Write #CH_ROL,REC_ROL,140;L1$
+Mat Write #CH_ROL,REC_ROL,160;L9
+Mat Write #CH_ROL,REC_ROL,168;L7
+Mat Write #CH_ROL,REC_ROL,246;PL
+Mat Write #CH_ROL,REC_ROL,250;UN
+Mat Write #CH_ROL,REC_ROL,256;S2
+Mat Write #CH_ROL,REC_ROL,260;S3
+Mat Write #CH_ROL,REC_ROL,368;MT$
+Mat Write #CH_ROL,REC_ROL,370;S3$
+Mat Write #CH_ROL,REC_ROL,404;OLM
+Mat Write #CH_ROL,REC_ROL,446;EUN
+Mat Write #CH_ROL,REC_ROL,452;UNF
+Mat Write #CH_ROL,REC_ROL,494;LCO
+Mat Write #CH_ROL,REC_ROL,502;CST
+Mat Write #CH_ROL,REC_ROL,508;LTAX1
+Mat Write #CH_ROL,REC_ROL,514;CTWT
+Mat Write #CH_ROL,REC_ROL,518;INVNO
+Mat Write #CH_ROL,REC_ROL,538;LTAX2
+Mat Write #CH_ROL,REC_ROL,542;QPB
+Write #CH_ROL,REC_ROL,548;LPRINTED
+Write #CH_ROL,REC_ROL,550;OWHS
+Write #CH_ROL,REC_ROL,552;LP_DATE
+Write #CH_ROL,REC_ROL,556;LP_TIME
+Write #CH_ROL,REC_ROL,564;ROL0;
+mat write #ch_rol,rec_rol,624;olcurrid;
+mat write #ch_rol,rec_rol,626;olcurrfact; ! 
+Rem {end write.rol.i}
+Return 
+GETSHIPDATE: Rem"cct165651
+K2$ = " ",K2$ \ K2$ = S2$[19,20]
+Search #CH_ZONE,2,1;K2$,R2,E \ If E > 1 Gosub ERR_SEARCH
+If E Let D0 = 0 \ Goto L_8125
+Read #CH_ZONE,R2,28;D0;
+L_8125: Rem
+X2 = D8
+X$ = X2 Using "&&&&&&"
+Call DateToJulian(1,X$,X$,E)
+X2 = X$[1,5]
+X2 = X2 + D0
+DT3[0] = X2 \ DT3[1] = X2 \ FLAG = 0
+Call "JULIANUTIL",DT3[],X$,FLAG
+X2 = X$
+H0[10] = X2
+VDATE = X2;STAT = 1;WARN = 0;PARAM[0] = H4[2];PARAM[1] = H5[8]
+Call "validdate",VDATE,STAT,WARN,PARAM[]
+H0[10] = VDATE
+Return 
+Rem {begin rtn.convert.s}
+CONVERT: Rem "UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)   ! 20040 REM
+If CNVTU[2] = 3 Or CNVTU[2] = 4 Goto CVTSTARTA
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto CVTDONE
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto CVTDONE
+If CNVTU[2] = 0 Goto CVTSTARTA
+If Not(CNVTA) Let AMOUNT = 0 \ Goto CVTDONE
+CVTSTARTA: Rem ALL UB 5+
+CVTSTARTB: Rem "====== unibasic 5+ logic
+Call "MXPRCONV5.dl4",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG,E$,RSTR$
+If CNVTU[2] = 0 Goto CVTDONE
+If FLAG Let E = FLAG \ Gosub ERR_SEARCH
+AMOUNT = CNVTA
+CVTDONE: Return 
+BadData: ! passed bad
+call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	  call AddToStr(e$,rstr$,WebStr$)
+	  call SetOutPut(e$,rstr$)
+End
+OUTEND: Rem we are out of here
+! Print @0,22;'CL RB';"process complete !";
+!Pause 20
+
+OUTEND1: Rem Always a message if exiting
+tmp1$="OK - Report Complete"
+if not(goforward) let tmp1$="OK - Report not run"
+Call setoutput(e$,rstr$,1,tmp1$) !1 flag puts 0 status section, puts </page> in
+if goforward call ERPCronSuccess()
+Try Close #CH_Sort Else REM
+Kill F1$ ! boalwork file
+!Chain "mx000"
+Try call dxclose() Else REM
+End
+Rem {end rtn.convert.s}
+ERR_TRAP: Rem
+If Spc(8) = 123
+  Escdis 
+  Escclr 
+  Return -1
+End If 
+Goto ERR_MAIN
+ERR_SEARCH: Rem
+ENUM = E + 1000;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+Msc$(4)
+e$=Msg$
+Goto ERR_MAIN
+ERR_MAIN: Rem
+
+include "src/callmainerrnet.inc"
+End 

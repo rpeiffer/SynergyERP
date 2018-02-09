@@ -1,0 +1,293 @@
+! loadsave -w -n 100,10 -o prog/util/procmysqlq.dl4 src/procmysqlq.src
+
+! process the mysql update queue.  This queue contains records of
+! modifications to ISAM files that also have corresponding mysql
+! tables (that need to be in sync)
+
+Option Default Dialect IRIS1
+include "src/utilcopyright.inc"
+
+Declare Intrinsic Function FindChannel
+
+External Lib "utillib.lib"
+Declare External Function ParseArguments,GetSessionParameter$
+
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile
+
+include "src/inc/filemysqlupdq.inc"
+include "src/inc/sql_dl4updatelog.inc"
+include "src/inc/sql_matcode.inc"
+include "src/inc/sql_commhead.inc"
+include "src/inc/sql_prod.inc"
+include "src/inc/sql_a80vm.inc"
+include "src/inc/sql_slscurr.inc"
+include "src/inc/sql_prodwhse.inc"
+
+! Local Subroutines
+Declare Sub GetCommandParameters,OpenFilesReadCntrl,OpenSQLChannel
+Declare Sub ProcessQueue,OpenOutputChan,LogIt,PrintOutput,UpdateLog
+
+try ! main TRY
+Dim K_MS2$[112],K_USRCTRL$[10]
+Dim 2%,intCo,noEmail
+Dim 3%,R_MS
+
+Dim EMAIL_FROM$[50],EMAIL_TO$[50],SUBJECT$[50]
+Dim CC1$[50],CC2$[50],nam$[30],e$[300],tmp$[100]
+dim args$[5,80],message$[80],isamKey$[60]
+
+! mysql vars
+dim mysql_db$[50],mysql_server$[100],mysql_user$[50],mysql_password$[50]
+dim currentMySQLUser$[10],currentMySQLPassword$[10]
+dim 1%,ch_sql,ch_TemplateSQL,MySQLFlag
+dim 2%,mysql_port
+
+dim 3%
+
+dim mysqlupdq. as mysqlupdq
+dim sql_matcode. as sql_matcode
+dim sql_commhead. as sql_commhead
+dim sql_prod. as sql_prod
+dim sql_a80vm. as sql_a80vm
+dim sql_slscurr. as sql_slscurr
+dim sql_prodwhse. as sql_prodwhse
+
+!*******
+! M A I N   L O G I C
+!*******
+call GetCommandParameters()
+if not(intCo) goto OutEnd:
+call SetUtilSession(e$,intCo)
+call OpenFilesReadCntrl()
+if not(MySQLFlag) goto OutEnd: ! no MySQL, nothing to do!
+call ProcessQueue()
+OutEnd:
+Close
+chain ""
+stop
+else ! main try
+	include "src/utilcallmainerr.inc"
+end try
+
+!--------------------------------------------------------------------------
+! S U B R O U T I N E S
+!--------------------------------------------------------------------------
+
+Sub GetCommandParameters()
+try
+	argc = ParseArguments(e$,args$[], msc$(4))
+	! First arg is company
+	intCo = args$[1]
+	if intCo < 1 or intCo > 99
+		print "Invalid company number.  Exiting."
+		intCo = 0
+		exit sub
+	end if
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+Sub OpenFilesReadCntrl()
+try
+	!call GetGlobals("UtilSessionMain",3,MySQLFlag)
+	MySQLFlag = GetSessionParameter$("MYSQLFLAG")
+
+	if not(MySQLFlag) exit sub ! no MySQL, nothing to do!
+	ch_ms = OpenFile(9910,intCo) \ if ch_ms<0 error 42
+	ch_usrcntrl = OpenFile(-9988,intCo) \ if ch_usrcntrl<0 error 42
+	! Gets MySQL vars from global session variables
+	! call GetGlobals("UtilSessionMySQL",1,mysql_db$,mysql_server$,mysql_port,mysql_user$,mysql_password$)
+	mysql_db$ = GetSessionParameter$("U_MYSQL_DB")
+	mysql_server$ = GetSessionParameter$("U_MYSQL_SERVER")
+	mysql_port = GetSessionParameter$("U_MYSQL_PORT")
+	mysql_user$ = GetSessionParameter$("U_MYSQL_USER")
+	mysql_password$ = GetSessionParameter$("U_MYSQL_PASSWORD")
+	let ch_TemplateSQL = MySQLOpen(-1,mysql_db$,0,mysql_user$,mysql_password$,mysql_server$,mysql_port)
+	if (ch_TemplateSQL < 0) ! parameters defined for open, but failed!
+		error 42
+	end if
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+sub OpenSQLChannel(sqlUser$, sqlPassword$)
+try
+	try close #ch_sql else rem
+	if sqlUser$ = "" ! special case - open as template user
+		let ch_sql = MySQLOpen(-1,mysql_db$,0,mysql_user$,mysql_password$,mysql_server$,mysql_port)
+		if (ch_sql < 0) ! parameters defined for open, but failed!
+			error 42
+		end if
+	end if
+	ch_sql = MySQLOpen(-1,mysql_db$, 0, sqlUser$, sqlPassword$, mysql_server$, mysql_port)
+	if ch_sql<0
+		! using template user access:
+		! create the new user and reattempt
+		! (NOTE, this will also update the password if the user
+		! id already exists in the event that is really the issue)
+		search #ch_TemplateSQL;"CALL adderpid(''"+sqlUser$+"'',''"+sqlPassword$+"'',''Y'')"
+		tmp = chf(ch_TemplateSQL)
+		if tmp < 1
+			e$ = "Error creating user id in MySQL Database!"
+			error 10000
+		end if
+		read #ch_TemplateSQL;idAdd,tmp$
+		if idAdd = 0
+			e$ = "Error creating user id in MySQL Database - "+tmp$
+			error 10000
+		end if
+		let ch_sql = MySQLOpen(-1,mysql_db$,0,sqlUser$,sqlPassword$,mysql_server$,mysql_portNo)
+		if ch_sql < 0 error 42
+	end if
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+end sub
+
+sub ProcessQueue() !
+try
+	currentMySQLUser$ = ""
+	K_MS2$ = " ",K_MS2$
+	call UpdateLog(98, mysqlupdq.) !* start process queue entry
+	do
+		R_MS = filegetmysqlupdq(e$,ch_ms,">",2,K_MS2$,mysqlupdq.,1)
+		if R_MS<=0 exit do
+		! Got one - should process this entry logged in to SQL
+		! database as the same user that did it originally.
+		mysqlupdq.AccessCode$ = rtrim$(ucase$(mysqlupdq.AccessCode$))
+		if currentMySQLUser$ <> mysqlupdq.AccessCode$
+			if mysqlupdq.AccessCode$ = "SU"
+				call OpenSQLChannel(mysqlupdq.AccessCode$,"PASSGO")
+				currentMySQLUser$ = mysqlupdq.AccessCode$
+			else
+				K_USRCTRL$ = " ",K_USRCTRL$
+				K_USRCTRL$[1,len(currentMySQLUser$)] = mysqlupdq.AccessCode$
+				search #ch_usrcntrl,2,1;K_USRCTRL$,R_USRCNTRL,E
+				if E
+					! OK - can't find user in access
+					! control - try running as the
+					! template user
+					if currentMySQLUser$ <> mysql_user$
+						call OpenSQLChannel("","")
+						currentMySQLUser$ = mysql_user$
+					end if
+				else
+					mat read #ch_usrcntrl,R_USRCNTRL,270;currentMySQLPassword$;
+					currentMySQLPassword$ = rtrim$(currentMySQLPassword$)
+					call OpenSQLChannel(mysqlupdq.AccessCode$,currentMySQLPassword$)
+					currentMySQLUser$ = mysqlupdq.AccessCode$
+				end if
+			end if
+		end if
+		isamKey$ = mysqlupdq.FileKey$
+		processed = -99 ! default a bad status on process
+		select case rtrim$(lcase$(mysqlupdq.FileDef$))
+			case "matcode"
+				if mysqlupdq.DeleteFlag = 1
+					clear sql_matcode.
+					sql_matcode.MatCode$ = rtrim$(mysqlupdq.FileKey$)
+					processed = matcode_SQLDelete(e$, ch_sql, sql_matcode.)
+				else
+					isamKey$ = rtrim$(isamKey$)
+					processed = matcode_UpdateSQLFromDL4(e$, intCo, isamKey$, ch_sql)
+				end if
+			case "commhead"
+				if mysqlupdq.DeleteFlag = 1
+					clear sql_commhead.
+					sql_commhead.Code$ = rtrim$(mysqlupdq.FileKey$)
+					processed = commhead_SQLDelete(e$, ch_sql, sql_commhead.)
+				else
+					processed = commhead_UpdateSQLFromDL4(e$, intCo, isamKey$, ch_sql)
+				end if
+			case "prod"
+				if mysqlupdq.DeleteFlag = 1
+					clear sql_prod.
+					sql_prod.ProdCode$ = mysqlupdq.FileKey$
+					processed = prod_SQLDelete(e$, ch_sql, sql_prod.)
+				else
+					processed = prod_UpdateSQLFromDL4(e$, intCo, isamKey$, ch_sql)
+				end if
+			case "a80vm"
+				if mysqlupdq.DeleteFlag = 1
+					clear sql_a80vm.
+					sql_a80vm.VendorCode = mysqlupdq.FileKey$
+					processed = a80vm_SQLDelete(e$, ch_sql, sql_a80vm.)
+				else
+					processed = a80vm_UpdateSQLFromDL4(e$, intCo, isamKey$, ch_sql)
+				end if
+			case "slscurr"
+				if mysqlupdq.DeleteFlag = 1
+					clear sql_slscurr.
+					sql_slscurr.CustNum = mysqlupdq.FileKey$[1,6]
+					sql_slscurr.ProdCode$ = mysqlupdq.FileKey$[7,18]
+					sql_slscurr.Whse = mysqlupdq.FileKey$[19,20]
+					processed = slscurr_SQLDelete(e$, ch_sql, sql_slscurr.)
+				else
+					processed = slscurr_UpdateSQLFromDL4(e$, intCo, isamKey$, ch_sql)
+				end if
+			case "prodwhse"
+				if mysqlupdq.DeleteFlag = 1
+					clear sql_prodwhse.
+					sql_prodwhse.ProdCode$ = mysqlupdq.FileKey$[1,12]
+					sql_prodwhse.Whse = mysqlupdq.FileKey$[13,14]
+					processed = prodwhse_SQLDelete(e$, ch_sql, sql_prodwhse.)
+				else
+					processed = prodwhse_UpdateSQLFromDL4(e$, intCo, isamKey$, ch_sql)
+				end if
+			case else
+				processed = -2	
+		end select
+		!* delete the queue entry
+		R_MS = fileupdatemysqlupdq(e$,ch_ms,"d",R_MS,mysqlupdq.)
+		!* create log entry
+		call UpdateLog(processed, mysqlupdq.)
+	loop
+	call UpdateLog(99, mysqlupdq.) !* end process queue entry
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub
+
+sub UpdateLog(status, queueRec. as mysqlupdq) !
+try
+	dim sql_dl4updatelog. as sql_dl4updatelog
+
+	!* status:
+	!*  -2 = unknown filedef BAD!
+	!*  -1 = ISAM record not found
+	!*       (might be OK if rec del before queue processed)
+	!*   0 = MySQL Row not found (update or delete) BAD!
+	!*   1 = MySQL action succesfully completed
+	!*  98 = MySQL Begin Queue Process
+	!*  99 = MySQL End Queue Process
+	if status = 98 or status = 99 ! default everything here
+		clear queueRec.
+		queueRec.FileDef$ = "* START PROCESS Q"
+		if status = 99	queueRec.FileDef$ = "* END PROCESS Q"
+		queueRec.Comment$ = "procmysqlq"
+		queueRec.AccessCode$ = "CRON JOB"
+	end if
+	!*
+	!* create log entry
+	clear sql_dl4updatelog.
+	call DL4StrToMySQL(e$,rtrim$(queueRec.FileDef$),sql_dl4updatelog.FileDef$)
+	call DL4StrToMySQL(e$,rtrim$(queueRec.FileKey$),sql_dl4updatelog.FileKey$)
+	call DL4StrToMySQL(e$,rtrim$(queueRec.AccessCode$),sql_dl4updatelog.AccessCode$)
+	call DL4DateToMySQL(e$,queueRec.ChangeDate,sql_dl4updatelog.ChangeDate#)
+	sql_dl4updatelog.ChangeTime = queueRec.ChangeTime
+	call DL4NumToMySQL(e$,queueRec.DeleteFlag,sql_dl4updatelog.DeleteFlag)
+	call DL4StrToMySQL(e$,rtrim$(queueRec.Comment$),sql_dl4updatelog.Comment$)
+	sql_dl4updatelog.ProcessedAt# = SQLNull#()
+	sql_dl4updatelog.Result = status
+	e = dl4updatelog_SQLInsert(e$, ch_TemplateSQL, sql_dl4updatelog.)
+	if not(e)
+		e$ = "error adding dl4updatelog: ",e
+		error 10000
+	end if
+else ! main try
+	include "src/utilcallsuberr.inc"
+end try
+End Sub

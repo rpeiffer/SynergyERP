@@ -1,0 +1,947 @@
+! serp081.dl4
+!
+! Pending Last/po Cost Change (PM program 081)
+!
+! 1.0 04/01/2009 - 12/2010 - add manual cost option
+!
+! loadsave -w -n 100,10 -o prog/dxport/serp081.dl4 src/serp081.src
+!
+!
+include "src/copyright.inc"
+! internal files needed
+
+Include "src/inc/fileccodes.inc" ! u/m file
+Include "src/inc/filecommhead.inc" ! commodity
+Include "src/inc/fileprod.inc" ! product file
+Include "src/inc/fileprodwhse.inc" ! prodwhse file
+Include "src/inc/filewhinfoz.inc" ! wh info file (rec 0 fix)
+include "src/inc/fileprtdefault.inc" ! port default
+Include "src/inc/filebrktbl.inc" ! break table
+include "src/inc/sql_prod.inc" ! SQL defintions
+
+! other external functions / subs
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,JDate$,PDate$
+Declare External Function ChkAltItem$,formatdate2$,getuidrec
+Declare External Sub UserCntrl,getportdefault
+Declare External Function OpenMySQLMirror ! new function
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+
+External Lib "libprod.lib"
+Declare External Sub ProdList,UMDList
+Declare External Function getpravail,getumrec,ChkPrdUM
+
+External Lib "libprodwh.lib"
+Declare External Function getWhAvail
+
+External Lib "libcustlist.lib"
+Declare External Sub CustList,getCustSpecN
+
+External Lib "ubsprconv.dl4"
+Declare External Function XUnit$
+
+External Lib "libprodconv.lib"
+Declare External Function ConvProdAmount
+
+External Lib "librebates.lib"
+Declare External Sub rebates
+
+External Lib "libprice.lib"
+Declare External Sub SysPriceCalc
+
+External Lib "ubsvendlist.dl4"
+Declare External Sub VendList
+
+! internal subs/functions 
+
+Declare Intrinsic sub programdump,env,Logic,FindF
+Declare Intrinsic Sub DateToJulian,JulianToDate
+Declare Intrinsic Function findchannel
+
+Declare Sub Openfiles,updatelog,doupdt,mandoupdt
+Declare Function chkdatefrmt$
+Try
+	Option String Redim is legal ! in case subs dim/use same names
+	
+	dim e$[500],buttonlist$[5,50],nextlist$[5,100] !error handling variables
+	dim action$[30],options$[30],userid$[8],b$[200],action1$[30],Action2$[30]
+	Dim bsdel$[10],esdel$[10],rdel$[10],fdel$[10],rstr$[3000]
+	dim tmp$[1200],tmp1$[300],Msgdesc$[150],Field$[1,30]
+	dim Message$[200],WebStr$[2000],SessionID$[200]
+	Dim Prod$[12],ProdKey$[60],P9$[50],P60$[50],P61$[256]
+	Dim QMask$[20],PMask$[20],Key1$[60],HKey$[60]
+	Dim Key2$[64],KCM$[50],K1$[50],Mode$[2]
+	Dim TUID$[10],UCA2$[50],UTYPE$[10]
+	dim Blank$[100] \ Blank$=" ",Blank$
+	dim 1%,cost_lev[4],Whse,debug,Cnvtu[2],UCA5[10]
+	Dim 2%,Q0[1],maxcnt \ maxcnt=50 ! init max records in arrays for list
+	dim List$[maxcnt,1000] ! for .net (larger size - ZLines)
+	dim 1%,X1[9],2%,CurDate
+	Dim 2%,x2[9],sysdate,Vend
+	Dim 3%,PRR,PWR,CUR,VNR,RHR,RDR,SHR,SDR
+	Dim 3%,CNVTA,Amount,X3[9],R[99],Chans[20]
+	dim dmsg$[256],dblog$[60] \ dblog$="files/6/lcu.log" ! fields for DEBUG
+
+	DEF FNR(H)=INT(ABS(H)*100+.5)*.01*SGN(H)
+	
+	Dim umc. as ccodes ! u/m file
+	Dim PR. as prod ! product file
+	Dim PW. as prodwhse ! prodwhse file
+	Dim WHI. as whinfo ! wh info file
+	Dim comd. as commhead ! commodity
+	dim prt. as prtdefault ! port defaults
+	dim btd. as brktbl ! break table
+	dim sql_prod. as sql_prod
+
+	! call dxopen() ! already done in menu
+	call GetSession(e$,CTLC,options$,action$,UserID$,intCo,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,action1$,action2$)
+	
+	debugDetail=0;debug=0 ! can do debug text by changing both to 1
+	If debugDetail
+		debug=1
+		tmp$="serp081"
+		dmsg$[1,50]="-",dmsg$ \ Call updatelog(debug)               
+		dmsg$="start...program "+tmp$ \ Call updatelog(debug)
+	Endif
+	Action2$=UCase$(Action2$)
+	ACtion2$=RTrim$(Action2$) ! make sure UPPERCASE and No blanks at end
+	Action1$=UCase$(action1$)
+	Action1$=RTrim$(action1$) ! UC and trimmed
+	GAct=0 ! action not found
+	if debugdetail
+		dmsg$="SERP081 ACTION1 "+action1$
+		If Action2$<>"" let dmsg$=dmsg$+" ACTION2 "+action2$
+		Call updatelog(debug)
+	Endif
+	
+
+	MAT  READ #CTLC,3,172;SysDate;
+	Mat Read #ctlc,19,50;P9$;
+	Mat Read #ctlc,60,50;P60$;
+	Mat Read #ctlc,61,0;P61$;
+	Call OpenFiles() ! open any/all files
+	Mat Read #CTLC,115,40;Q0;
+	QMask$="---------#.##"
+	tmp$="#",tmp$
+	If q0[1]<=0 Let Q0[1]=2
+	If Q0[1] Let Pmask$="-----------#.",tmp$[1,Q0[1]]     !price mask
+	DEF FNP(X)=SGN(X)*(INT(ABS(X)*10^Q0[1]+.5)/10^Q0[1])
+	! get the Usercntrl Rec #
+	If Userid$="" or UserID$[1,2]="  "
+		Call DXGet("S_USER.ID",tmp$) ! get from system variable
+	Else
+		tmp$=UserID$
+	Endif
+	Let UserID$=UCase$(tmp$) ! make sure it's UPPERCASE as that's what PM uses
+	TUID$=UserID$+Blank$
+	If Len(TUID$)>10 let TUID$[11]=""
+	Call UserCntrl(TUID$,UCA2$,UCA5[],status,intCo)
+	Let COST_LEV[0]=UCA5[0]
+	Let COST_LEV[1]=UCA5[1]
+	Let COST_LEV[2]=UCA5[2]
+	Let COST_LEV[3]=UCA5[3]
+	Let COMM_LEV=UCA5[4]
+	let rec_uac=GetUIDRec(e$,IntCo,TUID$)
+	call GetPortDefault(e$,IntCO,TUID$,portnum,rec_uac,prt.) ! get port default
+	tmp$=Tim(8) using "&&"
+	tmp$[3]=TIM(9) using "&&"
+	tmp$[5]=TIM(10) using "&&"
+	CurDate=tmp$[1,6] ! yymmdd
+	ReturnStatus=0
+	Message$="ACTION1 NOT FOUND"
+	select case action1$
+	case "PRODSEARCH" ! product scan						doc=LCU-ProdScan.doc
+		!
+		Let ReturnStatus=1
+		Message$="OK"
+		X2=0 ! IT'S Normal TYPE SCAN
+		Call ProdList(e$,IntCo,List$[],maxcnt,ctlc,prc,pwc,x2,debugdetail,dblog$,UserId$)
+		If E$<>""
+		  Let ReturnStatus=0
+		  Message$=E$
+		Endif
+		call AddToStr(e$,rstr$,List$[])
+		
+		if debugdetail
+			dmsg$="Product Search sent "+Message$ \ Call updatelog(debug)
+		Endif
+		GAct=1 ! okay
+		! end of prodsearch
+	case "SYSFLAGS" ! send up flags							doc=LCU-GetSysFlags.doc
+		GAct=1 ! ok
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		List$[0]=bsdel$,"SYSFLAGS",fdel$
+		Webstr$="USEWH",fdel$
+		List$[1]=webstr$
+		Tmp$="N" \ if p9$[32,32]="Y" let tmp$="Y"
+		Webstr$=tmp$[1,1],fdel$
+		List$[2]=webstr$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		! add commodity droplist with ALL option
+		Clear list$[]
+		tmpcnt=maxcnt
+		List$[0]=bsdel$,"COMMODLIST",fdel$
+		List$[1]="ID",fdel$,"DESC",fdel$
+		row=2
+		List$[row]="ALL ",fdel$,"All Commodities",fdel$
+		row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		KCM$=" ",KCM$
+		do
+			CMR=filegetcommhead(E$,cmc,">",1,kcm$,comd.)
+			If CMR<=0 Exit do
+			WebStr$=KCM$,fdel$,RTrim$(comd.CodeDescription$),fdel$
+			List$[row]=webstr$
+			row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		Loop
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		! per meeting - no Break or Markup list
+		Clear List$[]
+		List$[0]=bsdel$,"LCTYPE",fdel$
+		List$[1]="ID",fdel$,"DESC",fdel$
+		row=2
+		Webstr$="1",fdel$,"Flat Change $(+/-)",fdel$
+		List$[row]=webstr$
+		row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		WebStr$="2",fdel$,"Percent Change %(+/-)",fdel$
+		List$[row]=webstr$
+		row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		WebStr$="3",fdel$,"Replace the Cost =",fdel$
+		List$[row]=webstr$
+		row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		! send whse List
+		Clear list$[]
+		List$[0]=bsdel$,"WHSELIST",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$
+		List$[2]="M",fdel$,"MAIN PRODUCT",fdel$
+		row=3
+		if p9$[32,32]="Y" ! just send set up whses
+			Webstr$="A",fdel$,"ALL WHSES",fdel$
+			List$[row]=webstr$
+			row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			for x=0 to 98 ! translate to 1-99
+				Try 
+					read record #WHI,x,0;whi.;
+				Else
+					clear whi.
+				End try
+				tmp$=RTrim$(whi.WhName$)
+				if tmp$<>""
+					webstr$=Str$(X+1),fdel$,tmp$,fdel$
+					List$[row]=webstr$
+					row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+				Endif
+			Next x
+		Endif
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="System Flags & droplists sent "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of sysflags
+	case "GETPROD" ! get prod details (individual)			doc=LCU-GetProduct.doc
+		ReturnStatus=1
+		Message$="OK"
+		Call dxget("PRODID",tmp$)
+		tmp1$=chkaltitem$(e$,intco,tmp$)
+		tmp1$=RTrim$(tmp1$)
+		If tmp1$<>"" ! found an altitem
+		  Prod$=UCase$(tmp1$)+Blank$ ! use this instead of add'l calls
+		Else ! not found
+		  Prod$=UCase$(tmp$)+Blank$ ! use what we got
+		Endif
+		If Len(Prod$)>12 let Prod$[13]=""
+		PrR=filegetprod(e$,PRC,"=",1,prod$,PR.) ! product mode=2 dir=1
+		!
+		! initialize status
+		if PrR<0 ! Product record not found
+			clear PR.
+			ReturnStatus=0
+			Message$="Error, Product not found"
+			goto ProdInvld
+		Endif
+		! in case of altitem - send it
+		List$[0]=bsdel$,"PRODDATA",fdel$
+		List$[1]="ID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+		List$[2]=Prod$,fdel$,RTrim$(pr.desc1$),fdel$,RTrim$(pr.desc2$),fdel$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		ProdInvld: ! prod nogood
+		if debugdetail
+			dmsg$="Product sent "+Prod$+" "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of getprod
+	case "VENDSEARCH" ! vendor search						doc=LCU-VendList.doc
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		Call DXGet("STEXT",K1$)                                       
+		LET Mode$="1" ! it's begins with or contains?
+		Call DXGet("SEARCHFIELD",tmp$) \ tmp$ = UCase$(tmp$)    
+		if tmp$="" let tmp$="1"
+		
+		Call DXGet("VENDID",tmp1$) \ vend = tmp1$                         
+		Call VendList(Intco,maxcnt,K1$,mode$,tmp$, Key1$, vend, list$[])
+		call AddToStr(e$,rstr$,List$[]) ! "add the list from subs to string
+		Call AddToStr(e$,rstr$,esdel$) ! end of section  
+		if debugdetail
+			dmsg$="Vendor Search sent "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of getprod
+	case "SUBMITUPD" ! submit / update						doc=LCU-UpdateProduct.doc
+		ReturnStatus=1
+		Message$="OK"
+		LET CNCLBC=0
+		LET UPDTBC=1
+		Call doupdt()
+		if returnstatus=1
+			Message$="UPDATED "+Str$(Numrec[0])+" PRODUCT"
+			if p9$[32,32]="Y" let message$=message$+" AND "+STR$(Numrec[1])+" WHSE"
+			Message$=Message$+" RECORDS"
+		Endif
+		if debugdetail
+			dmsg$="Update complete "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of SUBMITUPD
+	case "CANCELUPD" ! cancel update						doc=LCU-CancelProduct.doc
+		ReturnStatus=1
+		Message$="OK"
+		Let cnclbc=1
+		let updtbc=0
+		call doupdt()
+		if returnstatus=1
+			Message$="CANCELLED "+Str$(Numrec[0])+" PRODUCT"
+			if p9$[32,32]="Y" let message$=message$+" AND "+STR$(Numrec[1])+" WHSE"
+			Message$=Message$+" RECORDS"
+		Endif
+		if debugdetail
+			dmsg$="Update complete "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of CANCELUPD
+	case "MANSYSFLAGS" ! send up flags							doc=MCU-GetSysFlags.doc
+		GAct=1 ! ok
+		ReturnStatus=1
+		Message$="OK"
+		Clear List$[]
+		List$[0]=bsdel$,"SYSFLAGS",fdel$
+		Webstr$="USEWH",fdel$
+		List$[1]=webstr$
+		Tmp$="N" \ if p9$[32,32]="Y" let tmp$="Y"
+		Webstr$=tmp$[1,1],fdel$
+		List$[2]=webstr$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		! add commodity droplist with ALL option
+		Clear list$[]
+		tmpcnt=maxcnt
+		! send whse List
+		List$[0]=bsdel$,"WHSELIST",fdel$
+		List$[1]="ID",fdel$,"NAME",fdel$
+		List$[2]="M",fdel$,"MAIN PRODUCT",fdel$
+		row=3
+		if p9$[32,32]="Y" ! just send set up whses
+			Webstr$="A",fdel$,"ALL WHSES",fdel$
+			List$[row]=webstr$
+			row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+			for x=0 to 98 ! translate to 1-99
+				Try 
+					read record #WHI,x,0;whi.;
+				Else
+					clear whi.
+				End try
+				tmp$=RTrim$(whi.WhName$)
+				if tmp$<>""
+					webstr$=Str$(X+1),fdel$,tmp$,fdel$
+					List$[row]=webstr$
+					row=row+1 \ If row>tmpcnt let tmpcnt=expandarray(e$,List$[])
+				Endif
+			Next x
+		Endif
+		List$[row]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		if debugdetail
+			dmsg$="System Flags & droplists sent "+Message$ \ Call updatelog(debug)
+		Endif
+		! end of mansysflags
+	case "MANGETPROD" ! manual cost entry					doc=MCU-GetProduct.doc
+		ReturnStatus=1
+		Message$="OK"
+		Call dxget("PRODID",tmp$)
+		tmp1$=chkaltitem$(e$,intco,tmp$)
+		tmp1$=RTrim$(tmp1$)
+		If tmp1$<>"" ! found an altitem
+		  Prod$=UCase$(tmp1$)+Blank$ ! use this instead of add'l calls
+		Else ! not found
+		  Prod$=UCase$(tmp$)+Blank$ ! use what we got
+		Endif
+		If Len(Prod$)>12 let Prod$[13]=""
+		PrR=filegetprod(e$,PRC,"=",1,prod$,PR.) ! product mode=2 dir=1
+		!
+		! initialize status
+		if PrR<0 ! Product record not found
+			clear PR.
+			ReturnStatus=0
+			Message$="Error, Product not found"
+			goto MProdInvld
+		Endif
+		! in case of altitem - send it
+		List$[0]=bsdel$,"PRODDATA",fdel$
+		webstr$="ID",fdel$,"DESC1",fdel$,"DESC2",fdel$
+		webstr$=webstr$,"BASE COST",fdel$,"PO COST",fdel$
+		webstr$=webstr$,"COST UM",fdel$,"PEND BASE",fdel$
+		webstr$=webstr$,"PEND BDATE",fdel$,"PEND PO",fdel$
+		webstr$=webstr$,"PEND PDATE",fdel$
+		List$[1]=webstr$
+		webstr$=Prod$,fdel$,RTrim$(pr.desc1$),fdel$,RTrim$(pr.desc2$),fdel$
+		cnvtu[0]=0;cnvtu[1]=pr.UMCostDefault;cnvtu[2]=2
+		CNVTA=pr.CostBase
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		Webstr$=Webstr$,LTrim$(Amount Using PMask$),fdel$
+		cnvtu[0]=0;cnvtu[1]=pr.UMCostDefault;cnvtu[2]=2
+		CNVTA=pr.CostPO
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		Webstr$=Webstr$,LTrim$(Amount Using PMask$),fdel$
+		tmp$=XUnit$(pr.UMCostDefault,ccc)
+		webstr$=webstr$,tmp$,fdel$
+		cnvtu[0]=0;cnvtu[1]=pr.UMCostDefault;cnvtu[2]=2
+		CNVTA=pr.PendBaseCost
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		Webstr$=Webstr$,LTrim$(Amount Using PMask$),fdel$
+		x2=pr.PendBaseDate;tmp$=""
+		if x2 let tmp$=PDate$(x2)
+		webstr$=webstr$,tmp$,fdel$
+		cnvtu[0]=0;cnvtu[1]=pr.UMCostDefault;cnvtu[2]=2
+		CNVTA=pr.PendLastCost
+		Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+		Webstr$=Webstr$,LTrim$(Amount Using PMask$),fdel$
+		x2=pr.PendLastCostDate;tmp$=""
+		if x2 let tmp$=PDate$(x2)
+		webstr$=webstr$,tmp$,fdel$
+		List$[2]=webstr$
+		List$[3]=esdel$
+		call AddToStr(e$,rstr$,List$[])
+		MProdInvld: ! prod nogood
+		if debugdetail
+			dmsg$="Product sent "+Prod$+" "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of mangetprod
+	case "MANSUBMITUPD" ! submit / update					doc=MCU-UpdateProduct.doc
+		ReturnStatus=1
+		Message$="OK"
+		LET CNCLBC=0
+		LET UPDTBC=1
+		Call mandoupdt()
+		if returnstatus=1
+			Message$="UPDATED "+Str$(Numrec[0])+" PRODUCT"
+			if p9$[32,32]="Y" let message$=message$+" AND "+STR$(Numrec[1])+" WHSE"
+			Message$=Message$+" RECORDS"
+		Endif
+		if debugdetail
+			dmsg$="Update complete "+Message$
+			Call updatelog(debug)
+		Endif
+		! end of mansubmitupdate
+	end select
+
+	! status section
+	call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	call AddToStr(e$,rstr$,WebStr$)
+	call SetOutPut(e$,rstr$)
+
+  if debugdetail
+		dmsg$="End of Program serp081" \ Call updatelog(debug)
+  Endif
+else
+ include "src/callmainerrnet.inc"
+end try
+end  ! end of Main
+!
+!--------------------------------------------------------------------
+
+! subs start now
+!------------------------------------------------------------------------------------------
+Sub OpenFiles()
+
+ Try
+    !
+	CTLC = OpenFile(-9999,intCo) \ If CTLC = -1 Error 42 !control
+	CCC=OpenFile(-1728,IntCo) \ IF CCC=-1 Error 42 ! u/m file
+	CMC=OpenFile(-2288,IntCo) \ if CMC=-1 Error 42 ! commodity
+	PRC=OpenFile(-1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(-1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	WHI = OpenFile(-2768,IntCo) \ if whi = -1 Error 42 ! wh info file (rec 0 fix)
+	btc = OpenFile(-1952,IntCo) \ if btc = -1 Error 42 ! break tbl chann
+	sqlChan = OpenMySQLMirror(e$)
+	
+ 	if debugdetail
+		dmsg$="Files Opened" \ Call updatelog(debug)
+    Endif
+ else
+    include "src/callsuberr.inc"
+  end try
+end sub ! openfiles
+! 
+!--------------------------------------------------------------------
+Sub updatelog(debug)                                        
+    If not(debug) Exit Sub                                    
+	System "echo ''" + msc$(0) + " UID "+Userid$+" " + dmsg$ + "'' >> " + dblog$
+End Sub 
+! 
+!--------------------------------------------------------------------
+Function chkDateFrmt$(DIn$)
+! see if date in is MM/DD/YY or MM/DD/YYYY
+! if not make it MM/DD/YYYY
+Try
+	Dim DOut$[10],X$[20]
+	Dim 1%,Mth,Day
+	Dim 3%,Yr
+	If DIn$[1,2]="00" or UCase$(DIn$[1,4])="NONE" or DIn$="0"
+	  Let DOut$=UCase$(DIn$)
+	  Exit Function DOut$ ! no reformat - send back as is
+	Endif
+	Mth=DIn$[1,2];Day=Din$[4,5];Yr=DIn$[7]
+	if Din$[2,2]="/" or DIn$[2,2]="-" ! 1 digit month
+	  Let Mth=DIn$[1,1]
+	  If DIn$[4,4]="/" or DIn$[4,4]="-" ! 1 digit day
+	     Let Day=DIn$[3,3]
+		 Let Yr=DIn$[5]
+	  Else
+	     Let Day=Din$[3,4] ! try 2 digit
+		 Let Yr=DIn$[6]
+	  Endif
+	Endif
+	X$=Mth Using "&&"
+	X$[3,4]=Day Using "&&"
+	If Yr>1000 ! 4
+		X$[5]=Yr Using "&&&&"
+	Else ! 2 digit
+		If YR<67 let yr=2000+yr Else Let Yr=yr+1900
+		X$[5]=Yr Using "####"
+	Endif
+	Dout$=X$[1,2]+"/"+X$[3,4]+"/"+X$[5]
+ else
+    include "src/callsuberr.inc"
+  end try
+end Function DOut$ ! chkDateFrmt$
+! 
+!--------------------------------------------------------------------
+Sub doupdt()
+! single routine to update or cancel update
+  Try
+	Close #PRC ! close read only - open read/write
+	Close #PWC
+	PRC=OpenFile(1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	Dim K1$[50],k2$[50],mode$[2],SCGrp$[11],ECGrp$[11]
+	Dim K4$[60],BType$[1],LType$[1]
+	Dim 1%,WH[99]
+	dim 2%,Vend,NMut,NBrt
+	Dim 3%,NumRec[1],BCost,LCost,LFact,BFact
+	!call dxsave(0,"/tmp/pcu081.txt!")
+	NumRec=0;Numrec[1]=0
+	Call dxget("STPROD",tmp$) \ tmp$=UCase$(RTrim$(tmp$))
+	K1$=tmp$+Blank$;k1$[13]=""
+	call dxget("ENPROD",tmp$) \ tmp$=UCase$(RTrim$(tmp$))
+	if tmp$="" let tmp$="}}}}}}}}}}}}"
+	K2$=tmp$+Blank$;k2$[13]=""
+	if k1$>k2$ ! bad range
+		Returnstatus=0
+		Message$="INVALID PRODUCT RANGE"
+		goto fldinvalid
+	Endif
+	if cnclbc goto cncldt  ! no types/factors/tables on cancel updates
+	call dxget("LCTYPE",tmp$)
+	If tmp$<>"1" and tmp$<>"2" and tmp$<>"3" ! gotta have it!
+		Returnstatus=0
+		Message$="INVALID COST TYPE"
+		goto fldinvalid
+	Endif
+	if tmp$="1" let BType$="$"
+	if tmp$="2" let BType$="%"
+	if tmp$="3" let BType$="="
+	Call dxget("LCFACTOR",tmp$)
+	Let BFact=tmp$
+	if BFACT<0 and BTYPE$="="
+		Returnstatus=0
+		Message$="CANNOT REPLACE WITH NEGATIVE NUMBER"
+		goto fldinvalid
+	Endif
+	if BFACT<=-100 and BTYPE$="%"
+		Returnstatus=0
+		Message$="CANNOT BE 100% OR MORE"
+		goto fldinvalid
+	Endif
+	cncldt: ! don't need type/fact/table on cancel
+	call dxget("COMMOD",tmp$)
+	if rtrim$(tmp$)="" let tmp$="ALL"
+	let Kcm$=tmp$+Blank$;kcm$[5]=""
+	call dxget("VENDOR",tmp$)
+	vend=tmp$
+	if vend<0 or vend>999999 or fra(vend) 
+		Returnstatus=0
+		Message$="INVALID VENDOR"
+		goto fldinvalid
+	Endif
+	call dxget("EFFDATE",tmp$)
+	tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+	EffDate=tmp1$[3,8] ! drop to yymmdd
+	!IF EFFDATE<CurDate ! ALLOWED ON PM, SO ALLOWED HERE
+	!	returnStatus=0
+	!	Message$="Date must today or future date"
+	!	Goto fldinvalid
+	!Endif
+	if updtbc and effdate=0 ! cannot happen
+		returnStatus=0
+		Message$="Date must exist"
+		Goto fldinvalid
+	Endif
+	call dxget("COSTGRP",tmp$)
+	LET scgrp$=RTrim$(tmp$)
+	if scgrp$="ALL" let scgrp$="" ! we use null for all
+	scgrp$=UCase$(scgrp$)+Blank$
+	call dxget("ECOSTGRP",tmp$)
+	ecgrp$=RTrim$(tmp$)
+	if ecgrp$="" let ecgrp$="Z",ecgrp$
+	ecgrp$=UCase$(ecgrp$)+Blank$
+	if scgrp$>ecgrp$ ! bad range
+		returnstatus=0
+		message$="Invalid Cost Group range"
+		goto fldinvalid
+	Endif
+	If P9$[32,32]="Y" ! whses
+		ProdMain=0
+		Clear WH[]
+		call dxget("WHSEL",tmp$)
+		! sent as comma delimited
+		CPOS=1
+		stloop: ! loop it
+		Search tmp$[CPOS],",",EPOS
+		If EPOS ! found a comma
+			x1 = cpos + epos - 2 ! move to before comma
+			tmp1$=tmp$[CPOS,X1]
+			if tmp1$="M" let Prodmain=1
+			If tmp1$="A" ! all
+				for x=1 to 99
+					Wh[x]=1
+				Next X
+				Wh[0]=99
+			Endif
+			let x2=tmp1$
+			if x2>0 and x2<100
+				wh[x2]=1
+				wh[0]=wh[0]+1
+			Endif
+			cpos = cpos + epos ! start after comma
+			EPOS=0
+			Goto STLoop ! look for next
+		Else ! no more commas, was there no comma at end?
+			if (cpos>1 and CPOS<=Len(tmp$)) or (cpos=1 and len(tmp$)>0) ! found one comma or none
+				tmp1$=tmp$[CPOS]
+				if tmp1$="M" let Prodmain=1
+				If tmp1$="A" ! all
+					for x=1 to 99
+						Wh[x]=1
+					Next X
+					Wh[0]=99
+				Endif
+				let x2=tmp1$
+				if x2>0 and x2<100
+					wh[x2]=1
+					wh[0]=wh[0]+1
+				Endif
+			
+			Endif
+		Endif
+		If Prodmain=0 and Wh[0]=0
+			returnStatus=0
+			Message$="NO WAREHOUSES SELECTED"
+			Goto fldinvalid
+		Endif
+	Else ! no whses
+		Prodmain=1 ! always
+		Clear WH[] ! not mwhse
+	Endif
+	! OK - START THE UPDATE
+	!call programdump("/tmp/pcu081u!","")
+	Prod$=K1$
+	Mode$=">="
+	Do
+		e=1 ! lock it!
+		PRR=filegetprod(e$,PRC,mode$,1,prod$,pr.,e)
+		mode$=">" ! switch to next
+		If PRR<=0 or prod$>K2$ Exit do
+		If Prod$="Z ZZZZZZZZZZ" goto Bypassprod
+		If KCM$<>"ALL " if kcm$<>pr.ComdtyCode$ goto bypassprod
+		!if cgrp$<>"" if cgrp$<>pr.CostUpdGrp$ goto bypassprod
+		tmp1$=UCase$(pr.CostUpdGrp$)+Blank$
+		tmp1$[12]="" ! cut it to 11 chars
+		if tmp1$<scgrp$ or tmp1$>ecgrp$ goto bypassprod
+		if p9$[32,32]="Y" and not(prodmain) goto whseupdt
+		if vend if vend<>pr.PrimVend goto whseupdt
+		If CnclBc ! wants a cancel
+			if effdate if effdate<>pr.PendLastCostDate goto WhseUpdt
+			pr.PendLastCost=0
+			pr.PendLastCostDate=0
+		Else
+			! do prodfile update
+			cnvtu[0]=0;cnvtu[1]=pr.UMCostDefault;cnvtu[2]=2
+			CNVTA=pr.CostPO
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			BCost=Amount
+			If BType$="%"  LET BCost=FNP(BCost+(BCost*BFact/100))
+			If BType$="$" LET BCost=FNP(BCost+BFact)
+			If BType$="=" Let BCost=FNP(BFact)
+			If BCost<0 let BCost=0
+			If BCost>999999 let BCost=999999
+			cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+			CNVTA=BCost
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			pr.PendLastCost=Amount
+			pr.PendLastCostDate=EffDate
+			if BFact=0 let pr.PendLastCost=0;pr.PendLastCostDate=0
+		Endif ! of update
+		Write record #PRC,PRR,0;pr.;
+		!
+		if sqlChan >= 0 ! MySQL enabled and channel opened
+			call prod_DL4SQLConvert(e$,"FROMDL4",PR.,sql_prod.,PRR)
+			e = prod_SQLAddUpdate(e$,sqlChan,sql_prod.) ! mode="a" or "c"
+			if e <> 1 ! returns the number of records add/updated/deleted
+				error 11000 ! do bad update stuff
+			end if
+		end if
+		!
+		Numrec[0]=numrec[0]+1
+	WhseUpdt: ! update whse 
+		if p9$[32,32]="Y" and wh[0]>=0 ! using whprc & has a whse
+		 ! do whses selected
+		 K4$=" ",k4$;K4$[1,12]=Prod$
+		 If Wh[0] let k4$[13]="  "
+		 Do
+			let e=1 ! LOCK IT
+			PWR=filegetprodwhse(e$,PWC,">",1,K4$,pw.,E)
+			If PWR<=0 or K4$[1,12]<>Prod$ Exit do
+			X2=K4$[13,14]
+			If Wh[0] and not(wh[x2]) goto NRWHSE
+			if vend if vend<>pw.Vend goto NRWhse
+			If CnclBC ! wants a cancel
+				if effdate if effdate<>pw.PendPOCostDate goto NRWHSE
+				pw.PendPOCost=0
+				pw.PendPOCostDate=0
+			Else
+			  ! do whse update
+				cnvtu[0]=0;cnvtu[1]=pr.UMCostDefault;cnvtu[2]=2
+				CNVTA=pw.CostLastPo
+				Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+				BCost=Amount
+				If BType$="%"  LET BCost=FNP(BCost+(BCost*BFact/100))
+				If BType$="$" LET BCost=FNP(BCost+BFact)
+				If BType$="=" Let BCost=FNP(BFact)
+				If BCost<0 let BCost=0
+				If BCost>999999 let BCost=999999
+				cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+				CNVTA=BCost
+				Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+				pw.PendPOCost=Amount
+				pw.PendPOCostDate=EffDate
+				if BFact=0 let pw.PendPOCost=0;pw.PendPOCostDate=0
+			Endif ! cancel/add
+			Write Record #PWC,PWR,0;pw.;
+			Numrec[1]=Numrec[1]+1
+		  NRWHSE: ! whse not updated
+		  Unlock #PWC ! in case - unlock pwhse rec
+		 Loop
+		Endif ! whse prcing
+	  Bypassprod: ! failed a test or done
+	  Unlock #PRC ! in case - unlock prod rec
+	Loop
+	FldInvalid: ! exit due to bad data
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! doupdt
+! 
+!--------------------------------------------------------------------
+Sub mandoupdt()
+! single routine to update PO/Base Cost for 1 product
+  Try
+	Close #PRC ! close read only - open read/write
+	Close #PWC
+	PRC=OpenFile(1792,IntCo) \ if prc=-1 Error 42 ! product file
+	PWC=OpenFile(1744,IntCo) \ If PWC=-1 Error 42 ! prodwhse file
+	Dim K1$[50],k2$[50],mode$[2],SCGrp$[11],ECGrp$[11]
+	Dim K4$[60],BType$[1],LType$[1]
+	Dim 1%,WH[99]
+	dim 2%,BCEFFDate,PCEffDate
+	Dim 3%,NumRec[1],BCost,LCost
+	!call dxsave(0,"/tmp/pcu081.txt!")
+	NumRec=0;Numrec[1]=0
+	Call dxget("PRODID",tmp$) \ tmp$=UCase$(RTrim$(tmp$))
+	K1$=tmp$+Blank$;k1$[13]=""
+	If Len(K1$)>12 let K1$[13]=""
+	PrR=filegetprod(e$,PRC,"=",1,K1$,PR.) ! product mode=2 dir=1
+	if prr<=0 ! bad range
+		Returnstatus=0
+		Message$="INVALID PRODUCT Code"
+		goto manupdone
+	Endif
+	prod$=k1$[1,12]
+	call dxget("BASECOST",tmp$)
+	BCost=tmp$
+	if BCost<0
+		returnstatus=0
+		message$="Can not have negative Base Cost"
+		goto manupdone
+	Endif
+	call dxget("BCEFFDATE",tmp$)
+	tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+	BEffDate=tmp1$[3,8] ! drop to yymmdd
+	if BCost and beffdate<=0 ! cannot happen
+		returnStatus=0
+		Message$="Base Effective Date must exist"
+		Goto manupdone
+	Endif
+	call dxget("POCOST",tmp$)
+	LCost=tmp$
+	if LCost<0
+		returnstatus=0
+		message$="Can not have negative PO Cost"
+		goto manupdone
+	Endif
+	call dxget("PCEFFDATE",tmp$)
+	tmp$=chkDateFrmt$(tmp$)
+	if tmp$[1,1]<"0" and tmp$[1,1]>"9" let tmp$=""
+	tmp1$=formatdate2$(tmp$) ! mm/dd/yyyy to yyyymmdd
+	PEffDate=tmp1$[3,8] ! drop to yymmdd
+	if LCost and Peffdate<=0 ! cannot happen
+		returnStatus=0
+		Message$="PO Cost Effective Date must exist"
+		Goto manupdone
+	Endif
+	If P9$[32,32]="Y" ! whses
+		ProdMain=0
+		Clear WH[]
+		call dxget("WHSEL",tmp$)
+		! sent as comma delimited
+		CPOS=1
+		mstloop: ! loop it
+		Search tmp$[CPOS],",",EPOS
+		If EPOS
+			x1 = cpos + epos - 2 ! move to before comma
+			tmp1$=tmp$[CPOS,X1]
+			if tmp1$="M" let Prodmain=1
+			If tmp1$="A" ! all
+				for x=1 to 99
+					Wh[x]=1
+				Next X
+				Wh[0]=99
+			Endif
+			let x2=tmp1$
+			if x2>0 and x2<100
+				wh[x2]=1
+				wh[0]=wh[0]+1
+			Endif
+			cpos = cpos + epos ! start after comma
+			EPOS=0
+			Goto MSTLoop ! look for next
+		Else ! no more commas, was there no comma at end?
+			if (cpos>1 and CPOS<=Len(tmp$)) or (cpos=1 and len(tmp$)>0) ! found one comma or none
+				tmp1$=tmp$[CPOS]
+				if tmp1$="M" let Prodmain=1
+				If tmp1$="A" ! all
+					for x=1 to 99
+						Wh[x]=1
+					Next X
+					Wh[0]=99
+				Endif
+				let x2=tmp1$
+				if x2>0 and x2<100
+					wh[x2]=1
+					wh[0]=wh[0]+1
+				Endif
+			Endif
+		Endif
+		If Prodmain=0 and Wh[0]=0
+			returnStatus=0
+			Message$="NO WAREHOUSES SELECTED"
+			Goto manupdone
+		Endif
+	Else ! no whses
+		Prodmain=1 ! always
+		Clear WH[] ! not mwhse
+	Endif
+	! OK - START THE UPDATE - already got Product
+	cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+	CNVTA=LCost
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	pr.PendLastCost=Amount
+	pr.PendLastCostDate=PEffDate
+	cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+	CNVTA=BCost
+	Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+	pr.PendBaseCost=Amount
+	pr.PendBaseDate=BEffDate
+	Write record #PRC,PRR,0;pr.;
+	!
+	if sqlChan >= 0 ! MySQL enabled and channel opened
+		call prod_DL4SQLConvert(e$,"FROMDL4",PR.,sql_prod.,PRR)
+		e = prod_SQLAddUpdate(e$,sqlChan,sql_prod.) ! mode="a" or "c"
+		if e <> 1 ! returns the number of records add/updated/deleted
+			error 11000 ! do bad update stuff
+		end if
+	end if
+	!
+	Numrec[0]=numrec[0]+1
+			
+	! do whse update
+	MWhseUpdt: ! update whse 
+	if p9$[32,32]="Y" and wh[0]>=0 ! using whprc & has a whse
+		! do whses selected
+		K4$=" ",k4$;K4$[1,12]=Prod$
+		If Wh[0] let k4$[13]="  "
+		 Do
+			let e=1 ! LOCK IT
+			PWR=filegetprodwhse(e$,PWC,">",1,K4$,pw.,E)
+			If PWR<=0 or K4$[1,12]<>Prod$ Exit do
+			X2=K4$[13,14]
+			If Wh[0] and not(wh[x2]) goto MNRWHSE
+			cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+			CNVTA=LCost
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			pw.PendPOCost=Amount
+			pw.PendPOCostDate=PEffDate
+			cnvtu[0]=pr.UMCostDefault;cnvtu[1]=0;cnvtu[2]=2
+			CNVTA=BCost
+			Amount=ConvProdAmount(e$,CNVTU[],CNVTA,ctlc,FLAG,PR.)
+			pw.PendBaseCost=Amount
+			pw.PendBaseDate=BEffDate
+			! done
+			Write Record #PWC,PWR,0;pw.;
+			Numrec[1]=Numrec[1]+1
+		  MNRWHSE: ! whse not updated
+		  Unlock #PWC ! in case - unlock Pwhse rec
+		 Loop
+	Endif ! of whse price & ent'd whse
+
+	Manupdone: ! finished
+  else
+    include "src/callsuberr.inc"
+  end try
+end sub ! mandoupdt
+! 
+!--------------------------------------------------------------------

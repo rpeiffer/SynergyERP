@@ -1,0 +1,567 @@
+! 
+! loadsave -w -n 100,10 -o prog/dxport/441j.dl4 src/441j.src
+!
+! New program for All Florida paper.  Print customer rebates based on
+! invoice
+!
+Rem  Copyright (c) 2010 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+include "src/copyright.inc"
+
+include "src/inc/filecust.inc"
+include "src/inc/filesslsm.inc"
+include "src/inc/fileinvh.inc"
+include "src/inc/fileinvl.inc"
+include "src/inc/fileinvt.inc"
+include "src/inc/fileproduda.inc"
+include "src/inc/filesslsmcomm.inc"
+include "src/inc/filecommaudit.inc"
+
+External Lib "libgeneral.lib"
+Declare External Sub GetSession,AddToStr,SetOutput,CreateNetStatus
+Declare External Function getmsg$,expandarray
+Declare External Function AddToMYReports
+External Lib "ubsfunc.dl4"
+Declare External Function OpenFile,PDate$,FormatDate2$,getuidinfo$,JDate$
+Declare Intrinsic Sub InpBuf,String,Time,programdump,DateToJulian,JulianToDate
+Declare External Function getuidrec
+
+Dim e$[500],buttonlist$[5,50],nextlist$[5,100] ! dx error handling variables
+dim tmp$[1000],tmp1$[800],tmp2$[800],Message$[600],msg$[100],rstr$[5000],webstr$[2000]
+dim action$[30],options$[30],userid$[8],3%,fdel$[10],bsdel$[10],esdel$[10],rdel$[10]
+Dim ReportDir$[128],BaseName1$[128],Statusfile$[128],action1$[30],action2$[30]
+
+! call dxopen() ! for standalone run
+Call getsession(e$,CTLC,options$,action$,userid$,intCO,intSls,fdel$,rstr$,bsdel$,esdel$,rdel$,Action1$,Action2$)
+call dxsave(0,"/tmp/mtg441j.txt!")
+try
+
+dim k_invh$[16],k_cust$[10],k_invl$[14]
+dim k_produda$[12],k_comm$[16],k_commaudit$[30]
+dim invh. as invh
+dim invl. as invl
+dim invt. as invt
+dim cust. As cust
+dim slsm. as sslsm
+dim produda. as produda
+dim comm. as sslsmcomm
+dim commaudit. as commaudit
+
+dim 1%,ch_cust,ch_slsm,ch_invh,ch_invt,ch_invl,ch_produda
+dim 1%,ch_comm,ch_commaudit
+dim 1%,toScreen,lineNo,currentSales,history,factor,adjustCommission,user
+dim 1%,CommissionAdjusted
+dim 1%,PFU1[20],CNVTU[2]
+dim 3%,PFU2[6],CNVTA,A[33]
+dim 2%,r_invh,r_invt,r_cust,r_invl,r_produda,r_comm,r_commaudit
+dim 2%,sdate,edate,jsdate,jedate,jinvdate
+dim 3%,totalDiscount,eligible,tot[2,3],ineligible,new_comm,merchadj,rebate
+dim 3%, ineligible
+dim 3%,Amount,chbase
+
+!**********************
+!* M A I N   L O G I C
+!**********************
+DEF FNR(X)=SGN(X)*(INT(ABS(X)*100+.5)*.01)
+USER = GetUIDRec(e$, intCo, userid$)
+gosub init: ! read flags, gather parameters from the web
+gosub OpenFiles:
+! "new" method.  if not going to the screen, send "processing"
+! back to the web and run in "background"
+if toscreen
+	!tmp$=bsdel$,fdel$ !"441j",fdel$,rdel$
+	! call addtostr(e$,rstr$,tmp$)
+	! set headings
+	tmp$=bsdel$,"441j",fdel$,rdel$
+	tmp$=tmp$,"Salesrep",fdel$,"Salesrep Name",fdel$
+	tmp$=tmp$,"Customer",fdel$,"Customer Name",fdel$
+	tmp$=tmp$,"Trans #",fdel$,"Trans Type",fdel$,"Trans Date",fdel$
+	tmp$=tmp$,"Merchandise $",fdel$
+	tmp$=tmp$,"Rebate Eligible $",fdel$,"Rebate Pct",fdel$,"Rebate $",fdel$
+	tmp$=tmp$,rdel$
+	call addtostr(e$,rstr$,tmp$)
+else
+	! run report in background if pdf or to printer
+	!if pdf or print, new method, after edits,setouput,dxclose
+	Call setoutput(e$,rstr$,2) !2 flag puts 0 status section in w/print in process msg, puts </page> in
+end if
+!
+! loop through customer file
+!
+k_cust$ = " ",k_cust$
+do
+	r_cust = filegetcust(e$,ch_cust,">",5,k_cust$,cust.)
+	if r_cust<=0 exit do
+	if not(currentSales)
+		currentSales = cust.SalesmanCode
+		gosub GetSalesrep:
+	else
+		if currentSales <> cust.SalesmanCode
+			if printedSalesRebate gosub SalesrepTotals:
+			printedSalesRebate = 0
+			currentSales = cust.SalesmanCode
+			gosub GetSalesrep:
+		end if
+	end if		
+	if cust.CustRebateType = 2 ! based on paid A/R
+		gosub PrintCustRebates:
+		if printedRebate printedSalesRebate = 1
+	end if
+loop
+if printedSalesRebate gosub SalesrepTotals:
+
+goto OutEnd:
+
+!********************************************************************
+!* S U B R O U T I N E S
+!********************************************************************
+init: ! read flags, gather parameters from the web
+	! get parameters from the web
+	sdate = 0 \ call dxget("sdate",tmp$)
+	if tmp$ <> ""
+		tmp1$ = tmp$[5,6]+tmp$[1,4]
+		sdate = tmp1$
+	end if
+	edate = 999999 \ call dxget("edate",tmp$)
+	if tmp$ <> ""
+		tmp1$ = tmp$[5,6]+tmp$[1,4]
+		edate = tmp1$
+	end if
+	if edate < sdate
+		e$ = "Starting date < ending date."
+		error 10000
+	end if
+	! convert the range of dates to julian so we can easily compare
+	if sdate
+		tmp$ = sdate using  "&&&&&&"
+		call datetojulian(1,tmp$)
+		jsdate = tmp$
+	end if
+	if edate <> 999999
+		tmp$ = edate using "&&&&&&"
+		call datetojulian(1,tmp$)
+		jedate = tmp$
+	else
+		jedate = 99999
+	end if
+	call dxget ("AdjustCommission", tmp$) \ adjustCommission = tmp$
+	! figure out if we are go to the browser
+	try
+		toScreen = 0 \ dummy = Chf(0)
+	else
+		toScreen = spc(8)
+	end try
+	If toScreen and toScreen <> 49 Gosub ERR_TRAP
+	pageLength = 60
+	lineNo = 999 ! set for first record to print
+return
+
+OpenFiles: ! like the name says
+	ch_invh = openfile(-1136, intCO) \ if ch_invh = -1 error 42
+	ch_invl = openfile(-1184, intCO) \ if ch_invl = -1 error 42
+	ch_invt = openfile(-1168, intCO) \ if ch_invt = -1 error 42
+	ch_cust = openfile(-1808,intCO) \ if ch_cust = -1 error 42
+	ch_slsm = openfile(-1824,intCO) \ if ch_slsm = -1 error 42
+	ch_cashother = openfile(-1488,intCO) \ if ch_cashother = -1 error 42
+	ch_produda = openfile(-9967, intCO) \ if ch_produda = -1 error 42
+	ch_comm = openfile(2240,intCO) \ if ch_comm = -1 error 42
+	ch_commaudit = openfile(9931,intCO) \ if ch_commaudit = -1 error 42
+return
+
+PrintCustRebates: ! print rebates for customer contained in cust.
+	k_invh$ = " ",k_invh$
+	k_invh$[1,6] = cust.CustomerCode using "######"
+	printedRebate = 0
+	do ! loop through invoice history
+		r_invh = filegetinvh(e$,ch_invh,">",2,k_invh$,invh.)
+		if r_invh<=0 exit do
+		if invh.CustNum <> cust.customercode exit do
+		tmp$ = invh.InvDate using "&&&&&&"
+		call DateToJulian(1,tmp$)
+		jinvdate = tmp$
+		if jinvdate < jsdate or jinvdate > jedate goto skip_inv:
+		! YUP, got one.
+		if not(printedRebate) gosub PrintHeader:
+		printedRebate = 1
+		factor = 1 \ if invh.Status = 31 factor = -1
+		gosub PrintRebate:
+		if adjustCommission and tot[2,3] <> 0
+			gosub AdjustCommission:
+		end if
+		skip_inv: ! didn't meet criteria
+	loop
+	if printedRebate ! if we actually printed something for this cust
+		gosub CustomerTotals:
+	end if
+Return
+
+
+GetSalesrep: ! read salesrep record based on customer salesrep
+	tmp$ = cust.SalesmanCode using "###"
+	search #ch_slsm,2,1;tmp$,r_slsm,e \ if e>1 gosub Err_Search:
+	if e
+        slsm.Name$="Salesman not on file          "                
+    Else                                                             
+	    Read Record #ch_slsm,r_slsm;slsm.;                             
+	ENDIF                                                            
+Return
+
+PrintRebate: ! Print 1 rebate
+	for i = 0 to 3
+		tot[2,i] = 0
+	next i
+	firstLine = 1
+	gosub PrintInvoiceLines: ! doesn't actually print - just totals
+	if toScreen<>0
+		tmp$=str$(cust.SalesmanCode),fdel$! 
+		tmp$=tmp$,rtrim$(slsm.Name$),fdel$
+		!tmp$=str$(currentSales),fdel$,slsm.Name$,fdel$
+		tmp$=tmp$,str$(cust.CustomerCode),fdel$
+		tmp$=tmp$,rtrim$(cust.Name$),fdel$
+		tmp$=tmp$,str$(invh.InvNum),fdel$
+		if invh.Status = 30
+			tmp$=tmp$,"Invoice",fdel$
+		else
+			if invh.Status = 31 
+				tmp$=tmp$,"Credit",fdel$
+			else
+				tmp$=tmp$,"Unknown",fdel$
+			endif
+		endif
+		tmp1$ = invh.InvDate using "&&&&&&"
+		tmp$=tmp$,tmp1$[3,4],"-",tmp1$[5,6],"-",tmp1$[1,2],fdel$
+		tmp$=tmp$,ltrim$(tot[2,0] using "-------#.##"),fdel$ ! merchandise dollar
+		tmp$=tmp$,ltrim$(tot[2,2] using "-------#.##"),fdel$ ! rebate Eligible
+		tmp$=tmp$,ltrim$(cust.CustRebatePercent using "---#.##"),fdel$ ! rebate pct
+		tmp$=tmp$,ltrim$(tot[2,3] using "-------#.##"),fdel$ ! rebate $
+		tmp$=tmp$,rdel$
+		call addtostr(e$,rstr$,tmp$)
+		return
+	end if
+	if lineNo+1 > pageLength gosub PrintHeader:
+	print #0; invh.InvNum using "##########"; tab 12;
+	if invh.Status = 30 print #0;"Invoice";
+	if invh.Status = 31 print #0;"Credit";
+	tmp$ = invh.InvDate using "&&&&&&"
+	print #0; tab 23; tmp$[3,4];"/";tmp$[5,6];"/";tmp$[1,2];
+	print #0; using "-------#.##"; tab 34; tot[2,0];
+	print #0; using "-------#.##"; tab 48;tot[2,2];
+	print #0; using "-------#.##"; tab 66;tot[2,3];
+	if adjustCommission and tot[2,3] <> 0
+		print #0; tab 78; "*";
+	end if
+	print #0; ""
+	lineNo = lineNo + 1
+	if tot[2,1] <> 0
+		print #0; tab 12; "not-elig";
+		tmp$ = invh.InvDate using "&&&&&&"
+		print #0; tab 23; tmp$[3,4];"/";tmp$[5,6];"/";tmp$[1,2];
+		print #0; using "-------#.##"; tab 34;tot[2,2]
+		lineNo = lineNo + 1
+	end if
+Return
+
+PrintInvoiceLines: ! spin through invoice lines for customer rebates
+	k_invl$ = " ",k_invl$
+	k_invl$[1,10] = k_invh$[7,16]
+	do ! loop through invoice lines
+		! do not actually print by line, only accumulate
+! 		if not(firstLine)
+! 			if lineNo > pageLength gosub PrintHeader:
+! 		end if
+ 		firstLine = 0
+ 		r_invl = filegetinvl(e$,ch_invl,">",1,k_invl$,invl.)
+ 		if r_invl<=0 exit do
+ 		if k_invl$[1,10] <> k_invh$[7,16] exit do
+ 		! check for zLine
+ 		if invl.NStkItem and invl.LineType = 3 goto skipLine:
+! 		gosub ConvertToDisplay
+! 		print #0; tab 34; invl.ProdCode$;
+! 		print #0; tab 47; invl.Desc1$;
+! 		print #0; using "-----##.##"; tab 78; invl.QtyShip * factor;
+! 		print #0; using "-------#.##"; tab 89; invl.NetPrice * factor;
+! 		print #0; using "-------#.##"; tab 101; invl.ExtShipAmt * factor;
+ 		! read product uda record
+ 		k_produda$ = invl.ProdCode$
+ 		r_produda = filegetproduda(e$,ch_produda,"=",1,k_produda$,produda.)
+ 		if rtrim$(ucase$(produda.ANUda13$)) = "Y" ! this is excluded
+ 			! print #0; tab 113; "Y";
+ 			eligible = 0
+			ineligible = invl.ExtShipAmt
+ 		else
+ 			! print #0; tab 113; "N";
+ 			eligible = invl.ExtShipAmt
+ 			ineligible = 0
+ 		end if
+ 		rebate = eligible * (cust.CustRebatePercent/100)
+! 		print #0; using "-------#.##"; tab 124; rebate * factor;
+! 		print #0; ""
+  		gosub UpdateAccums:
+! 		lineNo = lineNo + 1
+	skipLine: ! not one we include
+	loop
+Return
+
+ConvertToDisplay: ! convert base units to display units
+	gosub ConvertStockAndNonStock: ! load unit information
+	LET CNVTU[0]=0;CNVTU[1]=invl.UMSell;CNVTU[2]=5;CNVTA=invl.QtyShip
+	IF invl.NumOut LET CNVTA=CNVTA*invl.NumOut ! "cut (number out)
+	GOSUB ConvertUnit:
+	LET invl.QtyShip=amount
+
+	LET CHBASE=0
+	IF invl.UMCutChrg=-3 ! flat
+		LET CHBASE=(invl.CutChrg/invl.QtyOrd)
+	ELSE
+		LET CHBASE=invl.CutChrg ! "cut chg
+	end if
+	IF invl.UMPrice > 0 AND invl.NumOut
+		LET CNVTA=((invl.UnitPrice-invl.LineDisc)/invl.NumOut)
+		LET CNVTA=CNVTA+(CHBASE/invl.NumOut) 
+	ELSE
+		LET CNVTA=invl.UnitPrice-invl.LineDisc
+		LET CNVTA=CNVTA+CHBASE
+	END IF
+	LET CNVTA=CNVTA-(CNVTA*(invl.LineDiscPct/100))
+	IF invl.UpChrg>0 LET CNVTA=CNVTA+(CNVTA*(invl.UpChrg/100))
+	IF invl.UpChrg<0 LET CNVTA=CNVTA+(0-invl.UpChrg)
+	LET CNVTU[0]=0;CNVTU[1]=invl.UMPrice;CNVTU[2]=2
+	GOSUB ConvertUnit:
+	LET invl.NetPrice=AMOUNT ! "net unit price with cutting charge (child)
+Return
+
+ConvertStockAndNonStock: ! ===== set stock and n/s units for conversions
+	LET A[6]=invl.LbsUnit;A[5]=invl.WgtFactor \ IF NOT(A[5]) LET A[5]=1;invl.WgtFactor=1
+	!
+	LET PFU1[0]=invl.UMBase;PFU1[1]=invl.UMSell ! "base and selling units
+	LET PFU1[2]=invl.UMPrice;PFU1[3]=invl.UMCost ! "pricing and costing
+	LET PFU1[4]=invl.UMPurch ! "purchasing
+	LET PFU1[5]=0;PFU1[6]=0;PFU1[7]=0
+	LET PFU1[8]=invl.UMSell;PFU1[9]=invl.UMSell;PFU1[10]=invl.UMPurch ! "stock,sell,purch dflt
+	LET PFU1[11]=invl.UMCost;PFU1[12]=invl.UMPrice;PFU1[13]=invl.UMSell ! "cost,price,prod dflt
+	LET PFU1[16]=invl.UMBase;PFU1[17]=invl.UMBase;PFU1[18]=invl.UMSell ! "up,bkn,pack dflt
+	LET PFU1[19]=invl.UMSell ! "size default
+	LET PFU2[0]=invl.SellFactor;PFU2[1]=invl.PriceFactor ! "selling and pricing factor
+	LET PFU2[2]=invl.CostFactor;PFU2[3]=invl.PurchFactor ! "costing and purchasing
+	LET PFU2[4]=0;PFU2[5]=0;PFU2[6]=0
+	FOR X1=1 TO 4
+		FOR X2=0 TO X1-1
+			IF PFU1[X1]=PFU1[X2] LET PFU1[X1]=0;PFU2[X1-1]=0
+		NEXT X2
+	NEXT X1
+Return
+
+
+ConvertUnit: ! UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)
+	IF CNVTU[2]<>3 AND CNVTU[2] <> 0 ! um window and test if valid
+		IF (CNVTU[2]=1 or CNVTU[2]=5) AND CNVTU[1]=CNVTU[0]
+			LET AMOUNT=CNVTA ! same units
+			return
+		end if
+		IF CNVTU[0]=-2 OR CNVTU[1]=-2
+			LET AMOUNT=CNVTA ! lot
+			return
+		end if
+		IF NOT(CNVTA)
+			LET AMOUNT=0 ! "none there
+			return
+		end if
+	end if
+	CALL "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+	IF CNVTU[2]=0 return !!TEST IF VALID CONVERSION
+	IF FLAG LET E=FLAG \ GOSUB Err_Search:
+	LET AMOUNT=CNVTA
+RETURN
+
+
+UpdateAccums: !
+	! tot[0,x] = customer
+	! tot[1,x] = salesrep
+	! tot[2,x] = invoice
+	! tot[x,0] = merch $
+	! tot[x,1] = ineligible $
+	! tot[x,2] = eligible $
+	! tot[x,3] = rebate $
+	for i = 0 to 2
+ 		tot[i,0] = tot[i,0] + (invl.ExtShipAmt * factor)
+		tot[i,1] = tot[i,1] + (ineligible * factor)
+		tot[i,2] = tot[i,2] + (eligible * factor)
+		tot[i,3] = tot[i,3] + (rebate * factor)
+	next i
+Return
+
+
+PrintHeader: !
+	if toScreen return
+	if lineNo <> 999 print #0; "\14\" ! if not first time - form feed
+	lineNo = 1
+	print #0; "Customer Rebates for Invoiced Sales"
+	lineNo = lineNo + 1
+	if doingSalesTotals
+		print #0; "Salesrep Totals: ";str$(currentSales);" - ";
+		print #0; slsm.Name$
+	else
+		print #0; "Customer: ";cust.CustomerCode; " - ";cust.Name$;
+		print #0; using "###.##%"; Tab 52; "Rebate Percentage: "; cust.CustRebatePercent
+	endif
+	lineNo = lineNo + 1
+	print #0; tab 4; "For Invoice Merchandise Dollars ";
+	if not(sdate)
+		print #0; "ALL to ";
+	else
+		tmp$=sdate using "&&&&&&"
+		print #0;tmp$[3,4];"/";tmp$[5,6];"/";tmp$[1,2];" to ";
+	end if
+	if edate = 999999
+		print #0; "ALL"
+	else
+		tmp$=edate using "&&&&&&"
+		print #0;tmp$[3,4];"/";tmp$[5,6];"/";tmp$[1,2]
+	end if
+	lineNo = lineNo + 1
+	print #0;"Inv/Cred #";tab 12;"Trans Type";tab 23;"Trans Date";
+	print #0;tab 34;"Merchandise $";tab 48;"Rebate Eligible $";
+	print #0;tab 66;"Rebate Amount"
+	print #0;""
+	lineNo = lineNo + 2
+Return
+
+CustomerTotals: ! Print Customer Totals, reset accums
+	If not(toscreen)
+		print #0; ""
+		print #0; "** CUSTOMER TOTAL";
+		print #0; using "-------#.##";tab 48;tot[0,2];
+		print #0; using "-------#.##"; tab 66; tot[0,3];
+	endif
+	for i = 0 to 3
+		tot[0,i] = 0
+	next i
+Return
+
+SalesrepTotals: ! Print Salesrep Totals, reset accums
+	doingSalesTotals = 1
+	if not(toscreen)
+		gosub PrintHeader:
+		doingSalesTotals = 0
+		print #0; "** SALESREP TOTAL";
+		print #0; using "-------#.##";tab 48;tot[1,2];
+		print #0; using "-------#.##"; tab 66; tot[1,3]
+	endif
+	for i = 0 to 3
+		tot[1,i] = 0
+	next i
+Return
+
+AdjustCommission: ! adjust commission by rebate amount
+	CommissionAdjusted = 0
+	! we have a request for an adjustment to commissions - all
+	! appropriate checks have been completed.  See if there is
+	! an existing commission record out there.
+	k_comm$ = " ",k_comm$
+	k_comm$[1,3] = cust.SalesmanCode using "###"
+	k_comm$[4,13] = invh.InvNum using "##########"
+	if invh.Status = 30 artype = 1
+	if invh.Status = 31 artype = 6
+	k_comm$[14,14] = artype using "#"
+	r_comm = filegetsslsmcomm(e$,ch_comm,"=",1,k_comm$,comm.)
+	if r_comm<=0
+		! no existing commission record - see if a manual
+		! record exists
+		k_comm$[14,14] = artype + 1 using "#"
+		r_comm = filegetsslsmcomm(e$,ch_comm,"=",1,k_comm$,comm.)
+		if r_comm<=0 return ! DO NOT CREATE - must exist or we skip
+	end if
+	! the rebate amount adjusts the MERCHANDISE dollars (effecting
+	! overall gross profit) which is then re-multiplied by the
+	! commission percent to calculate the new amount
+	merchadj = tot[2,3] * -1
+	! new commission is the adjusted merchandise total - the
+	! cost * the commission rate
+	new_comm = fnr(((comm.InvCMDollars + merchadj) - comm.CostLoadedFrght) * (comm.CommPercent/100))
+	gosub CreateCommissionAudit:
+	comm.CommDollars = new_comm
+	comm.InvCMDollars = comm.InvCMDollars + merchadj
+	! write the changes back out
+	e = fileupdatesslsmcomm(e$,ch_comm,"c",r_comm,comm.)
+	if e error 10000
+	CommissionAdjusted = 1
+return
+
+CreateCommissionAudit: !
+	let k_commaudit$=" ",k_commaudit$
+	let k_commaudit$[1,13]=k_comm$[1,13]
+	let k_commaudit$[26,26]=k_comm$[14,14]
+	chk_auditrecord: !
+	LET k_commaudit$[14,15]=TIM(8) USING "&&"   !"year
+	LET k_commaudit$[16,17]=TIM(9) USING "&&"   !"month
+	LET k_commaudit$[18,19]=TIM(10) USING "&&"  !"date
+	LET k_commaudit$[20,21]=TIM(11) USING "&&"  !"hour
+	LET k_commaudit$[22,23]=TIM(12) USING "&&"  !"minute
+	LET k_commaudit$[24,25]=TIM(13) USING "&&"  !"second
+	r_commaudit = filegetcommaudit(e$,ch_commaudit,"=",1,k_commaudit$,commaudit.)
+	IF r_commaudit>0 ! already on file
+		SIGNAL 3,20
+		goto chk_auditrecord:
+	ENDIF
+	! build new record and insert
+	commaudit.Salesman = comm.Salesman
+	commaudit.Type = k_commaudit$[26,26]
+	commaudit.Updated = 0
+	commaudit.PortNo = SPC(6)
+	commaudit.Customer = comm.CustCode
+	commaudit.User = user
+	commaudit.CommBefore = comm.CommDollars
+	commaudit.CommAfter = new_comm
+	commaudit.InvCM = comm.Invoice
+	commaudit.OrderCM = comm.Order
+	commaudit.DateChanged = k_commaudit$[14,19]
+	commaudit.TimeChanged = k_commaudit$[20,25]
+	commaudit.Source$[10] = "441i"
+	commaudit.Reason$[60] = "Customer Rebate Adjustment"
+	commaudit.OrigComm = comm.OrigCommDollars
+	commaudit.AdjustType = 5 ! rebate adjustment
+	commaudit.CROtherDiscNum = 0
+	commaudit.OrigCommPercent = comm.CommPercent
+	commaudit.NewCommPercent = comm.CommPercent
+	commaudit.OrigInvCMDollars = comm.InvCMDollars
+	commaudit.NewInvCMDollars = comm.InvCMDollars + merchadj
+	commaudit.OrigCost = comm.CostLoadedFrght
+	commaudit.NewCost = comm.CostLoadedFrght
+	commaudit.RebateExcludedDollar = tot[2,0] - tot[2,2]
+	commaudit.Spare$=" ",commaudit.Spare$
+	! write the record
+	r_commaudit = 0
+	r_commaudit = fileupdatecommaudit(e$,ch_commaudit,"a",r_commaudit,commaudit.)
+	if r_commaudit<=0 error 10000
+Return
+
+OUTEND: Rem END
+If toScreen! dx xml
+	Call addtostr(e$,rstr$,esdel$) !end section
+	Call setoutput(e$,rstr$,1) !1 flag puts 0 status seciton in, puts </page> in
+End If
+End
+
+ERR_SEARCH: Rem
+	ENUM = E;ELINE = Spc(16);CTERR = 0
+	If E = 5 Let CTERR = Err(8)
+	e$ = "RETURN STATUS",(E + (CTERR * .001))
+	e$ = e$,"/ STATEMENT",ELINE," IN PROGRAM " + Msc$(4)
+	Call programdump("tmp/44ij!","")
+	Goto ERR_MSG ! Error 10000
+Return ! End
+
+ERR_MSG: ! send message
+	ReturnStatus = 1 ! 0 ! no good (ONLY DISPLAYS IF =1 ??)
+	Message$ = e$
+	Call CreateNetStatus(e$,ReturnStatus,Message$,WebStr$)
+	Call AddToStr(e$,rstr$,WebStr$)
+	Call SetOutPut(e$,rstr$)
+End
+
+else
+	ERR_TRAP: !
+	!
+	include "src/callmainerrnet.inc"
+end try

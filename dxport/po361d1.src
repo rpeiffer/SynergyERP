@@ -1,0 +1,557 @@
+Rem po361d1 - allocates freight/misc/haz charges to po lines
+!loadsave -w -n 100,10 -o prog/dxport/po361d1.dl4 src/po361d1.src
+Rem BEDIT Version: 2.2 OBJECT CODE     Created: OCT 16, 2006  12:42:20
+Rem /w2/papermaster/r2005//usr/acct/mary/work/r2005/po/po361d1.src (univ2) [mary] {00254}
+Rem  Copyright (c) 2006 Universal Business Systems, Inc.
+Rem    **** ALL CHANGES MUST BE MADE IN SOURCE!!! ****
+Rem
+Declare Intrinsic Sub InpBuf,String
+Declare Intrinsic Sub dxopen,dxget,dxset,dxclose,dxsave,programdump,env
+Option Default Dialect IRIS1
+External Lib "libgeneral.lib" !general routines                   
+Declare External Sub suberr,mainerr,searcherr 
+External Lib "ubsfunc.dl4"
+Declare External Sub getportdefault
+Declare External Function OpenFile,PDate$,FormatDate2$
+Rem PO361D1  DISTRIBUTE FREIGHT AND MISC CHARGES
+Rem AUTHOR DAVE DEVITO 05/11/94
+Rem LAST UPDATE
+Rem***************NOTE: CAREFUL CHANGING COST CALCULATIONS ****************
+Rem************* misc charge allocations & freight charge allocation *******
+Rem FOR WEIGHT PRODUCTS L1[5]=-1 for cwt or l1[5]=-2 for lb
+Rem MISC CHARGE & FREIGHT CHARGES ARE STORED IN BASE BY THE WEIGHT FACTORS ON THE
+Rem POLINE pl4[12] & pl4[13].  UNIT COST (l2[0]) & NET UNIT COST (pl4[0]) ARE
+Rem STORED IN BASE BY THE WEIGHT FACTORS ON THE PRODUCT FILE A[5] & A[6].
+Rem CHANGING COST CALCULATION HERE MAY REQUIRE ADDITIONAL CHANGES TO THE FOLLOWING
+Rem PROGRAMS: po361b, po370, po374a, po385, la544, la544ss, laupdchrg, lacalccost,
+Rem mx671cc.  MAKE SURE THAT TESTING DONE ON NON-WEIGHTED PRODUCTS, AS WELL AS CWT
+Rem& LB PRODUCTS AND THAT THE EXTENDED COST (PL4[7]) IS CALCULATED CORRECTLY
+! pass the po header record # and channel to be used
+Try
+Enter Chan[],parm[]
+! If Err 0 Gosub ERR_TRAP
+dim msg$[100],e$[500],buttonlist$[5,50],nextlist$[5,100],rstr$[1000]   
+DIM 1%,PFU1[20],CNVTU[9],COST_LEV[3],COMM_LEV,SOURCE
+DIM 3%,r8,A[33],PFU2[6]
+DIM 3%,CNVTA[4],OPT
+Dim 1%,J9[2],J0,J2,J3,J4,J5,J6,J8,X1,L1[5],PL0[4],NSD1[7],PO1[9]
+DIM 3%,MS1
+dim 1%,H4[3],FLAGS[11],WH1[99,2],dflt_dist_type
+Dim 2%,X2,PFB[24],Q0[1],L2[2],NSD2[4],PH[4],H0[5],H3[4]
+Dim 3%,J,J1,PFA1[7],W3[24],AMOUNT,LINE_FRT,FRT_CHRG,HAZ[4],FRT[4],MISC[4]
+Dim 3%,L3[6],PL[5],PL4[23],NSD3[9],H8[9],PO3[10]
+Dim 3%,QTY,BILL_QTY,TMP_CHARGE,DISP_COST,DISP_QTY,DISP_EXT
+Dim J$[75],J0$[10],J1$[75],J2$[40],J3$[40],J5$[75],J7$[75],J9$[75],J4$[75]
+Dim X$[10],P9$[50],J6$[40],U5$[10],PFA$[156],K4$[50],UNT$[4]
+Dim K3$[50],K12$[10],K11$[50],L1$[120],NSD$[96],H$[82],H1$[116]
+Dim K56$[50]
+Def FNR(X) = Sgn(X) * (Int(Abs(X) * 100 + .5) * .01)
+For X1 = 0 To 99 \ WH1[X1,0] = -99 \ WH1[X1,1] = -99 \ WH1[X1,2] = -99 \ Next X1
+FRT_DT = -99;HAZ_DT = -99;MISC_DT = -99
+! open files
+let r8=parm[0] ! po header record #
+let source=parm[1] ! source
+LET INTCO=PARM[9] ! COMPANY #
+if not (chan[0]) ! cntrl file
+	ctlc = OpenFile(9999,intCo) \ If ctlc = -1 Error 42 !control 
+else
+	let ctlc=chan[0]
+endif
+if not (chan[1]) ! purchase order header  #8
+	 Ch_Poh = openfile(2416,intCo) \ If Ch_Poh = -1 Error 42     !"po header file
+else
+	ch_poh=chan[1]
+endif
+if not (chan[2]) ! po lines #9
+	Ch_PoL = openfile(2432,intCo) \ If Ch_Pol = -1 Error 42     !"po lines file
+else
+	let ch_pol=chan[2]
+endif
+if not (chan[4]) ! product file #3
+	 Ch_Prod = OpenFile(1792,intCo) \ If Ch_Prod = -1 Error 42  !product file 
+else
+	let ch_prod=chan[4]
+endif
+if not (chan[5]) ! product warehouse #10
+	Ch_PrWh = OpenFile(1744,intCo) \ If Ch_PrWh = -1 Error 42  !"product warehouse file
+else
+	let ch_prwh=chan[5]
+endif
+if not (chan[6]) !  nonstock #14
+	ch_nstk=OpenFile(2448,intCo) \ If Ch_nstk = -1 Error 42 ! nonstock product
+else
+	let ch_nstk=chan[6]
+endif
+If not (chan[14]) ! warehouse file #12 
+	Ch_Wh = OpenFile(2768,intCo) \ If Ch_Wh = -1 Error 42  !" warehouse file
+else
+	let ch_wh=chan[14]
+endif
+If not (chan[15]) ! misc charge file #18
+	Ch_Misc = OpenFile(-9949,intCo) \ If ch_misc = -1 Error 42  !misc charge po misc charge file
+else
+	let ch_misc=chan[15]
+endif
+Gosub L_6500 ! read poheader file
+Read #ch_wh,(H4[1] - 1),122;DFLT_DIST_TYPE;
+Gosub L_4500
+Gosub L_2320
+K11$ = " ",K11$
+K11$[1,6] = H0[2] Using "######"
+L_2030: Search #ch_pol,3,1;K11$,R9,E
+If E Goto OUTEND
+X2 = K11$[1,6]
+If X2 <> H0[2] Goto OUTEND
+FLAGS[2] = 0
+Mat Read #ch_pol,R9;L1
+Mat Read #ch_pol,R9,12;L2
+Mat Read #ch_pol,R9,24;L3
+Mat Read #ch_pol,R9,66;L1$
+Mat Read #ch_pol,R9,186;PL
+Mat Read #ch_pol,R9,222;PL0
+Mat Read #ch_pol,R9,232;PL4
+Gosub L_5800
+If L1[0] = 3 Goto L_2030
+If FLAGS[2] Goto L_2030
+Gosub L_6000
+! if no cube/weight factors default to 1
+for ctr=12 to 15
+	if pl4[ctr]=0 let pl4[ctr]=1
+next ctr
+If L3[4] Let QTY = L3[4] Else Let QTY = PL4[5]
+LINE_CHRG = 0;PL4[8] = 0;LINE_FRT = 0;LINE_HAZ = 0
+If PL0[2]
+  LINE_FRT = DST_FREIGHT
+End If 
+LINE_CHRG = DST_CHARGE
+If PL0[3] = 1
+  LINE_HAZ = DST_HAZ
+End If 
+Gosub L_4000
+If SOURCE = 371
+  If L3[4] Let QTY = L3[4] Else Let QTY = PL4[5]
+  BILL_QTY = QTY - PL4[16]
+Else 
+  QTY = (L3[2] - L3[3]) + (PL4[1] - PL4[17])
+  BILL_QTY = L3[2] - L3[3]
+End If 
+DISP_QTY = BILL_QTY;DISP_COST = PL4[0] \ Gosub CALC_DISP_EXT
+PL4[7] = DISP_EXT
+Gosub L_8050
+Gosub L_8150
+Goto L_2030
+CALC_DISP_EXT: Rem convert qty and cost to cost um, then calc ext net cost
+If L1[5] >= 0
+  CNVTA[0] = DISP_QTY;CNVTU[0] = 0;CNVTU[1] = L1[5];CNVTU[2] = 5 \ Gosub L_20000
+  DISP_QTY = AMOUNT
+End If 
+CNVTA[0] = DISP_COST;CNVTU[0] = 0;CNVTU[1] = L1[5];CNVTU[2] = 2 \ Gosub L_20000
+DISP_COST = AMOUNT
+DISP_EXT = FNR(DISP_QTY * DISP_COST)
+If L1[5] = -1 Or L1[5] = -3
+  If L1[5] = -1 Let DISP_EXT = FNR(DISP_COST * (PL4[12] * DISP_QTY / PL4[13]) / 100)
+  Rem used to do funky math for cwt cost. cct 184104 dek
+  Rem we need to do the funky math for cwt & lbs - mtg
+  If L1[5] = -3 Let DISP_EXT = FNR(DISP_COST * (PL4[12] * DISP_QTY / PL4[13]))
+End If 
+If L1[5] = -2 Let DISP_EXT = DISP_COST
+Return 
+L_2320: Rem ADD UP MISC CHARGES AND FREIGHT TO BE DESTRIBUTED
+For X2 = 0 To 4
+  Mat Read #ch_misc,PO1[X2],24;MS1;
+  If Not(MS1) Goto L_2380
+  If MS1 = 1 Let MISC_CHARGE = MISC_CHARGE + PO3[X2]
+  If MS1 = 2 Let HAZ_CHARGE = HAZ_CHARGE + PO3[X2]
+L_2380: Next X2
+Gosub L_2620
+For X2 = 1 To 99
+  If FRT_DT = -99 And WH1[X2,0] <> -99 Let FRT_DT = WH1[X2,0]
+  If HAZ_DT = -99 And WH1[X2,1] <> -99 Let HAZ_DT = WH1[X2,1]
+  If MISC_DT = -99 And WH1[X2,2] <> -99 Let MISC_DT = WH1[X2,2]
+  If FRT_DT <> -99 And WH1[X2,0] <> -99 And FRT_DT <> WH1[X2,0]
+    FRT_DT = DFLT_DIST_TYPE
+  End If 
+  If HAZ_DT <> -99 And WH1[X2,1] <> -99 And HAZ_DT <> WH1[X2,1]
+    HAZ_DT = DFLT_DIST_TYPE
+  End If 
+  If MISC_DT <> -99 And WH1[X2,2] <> -99 And MISC_DT <> WH1[X2,2]
+    MISC_DT = DFLT_DIST_TYPE
+  End If 
+Next X2
+If MISC_DT = -99 Let MISC_DT = 0
+If FRT_DT = -99 Let FRT_DT = 0
+If HAZ_DT = -99 Let HAZ_DT = 0
+! DIVIED OUt
+! set the freight distribution based upon the purchase order criteria
+if dflt_dist_type<>0 and po1[5]<>0
+	if po1[5]=1 let frt_dt= 2 ! po freight is by lb set by weight
+	if po1[5]=2 let frt_dt= 2 ! po freight is by cwt set by weight
+	if po1[5]=3 let frt_dt= 1 ! po freight is by cube set by cube
+	if po1[5]=4 let frt_dt= 3 ! po freight is by piece set by piece
+endif
+DST_CHARGE = 0 \ DST_FREIGHT = 0 \ DST_HAZ = 0
+If MISC[MISC_DT]
+  DST_CHARGE = MISC_CHARGE / MISC[MISC_DT]
+End If 
+If FRT[FRT_DT]
+  DST_FREIGHT = H8[2] / FRT[FRT_DT]
+End If 
+If HAZ[HAZ_DT] Let DST_HAZ = HAZ_CHARGE / HAZ[HAZ_DT]
+Return 
+L_2620: Rem SCAN FOR LINES
+HAZ[1] = 0;HAZ[2] = 0;HAZ[3] = 0;HAZ[4] = 0
+FRT[1] = 0;FRT[2] = 0;FRT[3] = 0;FRT[4] = 0
+MISC[1] = 0;MISC[2] = 0;MISC[3] = 0;MISC[4] = 0
+K11$ = " ",K11$
+K11$[1,6] = H0[2] Using "######"
+L_2670: Search #ch_pol,3,1;K11$,R9,E
+If E Goto L_2850
+X2 = K11$[1,6]
+If X2 <> H0[2] Goto L_2850
+Mat Read #ch_pol,R9;L1
+Mat Read #ch_pol,R9,12;L2
+Mat Read #ch_pol,R9,24;L3
+Mat Read #ch_pol,R9,66;L1$
+Mat Read #ch_pol,R9,186;PL
+Mat Read #ch_pol,R9,222;PL0
+Mat Read #ch_pol,R9,232;PL4
+Gosub L_5800
+If L1[0] = 3 Goto L_2670
+If FLAGS[2] Goto L_2670
+Gosub L_6000
+! if no cube/weight factors default to 1
+for ctr=12 to 15
+	if pl4[ctr]=0 let pl4[ctr]=1
+next ctr
+If Not(L3[4]) And SOURCE = 371 Goto L_2670
+If PL0[2] And WH1[L1[1],0] = -99
+  Read #ch_wh,(L1[1] - 1),122;WH1[L1[1],0];
+End If 
+If PL0[3] = 1 And WH1[L1[1],1] = -99
+  Read #ch_wh,(L1[1] - 1),122;WH1[L1[1],1];
+End If 
+If WH1[L1[1],2] = -99
+  Read #ch_wh,(L1[1] - 1),122;WH1[L1[1],2];
+End If 
+If L3[4] Let QTY = L3[4] Else Let QTY = PL4[5]
+Gosub L_2870
+Goto L_2670
+L_2850: Return 
+Return 
+L_2870: Rem LINE EXT AND TOTALS
+If SOURCE = 371
+  If L3[4] Let QTY = L3[4] Else Let QTY = PL4[5]
+  BILL_QTY = QTY - PL4[16]
+Else 
+  QTY = (L3[2] - L3[3]) + (PL4[1] - PL4[17])
+  BILL_QTY = L3[2] - L3[3]
+End If 
+DISP_QTY = BILL_QTY;DISP_COST = PL4[0] \ Gosub CALC_DISP_EXT
+PL4[7] = DISP_EXT
+CNVTA[0] = QTY;CNVTU[0] = 0;CNVTU[1] = L1[4];CNVTU[2] = 1 \ Gosub L_20000
+DSP_QTY = AMOUNT
+If PL0[3] = 1
+  IF PL4[15]<> 0 HAZ[1] = HAZ[1] + QTY * PL4[14] / PL4[15]
+  IF PL4[13]<> 0 HAZ[2] = HAZ[2] + QTY * PL4[12] / PL4[13]
+  HAZ[3] = HAZ[3] + (DSP_QTY)
+  HAZ[4] = HAZ[4] + (PL4[7])
+End If 
+If PL0[2]
+  IF PL4[15]<> 0 FRT[1] = FRT[1] + QTY * PL4[14] / PL4[15]
+  IF PL4[13]<> 0 FRT[2] = FRT[2] + QTY * PL4[12] / PL4[13]
+  FRT[3] = FRT[3] + (DSP_QTY)
+  FRT[4] = FRT[4] + (PL4[7])
+End If 
+IF PL4[15]<> 0 MISC[1] = MISC[1] + QTY * PL4[14] / PL4[15]
+IF PL4[13]<> 0 MISC[2] = MISC[2] + QTY * PL4[12] / PL4[13]
+MISC[3] = MISC[3] + (DSP_QTY)
+MISC[4] = MISC[4] + (PL4[7])
+Return 
+L_4000: Rem FIND FACTOR
+CHARGE = 0;PL4[8] = 0;L2[1] = 0;FRT_CHRG = 0
+BILL_QTY = 0
+If SOURCE = 371
+  If L3[4]
+    QTY = L3[4]
+    BILL_QTY = QTY - PL4[16]
+  Else 
+    QTY = PL4[5]
+    BILL_QTY = QTY - PL4[16]
+  End If 
+Else 
+  QTY = (L3[2] - L3[3]) + (PL4[1] - PL4[17])
+  BILL_QTY = L3[2] - L3[3]
+End If 
+Rem! NEED TO GET DSP_EXT
+DISP_QTY = BILL_QTY;DISP_COST = PL4[0]
+Gosub CALC_DISP_EXT
+If FRT_DT = 1 !  cube
+  If (SOURCE <> 371 And L3[2] - L3[3]) Or (SOURCE = 371 And QTY)
+    FRT_CHRG = LINE_FRT * PL4[14] / PL4[15]
+    If L1[5] = -2 !  lot
+      FRT_CHRG = LINE_FRT * QTY * PL4[14] / PL4[15]
+    End If 
+  End If 
+End If 
+If FRT_DT = 2 ! wt
+  If (SOURCE <> 371 And L3[2] - L3[3] + PL4[1]) Or (SOURCE = 371 And QTY)
+    FRT_CHRG = LINE_FRT * PL4[12] / PL4[13]
+    If L1[5] = -2 !  lot
+      FRT_CHRG = LINE_FRT * QTY * PL4[12] / PL4[13]
+    End If 
+  End If 
+End If 
+If FRT_DT = 3 ! piece
+  CNVTA[0] = QTY;CNVTU[0] = 0;CNVTU[1] = L1[4];CNVTU[2] = 1 \ Gosub L_20000
+  DSP_QTY = AMOUNT
+  If L1[5] = -2 ! lot
+    FRT_CHRG = LINE_FRT * DSP_QTY
+  Else 
+    CNVTA = LINE_FRT;CNVTU[0] = L1[4];CNVTU[1] = 0;CNVTU[2] = 2 \ Gosub L_20000
+    FRT_CHRG = AMOUNT
+  End If 
+End If 
+If FRT_DT = 4 ! value
+  Rem frt_chrg = line_frt * pl4[0] * (L3[2]-l3[3])/(L3[2]-l3[3]+pl4[1]-pl4[17])
+  FRT_CHRG = 0
+  If QTY
+    FRT_CHRG = ((LINE_FRT * DISP_EXT) / QTY)
+  End If 
+End If 
+If MISC_DT = 1 !  cube
+  If (SOURCE <> 371 And L3[2] - L3[3]) Or (SOURCE = 371 And QTY)
+    CHARGE = (LINE_CHRG) * PL4[14] / PL4[15]
+    If L1[5] = -2 !  lot
+      CHARGE = (LINE_CHRG) * QTY * PL4[14] / PL4[15]
+    End If 
+  End If 
+End If 
+If MISC_DT = 2 ! cwt
+  If (SOURCE <> 371 And L3[2] - L3[3] + PL4[1]) Or (SOURCE = 371 And QTY)
+    CHARGE = (LINE_CHRG) * PL4[12] / PL4[13]
+    If L1[5] = -2 !  lot
+      CHARGE = (LINE_CHRG) * QTY * PL4[12] / PL4[13]
+    End If 
+  End If 
+End If 
+If MISC_DT = 3
+  CNVTA[0] = QTY;CNVTU[0] = 0;CNVTU[1] = L1[4];CNVTU[2] = 1 \ Gosub L_20000
+  DSP_QTY = AMOUNT
+  If L1[5] = -2 ! lot
+    CHARGE = (LINE_CHRG) * DSP_QTY
+  Else 
+    CNVTA = LINE_CHRG;CNVTU[0] = L1[4];CNVTU[1] = 0;CNVTU[2] = 2
+    Gosub L_20000
+    CHARGE = AMOUNT
+  End If 
+End If 
+If MISC_DT = 4
+  CHARGE = (LINE_CHRG) * PL4[0] * (L3[2] - L3[3]) / (L3[2] - L3[3] + PL4[1] - PL4[17])
+End If 
+If CHARGE
+  Rem  if misc_dt<>4 ! value is already in costing unit of measure
+  If L1[5] = -1 Or L1[5] = -3 And PL4[12] <> 0 ! calc of charge is done in qty uom
+    CHARGE = ((CHARGE / PL4[12]) * PL4[13])
+  End If 
+  Rem  endif
+End If 
+TMP_CHARGE = 0
+If PL0[3] <> 1 Goto NOT_HAZARD
+If HAZ_DT = 1 ! cube
+  If (SOURCE <> 371 And L3[2] - L3[3]) Or (SOURCE = 371 And QTY)
+    TMP_CHARGE = (LINE_HAZ * PL4[14] / PL4[15])
+    If L1[5] = -2 !  lot
+      TMP_CHARGE = (LINE_HAZ * QTY * PL4[14] / PL4[15])
+    End If 
+  End If 
+End If 
+If HAZ_DT = 2 ! cwt
+  If (SOURCE <> 371 And L3[2] - L3[3] + PL4[1]) Or (SOURCE = 371 And QTY)
+    TMP_CHARGE = (LINE_HAZ * PL4[12] / PL4[13])
+    If L1[5] = -2 !  lot
+      TMP_CHARGE = (LINE_HAZ * QTY * PL4[12] / PL4[13])
+    End If 
+  End If 
+End If 
+If HAZ_DT = 3
+  CNVTA[0] = QTY;CNVTU[0] = 0;CNVTU[1] = L1[4];CNVTU[2] = 1 \ Gosub L_20000
+  DSP_QTY = AMOUNT
+  If L1[5] = -2 ! lot
+    TMP_CHARGE = (LINE_HAZ * DSP_QTY)
+  Else 
+    CNVTA = LINE_HAZ;CNVTU[0] = L1[4];CNVTU[1] = 0;CNVTU[2] = 2
+    Gosub L_20000
+    TMP_CHARGE = AMOUNT
+  End If 
+End If 
+If HAZ_DT = 4
+  TMP_CHARGE = (LINE_HAZ * PL4[0] * (L3[2] - L3[3]) / (L3[2] - L3[3] + PL4[1] - PL4[17]))
+End If 
+If TMP_CHARGE
+  Rem if haz_dt<>4 !
+  If L1[5] = -1 Or L1[5] = -3 And PL4[12] <> 0 ! calc of charge is done in qty uom
+    TMP_CHARGE = ((TMP_CHARGE / PL4[12]) * PL4[13])
+  End If 
+  Rem  endif
+End If 
+CHARGE = CHARGE + TMP_CHARGE
+NOT_HAZARD: PL4[8] = CHARGE
+L2[1] = FRT_CHRG
+If FRT_CHRG
+  Rem if frt_dt<>4 !
+  If L1[5] = -1 Or L1[5] = -3 And PL4[12] <> 0 ! calc of charge is done in qty uom
+    L2[1] = ((FRT_CHRG / PL4[12]) * PL4[13])
+  End If 
+  Rem endif
+End If 
+Return 
+L_4500: Rem CALC TOTAL FREIGHT BY UNIT
+If PO1[5] = 0 Let H8[2] = PO3[6]
+If PO1[5] = 1
+  H8[2] = FNR(H8[1] * PO3[6])
+End If 
+If PO1[5] = 2
+  H8[2] = FNR((H8[1] / 100) * PO3[6])
+End If 
+If PO1[5] = 3
+  H8[2] = FNR(PO3[9] * PO3[6])
+End If 
+If PO1[5] = 4
+  H8[2] = FNR(PO3[10] * PO3[6])
+End If 
+Return 
+L_5800: Rem UNPACK L1[3] TO FLAGS[x]
+X2 = L1[3] \ For K = 0 To 11
+  FLAGS[K] = Sgn(Fra(X2 / 2)) \ X2 = Int(X2 / 2)
+Next K \ Return 
+L_5840: Rem PACK CHAIN TYPE FROM FLAGS[]
+X2 = 0 \ For K = 0 To 11
+  If FLAGS[K] Let X2 = X2 + 2 ^ K
+Next K \ L1[3] = X2 \ Return 
+L_6000: Rem FIND PRODUCT
+If FLAGS[0] Goto L_6230
+K3$ = " ",K3$
+K3$[1,12] = L1$[81,92]
+Search #ch_prod,2,1;K3$,R3,E
+If E
+  Print @5,23;"PRODUCT NOT ON FILE"; \ Signal 3,30 \ Return 
+End If 
+Mat Read #ch_prod,R3,0;PFA$;
+Mat Read #ch_prod,R3,156;PFB;
+Mat Read #ch_prod,R3,256;A;
+Mat Read #ch_prod,R3,460;PFA1;
+Mat Read #ch_prod,R3,512;PFU1;
+Mat Read #ch_prod,R3,554;PFU2;
+Return 
+K4$ = " ",K4$
+K4$[1,12] = L1$[81,92];K4$[13,14] = WHSE Using "##"
+Search #ch_prwh,2,1;K4$,R4,E
+If E
+  For X = 0 To 24 \ W3[X] = 0
+  Next X
+End If 
+Mat Read #ch_prwh,R4,78;W3;
+Return 
+Mat Write #ch_prwh,R4,78;W3;
+Return 
+If UNT = -1 Let UNT$ = "CWT "
+If UNT = -2 Let UNT$ = "LOT "
+If UNT = -3 Let UNT$ = "LB  "
+If UNT > 0 Mat Read #13,UNT,10;UNT$;
+Return 
+L_6230: Rem READ NSTKDESC
+Mat Read #ch_nstk,L3[1];NSD$
+Mat Read #ch_nstk,L3[1],96;NSD1
+Mat Read #ch_nstk,L3[1],112;NSD2
+Mat Read #ch_nstk,L3[1],132;NSD3
+Gosub L_6300
+Return 
+L_6300: Rem SET UP NON STOCK FACTORS
+For X0 = 0 To 20
+  If X0 < 21 Let PFU1[X0] = 0
+  If X0 < 4 Let PFU1[X0] = NSD1[X0 + 2]
+  If X0 < 7 Let PFU2[X0] = 0
+  If X0 < 3 Let PFU2[X0] = NSD3[X0 + 3]
+Next X0
+A[5] = NSD3[7];A[6] = NSD3[6];PFA1[3] = NSD3[8]
+PL4[12] = NSD3[6];PL4[13] = NSD3[7];PL4[14] = NSD3[2];PL4[15] = NSD3[8]
+PFU1[8] = NSD1[5];PFU1[10] = NSD1[4];PFU1[11] = NSD1[3];PFU1[15] = NSD1[7]
+L1$[1,30] = NSD$[13,42];L1$[31,60] = NSD$[43,72];L1$[61,80] = NSD$[73,92]
+L1$[81,92] = NSD$[1,12]
+if pl4[15]<=0 let pl4[15]=1
+if pl4[13]<=0 let pl4[13]=1
+Return 
+L_6500: Rem READ RECORD
+Mat Read #ch_poh,R8;H0
+Mat Read #ch_poh,R8,24;H$
+Mat Read #ch_poh,R8,106;H1$;
+Mat Read #ch_poh,R8,222;H3;
+Mat Read #ch_poh,R8,242;H4;
+Mat Read #ch_poh,R8,250;H8;
+Mat Read #ch_poh,R8,310;PH;
+Mat Read #ch_poh,R8,330;PO1;
+Mat Read #ch_poh,R8,350;PO3;
+Return 
+L_8050: Mat Write #ch_poh,R8;H0
+Mat Write #ch_poh,R8,24;H$
+Mat Write #ch_poh,R8,106;H1$;
+Mat Write #ch_poh,R8,222;H3;
+Mat Write #ch_poh,R8,242;H4;
+Mat Write #ch_poh,R8,250;H8;
+Mat Write #ch_poh,R8,310;PH;
+Mat Write #ch_poh,R8,330;PO1;
+Mat Write #ch_poh,R8,350;PO3;
+Return 
+L_8150: Rem WRITE LINE REC
+Gosub L_5840
+If FLAGS[2] Return 
+Mat Write #ch_pol,R9;L1
+Mat Write #ch_pol,R9,12;L2
+Mat Write #ch_pol,R9,24;L3
+Mat Write #ch_pol,R9,66;L1$
+Mat Write #ch_pol,R9,186;PL
+Mat Write #ch_pol,R9,222;PL0
+Mat Write #ch_pol,R9,232;PL4;
+if pl4[15]<=0 let pl4[15]=1
+if pl4[13]<=0 let pl4[13]=1
+Return 
+
+
+
+L_20000: Rem UNIT CONVERSION RETURNS AMOUNT  (rev 01/07/1992)   ! 20040 REM
+If CNVTU[2] = 3 Goto L_20120
+If CNVTU[2] = 1 And CNVTU[1] = CNVTU[0] Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[0] = -2 Or CNVTU[1] = -2 Let AMOUNT = CNVTA \ Goto L_20160
+If CNVTU[2] = 0 Goto L_20120
+L_20120: Rem "====== unibasic 5+ logic
+If Not(CNVTA) Let AMOUNT = 0 \ Goto L_20160
+Call "MXPRCONV5",PFU1[],PFU2[],A[],CNVTU[],CNVTA,SC,SR,FLAG
+If CNVTU[2] = 0 Goto L_20160
+If FLAG Let E = FLAG \ Gosub ERR_SEARCH
+AMOUNT = CNVTA
+L_20160: Return 
+
+!--------------------------------------------------
+ERR_SEARCH: Rem
+ENUM = E ;ELINE = Spc(16);CTERR = 0
+If E = 5 Let CTERR = Err(8)
+msg$ = "RETURN STATUS",(E + (CTERR * .001))
+msg$ = msg$,"/ STATEMENT",ELINE," IN PROGRAM "+MSC$(4)
+E$=msg$ \ Error 10000
+Return ! En
+
+OUTEND: Rem EXIT
+if not (chan[0]) and ctlc<>1 close #ctlc
+if not (chan[1]) close #ch_poh
+if not (chan[2]) close #ch_pol
+if not (chan[4]) close #Ch_Prod
+if not (chan[5]) close #ch_prwh
+if not (chan[6]) close #ch_nstk
+if not (chan[14]) close #ch_wh
+if not (chan[15]) close #ch_misc
+Else
+	ERR_TRAP: Rem *Error routine (escape trap)   V3.1 8/94 G.DOSCHER/REK
+!
+	include "src/callmainerrnet.inc"
+end try
+End ! the whole program
